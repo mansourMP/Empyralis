@@ -1494,6 +1494,55 @@ decides, new world never sees until cleared. When the old world is deleted
 (step 6), see-and-decide goes with it and gate-before-model is what's left,
 which is exactly the target state.
 
+**The OpenClaw lane's DM policy is `allowlist` — the only one of our four
+modes that transport can carry — and until 2026-08-14 nothing could set it,
+so no box could ever be provisioned.** A missing write path colliding with a
+mandatory audit, not a bug in any one function:
+
+```
+DEFAULT_DM_POLICY_MODE = open     first-party lane's live-agent-compat call
+   │  applied to OpenClaw channels too, because the ONLY writer
+   │  (_persist_agent_dm_policy_config) had two callers, both inside
+   │  personal_channels_service.py, neither reachable from a route
+   ▼
+openclaw-config-plan.ts  ─▶  dmPolicy: "open", allowFrom: ["*"]
+   ▼
+`openclaw security audit`  ─▶  channels.<id>.dm.open  [CRITICAL]
+   ▼
+blockingAuditFindings  ─▶  provisioning REFUSED, every box, forever
+```
+
+Three of our four modes render as OpenClaw's `open` and are refused at write
+time (422) rather than stored: `pairing` and `owner_only` widen deliberately
+(`dm_pairing_widened_to_open` / `dm_owner_only_widened_to_open` — their
+pairing blocks dispatch before our challenge could be sent, and they have no
+owner_only), and their audit flags `dmPolicy === "open"` UNCONDITIONALLY —
+the `allowFrom` wildcard their remediation text mentions clears only the
+separate `dm.open_invalid` warn, never the critical. Read their own
+`dist/audit-channel.collect.*.js`, never the message.
+
+Fixed with a SECOND, lane-scoped default (`DEFAULT_OPENCLAW_DM_POLICY_MODE`),
+never a flip of the shared constant — the ee3fca4f7c mistake this file
+already records. `PATCH/GET .../dm-policy` + `POST
+.../dm-policy/pairing-approvals` mirror the group-policy pair exactly
+(same auth, same `agent_id` query param, same reconcile-after-save), and
+`approve_dm_policy_pairing_request` finally has a caller.
+
+Two things a code reading gets wrong. **Gate 1 must not decide GROUP
+traffic**: `_enforce_dm_policy` ran on group messages too, and `sender_id`
+in a group is the individual participant — so the moment this lane got an
+allowlist default, an owner who had deliberately opened a group had to
+enumerate its entire membership before the agent answered anyone. Skipped
+for group messages on this lane only; doing it for first-party would loosen
+an owner who has explicitly chosen `owner_only` today. And **two allowed
+senders re-breaks the box**: their audit warns `dm.scope_main_multiuser`
+whenever `allowCount > 1` while `session.dmScope` is its default `"main"`,
+and our generated config never writes `session.dmScope`. One person works,
+two refuse (recoverable — remove one). The fix is one line in the gateway's
+config plan (`session.dmScope: "per-channel-peer"`), correct on its own
+terms since OpenClaw's sessions are irrelevant to us — it is a radio, its
+agent loop is off.
+
 **OpenClaw's `message_received` tap is post-gate and fact-less.** Verified
 against the shipped v2026.6.10 bundle 2026-08-08, correcting the earlier
 belief (recorded in the bridge plugin and in CHANNEL-ADOPTION-PLAN.md) that

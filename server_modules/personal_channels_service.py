@@ -917,8 +917,97 @@ DM_POLICY_MODES = {DM_POLICY_OWNER_ONLY, DM_POLICY_ALLOWLIST, DM_POLICY_PAIRING,
 # means a future change to this constant can never do that again.
 DEFAULT_DM_POLICY_MODE = DM_POLICY_OPEN
 
+# ── The OpenClaw-transported lane is a DIFFERENT lane, with a different
+#    default and a narrower set of expressible modes. ────────────────────
+#
+# THE DEADLOCK THIS EXISTS TO BREAK (found live, 2026-08-14, against a real
+# openclaw@2026.6.10 with a real Telegram bot token on the box):
+#
+#   DEFAULT_DM_POLICY_MODE = open              (above — first-party lane's
+#                                               deliberate live-agent-compat
+#                                               product decision)
+#          │  every OpenClaw channel rendered from it, since nothing could
+#          │  ever write a different one (see DM_POLICY_CHANNEL_KEYS below:
+#          │  _persist_agent_dm_policy_config had two callers, both inside
+#          │  this module, neither reachable from any route)
+#          ▼
+#   openclaw-config-plan.ts  ─▶  dmPolicy: "open", allowFrom: ["*"]
+#          ▼
+#   `openclaw security audit`  ─▶  channels.<id>.dm.open  [CRITICAL]
+#          ▼
+#   blockingAuditFindings  ─▶  provisioning REFUSED, on every box, forever.
+#
+# So the whole channel transport was unprovisionable through every surface
+# the product offers. Not a credential problem: a missing write path
+# colliding with a mandatory audit.
+#
+# WHY THE FIX IS `allowlist` AND NOT `pairing`/`owner_only`. Read
+# empyralis-gateway/src/openclaw/provisioning/openclaw-config-plan.ts's own
+# dmPolicy switch before changing this: THREE of our four modes render as
+# OpenClaw's `open`, deliberately and for good reasons —
+#
+#   open        -> open + ["*"]   (exact)
+#   pairing     -> open + ["*"]   dm_pairing_widened_to_open: their pairing
+#                                 blocks dispatch, so our pairing challenge
+#                                 (a REPLY we send) could never be sent
+#   owner_only  -> open + ["*"]   dm_owner_only_widened_to_open: they have
+#                                 no owner_only, and an allowlist of the
+#                                 owner's id is STRICTER the moment that id
+#                                 is stale — the unrecoverable direction
+#   allowlist   -> allowlist      (exact, and the ONLY non-open rendering)
+#
+# and their audit flags `dmPolicy === "open"` UNCONDITIONALLY — the
+# `allowFrom` wildcard their remediation text mentions only clears the
+# separate `dm.open_invalid` warn, never the critical. Verified by reading
+# their own dist/audit-channel.collect.*.js, not inferred from the message.
+# So `allowlist` is not a preference here; it is the only mode this
+# transport can carry at all.
+#
+# It is also the doctrinally correct default for this lane, which is why
+# this is a fix rather than a workaround. CLAUDE.md, on the OpenClaw
+# transport: gate-before-model, and "silent BY DESIGN until the owner
+# allowlists the chat". An empty allowlist means exactly that — nobody yet,
+# stated honestly — and DM_POLICY_CHANNEL_KEYS' route below is the thing
+# that finally lets an owner fill it.
+#
+# DELIBERATELY NOT a flip of DEFAULT_DM_POLICY_MODE. That constant is a
+# live-agent-compat decision for the first-party channels and is untouched;
+# this is a second, lane-scoped default, so the two can never move
+# together. See DEFAULT_DM_POLICY_MODE's own comment for the last time one
+# constant served two callers and a single-line change reached somewhere
+# nobody intended.
+DEFAULT_OPENCLAW_DM_POLICY_MODE = DM_POLICY_ALLOWLIST
 
-def _unresolved_identity_dm_policy_config() -> Dict[str, Any]:
+# The modes an owner may actually SET on an OpenClaw-transported channel.
+# Everything else in DM_POLICY_MODES renders as OpenClaw's `open` and would
+# make this box unprovisionable from the moment it was saved — a control
+# that bricks the transport is worse than no control, so the write path
+# refuses it with an owner-facing reason instead of storing it and letting
+# provisioning fail later with no way back.
+#
+# NOT hand-transcribed from that switch: test_personal_channels_dm_policy.py
+# DERIVES the widened set from the gateway's own source (the
+# `dm_<mode>_widened_to_open` codes it emits, which name their own modes)
+# and asserts this set is exactly the complement. If someone later teaches
+# the gateway to express `pairing` natively, that test goes red here rather
+# than leaving this list quietly refusing a mode that now works.
+OPENCLAW_SETTABLE_DM_POLICY_MODES = frozenset({DM_POLICY_ALLOWLIST})
+
+
+def _is_openclaw_transported_channel(channel_key: str) -> bool:
+    return str(channel_key or "").strip().lower() in OPENCLAW_PERSONAL_CHANNELS
+
+
+def _default_dm_policy_mode_for_channel(channel_key: str) -> str:
+    """The configured-but-unset default, per LANE. See
+    DEFAULT_OPENCLAW_DM_POLICY_MODE's comment block above for why the
+    OpenClaw-transported lane cannot share the first-party default."""
+    if _is_openclaw_transported_channel(channel_key):
+        return DEFAULT_OPENCLAW_DM_POLICY_MODE
+    return DEFAULT_DM_POLICY_MODE
+
+
+def _unresolved_identity_dm_policy_config(*, channel_key: str = "") -> Dict[str, Any]:
     """Fail-closed fallback for _load_agent_dm_policy_config when NO real
     per-agent install could even be identified: no agent_id resolved at all
     (personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID). Until this
@@ -942,15 +1031,27 @@ def _unresolved_identity_dm_policy_config() -> Dict[str, Any]:
     product decision another engineer is entitled to make) can never
     silently reopen this identity-less fallback too — see
     DEFAULT_DM_POLICY_MODE's own comment for exactly that having already
-    happened once (ee3fca4f7c)."""
+    happened once (ee3fca4f7c).
+
+    `channel_key` selects the STRICTEST EXPRESSIBLE mode for the lane, and
+    changes nothing about how closed this is. On the OpenClaw-transported
+    lane owner_only is not expressible — it renders as OpenClaw's own
+    `open` (see DEFAULT_OPENCLAW_DM_POLICY_MODE above), which is both the
+    opposite of what this fallback means AND the finding that makes the box
+    unprovisionable. An empty `allowlist` admits strictly FEWER senders
+    than owner_only does (nobody at all, rather than the owner), so this
+    stays fail-closed in the only direction that matters. Still hardcoded
+    per lane and still independent of both default constants."""
+    if _is_openclaw_transported_channel(channel_key):
+        return {"mode": DM_POLICY_ALLOWLIST, "allowlist": [], "pending_pairing": {}}
     return {"mode": DM_POLICY_OWNER_ONLY, "allowlist": [], "pending_pairing": {}}
 
 
-def _normalize_dm_policy_config(raw: Any) -> Dict[str, Any]:
+def _normalize_dm_policy_config(raw: Any, *, channel_key: str = "") -> Dict[str, Any]:
     data = raw if isinstance(raw, dict) else {}
     mode = str(data.get("mode") or "").strip().lower()
     if mode not in DM_POLICY_MODES:
-        mode = DEFAULT_DM_POLICY_MODE
+        mode = _default_dm_policy_mode_for_channel(channel_key)
     allowlist = sorted({str(x).strip() for x in (data.get("allowlist") or []) if str(x or "").strip()})
     pending_raw = data.get("pending_pairing") if isinstance(data.get("pending_pairing"), dict) else {}
     pending = {
@@ -983,7 +1084,7 @@ async def _load_agent_dm_policy_config(
     """
     normalized_agent_id = str(agent_id or "").strip()
     if not normalized_agent_id or normalized_agent_id == personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID:
-        return _unresolved_identity_dm_policy_config()
+        return _unresolved_identity_dm_policy_config(channel_key=channel_key)
     try:
         from server_modules import agent_registry_repository as _repo
 
@@ -994,12 +1095,12 @@ async def _load_agent_dm_policy_config(
         )
     except Exception:
         _logger.warning("dm_policy: install lookup failed for agent_id=%s — defaulting to owner_only", normalized_agent_id, exc_info=True)
-        return _unresolved_identity_dm_policy_config()
+        return _unresolved_identity_dm_policy_config(channel_key=channel_key)
     if not isinstance(install, dict):
-        return _unresolved_identity_dm_policy_config()
+        return _unresolved_identity_dm_policy_config(channel_key=channel_key)
     meta = dict(install.get("install_metadata") or install.get("metadata") or {})
     all_policies = meta.get("dm_policy") if isinstance(meta.get("dm_policy"), dict) else {}
-    return _normalize_dm_policy_config(all_policies.get(channel_key))
+    return _normalize_dm_policy_config(all_policies.get(channel_key), channel_key=channel_key)
 
 
 async def _persist_agent_dm_policy_config(
@@ -1032,7 +1133,7 @@ async def _persist_agent_dm_policy_config(
             return False
         meta = dict(install.get("install_metadata") or install.get("metadata") or {})
         all_policies = dict(meta.get("dm_policy")) if isinstance(meta.get("dm_policy"), dict) else {}
-        all_policies[channel_key] = _normalize_dm_policy_config(config)
+        all_policies[channel_key] = _normalize_dm_policy_config(config, channel_key=channel_key)
         updated = await _repo.update_workspace_agent_install(
             normalized_agent_id,
             tenant_id=resolved_tenant_id,
@@ -1056,9 +1157,13 @@ async def approve_dm_policy_pairing_request(
 ) -> Dict[str, Any]:
     """Owner-approval primitive: move a pending pairing request into the
     allowlist. Matches by sender_id OR by the one-time pairing code
-    (whichever a future approval route/owner-facing command has on hand).
-    Not yet wired to a route — this is the service-layer primitive for
-    that; see this build's report for the follow-up.
+    (whichever the approval route has on hand).
+
+    Wired to POST .../dm-policy/pairing-approvals (routes_personal_channels.py)
+    as of 2026-08-14. Before that it had zero callers anywhere outside this
+    module — the same "built, tested, and never wired" shape
+    _persist_agent_group_policy_config sat in until 2026-08-07, and half of
+    why the pairing mode it serves was unreachable in practice.
 
     Returns {"approved": bool, "sender_id": Optional[str], "reason": Optional[str]}.
     """
@@ -1086,6 +1191,116 @@ async def approve_dm_policy_pairing_request(
     if not persisted:
         return {"approved": False, "sender_id": target_sender_id, "reason": "persist_failed"}
     return {"approved": True, "sender_id": target_sender_id, "reason": None}
+
+
+# Channel keys dm_policy can ever apply to. Deliberately the SAME membership
+# rule GROUP_POLICY_CHANNEL_KEYS uses (WhatsApp/Telegram Personal plus the
+# whole local-bridge set, which LOCAL_BRIDGE_PERSONAL_CHANNELS.update()
+# already folds every OpenClaw-transported channel into) — a message on any
+# of them crosses _enforce_dm_policy, so a channel the gate reads and the
+# owner cannot write is exactly the deadlock this build exists to close.
+DM_POLICY_CHANNEL_KEYS = frozenset(
+    {WHATSAPP_PERSONAL_CHANNEL_KEY, TELEGRAM_PERSONAL_CHANNEL_KEY, *LOCAL_BRIDGE_PERSONAL_CHANNELS.keys()}
+)
+
+
+class UnsupportedDmPolicyModeError(ValueError):
+    """`mode` is a real DM_POLICY_MODES value, but not one this channel's
+    transport can carry. A distinct type (not a bare ValueError) so a route
+    can tell "you typed a mode that does not exist" from "that mode exists
+    and this transport cannot express it" — different facts, different
+    remedies, and collapsing them would tell an owner to fix a typo that
+    isn't there."""
+
+
+async def update_agent_dm_policy_config(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    agent_id: str,
+    channel_key: str,
+    mode: str,
+    allowlist: Optional[List[str]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Owner-facing write PRIMITIVE for the DM gate — the validating,
+    route-callable counterpart to _persist_agent_dm_policy_config, which had
+    exactly two callers before this build, BOTH inside this module and
+    NEITHER reachable from any route: approve_dm_policy_pairing_request
+    (itself unwired) and the inbound branch that only fires when the mode is
+    already `pairing`. So the mode could never leave its default by any means
+    the product offered, which — on the OpenClaw-transported lane, where that
+    default rendered as OpenClaw's `open` — made `openclaw security audit`
+    permanently unclean and the whole transport unprovisionable. See
+    DEFAULT_OPENCLAW_DM_POLICY_MODE's comment block for the full chain.
+
+    Same contract as update_agent_group_policy_config beside it: ValueError
+    for a missing/unresolvable agent_id, an unknown channel_key, or a mode
+    outside DM_POLICY_MODES (the route maps that to 400); None if the agent
+    install could not be found/updated (404).
+
+    UnsupportedDmPolicyModeError (a ValueError subclass, so an existing
+    `except ValueError` route still degrades to a 400) for a mode this
+    channel's transport cannot express — see
+    OPENCLAW_SETTABLE_DM_POLICY_MODES. Refused at WRITE time on purpose: the
+    alternative is storing it, returning 200, and having the box refuse every
+    later provisioning run with a finding that names OpenClaw's config rather
+    than the setting that caused it.
+
+    pending_pairing is CARRIED OVER, never reset. It is a live record of
+    strangers who have already been challenged; dropping it on an unrelated
+    mode/allowlist edit would re-challenge every one of them the next time
+    they wrote — the same "record but do not re-message" contract
+    _enforce_dm_policy's own repeat branch exists to keep.
+    """
+    normalized_agent_id = str(agent_id or "").strip()
+    if not normalized_agent_id or normalized_agent_id == personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID:
+        raise ValueError(
+            "agent_id is required to configure a per-agent direct-message policy — pass the specific "
+            "agent install this policy applies to (dm_policy is stored per agent+channel, not per gateway)."
+        )
+    normalized_channel_key = str(channel_key or "").strip().lower()
+    if normalized_channel_key not in DM_POLICY_CHANNEL_KEYS:
+        raise ValueError(f"channel_key must be one of {sorted(DM_POLICY_CHANNEL_KEYS)}.")
+    normalized_mode = str(mode or "").strip().lower()
+    if normalized_mode not in DM_POLICY_MODES:
+        raise ValueError(f"mode must be one of {sorted(DM_POLICY_MODES)}.")
+    if (
+        _is_openclaw_transported_channel(normalized_channel_key)
+        and normalized_mode not in OPENCLAW_SETTABLE_DM_POLICY_MODES
+    ):
+        label = OPENCLAW_PERSONAL_CHANNELS.get(normalized_channel_key, {}).get("label", normalized_channel_key)
+        raise UnsupportedDmPolicyModeError(
+            f"{label} can only be limited to a list of specific people. This computer's channel software "
+            "refuses to run at all while any channel accepts messages from everyone, so Empyralis cannot "
+            "save that setting here. Add the people who may message this agent instead."
+        )
+    normalized_allowlist = sorted({str(x).strip() for x in (allowlist or []) if str(x or "").strip()})
+    existing = await _load_agent_dm_policy_config(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        agent_id=normalized_agent_id,
+        channel_key=normalized_channel_key,
+    )
+    config = {
+        "mode": normalized_mode,
+        "allowlist": normalized_allowlist,
+        "pending_pairing": dict(existing.get("pending_pairing") or {}),
+    }
+    persisted = await _persist_agent_dm_policy_config(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        agent_id=normalized_agent_id,
+        channel_key=normalized_channel_key,
+        config=config,
+    )
+    if not persisted:
+        return None
+    return await _load_agent_dm_policy_config(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        agent_id=normalized_agent_id,
+        channel_key=normalized_channel_key,
+    )
 
 
 def _channel_owner_linked_id(*, channel_key: str, state: Optional[Dict[str, Any]]) -> str:
@@ -1216,6 +1431,39 @@ async def _enforce_dm_policy(
     if is_owner:
         return {
             "allowed": True, "mode": "owner", "sender_id": sender_id, "is_owner": True,
+            "system_reply": None, "config_changed": False,
+        }
+
+    # ── Group traffic on the OpenClaw lane belongs to the GROUP gate. ─────
+    #
+    # This gate is Gate 1 (who may DM this agent). CLAUDE.md's own
+    # description of the OpenClaw transport says group messages "land on
+    # Gates 2/3 (allowlist + require_mention) instead of Gate 1" — and
+    # _enforce_group_policy has already run and allowed this message by the
+    # time we get here, keyed on the GROUP's own chat id, which
+    # _group_policy_group_id's docstring explains is the only identity that
+    # answers "is this group allowed" ("a group's membership list is
+    # irrelevant").
+    #
+    # Applying a DM SENDER allowlist to a group message is a category error
+    # with a concrete cost: `sender_id` in a group is the individual
+    # participant, so an owner who deliberately allowed a group would ALSO
+    # have to enumerate every one of its members before the agent answered
+    # anybody in it. It never showed because the first-party default is
+    # `open`, which admitted everything; the moment this lane got the
+    # allowlist default its own transport requires, an allowed group went
+    # silent.
+    #
+    # SCOPED TO THIS LANE, deliberately. The same skip on the first-party
+    # channels would LOOSEN an owner who has explicitly chosen owner_only or
+    # allowlist on WhatsApp/Telegram today — their group traffic is
+    # currently blocked here, and quietly un-blocking it is not a side
+    # effect this change is entitled to have. Whether Gate 1 should stop
+    # deciding group traffic everywhere is a real question and a separate
+    # one; nothing here answers it.
+    if _is_openclaw_transported_channel(channel_key) and bool(message.get("is_group")):
+        return {
+            "allowed": True, "mode": "group_gate", "sender_id": sender_id, "is_owner": False,
             "system_reply": None, "config_changed": False,
         }
 
@@ -2718,9 +2966,20 @@ def get_gateway_personal_channel_surfaces(gateway_id: str) -> Dict[str, Any]:
                 # live allowlist — fetch that per-agent via a future
                 # settings surface once one exists (see this build's report).
                 "safety": secret_redaction_service.sanitize_mapping(_as_mapping(manifest.get("safety"))),
+                # default_mode/modes are LANE-SPECIFIC, not global: an
+                # OpenClaw-transported channel defaults to allowlist and can
+                # be set to nothing else (see
+                # DEFAULT_OPENCLAW_DM_POLICY_MODE). Reporting the first-party
+                # default here would describe a state this channel is never
+                # in, and reporting all four modes would invite a UI to
+                # render three that the write path refuses.
                 "dm_policy": {
-                    "default_mode": DEFAULT_DM_POLICY_MODE,
-                    "modes": sorted(DM_POLICY_MODES),
+                    "default_mode": _default_dm_policy_mode_for_channel(channel_key),
+                    "modes": sorted(
+                        OPENCLAW_SETTABLE_DM_POLICY_MODES
+                        if _is_openclaw_transported_channel(channel_key)
+                        else DM_POLICY_MODES
+                    ),
                     "enforced_server_side": True,
                 },
                 # group_policy: the SAME channel-level default/enforcement

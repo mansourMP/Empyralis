@@ -43,6 +43,27 @@ class GroupPolicyUpdateRequest(BaseModel):
     require_mention: Optional[bool] = None
 
 
+class DmPolicyUpdateRequest(BaseModel):
+    """Body for PATCH .../dm-policy. Same contract as
+    GroupPolicyUpdateRequest above: `mode` is validated by the service layer
+    against personal_channels_service.DM_POLICY_MODES, and — for an
+    OpenClaw-transported channel — additionally against the narrower set
+    that transport can actually carry."""
+
+    mode: str = Field(min_length=1)
+    allowlist: List[str] = Field(default_factory=list)
+
+
+class DmPolicyPairingApprovalRequest(BaseModel):
+    """Body for POST .../dm-policy/pairing-approvals. Either identifier the
+    owner has on hand: the sender's own id, or the one-time code the pairing
+    challenge sent them. At least one is required — the service refuses an
+    empty request with pairing_request_not_found rather than guessing."""
+
+    sender_id: Optional[str] = None
+    code: Optional[str] = None
+
+
 # DERIVED from the service's own map, never re-declared here.
 #
 # This used to be a third hardcoded copy of the local-bridge channel list
@@ -438,6 +459,321 @@ async def get_personal_channel_group_policy(
         "agent_id": normalized_agent_id,
         "group_policy": config,
     }
+
+
+# ── DM policy (who may message this agent directly) ────────────────────
+#
+# The other half of the gate pair above, and until 2026-08-14 the half that
+# had NO route at all — see personal_channels_service
+# .update_agent_dm_policy_config and DEFAULT_OPENCLAW_DM_POLICY_MODE for the
+# full chain, but the short version is that _persist_agent_dm_policy_config's
+# only two callers both lived inside the service module and neither could be
+# reached from outside it. The mode could therefore never leave its default,
+# and on the OpenClaw-transported lane that default rendered as OpenClaw's
+# own `dmPolicy: "open"`, which their mandatory `security audit` calls
+# critical — so the entire channel transport could not be provisioned on any
+# box, through any surface, ever.
+#
+# Shaped deliberately as a mirror of the group-policy pair above (same auth
+# bar, same agent_id query param, same reconcile-after-save, same audit
+# events) rather than as a new pattern: they are two axes of one gate, and an
+# owner editing one should not be meeting a different set of rules than when
+# they edit the other.
+
+
+def _dm_policy_registration_or_404(
+    *,
+    channel_key: str,
+    gateway_id: str,
+    current_user,
+    minimum_role: str,
+):
+    normalized_channel_key = str(channel_key or "").strip().lower()
+    if normalized_channel_key not in personal_channels_service.DM_POLICY_CHANNEL_KEYS:
+        raise HTTPException(status_code=404, detail="Personal channel was not found.")
+    registration = _require_accessible_gateway_registration(
+        gateway_id,
+        current_user,
+        minimum_role=minimum_role,
+    )
+    return normalized_channel_key, registration
+
+
+@router.patch("/personal-channels/{channel_key}/gateways/{gateway_id}/dm-policy")
+async def update_personal_channel_dm_policy(
+    request: Request,
+    channel_key: str,
+    gateway_id: str,
+    body: DmPolicyUpdateRequest,
+    current_user=Depends(require_api_key),
+    agent_id: Optional[str] = None,
+):
+    """"member", matching PATCH .../group-policy above: this changes who the
+    agent will actually answer, the same bar as any other channel
+    configuration change."""
+    channel_lane_contract_service.assert_personal_route_path(str(request.url.path))
+    normalized_channel_key, registration = _dm_policy_registration_or_404(
+        channel_key=channel_key,
+        gateway_id=gateway_id,
+        current_user=current_user,
+        minimum_role="member",
+    )
+    normalized_agent_id = str(agent_id or "").strip()
+    try:
+        updated = await personal_channels_service.update_agent_dm_policy_config(
+            tenant_id=str(registration.get("tenant_id") or "default"),
+            workspace_id=str(registration.get("workspace_id") or "default"),
+            agent_id=normalized_agent_id,
+            channel_key=normalized_channel_key,
+            mode=body.mode,
+            allowlist=body.allowlist,
+        )
+    except personal_channels_service.UnsupportedDmPolicyModeError as exc:
+        # 422, not 400: the request is well-formed and the mode is real — it
+        # is this CHANNEL's transport that cannot carry it. A 400 would read
+        # as "you sent something malformed" and send an owner looking for a
+        # typo that isn't there. str(exc) is already the owner-facing
+        # sentence (no "dmPolicy", no "OpenClaw config", no mode tokens), and
+        # getErrorMessage surfaces a string `detail` verbatim.
+        detail = str(exc)
+        _emit_personal_channel_audit(
+            action="personal_channel.dm_policy.configure",
+            status="denied",
+            registration=registration,
+            current_user=current_user,
+            gateway_id=gateway_id,
+            channel_key=normalized_channel_key,
+            detail=detail,
+            metadata={"agent_id": normalized_agent_id, "requested_mode": body.mode},
+        )
+        raise HTTPException(status_code=422, detail=detail) from exc
+    except ValueError as exc:
+        detail = str(exc)
+        _emit_personal_channel_audit(
+            action="personal_channel.dm_policy.configure",
+            status="denied",
+            registration=registration,
+            current_user=current_user,
+            gateway_id=gateway_id,
+            channel_key=normalized_channel_key,
+            detail=detail,
+            metadata={"agent_id": normalized_agent_id, "requested_mode": body.mode},
+        )
+        raise HTTPException(status_code=400, detail=detail) from exc
+    if updated is None:
+        detail = "Agent install was not found in this workspace, or the update could not be saved."
+        _emit_personal_channel_audit(
+            action="personal_channel.dm_policy.configure",
+            status="denied",
+            registration=registration,
+            current_user=current_user,
+            gateway_id=gateway_id,
+            channel_key=normalized_channel_key,
+            detail=detail,
+            metadata={"agent_id": normalized_agent_id, "requested_mode": body.mode},
+        )
+        raise HTTPException(status_code=404, detail=detail)
+    # allowlist SIZE, never its entries: an allowlist entry is a real
+    # person's phone number / handle / account id, and an audit row is not
+    # the place for it. Same shape the group-policy audit above already uses.
+    _emit_personal_channel_audit(
+        action="personal_channel.dm_policy.configure",
+        status="success",
+        registration=registration,
+        current_user=current_user,
+        gateway_id=gateway_id,
+        channel_key=normalized_channel_key,
+        detail="Direct-message policy (who may message this agent) was updated for a personal-channel agent binding.",
+        metadata={
+            "agent_id": normalized_agent_id,
+            "mode": updated.get("mode"),
+            "allowlist_size": len(updated.get("allowlist") or []),
+        },
+    )
+    provisioning = await _reconcile_openclaw_after_policy_change(
+        channel_key=normalized_channel_key,
+        gateway_id=gateway_id,
+        registration=registration,
+        agent_id=normalized_agent_id,
+        current_user=current_user,
+    )
+    return {
+        "channel_key": normalized_channel_key,
+        "agent_id": normalized_agent_id,
+        "dm_policy": updated,
+        "openclaw_provisioning": provisioning,
+    }
+
+
+@router.get("/personal-channels/{channel_key}/gateways/{gateway_id}/dm-policy")
+async def get_personal_channel_dm_policy(
+    request: Request,
+    channel_key: str,
+    gateway_id: str,
+    current_user=Depends(require_api_key),
+    agent_id: Optional[str] = None,
+):
+    """Read-only counterpart — "viewer", same bar as GET .../group-policy.
+
+    `settable_modes` is served alongside the config because it is a property
+    of this CHANNEL's transport, not of the request: a UI that offered the
+    three modes this lane cannot carry would be rendering controls whose only
+    outcome is a 422."""
+    channel_lane_contract_service.assert_personal_route_path(str(request.url.path))
+    normalized_channel_key, registration = _dm_policy_registration_or_404(
+        channel_key=channel_key,
+        gateway_id=gateway_id,
+        current_user=current_user,
+        minimum_role="viewer",
+    )
+    normalized_agent_id = str(agent_id or "").strip()
+    config = await personal_channels_service._load_agent_dm_policy_config(
+        tenant_id=str(registration.get("tenant_id") or "default"),
+        workspace_id=str(registration.get("workspace_id") or "default"),
+        agent_id=normalized_agent_id,
+        channel_key=normalized_channel_key,
+    )
+    # pending_pairing carries a stranger's own id and the one-time code we
+    # sent them — the owner needs both to approve, so this is deliberately
+    # returned, and deliberately only to someone who already passed
+    # _require_accessible_gateway_registration for this workspace.
+    settable = (
+        personal_channels_service.OPENCLAW_SETTABLE_DM_POLICY_MODES
+        if normalized_channel_key in personal_channels_service.OPENCLAW_PERSONAL_CHANNELS
+        else personal_channels_service.DM_POLICY_MODES
+    )
+    return {
+        "channel_key": normalized_channel_key,
+        "agent_id": normalized_agent_id,
+        "dm_policy": config,
+        "settable_modes": sorted(settable),
+    }
+
+
+@router.post("/personal-channels/{channel_key}/gateways/{gateway_id}/dm-policy/pairing-approvals")
+async def approve_personal_channel_dm_pairing(
+    request: Request,
+    channel_key: str,
+    gateway_id: str,
+    body: DmPolicyPairingApprovalRequest,
+    current_user=Depends(require_api_key),
+    agent_id: Optional[str] = None,
+):
+    """Wires personal_channels_service.approve_dm_policy_pairing_request,
+    which had zero callers outside its own module until now. `pairing` mode
+    challenges a stranger and records them as pending; without this route
+    nothing could ever move one of those pending entries into the allowlist,
+    so the challenge went out and the approval it asked for was impossible.
+
+    "member", matching the PATCH above — approving a pairing request adds a
+    sender to the allowlist, which is the same act by a different door."""
+    channel_lane_contract_service.assert_personal_route_path(str(request.url.path))
+    normalized_channel_key, registration = _dm_policy_registration_or_404(
+        channel_key=channel_key,
+        gateway_id=gateway_id,
+        current_user=current_user,
+        minimum_role="member",
+    )
+    normalized_agent_id = str(agent_id or "").strip()
+    if not normalized_agent_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "agent_id is required to approve a pairing request — pairing requests are stored per "
+                "agent+channel, not per gateway."
+            ),
+        )
+    result = await personal_channels_service.approve_dm_policy_pairing_request(
+        tenant_id=str(registration.get("tenant_id") or "default"),
+        workspace_id=str(registration.get("workspace_id") or "default"),
+        agent_id=normalized_agent_id,
+        channel_key=normalized_channel_key,
+        sender_id=body.sender_id,
+        code=body.code,
+    )
+    # Three outcomes, three answers — never one "failed". "no such request"
+    # is the owner's own typo or an already-approved sender (404, nothing to
+    # retry); "persist_failed" is ours and IS worth retrying (503); approved
+    # is approved.
+    if not result.get("approved"):
+        reason = str(result.get("reason") or "")
+        detail = (
+            "That request could not be saved just now — nothing was changed, so it is safe to try again."
+            if reason == "persist_failed"
+            else "No pending request matches that person or code. It may already have been approved."
+        )
+        _emit_personal_channel_audit(
+            action="personal_channel.dm_policy.pairing_approve",
+            status="denied",
+            registration=registration,
+            current_user=current_user,
+            gateway_id=gateway_id,
+            channel_key=normalized_channel_key,
+            detail=detail,
+            metadata={"agent_id": normalized_agent_id, "reason": reason or "unknown"},
+        )
+        raise HTTPException(status_code=503 if reason == "persist_failed" else 404, detail=detail)
+    _emit_personal_channel_audit(
+        action="personal_channel.dm_policy.pairing_approve",
+        status="success",
+        registration=registration,
+        current_user=current_user,
+        gateway_id=gateway_id,
+        channel_key=normalized_channel_key,
+        detail="A pending pairing request was approved and the sender was added to this agent's allowed list.",
+        metadata={"agent_id": normalized_agent_id},
+    )
+    updated = await personal_channels_service._load_agent_dm_policy_config(
+        tenant_id=str(registration.get("tenant_id") or "default"),
+        workspace_id=str(registration.get("workspace_id") or "default"),
+        agent_id=normalized_agent_id,
+        channel_key=normalized_channel_key,
+    )
+    provisioning = await _reconcile_openclaw_after_policy_change(
+        channel_key=normalized_channel_key,
+        gateway_id=gateway_id,
+        registration=registration,
+        agent_id=normalized_agent_id,
+        current_user=current_user,
+    )
+    return {
+        "channel_key": normalized_channel_key,
+        "agent_id": normalized_agent_id,
+        "approved_sender_id": result.get("sender_id"),
+        "dm_policy": updated,
+        "openclaw_provisioning": provisioning,
+    }
+
+
+async def _reconcile_openclaw_after_policy_change(
+    *,
+    channel_key: str,
+    gateway_id: str,
+    registration,
+    agent_id: str,
+    current_user,
+):
+    """CHANNEL-ADOPTION-PLAN.md step 4, identical to the group-policy route's
+    own post-save push and factored out so the two axes cannot drift into
+    saving the same kind of setting and only one of them taking effect.
+
+    For an OpenClaw-transported channel the policy just saved is NOT what
+    decides whether a message ever arrives — OpenClaw's own config runs first
+    and can block-dispatch before any Empyralis gate sees it. Push it now, so
+    the setting is in force rather than merely stored.
+
+    Best effort by design (an offline box re-asserts this from its own
+    provisioning record at next boot, so a push failure must never fail a
+    setting that saved cleanly) — but the RESULT is returned, because this is
+    the only moment an owner can be told the box did not take it."""
+    return await openclaw_provisioning_service.reconcile_openclaw_policy_best_effort(
+        channel_key=channel_key,
+        gateway_id=gateway_id,
+        tenant_id=str(registration.get("tenant_id") or "default"),
+        workspace_id=str(registration.get("workspace_id") or "default"),
+        agent_id=agent_id,
+        actor_id=str(current_user.get("id") or "") or None,
+    )
 
 
 # ── OpenClaw transport: first-run provisioning ─────────────────────────
