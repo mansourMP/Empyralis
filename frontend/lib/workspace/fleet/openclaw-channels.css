@@ -286,3 +286,53 @@
     animation: none;
   }
 }
+
+/* ── The channel search ───────────────────────────────────────────────────
+ *
+ * Every channel OpenClaw carries is on one grid now — bundled, official and
+ * community alike — which is a lot of cards. This is NAVIGATION, not
+ * curation: it never removes a channel from the surface, it only helps
+ * someone who already knows the name reach it without scrolling. Filtering
+ * the grid by trust or by origin would be the curated-subset framing this
+ * surface exists to avoid.
+ */
+.fleet-channel-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 320px;
+  margin: 0 0 12px;
+  padding: 0 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--bg-inset);
+  color: var(--text-tertiary);
+}
+
+.fleet-channel-search input {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.fleet-channel-search input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.fleet-channel-search:focus-within {
+  border-color: var(--border-strong);
+}
+
+/* The trust word on a registry card's face. Deliberately the same slot the
+   door-count note uses — one quiet line under the status pill, never a second
+   pill competing with it. */
+.fleet-channel-banner-detail--quiet {
+  color: var(--text-tertiary);
+  font-size: 12px;
+}

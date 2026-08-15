@@ -236,3 +236,30 @@ def openclaw_channel_setup_catalog() -> List[Dict[str, Any]]:
         )
     catalog.sort(key=lambda entry: entry["label"].lower())
     return catalog
+
+
+def openclaw_registry_channel_plugin_catalog() -> List[Dict[str, Any]]:
+    """Every channel-capable plugin OpenClaw's registry publishes that this
+    pinned build does not already carry.
+
+    Servable without touching a gateway for the same reason the catalog above
+    is: it is a property of the derived manifest, not of any one box.
+
+    Two things are deliberately different from a resolved channel, and the UI
+    has to render both honestly rather than smoothing them over:
+
+      * `channel_key` is null. Not "unknown yet" as a placeholder — a
+        third-party plugin registers its channel at runtime, so there is no id
+        to key on until the plugin is installed. A card for one of these is an
+        OFFER TO INSTALL, never a channel you can paste a credential into.
+
+      * `trust` is carried through verbatim, including their scanner's own
+        `scan_status`. A channel plugin runs third-party code beside the
+        owner's messages and contributes its own `channels.<id>.tools.*`
+        surface that the global `tools.*` lockdown does not reach, so who
+        published it is a fact the owner is entitled to before installing —
+        never a reason to hide it from them.
+    """
+    return [
+        plugin.as_payload() for plugin in openclaw_channel_registry.registry_channel_plugins()
+    ]

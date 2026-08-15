@@ -161,15 +161,24 @@ from __future__ import annotations
 
 import argparse
 import collections
+import concurrent.futures
+import io
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import zipfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PYTHON_MANIFEST_PATH = REPO_ROOT / "server_modules" / "openclaw_channel_manifest.json"
@@ -177,8 +186,77 @@ TYPESCRIPT_MANIFEST_PATH = (
     REPO_ROOT / "empyralis-gateway" / "src" / "openclaw" / "generated-openclaw-channels.ts"
 )
 
-MANIFEST_SCHEMA = "empyralis.openclaw_channel_manifest.v1"
+MANIFEST_SCHEMA = "empyralis.openclaw_channel_manifest.v2"
 CHANNEL_KEY_PREFIX = "openclaw_"
+
+# ── SOURCE 8: THE CLAWHUB PLUGIN REGISTRY ────────────────────────────────
+# Sources 1-7 all describe what is BUNDLED or already INSTALLED on this box.
+# That is why this manifest carried 27 channels while OpenClaw's real channel
+# surface is far larger: their registry publishes installable channel plugins
+# that a bare install has never heard of. `telegram-userbot` — a personal
+# Telegram account over MTProto — is the example that exposed it.
+#
+# THE CLI CANNOT ENUMERATE. `openclaw plugins search` requires a query (its
+# `--json` handler passes `q` straight through and the server answers
+# "Missing q query parameter" for an empty or whitespace one); there is no
+# `--category` and no list subcommand. `plugins list` and `plugins registry`
+# both describe only what is installed HERE. A hand-written set of search
+# terms would be a channel list wearing a derivation's clothes — the exact
+# defect this script exists to remove.
+#
+# So we go one level below the CLI to the registry it talks to.
+# `resolveClawHubBaseUrl` (dist/clawhub-*.js) reads CLAWHUB_URL and defaults
+# to https://clawhub.ai; `GET /api/v1/packages` on that host is a plain
+# cursor-paginated listing of every published package, which is what makes a
+# COMPLETE enumeration possible. Same host, same API version and same auth
+# variable the CLI's own `plugins search`/`plugins install` use.
+CLAWHUB_DEFAULT_BASE_URL = "https://clawhub.ai"
+CLAWHUB_PACKAGES_PATH = "/api/v1/packages"
+
+# `family` is the only server-side filter `/api/v1/packages` accepts (a
+# `category` parameter is a 400). These two are the plugin families; `skill`
+# is a different artifact kind and can never contribute a channel.
+# `@openclaw/feishu` is `bundle-plugin` and `telegram-userbot` is
+# `code-plugin`, so filtering to either one alone silently drops half.
+CLAWHUB_PLUGIN_FAMILIES = ("code-plugin", "bundle-plugin")
+
+# ── HOW A CHANNEL PLUGIN IS IDENTIFIED, IN TWO INDEPENDENT STAGES ────────
+# Stage 1, the CANDIDATE filter: the package declares the "channels"
+# category. Publisher-declared, so it is over-broad on its own — `telegram-ui`
+# (inline buttons and reactions) and `@honcho-ai/openclaw-honcho` (memory)
+# both claim it. It is used only to narrow 1,687 packages to ~326, never to
+# decide.
+#
+# Stage 2, the STRUCTURAL confirmation: fetch the package's own artifact and
+# require it to actually register a channel — either the bundled-style
+# `openclaw.channel` declaration in its package.json, or a
+# `registerChannel(` call in its shipped code (`api.registerChannel({...})`
+# is how a third-party plugin contributes one at runtime; telegram-userbot's
+# `dist/index.js` does exactly that and carries no package.json declaration).
+#
+# The two stages read DIFFERENT sources — a server-side category tag versus
+# the plugin's own code — which is this repo's standing rule for any
+# conformance check. Measured against the 20 channels we already carry that
+# are published on ClawHub: stage 1 keeps all 20 (zero missed), stage 2
+# confirms all 20 (zero dropped), and stage 2 rejects 196 of the 326
+# candidates that merely self-tag. A plugin that neither declares nor
+# registers a channel is not a channel, whatever its category says.
+CLAWHUB_CHANNEL_CATEGORY = "channels"
+_REGISTERS_CHANNEL = re.compile(rb"registerChannel\s*[({]")
+_ARTIFACT_CODE_SUFFIXES = (".js", ".mjs", ".cjs", ".ts", ".mts", ".cts")
+
+# The floor for source 8, same purpose as MINIMUM_EXPECTED_CHANNELS: a
+# network hiccup that returns two pages instead of eighteen would otherwise
+# shrink the offered surface silently and look like an upstream removal.
+MINIMUM_EXPECTED_REGISTRY_CHANNEL_PLUGINS = 60
+
+# A registry artifact big enough to be a model or a dataset is not a channel
+# plugin, and downloading it would make regeneration hostage to one publisher.
+CLAWHUB_MAX_ARTIFACT_BYTES = 24 * 1024 * 1024
+CLAWHUB_HTTP_TIMEOUT_SECONDS = 60
+CLAWHUB_HTTP_ATTEMPTS = 6
+CLAWHUB_RETRY_BASE_SECONDS = 1.5
+CLAWHUB_RETRYABLE_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
 
 # The floor a broken parse has to clear. OpenClaw shipped 27 channels at the
 # pinned version; a regeneration that suddenly produces a handful is a parse
@@ -925,7 +1003,392 @@ def _credential_shapes(
     return shapes
 
 
-def build_manifest() -> Dict[str, Any]:
+# Candidates whose artifact is broken upstream in a way no retry fixes.
+# Populated by `_registry_channel_plugins` and written into the manifest, so a
+# package we could not classify is VISIBLE rather than missing.
+_LAST_UNRESOLVED: List[Dict[str, str]] = []
+
+
+def _is_permanent_artifact_failure(exc: BaseException) -> bool:
+    """Whether re-running would produce the same failure.
+
+    Deliberately narrow: anything not recognised here is treated as transient
+    and RAISES, because the expensive mistake is quietly accepting a shorter
+    channel surface, not asking an operator to run the script twice.
+    """
+    if isinstance(exc, (GenerationError, tarfile.TarError, zipfile.BadZipFile)):
+        return True
+    if isinstance(exc, urllib.error.HTTPError):
+        # 404/410 — the registry does not serve this version at all.
+        # 300-399 reaching here is urllib's redirect-loop guard, i.e. the
+        # package's own download URL is misconfigured upstream.
+        return exc.code in {404, 410} or 300 <= exc.code < 400
+    return False
+
+
+def _clawhub_base_url() -> str:
+    """The registry host, resolved the same way OpenClaw's own client does."""
+    return (os.environ.get("CLAWHUB_URL") or CLAWHUB_DEFAULT_BASE_URL).rstrip("/")
+
+
+def _clawhub_request(url: str) -> bytes:
+    """One registry read.
+
+    Sends the CLI's own auth variable when the operator has one set, so a
+    private or rate-limited registry behaves the same here as under
+    `openclaw plugins search`. Never invents credentials.
+    """
+    headers = {
+        "User-Agent": "empyralis-openclaw-channel-manifest-generator",
+        "Accept": "application/json",
+    }
+    token = os.environ.get("CLAWHUB_AUTH_TOKEN") or os.environ.get("CLAWHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers)
+    # The registry rate-limits: a full derivation is ~1,700 listing rows plus
+    # ~330 detail reads plus ~330 artifact downloads, and it answers 503/429
+    # under that load. Retrying is not papering over a failure — the failure
+    # IS "you asked too fast", and the alternative (treating it as fatal) makes
+    # regeneration a coin flip. A candidate that still cannot be read after
+    # this is raised, never dropped.
+    last: Optional[Exception] = None
+    for attempt in range(CLAWHUB_HTTP_ATTEMPTS):
+        try:
+            with urllib.request.urlopen(
+                request, timeout=CLAWHUB_HTTP_TIMEOUT_SECONDS
+            ) as response:
+                return response.read(CLAWHUB_MAX_ARTIFACT_BYTES + 1)
+        except urllib.error.HTTPError as exc:
+            last = exc
+            if exc.code not in CLAWHUB_RETRYABLE_STATUS:
+                raise
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last = exc
+        if attempt + 1 < CLAWHUB_HTTP_ATTEMPTS:
+            time.sleep(CLAWHUB_RETRY_BASE_SECONDS * (2**attempt) + random.random())
+    raise last if last else RuntimeError("unreachable")
+
+
+def _clawhub_json(path: str, **params: Any) -> Dict[str, Any]:
+    query = {key: str(value) for key, value in params.items() if value is not None}
+    url = f"{_clawhub_base_url()}{path}"
+    if query:
+        url = f"{url}?{urllib.parse.urlencode(query)}"
+    try:
+        return json.loads(_clawhub_request(url))
+    except urllib.error.URLError as exc:
+        raise GenerationError(
+            f"Could not reach the ClawHub plugin registry at {url}: {exc}. "
+            "The registry is source 8 of this manifest; a run that cannot read "
+            "it would silently drop every channel that is not bundled. Fix the "
+            "network (or point CLAWHUB_URL at a reachable mirror) and re-run — "
+            "or pass --skip-registry to deliberately keep the checked-in set."
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise GenerationError(f"ClawHub returned non-JSON from {url}: {exc}") from exc
+
+
+def _clawhub_enumerate_packages() -> List[Dict[str, Any]]:
+    """Every published plugin package, via cursor pagination.
+
+    `/api/v1/packages` answers `{"items": [...], "nextCursor": "..."}` and
+    omits the cursor on the last page. Paged per family because that is the
+    only server-side filter the endpoint accepts.
+    """
+    packages: List[Dict[str, Any]] = []
+    for family in CLAWHUB_PLUGIN_FAMILIES:
+        cursor: Optional[str] = None
+        pages = 0
+        while True:
+            payload = _clawhub_json(
+                CLAWHUB_PACKAGES_PATH, family=family, limit=100, cursor=cursor
+            )
+            items = payload.get("items")
+            if not isinstance(items, list):
+                raise GenerationError(
+                    f"ClawHub listing for family {family!r} had no `items` array."
+                )
+            packages.extend(item for item in items if isinstance(item, dict))
+            cursor = payload.get("nextCursor")
+            pages += 1
+            if not cursor:
+                break
+            if pages > 200:
+                raise GenerationError(
+                    f"ClawHub pagination for family {family!r} did not terminate "
+                    f"after {pages} pages — refusing to loop."
+                )
+    return packages
+
+
+def _artifact_members(raw: bytes) -> List[Tuple[str, Any]]:
+    """(path, reader) for every file in a registry artifact.
+
+    Both shapes ClawHub serves are handled: `npm-pack` tarballs (the normal
+    case, everything under a `package/` prefix) and the `legacy-zip` format
+    older community packages were published in.
+    """
+    try:
+        archive = tarfile.open(fileobj=io.BytesIO(raw))
+    except tarfile.TarError:
+        pass
+    else:
+        return [
+            (member.name, (lambda m=member: archive.extractfile(m).read()))
+            for member in archive.getmembers()
+            if member.isfile()
+        ]
+    try:
+        zip_archive = zipfile.ZipFile(io.BytesIO(raw))
+    except zipfile.BadZipFile as exc:
+        raise GenerationError(f"artifact is neither a tarball nor a zip: {exc}") from exc
+    return [
+        (info.filename, (lambda i=info: zip_archive.read(i)))
+        for info in zip_archive.infolist()
+        if not info.is_dir()
+    ]
+
+
+def _clawhub_confirm_channel_plugin(name: str, version: str) -> Dict[str, Any]:
+    """Stage 2 — does this package actually contribute a channel?
+
+    Reads the package's own artifact, never its metadata. Returns the
+    evidence as well as the verdict so a regeneration can be audited rather
+    than trusted.
+    """
+    quoted_name = urllib.parse.quote(name, safe="")
+    quoted_version = urllib.parse.quote(version, safe="")
+    url = (
+        f"{_clawhub_base_url()}{CLAWHUB_PACKAGES_PATH}/{quoted_name}"
+        f"/versions/{quoted_version}/artifact/download"
+    )
+    raw = _clawhub_request(url)
+    if len(raw) > CLAWHUB_MAX_ARTIFACT_BYTES:
+        return {"confirmed": False, "evidence": None, "skipped": "artifact_too_large"}
+
+    package_json: Optional[Dict[str, Any]] = None
+    registers_in: Optional[str] = None
+    for path, read in _artifact_members(raw):
+        segments = path.split("/")
+        if segments[-1] == "package.json" and len(segments) <= 2:
+            try:
+                parsed = json.loads(read())
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+                parsed = None
+            if isinstance(parsed, dict):
+                package_json = parsed
+        elif registers_in is None and path.endswith(_ARTIFACT_CODE_SUFFIXES):
+            try:
+                body = read()
+            except (OSError, KeyError):
+                continue
+            if _REGISTERS_CHANNEL.search(body):
+                registers_in = path
+
+    openclaw_block = (package_json or {}).get("openclaw")
+    declares = isinstance(openclaw_block, dict) and bool(openclaw_block.get("channel"))
+    compat = openclaw_block.get("compat") if isinstance(openclaw_block, dict) else None
+    min_host = None
+    if isinstance(compat, dict):
+        raw_min = compat.get("minGatewayVersion")
+        if isinstance(raw_min, str) and raw_min.strip():
+            min_host = raw_min.strip()
+
+    if declares:
+        evidence = "package.json openclaw.channel"
+    elif registers_in:
+        evidence = f"registerChannel in {registers_in}"
+    else:
+        evidence = None
+    return {
+        "confirmed": bool(declares or registers_in),
+        "evidence": evidence,
+        "min_host_version": min_host,
+    }
+
+
+def _clawhub_trust(package: Dict[str, Any], detail: Dict[str, Any]) -> Dict[str, Any]:
+    """The trust facts, passed through verbatim from the registry.
+
+    Never collapsed into a single "safe/unsafe" verdict. A channel plugin runs
+    third-party code beside the owner's messages AND contributes its own
+    `channels.<id>.tools.*` surface, which the global `tools.*` lockdown does
+    not reach — so who published it, whether OpenClaw vouches for it, and what
+    their scanner said are facts the owner is entitled to see before installing.
+    `scan_status` in particular is a real signal: `telegram-userbot` is
+    "suspicious" on their own scanner while `telegram-ui` is "clean".
+    """
+    verification = detail.get("verification")
+    verification = verification if isinstance(verification, dict) else {}
+    stats = package.get("stats")
+    stats = stats if isinstance(stats, dict) else {}
+
+    def _text(value: Any) -> Optional[str]:
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
+    return {
+        "is_official": bool(package.get("isOfficial")),
+        "release_channel": _text(package.get("channel")),
+        "publisher": _text(package.get("ownerHandle")),
+        "verification_tier": _text(verification.get("tier"))
+        or _text(package.get("verificationTier")),
+        "verification_scope": _text(verification.get("scope")),
+        "scan_status": _text(verification.get("scanStatus")) or _text(package.get("scanStatus")),
+        "has_provenance": bool(verification.get("hasProvenance")),
+        "trusted_openclaw_plugin": bool(verification.get("trustedOpenClawPlugin")),
+        "source_repo": _text(verification.get("sourceRepo")),
+        "installs": int(stats.get("installs") or 0),
+        "downloads": int(stats.get("downloads") or 0),
+    }
+
+
+def _registry_channel_plugins(carried_packages: Set[str]) -> List[Dict[str, Any]]:
+    """Source 8 — every channel-capable plugin ClawHub publishes that this
+    build does not already carry as a first-class channel.
+
+    `carried_packages` is the npm package of every channel already in
+    `channels` (sources 1-3). Those are not repeated here: they are resolved
+    channels with a known id and a real config schema, and an entry in both
+    lists would put two cards on one platform.
+    """
+    packages = _clawhub_enumerate_packages()
+    candidates = [
+        package
+        for package in packages
+        if CLAWHUB_CHANNEL_CATEGORY in (package.get("categories") or [])
+        and isinstance(package.get("name"), str)
+        and isinstance(package.get("latestVersion"), str)
+    ]
+    if not candidates:
+        raise GenerationError(
+            f"ClawHub returned {len(packages)} packages but none declared the "
+            f"{CLAWHUB_CHANNEL_CATEGORY!r} category. That is a broken parse of "
+            "their listing, not a registry with no channel plugins."
+        )
+
+    def _resolve(package: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        name = package["name"]
+        version = package["latestVersion"]
+        detail = _clawhub_json(f"{CLAWHUB_PACKAGES_PATH}/{urllib.parse.quote(name, safe='')}")
+        detail_package = detail.get("package")
+        detail_package = detail_package if isinstance(detail_package, dict) else {}
+        confirmation = _clawhub_confirm_channel_plugin(name, version)
+        if not confirmation["confirmed"]:
+            return None
+        compatibility = detail_package.get("compatibility")
+        compatibility = compatibility if isinstance(compatibility, dict) else {}
+        min_host = compatibility.get("minGatewayVersion") or confirmation.get("min_host_version")
+        summary = detail_package.get("summary") or package.get("summary")
+        return {
+            # The PLUGIN id — what `plugins registry --json` keys its install
+            # records on, and what the install/drift check compares against.
+            # It is NOT the channel id: `openclaw-plugin-yuanbao` publishes
+            # channel `yuanbao`, and `@wecom/wecom-openclaw-plugin` publishes
+            # channel `wecom`. See `channel_id` below.
+            "plugin_id": package.get("runtimeId") or name,
+            "npm_package": name,
+            # Pinned to the version this manifest was generated against, for
+            # the same reason every other spec here is pinned: "newest
+            # compatible" moves, and two boxes provisioned a month apart would
+            # otherwise silently run different code.
+            # `clawhub:<name>@<version>`, NOT a bare npm spec — measured, not
+            # assumed. `openclaw plugins install telegram-userbot@1.0.2` exits
+            # 1 with "Package not found on npm": a ClawHub package need not be
+            # published to npm at all, and their installer resolves a bare
+            # spec against npm. Their own official external plugin catalog
+            # uses this same `clawhub:` form. Named `install_spec` rather than
+            # `npm_spec` because it is deliberately not one — the resolved
+            # channels above keep `npm_spec`, which for them is accurate.
+            "install_spec": f"clawhub:{name}@{version}",
+            "version": version,
+            "label": str(package.get("displayName") or name),
+            "summary": summary.strip() if isinstance(summary, str) else None,
+            "topics": [t for t in (package.get("topics") or []) if isinstance(t, str)],
+            # UNKNOWABLE until the plugin is installed, and deliberately not
+            # guessed. A third-party plugin registers its channel at runtime
+            # (`api.registerChannel({...})`), so the id it will claim exists
+            # only in code we have not run. Writing `openclaw_<plugin_id>`
+            # here would reproduce the exact `openclaw_qq`-vs-`openclaw_qqbot`
+            # defect the channel_key invariant was added to prevent: a policy
+            # written to the wrong `channels.<id>` node and an outbound send
+            # that answers "unsupported channel". It resolves on the box, from
+            # `channels list --all --json`, once the plugin is installed.
+            "channel_id": None,
+            "channel_key": None,
+            # Same three-state vocabulary the resolved channels use. A plugin
+            # that is not installed contributes no schema node, so its
+            # credential fields cannot be known — say so, never render a
+            # guessed form.
+            "config_schema_present": False,
+            "connect_method": CONNECT_METHOD_PLUGIN_ABSENT,
+            "min_host_version": min_host if isinstance(min_host, str) else None,
+            "confirmed_by": confirmation["evidence"],
+            "trust": _clawhub_trust({**package, **detail_package}, detail_package),
+        }
+
+    resolved: List[Dict[str, Any]] = []
+    transient: List[str] = []
+    unresolved: List[Dict[str, str]] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+        futures = {pool.submit(_resolve, package): package for package in candidates}
+        for future in concurrent.futures.as_completed(futures):
+            package = futures[future]
+            name = str(package.get("name"))
+            try:
+                entry = future.result()
+            except GenerationError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - classified, never swallowed
+                # A candidate we could not read is a channel we cannot
+                # classify, and it must never vanish quietly — that is how a
+                # curated list gets rebuilt by accident. But the two reasons
+                # it can happen are different facts and get different
+                # treatment:
+                #
+                #   PERMANENT   the package itself is broken upstream (a
+                #               redirect loop, a corrupt archive, a version
+                #               the registry will not serve). Re-running will
+                #               never fix it, so failing the whole generation
+                #               would make one broken publisher able to block
+                #               every future regeneration. Recorded below,
+                #               visibly, with the reason.
+                #   TRANSIENT   the registry rate-limited or the network
+                #               blipped, after this module already retried
+                #               with backoff. Re-running WILL fix it, and
+                #               accepting it would silently shorten the
+                #               offered surface. Raised.
+                if _is_permanent_artifact_failure(exc):
+                    unresolved.append({"npm_package": name, "reason": f"{type(exc).__name__}: {exc}"[:200]})
+                else:
+                    transient.append(f"{name}: {type(exc).__name__}: {exc}")
+                continue
+            if entry is not None:
+                resolved.append(entry)
+
+    if transient:
+        raise GenerationError(
+            f"{len(transient)} ClawHub channel candidate(s) could not be read for a "
+            "reason that will clear on a retry, so their channel status is unknown "
+            "and the manifest would be silently short. Re-run:\n  "
+            + "\n  ".join(sorted(transient)[:10])
+        )
+
+    fresh = [entry for entry in resolved if entry["npm_package"] not in carried_packages]
+    _LAST_UNRESOLVED.clear()
+    _LAST_UNRESOLVED.extend(sorted(unresolved, key=lambda row: row["npm_package"]))
+    if len(fresh) < MINIMUM_EXPECTED_REGISTRY_CHANNEL_PLUGINS:
+        raise GenerationError(
+            f"Only {len(fresh)} registry channel plugins survived derivation "
+            f"(floor is {MINIMUM_EXPECTED_REGISTRY_CHANNEL_PLUGINS}). That is a "
+            "broken enumeration, not an upstream removal. Refusing to write a "
+            "manifest that would silently shrink the offered channel surface."
+        )
+    fresh.sort(key=lambda entry: entry["npm_package"])
+    return fresh
+
+
+def build_manifest(*, include_registry: bool = True) -> Dict[str, Any]:
     package_root = _openclaw_package_root()
     with tempfile.TemporaryDirectory(prefix="empyralis-openclaw-manifest-") as tmp:
         home = Path(tmp)
@@ -999,13 +1462,82 @@ def build_manifest() -> Dict[str, Any]:
             }
         )
 
+    if include_registry:
+        carried_packages = {
+            (channel["plugin_install"] or {}).get("npm_package")
+            for channel in channels
+            if channel["plugin_install"]
+        }
+        carried_packages.discard(None)
+        registry_channel_plugins = _registry_channel_plugins(carried_packages)
+    else:
+        # --skip-registry: keep whatever source 8 last derived rather than
+        # silently emitting an empty set. An operator regenerating offline is
+        # saying "sources 1-7 changed", never "OpenClaw stopped publishing
+        # channel plugins".
+        registry_channel_plugins = _checked_in_registry_channel_plugins()
+        # Carried forward WHOLE, provenance included. Rebuilding the block
+        # from today's constants while carrying yesterday's data would make
+        # the manifest describe a derivation that never ran, and would make
+        # `--check` report drift against itself.
+        return {
+            "schema": MANIFEST_SCHEMA,
+            "openclaw_version": version,
+            "generated_by": "scripts/generate_openclaw_channel_manifest.py",
+            "channel_key_prefix": CHANNEL_KEY_PREFIX,
+            "channels": channels,
+            "registry": _checked_in_registry_provenance(),
+            "registry_channel_plugins": registry_channel_plugins,
+        }
+
     return {
         "schema": MANIFEST_SCHEMA,
         "openclaw_version": version,
         "generated_by": "scripts/generate_openclaw_channel_manifest.py",
         "channel_key_prefix": CHANNEL_KEY_PREFIX,
         "channels": channels,
+        "registry": {
+            "source": _clawhub_base_url(),
+            "endpoint": CLAWHUB_PACKAGES_PATH,
+            "families": list(CLAWHUB_PLUGIN_FAMILIES),
+            "candidate_category": CLAWHUB_CHANNEL_CATEGORY,
+            "derived": bool(include_registry),
+            # Channel candidates whose own artifact is broken upstream, so we
+            # could not tell whether they are channels. Recorded rather than
+            # dropped: an unclassifiable package is a fact about the registry,
+            # and a silently missing one is indistinguishable from curation.
+            "unresolved_candidates": list(_LAST_UNRESOLVED) if include_registry else [],
+        },
+        "registry_channel_plugins": registry_channel_plugins,
     }
+
+
+def _checked_in_registry_provenance() -> Dict[str, Any]:
+    existing = json.loads(PYTHON_MANIFEST_PATH.read_text())
+    registry = existing.get("registry")
+    if not isinstance(registry, dict):
+        raise GenerationError(
+            "The checked-in manifest has no `registry` provenance block to carry "
+            "forward. Run once with network access to derive it."
+        )
+    return registry
+
+
+def _checked_in_registry_channel_plugins() -> List[Dict[str, Any]]:
+    if not PYTHON_MANIFEST_PATH.is_file():
+        raise GenerationError(
+            "--skip-registry needs an existing manifest to carry source 8 "
+            f"forward, and {PYTHON_MANIFEST_PATH} does not exist."
+        )
+    existing = json.loads(PYTHON_MANIFEST_PATH.read_text())
+    carried = existing.get("registry_channel_plugins")
+    if not isinstance(carried, list) or not carried:
+        raise GenerationError(
+            "--skip-registry cannot carry source 8 forward: the checked-in "
+            "manifest has no `registry_channel_plugins`. Run once with network "
+            "access to derive it."
+        )
+    return carried
 
 
 def _resolved_ownership(manifest: Dict[str, Any]) -> Dict[str, List[str]]:
@@ -1138,12 +1670,77 @@ export interface GeneratedOpenClawChannel {{
   readonly credential_shape: GeneratedOpenClawCredentialShape;
 }}
 
+/** What the registry says about who published a channel plugin and whether
+ *  anyone vouches for it. Passed through verbatim, never reduced to one
+ *  safe/unsafe verdict: a channel plugin runs third-party code beside the
+ *  owner's messages and contributes its own `channels.<id>.tools.*` surface,
+ *  which the global `tools.*` lockdown does not reach. */
+export interface GeneratedOpenClawRegistryTrust {{
+  readonly is_official: boolean;
+  readonly release_channel: string | null;
+  readonly publisher: string | null;
+  readonly verification_tier: string | null;
+  readonly verification_scope: string | null;
+  /** Their own scanner's verdict — "clean" / "suspicious" / null. */
+  readonly scan_status: string | null;
+  readonly has_provenance: boolean;
+  readonly trusted_openclaw_plugin: boolean;
+  readonly source_repo: string | null;
+  readonly installs: number;
+  readonly downloads: number;
+}}
+
+/** A channel-capable plugin ClawHub publishes that the pinned OpenClaw build
+ *  does not bundle and this manifest does not already carry as a resolved
+ *  channel. It is an OFFER TO INSTALL, not a channel you can bind yet:
+ *  `channel_id` is null because a third-party plugin registers its channel at
+ *  runtime, so the id it will claim is not knowable until it is installed. */
+export interface GeneratedOpenClawRegistryChannelPlugin {{
+  readonly plugin_id: string;
+  readonly npm_package: string;
+  /** `clawhub:<name>@<version>` — their registry's own spec form. A bare
+   *  `<name>@<version>` resolves against npm and fails for a package that is
+   *  published only to ClawHub, which most community channels are. */
+  readonly install_spec: string;
+  readonly version: string;
+  readonly label: string;
+  readonly summary: string | null;
+  readonly topics: readonly string[];
+  readonly channel_id: null;
+  readonly channel_key: null;
+  readonly config_schema_present: false;
+  readonly connect_method: "plugin_absent";
+  readonly min_host_version: string | null;
+  /** Which structural check proved this is a channel — the package.json
+   *  declaration or the `registerChannel` call site. Recorded so a
+   *  regeneration can be audited rather than trusted. */
+  readonly confirmed_by: string | null;
+  readonly trust: GeneratedOpenClawRegistryTrust;
+}}
+
+export interface GeneratedOpenClawRegistryProvenance {{
+  readonly source: string;
+  readonly endpoint: string;
+  readonly families: readonly string[];
+  readonly candidate_category: string;
+  readonly derived: boolean;
+  /** Channel candidates whose artifact is broken upstream and could not be
+   *  classified. Recorded so an unclassifiable package is visible rather than
+   *  silently absent. */
+  readonly unresolved_candidates: readonly {{
+    readonly npm_package: string;
+    readonly reason: string;
+  }}[];
+}}
+
 export interface GeneratedOpenClawManifest {{
   readonly schema: string;
   readonly openclaw_version: string;
   readonly generated_by: string;
   readonly channel_key_prefix: string;
   readonly channels: readonly GeneratedOpenClawChannel[];
+  readonly registry: GeneratedOpenClawRegistryProvenance;
+  readonly registry_channel_plugins: readonly GeneratedOpenClawRegistryChannelPlugin[];
 }}
 
 export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {body} as const;
@@ -1176,10 +1773,38 @@ def main() -> int:
         action="store_true",
         help="Exit non-zero if the checked-in manifest differs from the installed OpenClaw.",
     )
+    parser.add_argument(
+        "--skip-registry",
+        action="store_true",
+        help=(
+            "Do not re-derive source 8 (the ClawHub channel-plugin registry); "
+            "carry the checked-in set forward. For regenerating offline when "
+            "only the installed OpenClaw changed."
+        ),
+    )
+    parser.add_argument(
+        "--check-registry",
+        action="store_true",
+        help=(
+            "With --check, ALSO re-derive source 8 and diff it. Off by default "
+            "because it is a network round trip over every published plugin and "
+            "takes minutes; --check exists to compare against the INSTALLED "
+            "OpenClaw, which source 8 is not part of."
+        ),
+    )
     args = parser.parse_args()
 
+    # `--check` answers "has the checked-in manifest drifted from the OpenClaw
+    # installed on this machine". Source 8 is a property of a REMOTE registry,
+    # not of the local install, so re-deriving it here would make an offline,
+    # sub-second conformance check into a multi-minute network sweep whose
+    # result also moves whenever a publisher ships a version — a drift test
+    # that fails for reasons unrelated to drift. It is carried forward instead,
+    # and `--check-registry` opts into checking that half deliberately.
+    include_registry = not args.skip_registry and not (args.check and not args.check_registry)
+
     try:
-        manifest = build_manifest()
+        manifest = build_manifest(include_registry=include_registry)
     except GenerationError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -1209,14 +1834,19 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
-        print(f"ok: {len(manifest['channels'])} channels, openclaw {manifest['openclaw_version']}")
+        print(
+            f"ok: {len(manifest['channels'])} channels + "
+            f"{len(manifest['registry_channel_plugins'])} registry channel plugins, "
+            f"openclaw {manifest['openclaw_version']}"
+        )
         return 0
 
     PYTHON_MANIFEST_PATH.write_text(python_payload)
     TYPESCRIPT_MANIFEST_PATH.write_text(typescript_payload)
     print(
-        f"wrote {len(manifest['channels'])} channels from openclaw "
-        f"{manifest['openclaw_version']}:\n"
+        f"wrote {len(manifest['channels'])} channels + "
+        f"{len(manifest['registry_channel_plugins'])} registry channel plugins "
+        f"from openclaw {manifest['openclaw_version']}:\n"
         f"  {PYTHON_MANIFEST_PATH.relative_to(REPO_ROOT)}\n"
         f"  {TYPESCRIPT_MANIFEST_PATH.relative_to(REPO_ROOT)}"
     )

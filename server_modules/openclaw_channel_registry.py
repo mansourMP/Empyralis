@@ -59,7 +59,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 MANIFEST_PATH = Path(__file__).with_name("openclaw_channel_manifest.json")
-MANIFEST_SCHEMA = "empyralis.openclaw_channel_manifest.v1"
+MANIFEST_SCHEMA = "empyralis.openclaw_channel_manifest.v2"
 
 # The floor a broken parse has to clear. A manifest that resolves to nothing —
 # a bad path, a truncated file, a schema rename — must be a loud import-time
@@ -181,6 +181,170 @@ CHANNELS_BY_KEY: Dict[str, OpenClawChannel] = {channel.channel_key: channel for 
 
 if len(CHANNELS_BY_ID) != len(CHANNELS):
     raise RuntimeError("OpenClaw channel manifest carries duplicate channel ids.")
+
+
+# ── Registry channel plugins (manifest source 8) ─────────────────────────
+#
+# Everything above describes channels the pinned OpenClaw build already knows
+# about — bundled, or published in its own official catalog. That is a strict
+# subset of what OpenClaw actually offers: their plugin registry (ClawHub)
+# publishes channel plugins a bare install has never heard of, and until
+# 2026-08-15 Empyralis carried none of them. The set below is derived from
+# that registry by the same generator, so "whatever channels their gateway
+# carries, we carry" holds for the registry too and adding one upstream still
+# costs zero Empyralis code.
+#
+# THE IMPORTANT DIFFERENCE, and why these are not `OpenClawChannel`s:
+# a registry plugin's OpenClaw CHANNEL ID IS NOT KNOWN. A third-party plugin
+# registers its channel at runtime (`api.registerChannel({...})`), so the id
+# it claims exists only in code nobody has run yet — and it is demonstrably
+# not the package or plugin id (`openclaw-plugin-yuanbao` publishes channel
+# `yuanbao`; `@wecom/wecom-openclaw-plugin` publishes `wecom`). Minting
+# `openclaw_<plugin_id>` for one would rebuild the exact `openclaw_qq`
+# -vs-`openclaw_qqbot` defect `OpenClawChannel.__init__` raises on. So these
+# carry `channel_id = None` and are OFFERS TO INSTALL; the id resolves on the
+# box, from `channels list --all --json`, once the plugin is there.
+MINIMUM_EXPECTED_REGISTRY_CHANNEL_PLUGINS = 60
+
+
+class OpenClawRegistryChannelPlugin:
+    """A channel-capable plugin OpenClaw's registry publishes but this pinned
+    build does not carry as a resolved channel."""
+
+    __slots__ = (
+        "plugin_id",
+        "npm_package",
+        "install_spec",
+        "version",
+        "label",
+        "summary",
+        "topics",
+        "channel_id",
+        "channel_key",
+        "config_schema_present",
+        "connect_method",
+        "min_host_version",
+        "confirmed_by",
+        "trust",
+    )
+
+    def __init__(self, record: Mapping[str, Any]) -> None:
+        self.plugin_id = str(record["plugin_id"])
+        self.npm_package = str(record["npm_package"])
+        self.install_spec = str(record["install_spec"])
+        self.version = str(record.get("version") or "")
+        self.label = str(record.get("label") or self.npm_package)
+        summary = record.get("summary")
+        self.summary = str(summary) if isinstance(summary, str) and summary.strip() else None
+        self.topics = tuple(str(t) for t in (record.get("topics") or []))
+        # Deliberately fixed, not read hopefully from the record: if a future
+        # manifest ever carries a non-null id here it means the derivation
+        # started guessing, and this is where that must fail loudly.
+        if record.get("channel_id") is not None or record.get("channel_key") is not None:
+            raise RuntimeError(
+                f"Registry channel plugin {self.npm_package!r} carries a channel id "
+                f"({record.get('channel_id')!r}). A plugin that is not installed cannot "
+                "have a known channel id — the generator must not guess one."
+            )
+        self.channel_id: Optional[str] = None
+        self.channel_key: Optional[str] = None
+        self.config_schema_present = False
+        self.connect_method = "plugin_absent"
+        min_host = record.get("min_host_version")
+        self.min_host_version = str(min_host) if isinstance(min_host, str) and min_host else None
+        confirmed_by = record.get("confirmed_by")
+        self.confirmed_by = str(confirmed_by) if isinstance(confirmed_by, str) else None
+        trust = record.get("trust")
+        if not isinstance(trust, Mapping):
+            raise RuntimeError(
+                f"Registry channel plugin {self.npm_package!r} carries no trust block. "
+                "Trust is not optional here: installing one runs third-party code "
+                "beside the owner's messages."
+            )
+        self.trust = dict(trust)
+
+    @property
+    def is_official(self) -> bool:
+        return bool(self.trust.get("is_official"))
+
+    def as_payload(self) -> Dict[str, Any]:
+        """The wire shape the channel surfaces hand to the browser."""
+        return {
+            "plugin_id": self.plugin_id,
+            "npm_package": self.npm_package,
+            "install_spec": self.install_spec,
+            "version": self.version,
+            "label": self.label,
+            "summary": self.summary,
+            "topics": list(self.topics),
+            "channel_id": None,
+            "channel_key": None,
+            "config_schema_present": False,
+            "connect_method": self.connect_method,
+            "min_host_version": self.min_host_version,
+            "confirmed_by": self.confirmed_by,
+            "trust": dict(self.trust),
+        }
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<OpenClawRegistryChannelPlugin {self.npm_package} {self.label!r}>"
+
+
+def _load_registry_channel_plugins() -> Tuple[OpenClawRegistryChannelPlugin, ...]:
+    records = _MANIFEST.get("registry_channel_plugins")
+    if not isinstance(records, list) or len(records) < MINIMUM_EXPECTED_REGISTRY_CHANNEL_PLUGINS:
+        raise RuntimeError(
+            "OpenClaw channel manifest carries "
+            f"{len(records) if isinstance(records, list) else 0} registry channel plugins; "
+            f"the floor is {MINIMUM_EXPECTED_REGISTRY_CHANNEL_PLUGINS}. An empty or truncated "
+            "list is a parse failure, not an upstream removal — it would silently shrink the "
+            "offered channel surface back to the bundled set."
+        )
+    return tuple(OpenClawRegistryChannelPlugin(record) for record in records)
+
+
+REGISTRY_CHANNEL_PLUGINS: Tuple[OpenClawRegistryChannelPlugin, ...] = (
+    _load_registry_channel_plugins()
+)
+
+REGISTRY_CHANNEL_PLUGINS_BY_PACKAGE: Dict[str, OpenClawRegistryChannelPlugin] = {
+    plugin.npm_package: plugin for plugin in REGISTRY_CHANNEL_PLUGINS
+}
+
+if len(REGISTRY_CHANNEL_PLUGINS_BY_PACKAGE) != len(REGISTRY_CHANNEL_PLUGINS):
+    raise RuntimeError("OpenClaw channel manifest carries duplicate registry plugin packages.")
+
+_CARRIED_PACKAGES = {
+    (channel.plugin_install or {}).get("npm_package")
+    for channel in CHANNELS
+    if channel.plugin_install
+}
+_OVERLAP = _CARRIED_PACKAGES & set(REGISTRY_CHANNEL_PLUGINS_BY_PACKAGE)
+if _OVERLAP:
+    raise RuntimeError(
+        "OpenClaw channel manifest lists the same npm package as both a resolved channel "
+        f"and a registry offer: {sorted(_OVERLAP)}. That would put two cards on one platform."
+    )
+
+
+def registry_channel_plugins() -> Tuple[OpenClawRegistryChannelPlugin, ...]:
+    return REGISTRY_CHANNEL_PLUGINS
+
+
+def registry_channel_plugin_for_package(
+    npm_package: str,
+) -> Optional[OpenClawRegistryChannelPlugin]:
+    return REGISTRY_CHANNEL_PLUGINS_BY_PACKAGE.get(npm_package)
+
+
+def is_registry_channel_package(npm_package: str) -> bool:
+    """Whether this npm package is one the registry derivation vouched for.
+
+    The install path's allowlist: a spec that did not come out of the derived
+    manifest is never handed to `openclaw plugins install`, so a caller cannot
+    talk the box into fetching an arbitrary npm package.
+    """
+    return npm_package in REGISTRY_CHANNEL_PLUGINS_BY_PACKAGE
 
 
 # ── The overlap question ─────────────────────────────────────────────────
