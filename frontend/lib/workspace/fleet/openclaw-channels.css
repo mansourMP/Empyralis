@@ -160,6 +160,49 @@
   color: var(--text-primary);
 }
 
+/* Quiet by construction: setting up a channel is the primary fields above, and
+   this is the drawer for everything else the schema declares. Neutral, no
+   accent — the one accent in this view belongs to Save. */
+.openclaw-form-advanced {
+  margin: 0 0 var(--space-4);
+  border-top: 1px solid var(--border-subtle);
+  padding-top: var(--space-3);
+}
+
+.openclaw-form-advanced > summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  user-select: none;
+}
+
+.openclaw-form-advanced > summary::-webkit-details-marker {
+  display: none;
+}
+
+/* A disclosure triangle drawn from the open state, so the control says which
+   way it goes without a second label. */
+.openclaw-form-advanced > summary::before {
+  content: "▸";
+  display: inline-block;
+  margin-right: var(--space-1);
+  color: var(--text-muted);
+  transition: transform 120ms ease-out;
+}
+
+.openclaw-form-advanced[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.openclaw-form-advanced > summary:hover {
+  color: var(--text-primary);
+}
+
+.openclaw-form-advanced .openclaw-form {
+  margin-bottom: 0;
+}
+
 .openclaw-form-note {
   font-size: var(--text-xs);
   color: var(--text-muted);

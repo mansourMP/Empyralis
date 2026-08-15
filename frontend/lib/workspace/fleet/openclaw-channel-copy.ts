@@ -12,7 +12,36 @@ export type OpenClawCredentialField = {
   secret: boolean;
   type: string;
   file_alternative?: string | null;
+  /** Generated. False for the fields a customer must supply to connect; true
+   *  for mode-specific extras, network overrides and cosmetics. See
+   *  `_split_primary_and_advanced` in the manifest generator — nothing here
+   *  is a judgement made in the frontend. */
+  advanced?: boolean;
 };
+
+/** The setup form has two halves, and this is the only place that decides
+ *  which field goes where.
+ *
+ *  Setting up Telegram is: paste the bot token. Until 2026-08-15 the form
+ *  rendered all SEVEN fields OpenClaw's schema declares for it — a webhook
+ *  secret, an ack emoji, a custom API root, a proxy, a webhook host and a
+ *  webhook URL beside the one thing anybody has. The split is DERIVED in the
+ *  manifest generator, never listed here; this function only reads the flag,
+ *  so a channel upstream adds tomorrow gets the same treatment with no
+ *  frontend change.
+ *
+ *  A field with no `advanced` flag is PRIMARY. That is deliberate: a manifest
+ *  generated before this axis existed renders exactly as it used to rather
+ *  than collapsing every field out of sight. */
+export function splitCredentialFields(fields: readonly OpenClawCredentialField[]): {
+  primary: OpenClawCredentialField[];
+  advanced: OpenClawCredentialField[];
+} {
+  return {
+    primary: fields.filter((field) => !field.advanced),
+    advanced: fields.filter((field) => Boolean(field.advanced)),
+  };
+}
 
 export type OpenClawChannelCatalogEntry = {
   channel_key: string;
@@ -175,11 +204,25 @@ export function remediationFor(
       detail: `${entry.selection_label} — there is no token to paste. Link it directly from this computer.`,
     };
   }
-  const missing = observed.fields.filter((field) => !field.set);
+  // "Waiting on" names only the fields connecting actually requires. The
+  // observed set is every field OpenClaw declares, so before the primary/
+  // advanced split existed this sentence read, on a Telegram whose bot token
+  // was already saved: "Waiting on webhookSecret, ackReaction, apiRoot, proxy,
+  // webhookHost, webhookUrl." — six optional extras presented as six things
+  // blocking the channel. A channel is not waiting on a proxy.
+  //
+  // Derived, never listed: `advanced` comes off the generated manifest, and a
+  // field the catalog does not mention at all counts as required rather than
+  // being silently dropped from the sentence.
+  const advancedNames = new Set(
+    entry.fields.filter((field) => field.advanced).map((field) => field.name),
+  );
+  const required = observed.fields.filter((field) => !advancedNames.has(field.name));
+  const missing = required.filter((field) => !field.set);
   if (missing.length > 0) {
     return {
       kind: "credential",
-      label: observed.fields.some((field) => field.set) ? "Finish credential" : "Add credential",
+      label: required.some((field) => field.set) ? "Finish credential" : "Add credential",
       detail: `Waiting on ${missing.map((field) => field.name).join(", ")}.`,
     };
   }

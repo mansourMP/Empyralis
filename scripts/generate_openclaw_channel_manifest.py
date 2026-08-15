@@ -239,6 +239,20 @@ CONNECT_METHOD_CREDENTIAL = "credential"
 CONNECT_METHOD_PAIRING = "pairing"
 CONNECT_METHOD_PLUGIN_ABSENT = "plugin_absent"
 
+# Their per-plugin secret contract, bundled in `dist/` even for channels whose
+# plugin is not installed. `collectConditionalChannelFieldAssignments` is how
+# OpenClaw declares that a secret is only live under some OTHER setting; the
+# condition it reads is the thing that says which. See `_mode_gated_secrets`.
+_SECRET_CONTRACT_REGION = re.compile(
+    r"//#region extensions/([a-z0-9-]+)/src/secret-contract\.ts"
+)
+_CONDITIONAL_ASSIGNMENT = re.compile(
+    r"collectConditionalChannelFieldAssignments\(\{(.*?)\n\t\}\)", re.S
+)
+_ASSIGNMENT_CHANNEL_KEY = re.compile(r'channelKey:\s*"([^"]+)"')
+_ASSIGNMENT_FIELD = re.compile(r'field:\s*"([^"]+)"')
+_ASSIGNMENT_CONDITION = re.compile(r"topLevelActiveWithoutAccounts:\s*([^,\n]+)")
+
 
 class GenerationError(RuntimeError):
     """Any reason the manifest cannot be produced. Never partially written."""
@@ -629,11 +643,79 @@ def _generic_field_names(channel_nodes: Dict[str, Any]) -> Dict[str, int]:
     return dict(counts)
 
 
+def _mode_gated_secrets(package_root: Path) -> Dict[str, set]:
+    """channel id -> the secrets OpenClaw only reads under some OTHER setting.
+
+    Source 7, and the axis that decides PRIMARY vs ADVANCED for a secret.
+
+    Every channel's `dist/*secret-contract*.js` says, per secret, when that
+    secret is actually live. Two collectors appear:
+
+        collectSimpleChannelFieldAssignments        always live
+        collectConditionalChannelFieldAssignments   live only when <cond>
+
+    and the condition is what separates a channel's own credential from an
+    extra belonging to a transport mode nobody is in:
+
+        telegram botToken       baseTokenFile.length === 0     its OWN file
+                                                               variant — the
+                                                               same credential,
+                                                               read off disk
+        telegram webhookSecret  baseWebhookUrl.length > 0      webhook mode
+        feishu   encryptKey     baseConnectionMode === "webhook"
+        zalo     botToken       true                           always live
+
+    So a secret is MODE-GATED iff its condition is neither the literal `true`
+    nor a reference to its own file alternative. That is OpenClaw's own
+    declaration, not a judgement about the word "webhook" — the condition is
+    read structurally and no channel or field name appears in this function.
+
+    PARTIAL BY CONSTRUCTION, and safe that way. Only nine channels ship a
+    secret contract in the pinned build; the rest simply have no gated secrets
+    recorded, so every secret they declare stays PRIMARY — which is exactly the
+    behaviour before this axis existed. A channel gains a sharper form the day
+    upstream ships a contract for it, and never a worse one.
+    """
+    gated: Dict[str, set] = collections.defaultdict(set)
+    for path in sorted((package_root / "dist").glob("*.js")):
+        try:
+            text = path.read_text(errors="ignore")
+        except OSError:  # pragma: no cover - unreadable bundle chunk
+            continue
+        if "secretTargetRegistryEntries" not in text:
+            continue
+        if not _SECRET_CONTRACT_REGION.search(text):
+            continue
+        for call in _CONDITIONAL_ASSIGNMENT.finditer(text):
+            body = call.group(1)
+            channel = _ASSIGNMENT_CHANNEL_KEY.search(body)
+            field = _ASSIGNMENT_FIELD.search(body)
+            condition = _ASSIGNMENT_CONDITION.search(body)
+            if not (channel and field and condition):
+                continue
+            expression = condition.group(1).strip()
+            if expression == "true":
+                continue
+            if "file" in expression.lower():
+                # Gated on its own `<name>File` sibling: one credential with two
+                # input modes, never a second credential.
+                continue
+            gated[channel.group(1)].add(field.group(1))
+    return dict(gated)
+
+
 def _credential_fields(
-    channel_node: Any, *, name_frequency: Dict[str, int]
+    channel_node: Any,
+    *,
+    name_frequency: Dict[str, int],
+    gated_secrets: frozenset,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     """The owner-supplied connection fields for one channel, plus the path
-    fields that were folded into them as `file_alternative`."""
+    fields that were folded into them as `file_alternative`.
+
+    Every field the schema declares is returned. `advanced` says which half of
+    the form it belongs in — see `_split_primary_and_advanced`.
+    """
     props = _properties(channel_node)
     path_fields = {name for name in props if _PATH_FIELD_SUFFIX.search(name)}
 
@@ -695,12 +777,120 @@ def _credential_fields(
             }
         )
 
-    fields.sort(key=lambda field: (not field["secret"], field["name"]))
+    primary = _split_primary_and_advanced(
+        props,
+        candidates={field["name"] for field in fields},
+        path_fields=path_fields,
+        gated_secrets=gated_secrets,
+    )
+    for field in fields:
+        field["advanced"] = field["name"] not in primary
+
+    fields.sort(key=lambda field: (field["advanced"], not field["secret"], field["name"]))
     return fields, sorted(set(consumed_paths))
 
 
+def _split_primary_and_advanced(
+    props: Dict[str, Any],
+    *,
+    candidates: set,
+    path_fields: set,
+    gated_secrets: frozenset,
+) -> set:
+    """Which of a channel's form fields a customer must supply to connect.
+
+    WHY THIS EXISTS
+    ---------------
+    The derivation above answers "is this a field the form may render". It
+    never answered "must a customer fill it in", so every renderable field was
+    equally prominent and Telegram's form asked for SEVEN things — bot token,
+    webhook secret, an ack emoji, a custom API root, a proxy, a webhook host
+    and a webhook URL — when connecting Telegram is: paste the bot token.
+
+    Nothing is dropped. `advanced` fields stay in the manifest, stay writable
+    (`openclaw_channel_setup_service._validate_credential_values` narrows to
+    the whole set, not this half), and stay reachable in the form behind a
+    disclosure. Some operator genuinely does need `proxy`.
+
+    THE RULE, and it names no channel and no field
+    ----------------------------------------------
+    A credential ANCHORS a group; the group is the run of form fields declared
+    around it. Concretely, walking the schema's own declaration order:
+
+      * a MODE-GATED secret (source 7) is advanced, and CLOSES the run — the
+        thing separating "how you connect" from "extras for a mode you are
+        not in" is upstream's own gate, so it is also the boundary.
+      * a POLICY-surface field, or one OpenClaw gives a default/enum/const,
+        CLOSES the run. Those are behaviour knobs it can run without; a knob
+        is where one credential group ends and the next thing begins.
+      * anything else is TRANSPARENT — objects, arrays, numbers, booleans,
+        `*File`/`*Path` siblings, and names too generic to render. None of
+        them is a form field at all, so none can separate two values a person
+        types in one sitting. (Matrix declares `network` between `homeserver`
+        and `userId`; treating that object as a wall would hide the one field
+        Matrix cannot connect without.)
+      * a run is PRIMARY iff it contains a credential: a SecretRef that is not
+        mode-gated, or a plain string OpenClaw ships a `*File` variant for.
+
+    Measured against the pinned build: Telegram 7 -> 1 (`botToken`), Feishu
+    5 -> 2 (`appId` + `appSecret`, which it genuinely needs together), LINE 2,
+    QQ Bot 2, MS Teams 3, Slack 4, Matrix 8. Matrix stays wide because its
+    schema really does declare device identity in one contiguous block with
+    its login — nothing it needs is hidden, which is the direction that
+    matters.
+    """
+    file_stems = {name[: -len("File")].lower() for name in props if name.endswith("File")}
+
+    def is_credential(name: str) -> bool:
+        if name in gated_secrets:
+            return False
+        node = props[name]
+        if _is_secret_ref_union(node):
+            return True
+        if _leaf_scalar_type(node) != "string":
+            return False
+        # LINE's `channelAccessToken`/`channelSecret` are plain strings whose
+        # file variants are `tokenFile`/`secretFile` — the stem is a SUFFIX of
+        # the field name, not the whole of it.
+        lowered = name.lower()
+        return any(lowered.endswith(stem) for stem in file_stems if stem)
+
+    def closes_run(name: str) -> bool:
+        if name in _POLICY_SURFACE_FIELDS:
+            return True
+        node = props[name]
+        return isinstance(node, dict) and bool(
+            {"default", "enum", "const"} & set(node)
+        )
+
+    runs: List[List[str]] = []
+    current: List[str] = []
+    for name in props:
+        if name in gated_secrets:
+            if current:
+                runs.append(current)
+            current = []
+            continue
+        if name in candidates:
+            current.append(name)
+            continue
+        if name in path_fields:
+            continue
+        if closes_run(name):
+            if current:
+                runs.append(current)
+            current = []
+    if current:
+        runs.append(current)
+
+    return {name for run in runs if any(is_credential(n) for n in run) for name in run}
+
+
 def _credential_shapes(
-    channel_nodes: Dict[str, Any], channel_meta: Dict[str, Dict[str, Any]], ids: List[str]
+    channel_nodes: Dict[str, Any],
+    channel_meta: Dict[str, Dict[str, Any]],
+    ids: List[str],
+    gated_secrets: Dict[str, set],
 ) -> Dict[str, Dict[str, Any]]:
     """Source 6 — the generated setup form, one per channel."""
     name_frequency = _generic_field_names(channel_nodes)
@@ -715,7 +905,11 @@ def _credential_shapes(
             fields: List[Dict[str, Any]] = []
             file_alternatives: List[str] = []
         else:
-            fields, file_alternatives = _credential_fields(node, name_frequency=name_frequency)
+            fields, file_alternatives = _credential_fields(
+                node,
+                name_frequency=name_frequency,
+                gated_secrets=frozenset(gated_secrets.get(channel_id) or ()),
+            )
             connect_method = (
                 CONNECT_METHOD_CREDENTIAL if fields else CONNECT_METHOD_PAIRING
             )
@@ -747,7 +941,9 @@ def build_manifest() -> Dict[str, Any]:
         for channel_id, meta in channel_meta.items()
     }
     plugin_installs = _plugin_installs(package_root, ids)
-    credential_shapes = _credential_shapes(channel_nodes, channel_meta, ids)
+    credential_shapes = _credential_shapes(
+        channel_nodes, channel_meta, ids, _mode_gated_secrets(package_root)
+    )
 
     # ── The two-source conformance check ─────────────────────────────────
     # `channels list --all --json` (their live registry) versus the on-disk
@@ -906,6 +1102,11 @@ export interface GeneratedOpenClawCredentialField {{
    *  visible; never rendered — a browser form may not write a path on the
    *  owner's machine. */
   readonly file_alternative: string | null;
+  /** False for the fields a customer must supply to connect; true for
+   *  everything else (mode-specific extras, network overrides, cosmetics).
+   *  Advanced fields are hidden behind a disclosure in the setup form and
+   *  are never dropped — they stay writable. */
+  readonly advanced: boolean;
 }}
 
 /** How an owner connects this channel, and what they type to do it.

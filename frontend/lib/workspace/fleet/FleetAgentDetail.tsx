@@ -1722,6 +1722,7 @@ function ChatTab({
 
 import {
   CredentialForm,
+  DmAllowlistForm,
   GroupAllowlistForm,
   StateChip,
   useOpenClawChannelSetup,
@@ -2689,12 +2690,25 @@ export function ChannelsTab({
                               working identity to reply WITH has nothing to act
                               on yet. */}
                           {openclawDetail.remediation.kind === "ready" ? (
-                            <GroupAllowlistForm
-                              gatewayId={agentGatewayId}
-                              agentId={agentId}
-                              channelKey={openclawDetail.entry.channel_key}
-                              channelLabel={openclawDetail.entry.label}
-                            />
+                            <>
+                              {/* Direct messages first, groups second — that
+                                  is the order the gates themselves run in,
+                                  and the DM list is the one an owner has to
+                                  fill before the channel answers anybody at
+                                  all (including them). */}
+                              <DmAllowlistForm
+                                gatewayId={agentGatewayId}
+                                agentId={agentId}
+                                channelKey={openclawDetail.entry.channel_key}
+                                channelLabel={openclawDetail.entry.label}
+                              />
+                              <GroupAllowlistForm
+                                gatewayId={agentGatewayId}
+                                agentId={agentId}
+                                channelKey={openclawDetail.entry.channel_key}
+                                channelLabel={openclawDetail.entry.label}
+                              />
+                            </>
                           ) : null}
                         </div>
                       ) : openclawDetail.remediation.kind === "install" || openclawDetail.remediation.kind === "enable" ? (

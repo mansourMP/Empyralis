@@ -55,6 +55,7 @@ import { join } from "node:path";
 import {
   channelCardPill,
   formatChannelList,
+  splitCredentialFields,
   openclawObservedErrorBanner,
   remediationFor,
   OPENCLAW_CAPABILITY_MISSING_BANNER_TEXT,
@@ -1140,6 +1141,81 @@ for (const [code, label] of [
     capabilityMissing.retryable !== offline.retryable,
     "capability-missing and offline must not share retryability",
   );
+}
+
+// --- THE SETUP FORM'S PRIMARY/ADVANCED SPLIT (splitCredentialFields). ----
+//
+// The founder, looking at Telegram's setup form: "this token web hook secret
+// API host proxy and whatever ... Should be enough just pasting token?" It
+// rendered all SEVEN fields OpenClaw's schema declares. Connecting Telegram is
+// pasting the bot token; everything else is a mode-specific extra.
+//
+// Driven off the CHECKED-IN MANIFEST for the same reason the grouping check
+// above is: the split is DERIVED in the generator, so the expected set (what
+// upstream declares) and the actual set (what the split produces) come from
+// different places. A hand-written "these fields are advanced" list per
+// channel is the exact defect this whole surface exists to avoid.
+
+type ManifestField = { name: string; secret: boolean; type: string; advanced?: boolean };
+type ManifestChannelFields = { id: string; credential_shape?: { fields?: ManifestField[] } | null };
+
+const fieldsFor = (id: string): ManifestField[] => {
+  const channel = (manifest.channels as unknown as ManifestChannelFields[]).find((c) => c.id === id);
+  assert(Boolean(channel), `manifest carries a channel named ${id}`);
+  return channel!.credential_shape?.fields ?? [];
+};
+
+// Every field is in exactly one half — advanced HIDES fields, it never drops
+// them. A field that reached neither half would be unreachable and unwritable.
+for (const channel of manifest.channels as unknown as ManifestChannelFields[]) {
+  const all = channel.credential_shape?.fields ?? [];
+  const { primary, advanced } = splitCredentialFields(all);
+  assert(
+    primary.length + advanced.length === all.length,
+    `${channel.id}: every credential field lands in exactly one half (${all.length} in, ${primary.length}+${advanced.length} out)`,
+  );
+}
+
+// The founder's own case, stated exactly: Telegram's form asks for the bot
+// token and nothing else.
+{
+  const { primary, advanced } = splitCredentialFields(fieldsFor("telegram"));
+  assert(
+    primary.length === 1 && primary[0].name === "botToken",
+    `telegram's primary form is exactly botToken, got ${JSON.stringify(primary.map((f) => f.name))}`,
+  );
+  assert(advanced.length > 0, "telegram's other schema fields survive under Advanced, never deleted");
+}
+
+// The counterweight, and the reason the rule may not simply be "one secret".
+// Feishu genuinely cannot connect without appId AND appSecret together, so a
+// split that made Telegram pretty by keeping only the secret would break it.
+{
+  const { primary } = splitCredentialFields(fieldsFor("feishu"));
+  const names = primary.map((f) => f.name).sort();
+  assert(
+    names.length === 2 && names[0] === "appId" && names[1] === "appSecret",
+    `feishu's primary form is appId + appSecret, got ${JSON.stringify(names)}`,
+  );
+}
+
+// Every channel that takes a pasted credential must still ask for at least one
+// thing. A primary half emptied to zero is a form nobody can submit — the
+// failure mode a too-aggressive rule produces, and it is silent.
+for (const channel of manifest.channels as unknown as ManifestChannelFields[]) {
+  const all = channel.credential_shape?.fields ?? [];
+  if (all.length === 0) continue;
+  const { primary } = splitCredentialFields(all);
+  assert(primary.length > 0, `${channel.id}: a channel with credential fields keeps at least one primary field`);
+}
+
+// A field carrying no `advanced` flag is PRIMARY. A manifest generated before
+// this axis existed must render as it always did, never collapse out of sight.
+{
+  const { primary, advanced } = splitCredentialFields([
+    { name: "legacyToken", secret: true, type: "string" },
+  ] as never);
+  assert(primary.length === 1 && advanced.length === 0, "an unflagged field defaults to primary");
 }
 
 // --- Summary ---

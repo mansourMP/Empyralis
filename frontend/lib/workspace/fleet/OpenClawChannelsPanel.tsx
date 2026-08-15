@@ -79,7 +79,9 @@ import { getErrorMessage } from "@/lib/ui/api-error";
 import { runMutationWithBestEffortRefresh } from "@/lib/workspace/mutation-outcome";
 import {
   remediationFor,
+  splitCredentialFields,
   type OpenClawChannelCatalogEntry,
+  type OpenClawCredentialField,
   type OpenClawObservedChannel,
   type Remediation,
 } from "./openclaw-channel-copy";
@@ -416,12 +418,47 @@ export function CredentialForm({
     setSaving(false);
   };
 
+  const { primary, advanced } = splitCredentialFields(entry.fields);
+
+  const renderField = (field: OpenClawCredentialField) => {
+    const inputId = `openclaw-${entry.channel_id}-${field.name}`;
+    const already = setFields.has(field.name);
+    return (
+      <div key={field.name} className="openclaw-form-field">
+        <label htmlFor={inputId}>
+          <span className="openclaw-form-name">{field.name}</span>
+          {field.secret ? (
+            <span className="fleet-badge openclaw-chip openclaw-chip--secret" style={{ marginLeft: 0 }}>
+              secret
+            </span>
+          ) : null}
+          {already ? (
+            <span className="fleet-badge openclaw-chip openclaw-chip--ok" style={{ marginLeft: 0 }}>
+              set
+            </span>
+          ) : null}
+        </label>
+        <input
+          id={inputId}
+          className="fleet-wizard-input"
+          /* A secret is a password input and is ALWAYS empty on open:
+             there is no stored value to prefill — this computer
+             redacts it before it ever leaves the machine. */
+          type={field.secret ? "password" : "text"}
+          autoComplete="off"
+          spellCheck={false}
+          value={values[field.name] ?? ""}
+          placeholder={already ? "Set — type to replace" : ""}
+          onChange={(event) =>
+            setValues((current) => ({ ...current, [field.name]: event.target.value }))
+          }
+        />
+      </div>
+    );
+  };
+
   return (
     <>
-      <p className="fleet-channel-expand-hint" style={{ marginTop: 0 }}>
-        These are the fields this channel needs to connect.
-      </p>
-
       {error ? (
         <div className="openclaw-banner" role="alert">
           <AlertTriangle size={14} aria-hidden />
@@ -429,44 +466,18 @@ export function CredentialForm({
         </div>
       ) : null}
 
-      <div className="openclaw-form">
-        {entry.fields.map((field) => {
-          const inputId = `openclaw-${entry.channel_id}-${field.name}`;
-          const already = setFields.has(field.name);
-          return (
-            <div key={field.name} className="openclaw-form-field">
-              <label htmlFor={inputId}>
-                <span className="openclaw-form-name">{field.name}</span>
-                {field.secret ? (
-                  <span className="fleet-badge openclaw-chip openclaw-chip--secret" style={{ marginLeft: 0 }}>
-                    secret
-                  </span>
-                ) : null}
-                {already ? (
-                  <span className="fleet-badge openclaw-chip openclaw-chip--ok" style={{ marginLeft: 0 }}>
-                    set
-                  </span>
-                ) : null}
-              </label>
-              <input
-                id={inputId}
-                className="fleet-wizard-input"
-                /* A secret is a password input and is ALWAYS empty on open:
-                   there is no stored value to prefill — this computer
-                   redacts it before it ever leaves the machine. */
-                type={field.secret ? "password" : "text"}
-                autoComplete="off"
-                spellCheck={false}
-                value={values[field.name] ?? ""}
-                placeholder={already ? "Set — type to replace" : ""}
-                onChange={(event) =>
-                  setValues((current) => ({ ...current, [field.name]: event.target.value }))
-                }
-              />
-            </div>
-          );
-        })}
-      </div>
+      <div className="openclaw-form">{primary.map(renderField)}</div>
+
+      {/* Collapsed by default and rendered only when there is something in it —
+          an empty disclosure is a dead control. Everything OpenClaw's schema
+          declares is still here and still writable; it is simply not what
+          connecting the channel asks of anybody. */}
+      {advanced.length > 0 ? (
+        <details className="openclaw-form-advanced">
+          <summary>Advanced</summary>
+          <div className="openclaw-form">{advanced.map(renderField)}</div>
+        </details>
+      ) : null}
 
       <p className="openclaw-form-note">
         Leave a field blank to keep what is already on the computer. Values are sent straight to it
@@ -489,6 +500,231 @@ export function CredentialForm({
       </div>
     </>
   );
+}
+
+/** Who may message this agent DIRECTLY on ONE OpenClaw-transported channel.
+ *
+ *  The sibling of GroupAllowlistForm below, and the axis that had no screen
+ *  AND no route at all until 2026-08-14 — worse than the group axis was,
+ *  because its default did not merely leave a gate open, it made the whole
+ *  transport refuse to run. `dm_policy` defaulted to "open", which the
+ *  gateway renders as OpenClaw's own `dmPolicy: "open"`, which their
+ *  mandatory `security audit` calls CRITICAL, which our lockdown treats as
+ *  blocking. No customer could ever provision an OpenClaw channel on any
+ *  box, and there was no control anywhere that could have changed the value
+ *  responsible.
+ *
+ *  ONE MODE, SO NO MODE PICKER. The transport can express exactly one of
+ *  Empyralis's four DM modes (allowlist); the other three all render as
+ *  OpenClaw's `open` and put the box back in the state above. The backend
+ *  serves that as `settable_modes` and refuses the rest with a 422, so this
+ *  form saves mode: "allowlist" and offers no choice — a picker of one is a
+ *  dead control, and a picker of four where three are refused is worse.
+ *
+ *  THE PEOPLE LIST CANNOT BE SHOWN, for the same reason the group list
+ *  cannot: gate-before-model means a message from someone not on this list
+ *  is refused before it is ever recorded, so no history exists to populate a
+ *  picker from. A field to type an ID into is the honest form of that. */
+type DmPolicyState = {
+  allowlist: string[];
+};
+
+export function DmAllowlistForm({
+  gatewayId,
+  agentId,
+  channelKey,
+  channelLabel,
+}: {
+  gatewayId: string;
+  agentId: string;
+  channelKey: string;
+  channelLabel: string;
+}) {
+  const [policy, setPolicy] = useState<DmPolicyState | null>(null);
+  const [loading, setLoading] = useState(true);
+  // "loaded, and nobody is allowed yet" and "the read failed" are different
+  // facts and never share a message — see GroupAllowlistForm's own note.
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [newSenderId, setNewSenderId] = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await fleetAuthorizedFetch(
+        `/api/personal-channels/${encodeURIComponent(channelKey)}/gateways/${encodeURIComponent(gatewayId)}/dm-policy?agent_id=${encodeURIComponent(agentId)}`,
+        { credentials: "include", headers: buildCookieAuthHeaders("GET") },
+      );
+      const body = await res.json().catch(() => ({}));
+      const config = body?.dm_policy;
+      if (res.ok && config) {
+        setPolicy({ allowlist: Array.isArray(config.allowlist) ? config.allowlist.map(String) : [] });
+        setLoadFailed(false);
+      } else {
+        setLoadFailed(true);
+      }
+    } catch {
+      setLoadFailed(true);
+    } finally {
+      setLoading(false);
+    }
+  }, [channelKey, gatewayId, agentId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const save = useCallback(
+    async (nextAllowlist: string[]) => {
+      setSaving(true);
+      setError(null);
+      try {
+        const res = await fleetAuthorizedFetch(
+          `/api/personal-channels/${encodeURIComponent(channelKey)}/gateways/${encodeURIComponent(gatewayId)}/dm-policy?agent_id=${encodeURIComponent(agentId)}`,
+          {
+            method: "PATCH",
+            credentials: "include",
+            headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
+            body: JSON.stringify({ mode: "allowlist", allowlist: nextAllowlist }),
+          },
+        );
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setError(getErrorMessage(body, `Could not save (${res.status}).`));
+          return;
+        }
+        setPolicy({ allowlist: nextAllowlist });
+        // Saved is saved — it is in Postgres by the time this response
+        // exists. What follows is only whether the computer's own copy
+        // caught up, and the three outcomes never share one message.
+        const provisioning = body?.openclaw_provisioning;
+        if (provisioning?.status === "agent_conflict") {
+          setError(provisioning.message || "Another agent on this computer already uses this channel.");
+        } else if (provisioning?.status === "unreachable") {
+          setError(provisioning.message || "Saved, but this computer could not be reached to apply it yet.");
+        } else if (provisioning?.status === "refused") {
+          setError(dmRefusalMessage(provisioning?.refusal?.detail, nextAllowlist.length));
+        }
+      } catch {
+        setError("Could not reach this computer.");
+      } finally {
+        setSaving(false);
+      }
+    },
+    [channelKey, gatewayId, agentId],
+  );
+
+  if (loading) {
+    return (
+      <p className="fleet-subtitle" style={{ marginTop: "var(--space-4)" }}>
+        Reading who can message this agent…
+      </p>
+    );
+  }
+
+  if (loadFailed) {
+    return (
+      <div style={{ marginTop: "var(--space-4)" }}>
+        <div className="openclaw-banner" role="alert">
+          <AlertTriangle size={14} aria-hidden />
+          <span>Could not read who can message this agent just now.</span>
+        </div>
+        <button type="button" className="fleet-btn" onClick={() => void load()}>
+          Try again
+        </button>
+      </div>
+    );
+  }
+
+  const senders = policy?.allowlist ?? [];
+  const addSender = () => {
+    const trimmed = newSenderId.trim();
+    if (!trimmed || senders.includes(trimmed)) return;
+    setNewSenderId("");
+    void save([...senders, trimmed]);
+  };
+
+  return (
+    <div
+      style={{ marginTop: "var(--space-4)", paddingTop: "var(--space-4)", borderTop: "1px solid var(--border)" }}
+    >
+      {error ? (
+        <div className="openclaw-banner" role="alert">
+          <AlertTriangle size={14} aria-hidden />
+          <span>{error}</span>
+        </div>
+      ) : null}
+
+      <p className="openclaw-form-note" style={{ marginTop: 0 }}>
+        {senders.length === 0
+          ? `Nobody can message this agent on ${channelLabel} yet — including you. Add a ${channelLabel} ID below to let that person start a conversation with it.`
+          : `${senders.length === 1 ? "The person" : "The people"} below can message this agent on ${channelLabel}. Everyone else is ignored.`}
+      </p>
+
+      {senders.length > 0 ? (
+        <div className="openclaw-group-list">
+          {senders.map((senderId) => (
+            <div key={senderId} className="openclaw-group-chip">
+              <span className="openclaw-group-chip-id">{senderId}</span>
+              <button
+                type="button"
+                className="openclaw-group-chip-remove"
+                disabled={saving}
+                aria-label={`Remove ${senderId}`}
+                onClick={() => void save(senders.filter((id) => id !== senderId))}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      <div className="openclaw-group-add">
+        <input
+          className="fleet-wizard-input"
+          type="text"
+          autoComplete="off"
+          spellCheck={false}
+          placeholder={`${channelLabel} ID`}
+          aria-label={`${channelLabel} ID`}
+          value={newSenderId}
+          disabled={saving}
+          onChange={(event) => setNewSenderId(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") addSender();
+          }}
+        />
+        <button type="button" className="fleet-btn" disabled={saving || !newSenderId.trim()} onClick={addSender}>
+          Add
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** The one provisioning refusal an owner can hit from THIS form, translated.
+ *
+ *  Matched on the CHECK ID (`dm.scope_main_multiuser`), which is a stable
+ *  identifier in OpenClaw's audit output, never on the sentence around it —
+ *  this repo has already lost five weeks to an error bucket that matched
+ *  prose someone later reworded.
+ *
+ *  What it actually means, measured on a real openclaw@2026.6.10: their
+ *  audit warns whenever more than ONE sender may DM a channel while
+ *  `session.dmScope` is still its default "main", and our generated config
+ *  does not write `session.dmScope` at all. So the box accepts one allowed
+ *  person and refuses two — recoverable (remove one and it provisions
+ *  again), but a cliff the owner would otherwise meet as an OpenClaw check
+ *  id. The real fix is one line in the gateway's config plan
+ *  (`session.dmScope: "per-channel-peer"`), which is outside this file; until
+ *  it lands, say the true thing rather than pass the finding through. */
+export function dmRefusalMessage(detail: string | undefined, senderCount: number): string {
+  if (detail && detail.includes("dm.scope_main_multiuser") && senderCount > 1) {
+    return "Saved, but this computer will only run with one person allowed on this channel right now. Remove one to let it apply.";
+  }
+  return detail || "The computer could not apply this change.";
 }
 
 type GroupPolicyState = {

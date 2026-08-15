@@ -55,6 +55,11 @@ export interface GeneratedOpenClawCredentialField {
    *  visible; never rendered — a browser form may not write a path on the
    *  owner's machine. */
   readonly file_alternative: string | null;
+  /** False for the fields a customer must supply to connect; true for
+   *  everything else (mode-specific extras, network overrides, cosmetics).
+   *  Advanced fields are hidden behind a disclosure in the setup form and
+   *  are never dropped — they stay writable. */
+  readonly advanced: boolean;
 }
 
 /** How an owner connects this channel, and what they type to do it.
@@ -126,43 +131,50 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
             "name": "token",
             "secret": true,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "agentId",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "baseUrl",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "botUserId",
             "secret": false,
             "type": "string",
-            "file_alternative": null
-          },
-          {
-            "name": "model",
-            "secret": false,
-            "type": "string",
-            "file_alternative": null
-          },
-          {
-            "name": "systemPrompt",
-            "secret": false,
-            "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "workspace",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
+          },
+          {
+            "name": "model",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null,
+            "advanced": true
+          },
+          {
+            "name": "systemPrompt",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null,
+            "advanced": true
           }
         ],
         "file_alternatives": []
@@ -212,37 +224,43 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
             "name": "token",
             "secret": true,
             "type": "string",
-            "file_alternative": null
-          },
-          {
-            "name": "ackReaction",
-            "secret": false,
-            "type": "string",
-            "file_alternative": null
-          },
-          {
-            "name": "activity",
-            "secret": false,
-            "type": "string",
-            "file_alternative": null
-          },
-          {
-            "name": "activityUrl",
-            "secret": false,
-            "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "applicationId",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "proxy",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
+          },
+          {
+            "name": "ackReaction",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null,
+            "advanced": true
+          },
+          {
+            "name": "activity",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null,
+            "advanced": true
+          },
+          {
+            "name": "activityUrl",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null,
+            "advanced": true
           }
         ],
         "file_alternatives": []
@@ -291,31 +309,36 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
             "name": "appSecret",
             "secret": true,
             "type": "string",
-            "file_alternative": null
-          },
-          {
-            "name": "encryptKey",
-            "secret": true,
-            "type": "string",
-            "file_alternative": null
-          },
-          {
-            "name": "verificationToken",
-            "secret": true,
-            "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "appId",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
+          },
+          {
+            "name": "encryptKey",
+            "secret": true,
+            "type": "string",
+            "file_alternative": null,
+            "advanced": true
+          },
+          {
+            "name": "verificationToken",
+            "secret": true,
+            "type": "string",
+            "file_alternative": null,
+            "advanced": true
           },
           {
             "name": "webhookHost",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           }
         ],
         "file_alternatives": []
@@ -360,31 +383,36 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
             "name": "serviceAccount",
             "secret": true,
             "type": "string",
-            "file_alternative": "serviceAccountFile"
+            "file_alternative": "serviceAccountFile",
+            "advanced": false
           },
           {
             "name": "appPrincipal",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           },
           {
             "name": "audience",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           },
           {
             "name": "botUser",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           },
           {
             "name": "webhookUrl",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           }
         ],
         "file_alternatives": [
@@ -461,31 +489,36 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
             "name": "host",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "nick",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "password",
             "secret": false,
             "type": "string",
-            "file_alternative": "passwordFile"
+            "file_alternative": "passwordFile",
+            "advanced": false
           },
           {
             "name": "realname",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "username",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           }
         ],
         "file_alternatives": [
@@ -537,13 +570,15 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
             "name": "channelAccessToken",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "channelSecret",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           }
         ],
         "file_alternatives": []
@@ -588,55 +623,64 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
             "name": "accessToken",
             "secret": true,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "password",
             "secret": true,
             "type": "string",
-            "file_alternative": null
-          },
-          {
-            "name": "ackReaction",
-            "secret": false,
-            "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "avatarUrl",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "deviceId",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "deviceName",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "homeserver",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "proxy",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "userId",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
+          },
+          {
+            "name": "ackReaction",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null,
+            "advanced": true
           }
         ],
         "file_alternatives": []
@@ -677,13 +721,15 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
             "name": "botToken",
             "secret": true,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "baseUrl",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           }
         ],
         "file_alternatives": []
@@ -733,43 +779,50 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
             "name": "appPassword",
             "secret": true,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "appId",
             "secret": false,
             "type": "string",
-            "file_alternative": null
-          },
-          {
-            "name": "certificateThumbprint",
-            "secret": false,
-            "type": "string",
-            "file_alternative": null
-          },
-          {
-            "name": "managedIdentityClientId",
-            "secret": false,
-            "type": "string",
-            "file_alternative": null
-          },
-          {
-            "name": "serviceUrl",
-            "secret": false,
-            "type": "string",
-            "file_alternative": null
-          },
-          {
-            "name": "sharePointSiteId",
-            "secret": false,
-            "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "tenantId",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
+          },
+          {
+            "name": "certificateThumbprint",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null,
+            "advanced": true
+          },
+          {
+            "name": "managedIdentityClientId",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null,
+            "advanced": true
+          },
+          {
+            "name": "serviceUrl",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null,
+            "advanced": true
+          },
+          {
+            "name": "sharePointSiteId",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null,
+            "advanced": true
           }
         ],
         "file_alternatives": []
@@ -819,37 +872,43 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
             "name": "apiPassword",
             "secret": true,
             "type": "string",
-            "file_alternative": "apiPasswordFile"
+            "file_alternative": "apiPasswordFile",
+            "advanced": false
           },
           {
             "name": "botSecret",
             "secret": true,
             "type": "string",
-            "file_alternative": "botSecretFile"
+            "file_alternative": "botSecretFile",
+            "advanced": false
           },
           {
             "name": "apiUser",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "baseUrl",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "webhookHost",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           },
           {
             "name": "webhookPublicUrl",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           }
         ],
         "file_alternatives": [
@@ -898,7 +957,8 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
             "name": "privateKey",
             "secret": true,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           }
         ],
         "file_alternatives": []
@@ -997,25 +1057,29 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
             "name": "clientSecret",
             "secret": true,
             "type": "string",
-            "file_alternative": "clientSecretFile"
+            "file_alternative": "clientSecretFile",
+            "advanced": false
           },
           {
             "name": "appId",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "systemPrompt",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           },
           {
             "name": "upgradeUrl",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           }
         ],
         "file_alternatives": [
@@ -1101,37 +1165,43 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
             "name": "appToken",
             "secret": true,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "botToken",
             "secret": true,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "signingSecret",
             "secret": true,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "userToken",
             "secret": true,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "ackReaction",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           },
           {
             "name": "typingReaction",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           }
         ],
         "file_alternatives": []
@@ -1168,31 +1238,36 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
             "name": "authToken",
             "secret": true,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "accountSid",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "fromNumber",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "messagingServiceSid",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "publicWebhookUrl",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           }
         ],
         "file_alternatives": []
@@ -1267,43 +1342,50 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
             "name": "botToken",
             "secret": true,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "webhookSecret",
             "secret": true,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           },
           {
             "name": "ackReaction",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           },
           {
             "name": "apiRoot",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           },
           {
             "name": "proxy",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           },
           {
             "name": "webhookHost",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           },
           {
             "name": "webhookUrl",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           }
         ],
         "file_alternatives": []
@@ -1516,25 +1598,29 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
             "name": "botToken",
             "secret": true,
             "type": "string",
-            "file_alternative": null
-          },
-          {
-            "name": "webhookSecret",
-            "secret": true,
-            "type": "string",
-            "file_alternative": null
-          },
-          {
-            "name": "proxy",
-            "secret": false,
-            "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "webhookUrl",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
+          },
+          {
+            "name": "webhookSecret",
+            "secret": true,
+            "type": "string",
+            "file_alternative": null,
+            "advanced": true
+          },
+          {
+            "name": "proxy",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null,
+            "advanced": true
           }
         ],
         "file_alternatives": []

@@ -30,43 +30,50 @@
             "name": "token",
             "secret": true,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "agentId",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "baseUrl",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "botUserId",
             "secret": false,
             "type": "string",
-            "file_alternative": null
-          },
-          {
-            "name": "model",
-            "secret": false,
-            "type": "string",
-            "file_alternative": null
-          },
-          {
-            "name": "systemPrompt",
-            "secret": false,
-            "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "workspace",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
+          },
+          {
+            "name": "model",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null,
+            "advanced": true
+          },
+          {
+            "name": "systemPrompt",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null,
+            "advanced": true
           }
         ],
         "file_alternatives": []
@@ -116,37 +123,43 @@
             "name": "token",
             "secret": true,
             "type": "string",
-            "file_alternative": null
-          },
-          {
-            "name": "ackReaction",
-            "secret": false,
-            "type": "string",
-            "file_alternative": null
-          },
-          {
-            "name": "activity",
-            "secret": false,
-            "type": "string",
-            "file_alternative": null
-          },
-          {
-            "name": "activityUrl",
-            "secret": false,
-            "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "applicationId",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "proxy",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
+          },
+          {
+            "name": "ackReaction",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null,
+            "advanced": true
+          },
+          {
+            "name": "activity",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null,
+            "advanced": true
+          },
+          {
+            "name": "activityUrl",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null,
+            "advanced": true
           }
         ],
         "file_alternatives": []
@@ -195,31 +208,36 @@
             "name": "appSecret",
             "secret": true,
             "type": "string",
-            "file_alternative": null
-          },
-          {
-            "name": "encryptKey",
-            "secret": true,
-            "type": "string",
-            "file_alternative": null
-          },
-          {
-            "name": "verificationToken",
-            "secret": true,
-            "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "appId",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
+          },
+          {
+            "name": "encryptKey",
+            "secret": true,
+            "type": "string",
+            "file_alternative": null,
+            "advanced": true
+          },
+          {
+            "name": "verificationToken",
+            "secret": true,
+            "type": "string",
+            "file_alternative": null,
+            "advanced": true
           },
           {
             "name": "webhookHost",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           }
         ],
         "file_alternatives": []
@@ -264,31 +282,36 @@
             "name": "serviceAccount",
             "secret": true,
             "type": "string",
-            "file_alternative": "serviceAccountFile"
+            "file_alternative": "serviceAccountFile",
+            "advanced": false
           },
           {
             "name": "appPrincipal",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           },
           {
             "name": "audience",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           },
           {
             "name": "botUser",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           },
           {
             "name": "webhookUrl",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           }
         ],
         "file_alternatives": [
@@ -365,31 +388,36 @@
             "name": "host",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "nick",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "password",
             "secret": false,
             "type": "string",
-            "file_alternative": "passwordFile"
+            "file_alternative": "passwordFile",
+            "advanced": false
           },
           {
             "name": "realname",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "username",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           }
         ],
         "file_alternatives": [
@@ -441,13 +469,15 @@
             "name": "channelAccessToken",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "channelSecret",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           }
         ],
         "file_alternatives": []
@@ -492,55 +522,64 @@
             "name": "accessToken",
             "secret": true,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "password",
             "secret": true,
             "type": "string",
-            "file_alternative": null
-          },
-          {
-            "name": "ackReaction",
-            "secret": false,
-            "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "avatarUrl",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "deviceId",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "deviceName",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "homeserver",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "proxy",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "userId",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
+          },
+          {
+            "name": "ackReaction",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null,
+            "advanced": true
           }
         ],
         "file_alternatives": []
@@ -581,13 +620,15 @@
             "name": "botToken",
             "secret": true,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "baseUrl",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           }
         ],
         "file_alternatives": []
@@ -637,43 +678,50 @@
             "name": "appPassword",
             "secret": true,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "appId",
             "secret": false,
             "type": "string",
-            "file_alternative": null
-          },
-          {
-            "name": "certificateThumbprint",
-            "secret": false,
-            "type": "string",
-            "file_alternative": null
-          },
-          {
-            "name": "managedIdentityClientId",
-            "secret": false,
-            "type": "string",
-            "file_alternative": null
-          },
-          {
-            "name": "serviceUrl",
-            "secret": false,
-            "type": "string",
-            "file_alternative": null
-          },
-          {
-            "name": "sharePointSiteId",
-            "secret": false,
-            "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "tenantId",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
+          },
+          {
+            "name": "certificateThumbprint",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null,
+            "advanced": true
+          },
+          {
+            "name": "managedIdentityClientId",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null,
+            "advanced": true
+          },
+          {
+            "name": "serviceUrl",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null,
+            "advanced": true
+          },
+          {
+            "name": "sharePointSiteId",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null,
+            "advanced": true
           }
         ],
         "file_alternatives": []
@@ -723,37 +771,43 @@
             "name": "apiPassword",
             "secret": true,
             "type": "string",
-            "file_alternative": "apiPasswordFile"
+            "file_alternative": "apiPasswordFile",
+            "advanced": false
           },
           {
             "name": "botSecret",
             "secret": true,
             "type": "string",
-            "file_alternative": "botSecretFile"
+            "file_alternative": "botSecretFile",
+            "advanced": false
           },
           {
             "name": "apiUser",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "baseUrl",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "webhookHost",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           },
           {
             "name": "webhookPublicUrl",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           }
         ],
         "file_alternatives": [
@@ -802,7 +856,8 @@
             "name": "privateKey",
             "secret": true,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           }
         ],
         "file_alternatives": []
@@ -901,25 +956,29 @@
             "name": "clientSecret",
             "secret": true,
             "type": "string",
-            "file_alternative": "clientSecretFile"
+            "file_alternative": "clientSecretFile",
+            "advanced": false
           },
           {
             "name": "appId",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "systemPrompt",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           },
           {
             "name": "upgradeUrl",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           }
         ],
         "file_alternatives": [
@@ -1005,37 +1064,43 @@
             "name": "appToken",
             "secret": true,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "botToken",
             "secret": true,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "signingSecret",
             "secret": true,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "userToken",
             "secret": true,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "ackReaction",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           },
           {
             "name": "typingReaction",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           }
         ],
         "file_alternatives": []
@@ -1072,31 +1137,36 @@
             "name": "authToken",
             "secret": true,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "accountSid",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "fromNumber",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "messagingServiceSid",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "publicWebhookUrl",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           }
         ],
         "file_alternatives": []
@@ -1171,43 +1241,50 @@
             "name": "botToken",
             "secret": true,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "webhookSecret",
             "secret": true,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           },
           {
             "name": "ackReaction",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           },
           {
             "name": "apiRoot",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           },
           {
             "name": "proxy",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           },
           {
             "name": "webhookHost",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           },
           {
             "name": "webhookUrl",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": true
           }
         ],
         "file_alternatives": []
@@ -1420,25 +1497,29 @@
             "name": "botToken",
             "secret": true,
             "type": "string",
-            "file_alternative": null
-          },
-          {
-            "name": "webhookSecret",
-            "secret": true,
-            "type": "string",
-            "file_alternative": null
-          },
-          {
-            "name": "proxy",
-            "secret": false,
-            "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
           },
           {
             "name": "webhookUrl",
             "secret": false,
             "type": "string",
-            "file_alternative": null
+            "file_alternative": null,
+            "advanced": false
+          },
+          {
+            "name": "webhookSecret",
+            "secret": true,
+            "type": "string",
+            "file_alternative": null,
+            "advanced": true
+          },
+          {
+            "name": "proxy",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null,
+            "advanced": true
           }
         ],
         "file_alternatives": []
