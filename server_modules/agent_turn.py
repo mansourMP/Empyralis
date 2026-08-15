@@ -897,15 +897,32 @@ def _promote_turn_request_to_primary_engine_path(request: AgentTurnRequest) -> A
         promotion_reason = "explicit_override"
     elif request.attachments:
         promotion_reason = "attachments_present"
-    else:
-        marker_count = _serious_task_marker_count(compact_message)
-        sequence_requested = any(marker in compact_message for marker in SERIOUS_SEQUENCE_MARKERS)
-        outcome_requested = any(marker in compact_message for marker in SERIOUS_OUTCOME_MARKERS)
-        if not _looks_like_lightweight_direct_chat(compact_message):
-            if marker_count >= 2:
-                promotion_reason = "task_markers"
-            elif marker_count >= 1 and (sequence_requested or outcome_requested or len(compact_message) >= 48):
-                promotion_reason = "task_markers"
+    # The `task_markers` heuristic is DELIBERATELY GONE. It read the customer's
+    # WORDING and, from that alone, silently swapped which engine ran the turn —
+    # and the two engines are not interchangeable. Measured live 2026-08-15,
+    # same message, both outcomes:
+    #
+    #   not promoted -> direct chat  -> shell runs on the box, exit 0
+    #   promoted     -> outcome pack -> "Action policy blocked requested
+    #                                    actions: shell.execute."
+    #
+    # That is not a flake. `classify_runtime_action("shell.execute")` returns
+    # destructive_risk=True on EVERY target (auto/cloud/local/agent_machine),
+    # and `decide_runtime_action_execution`'s first branch denies destructive
+    # unconditionally — "Destructive actions never auto-run." So on the promoted
+    # path, running a command on your own computer could never succeed, while
+    # the identical request phrased more casually worked every time. A customer
+    # experiences that as a product that works half the time for no reason.
+    #
+    # The same promotion is what dropped the AI provider (see
+    # run_service._ensure_durable_turn_provider): it inherits the request shape
+    # and silently loses what the direct-chat branch's callees supply. Two
+    # independent, invisible failures from one wording-based guess is enough.
+    #
+    # Promotion still happens where it is ASKED FOR (force_durable_run) or
+    # where it is structurally required (attachments). Restoring a heuristic
+    # here means re-answering: can the destination engine actually do what the
+    # message asked for? Nothing consults that today.
 
     if not promotion_reason:
         return request

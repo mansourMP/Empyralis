@@ -671,7 +671,22 @@ class AgentTurnTests(unittest.TestCase):
 
         self.assertEqual(request.context_hints["request_id"], "req-canonical-1")
 
-    def test_build_direct_chat_turn_request_promotes_serious_task_to_durable_run(self):
+    def test_build_direct_chat_turn_request_no_longer_promotes_on_wording(self):
+        """This test used to assert the OPPOSITE, and the behaviour it locked in
+        was removed on purpose (2026-08-15) — see
+        test_turn_engine_promotion.py for the full account.
+
+        Short version: counting "task markers" in the customer's sentence chose
+        which ENGINE ran the turn, and the destination engine cannot run a shell
+        command at all (`shell.execute` classifies destructive on every target,
+        and destructive is denied unconditionally). So "run this on your
+        computer" succeeded or failed on phrasing alone — measured 2 of 4 before,
+        5 of 5 after. The same promotion also silently dropped the AI provider.
+
+        Rewritten rather than deleted so the reversal stays visible: a future
+        reader finding no test here would not know the promotion was considered
+        and rejected.
+        """
         request = build_direct_chat_turn_request(
             current_user={"user_id": "user-1", "email": "user@example.com"},
             body={},
@@ -681,10 +696,11 @@ class AgentTurnTests(unittest.TestCase):
             message="Research the latest project blockers and draft a summary.",
         )
 
-        self.assertEqual(request.execution_mode, "durable")
-        self.assertEqual(request.response_mode, "artifact")
-        self.assertEqual(request.context_hints["metadata"]["primary_engine_path"], "durable_run")
-        self.assertEqual(request.context_hints["metadata"]["primary_engine_reason"], "task_markers")
+        self.assertEqual(request.execution_mode, "sync")
+        self.assertEqual(request.response_mode, "stream")
+        metadata = request.context_hints.get("metadata") or {}
+        self.assertNotIn("primary_engine_path", metadata)
+        self.assertNotIn("primary_engine_reason", metadata)
 
     def test_build_direct_chat_turn_request_keeps_lightweight_question_as_direct_chat(self):
         request = build_direct_chat_turn_request(
