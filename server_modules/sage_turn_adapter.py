@@ -259,6 +259,7 @@ async def execute_sage_turn(
     if _msg.startswith("/") and _commands_allowed:
         from server_modules.command_registry import process_message as _proc_msg
         from server_modules.command_registry import dispatch as _cmd_dispatch
+        from server_modules.command_registry import build_service_kwargs_for_text as _build_service_kwargs
 
         # Phase 4B / Phase 1 (reasoning effort): the resolved specialist's
         # own install id, so directive handlers that persist per-agent state
@@ -267,6 +268,17 @@ async def execute_sage_turn(
         # master. Empty when this turn runs as Sage/master, unchanged.
         _directive_agent_install_id = str(getattr(specialist_context, "agent_install_id", "") or "").strip()
 
+        # /stop /model /tools /status /debug all read a `services` and/or
+        # `availability_payload`/`tool_capabilities` kwarg that nothing on
+        # this live path used to build — see build_service_kwargs_for_text's
+        # own docstring. Built once, from the whole message (a superset of
+        # whatever _proc_msg strips as a directive/shortcut), and forwarded
+        # to BOTH call sites below: the inline-directive/shortcut path
+        # (/model, /tools, /status) and the standalone fallback path
+        # (/stop, /debug). Empty dict — no extra kwargs, no extra cost — for
+        # every other command.
+        _service_kwargs = _build_service_kwargs(_msg, resolved_workspace_id)
+
         _proc = await _proc_msg(
             text=_msg,
             workspace_id=resolved_workspace_id,
@@ -274,6 +286,7 @@ async def execute_sage_turn(
             channel_origin=resolved_channel_origin,
             sender_id=resolved_sender_id,
             agent_install_id=_directive_agent_install_id,
+            **_service_kwargs,
         )
         if _proc.is_command_only and not _proc.text.strip():
             # Pure command/directive message — skip LLM entirely
@@ -310,6 +323,7 @@ async def execute_sage_turn(
                 surface="channel" if resolved_channel_origin else "web",
                 sender_id=resolved_sender_id,
                 agent_install_id=_directive_agent_install_id,
+                **_service_kwargs,
             )
             if _cmd_result is not None:
                 return SageTurnResult(

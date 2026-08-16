@@ -301,6 +301,17 @@ async def dispatch_command(
     to handle_sage_chat() as a normal message).
     """
     from server_modules.command_registry import dispatch as _dispatch
+    from server_modules.command_registry import build_service_kwargs_for_text as _build_service_kwargs
+
+    # Same gap sage_turn_adapter.execute_sage_turn's own command block had:
+    # /stop /model /tools /status /debug read a `services` and/or
+    # `availability_payload`/`tool_capabilities` kwarg that a bare
+    # command_registry.dispatch() call never supplies. This is the OTHER
+    # live entry point every channel routes through before
+    # execute_sage_turn (hosted Telegram, WeChat official) — see this
+    # module's own docstring — so it needs the identical fix, built from
+    # the same function rather than a second hand-copied definition.
+    _service_kwargs = _build_service_kwargs(command, workspace_id)
 
     result = await _dispatch(
         text=str(command or ""),
@@ -309,6 +320,7 @@ async def dispatch_command(
         thread_id=thread_id,
         channel_origin=channel_origin,
         sender_id=sender_id,
+        **_service_kwargs,
     )
     if result is None:
         return None

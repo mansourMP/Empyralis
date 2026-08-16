@@ -357,6 +357,100 @@ def parse(text: str) -> tuple[str, str]:
     return (cmd, remainder)
 
 
+# ── services kwargs (lazy — built once per caller, only when a command that
+# actually reads them is present) ───────────────────────────────────────────
+#
+# _handle_stop / _handle_model / _handle_status / _handle_debug read
+# kwargs.get("services") and degrade to a stub reply ("... not loaded.") when
+# it is None. _handle_tools / _handle_status also read
+# kwargs.get("availability_payload") / kwargs.get("tool_capabilities"). Every
+# live caller of this module (sage_turn_adapter.execute_sage_turn's "/"
+# command block, and sage_command_dispatcher.dispatch_command — the two
+# entry points every channel and web chat route through) used to pass none
+# of these, so all five commands ran permanently degraded. Fixed by building
+# them here, once, and having both callers forward the result — see each
+# caller's own use of build_service_kwargs_for_text() rather than a second,
+# hand-copied definition of "what does a command need" (CLAUDE.md's "a
+# channel list copied into a third place" entry is the same failure shape).
+
+import re as _cmd_re
+
+# Only these four commands ever read kwargs["services"] (grep each handler
+# body above for `services.` to confirm — do not add a name here without
+# checking the handler actually consumes it).
+_SERVICES_NEEDED_RE = _cmd_re.compile(r"/(stop|model|status|debug)\b", _cmd_re.IGNORECASE)
+# Only these two ever read kwargs["availability_payload"] /
+# kwargs["tool_capabilities"].
+_AVAILABILITY_NEEDED_RE = _cmd_re.compile(r"/(status|tools)\b", _cmd_re.IGNORECASE)
+
+
+class _SlashCommandServices:
+    """The real, minimal implementation of the `services` interface those
+    four handlers call — exactly the two methods they use
+    (`.active_run_count(workspace_id)`, `.connected_provider_tokens(
+    workspace_id)`), nothing else. The dead
+    `direct_chat_runtime_service.build_direct_operator_reply`'s own
+    `DirectChatResponseServices` fixture carries 8 fields; these handlers
+    read only 2 of them, so building the full dataclass would both
+    resurrect dead-code assumptions and do work nothing here needs.
+
+    Backed by the SAME production-wired functions
+    `sage_agent_runtime_service._direct_tool_bundle` already calls on every
+    ordinary (non-command) Sage turn to build that turn's own tool
+    availability payload
+    (`direct_chat_runtime_exports._active_run_count` /
+    `_connected_provider_tokens`) — not a new lookup path, the one every
+    real turn already pays for.
+    """
+
+    def active_run_count(self, workspace_id: str) -> int:
+        from server_modules import direct_chat_runtime_exports
+
+        try:
+            return int(direct_chat_runtime_exports._active_run_count(workspace_id))
+        except Exception:
+            return 0
+
+    def connected_provider_tokens(self, workspace_id: str) -> List[str]:
+        from server_modules import direct_chat_runtime_exports
+
+        try:
+            return list(direct_chat_runtime_exports._connected_provider_tokens(workspace_id) or [])
+        except Exception:
+            return []
+
+
+def build_service_kwargs_for_text(text: str, workspace_id: str) -> Dict[str, Any]:
+    """Build the `services` / `availability_payload` / `tool_capabilities`
+    kwargs /stop, /model, /tools, /status, /debug actually consume — and
+    ONLY when *text* plausibly contains one of those command names, so an
+    unrelated command (/whoami, /new, /bash, ...) — and, for every caller
+    today, every ordinary non-"/" chat message, which never reaches this
+    function at all — pays no extra lookup cost. `availability_payload` is
+    a real provider/gateway lookup (the same one a normal turn already
+    makes to build the model's own tool list); `services` is free to
+    construct (its cost is entirely inside the two methods above, invoked
+    only by a handler that actually calls them).
+    """
+    text = str(text or "")
+    extra: Dict[str, Any] = {}
+    if _SERVICES_NEEDED_RE.search(text):
+        extra["services"] = _SlashCommandServices()
+    if _AVAILABILITY_NEEDED_RE.search(text):
+        from server_modules import direct_chat_runtime_exports
+
+        try:
+            availability_payload = direct_chat_runtime_exports._resolve_direct_chat_availability(
+                workspace_id, requested_provider="",
+            )
+        except Exception:
+            availability_payload = None
+        availability_payload = availability_payload if isinstance(availability_payload, dict) else {}
+        extra["availability_payload"] = availability_payload
+        extra["tool_capabilities"] = list(availability_payload.get("tool_capabilities") or [])
+    return extra
+
+
 # ── dispatch ───────────────────────────────────────────────────────────────
 
 
