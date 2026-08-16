@@ -2857,7 +2857,11 @@ async def workspace_connection_summary(
         from server_modules import channel_lane_contract_service as _lanes
 
         _specs = _lanes.PERSONAL_CHANNEL_SPECS
-        carried_personal = {str(k) for k in (_specs.keys() if isinstance(_specs, dict) else _specs)}
+        # _token(), not str(), so both sides of the intersection below are
+        # normalized the same way — a bound key is compared against a carried
+        # key, and one of them arriving cased differently would silently drop
+        # a live channel, which is the exact failure this filter just caused.
+        carried_personal = {_token(k) for k in (_specs.keys() if isinstance(_specs, dict) else _specs)}
     except Exception:
         carried_personal = set()
     live_channel_keys = carried_personal | {
@@ -2865,10 +2869,19 @@ async def workspace_connection_summary(
         for item in catalog_items(surface="sage")
         if _token(item.get("lane")) == LANE_STUDIO_BUSINESS_CHANNEL
     }
-    bound_keys = {
-        str((row or {}).get("channel_key") or (row or {}).get("channel") or "").strip()
-        for row in (channel_bindings or [])
-    }
+    #
+    # The row's channel identity is `key` — and ONLY `key`.
+    # agent_bindings_repository._list selects `{key_col} AS key`, so the
+    # column's real name (`channel_key`) never survives the alias, and every
+    # other reader in the repo says so: channels_in_use, fleet_tools,
+    # agent_channel_router, mcp_server, and agent_connection_status thirty
+    # lines above in this very file all read `row["key"]`. The first version of
+    # this filter guessed `channel_key or channel` — neither exists, so every
+    # key was the empty string, the intersection below emptied, and a real
+    # enabled `slack` binding rendered as "0 Channels connected" on the
+    # workspace home. A chain of `or` fallbacks is what produced that; the
+    # repository's own SELECT is the answer, so there is exactly one read here.
+    bound_keys = {_token((row or {}).get("key")) for row in (channel_bindings or [])}
     bound_keys.discard("")
     bound_keys &= live_channel_keys
     channels_connected = len(bound_keys | openclaw_channels)
