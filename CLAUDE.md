@@ -401,8 +401,9 @@ matching reset before assuming a visual bug is a CSS problem.
 
 **Founder's rule, verbatim intent: "the rail is where you pick; the content
 is what you picked."** A list of navigation choices rendered inside the
-content area is a second rail pretending to be content. Two offenders fixed
-the same night, one mechanism (`primary-rail-space.ts`, pure + tested):
+content area is a second rail pretending to be content. One offender fixed
+the same night; a second was attempted and reverted the same night — see
+below. Mechanism is `primary-rail-space.ts`, pure + tested:
 
 ```
 DEFAULT  Inbox · My work · Projects          ← flat, 2026-08-15, unchanged
@@ -416,21 +417,37 @@ SPACE    ‹ Back                              a real <Link>, never router.back(
                               in-content GroupedRail sidebar in SettingsShell
                               is DELETED; the "Settings › " crumb-parent is
                               folded (Breadcrumbs.tsx).
-/projects/{p}/agents/**     → project-agents space, GATED by the same
-                              showsProjectAgentsRail count rule (0 empty
-                              state / 1 solo redirect / 2+ list — never a
-                              second rule). Back → the project, always.
-                              ProjectAgentsRail.tsx + agents/layout.tsx are
-                              DELETED — the rail persists across navigation
-                              by construction, so agent switches keep scroll
-                              and refetch nothing.
 ```
 
 This REFINES 2026-08-15's flat rail, not reverses it: merely opening a
 project still never changes the rail — a space exists only where the
-content's whole job used to be a second nav column. Superseded mechanics
-recorded above (agents/layout.tsx persistence, ProjectAgentsRail) are gone;
-do not rebuild them.
+content's whole job used to be a second nav column. `RailSpace` has exactly
+one kind, `"settings"` — not two.
+
+**A second space was built the same night and REVERTED the same night —
+this is not a hole in the pattern, it is the pattern rejecting a bad fit.**
+`d5833c615` moved a project's Agents section (2+ agents) into a
+`project-agents` rail space — "‹ Back" (to the project), the project name,
+one row per agent — deleting `ProjectAgentsRail.tsx` and
+`agents/layout.tsx`, which had rendered that list in the content area
+beside the chat. It shipped, and the founder found the result live: opening
+a project's Agents tab now showed the rail morphed into the agent list AND
+the content area still showing the Tasks/Documents/Agents tab bar with
+Agents highlighted plus an empty "Select an agent to start chatting"
+prompt — two navigation surfaces both claiming to be "where you pick," one
+of them now pointless. A follow-up dispatch proposed folding Tasks and
+Documents into the rail too (so ALL of a project's sections would live in
+one persistent rail structure, Linear's Team-sidebar shape) — the founder
+rejected that direction directly: *"everything in one [list] is not
+something I am looking for."* The fix taken instead was the opposite move:
+revert `d5833c615` outright (`fec3bc118`). `ProjectAgentsRail.tsx` and
+`agents/layout.tsx` are BACK, not gone — a project's Agents section renders
+its agent list in the content area again, exactly as it did before that
+commit, and the rail stays flat at all times inside a project. Do not
+re-attempt either shape (agents-in-rail, or the broader "fold every project
+section into the rail") without the founder asking for it specifically —
+both were tried and both were rejected live, one implicitly (by the bug
+report) and one explicitly (by name).
 
 Same night, same surface, three more founder calls:
 - **Settings left the flat rail** (two doors to one room; the account menu
