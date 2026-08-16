@@ -509,5 +509,100 @@ class SageTurnAdapterThreadKeyingTests(unittest.TestCase):
         self.assertEqual(handle_mock.call_args.kwargs["thread_id"], "thread_prior_conversation_abc123")
 
 
+class FallbackCommandDispatchSenderIdTests(unittest.TestCase):
+    """execute_sage_turn is the single unified entry every channel AND the
+    web surface route through (this module's own docstring). Its FALLBACK
+    dispatch — for standalone commands that are neither a registered
+    "directive" nor "inline_shortcut" (e.g. /config, /mcp, /plugins,
+    /debug, /bash — every owner-gated command in command_registry.py) —
+    used to call command_registry.dispatch with no sender_id at all, so
+    command_registry._is_sender_owner could never return True here, no
+    matter who sent the message. A real owner-gated command therefore
+    silently failed the owner check and fell through to handle_sage_chat as
+    ordinary chat text — the exact "silent misrouting" shape a raw /bash
+    argument must never take. Registers a throwaway owner-gated test
+    command against the REAL command_registry (only get_workspace_by_id is
+    mocked) rather than asserting against one of the real five, so a future
+    edit to any of their own handlers can't accidentally mask this."""
+
+    def setUp(self):
+        from server_modules import command_registry
+
+        self._command_registry = command_registry
+        self._test_command_name = "__test_sage_turn_adapter_fallback_owner_probe__"
+        self.handler = AsyncMock(return_value={"reply": "executed"})
+        command_registry.register(
+            self._test_command_name,
+            self.handler,
+            access="owner",
+        )
+
+    def tearDown(self):
+        self._command_registry._registry.pop(self._test_command_name, None)
+        self._command_registry._handlers.pop(self._test_command_name, None)
+
+    def test_owner_sender_id_reaches_the_fallback_owner_gated_command(self):
+        sage_chat = AsyncMock()
+        with (
+            patch("server_modules.sage_agent_runtime_service.handle_sage_chat", new=sage_chat),
+            patch(
+                "server_modules.control_plane_repository.get_workspace_by_id",
+                new=AsyncMock(return_value={"created_by_user_id": "owner-1", "identity_links": {}}),
+            ),
+        ):
+            result = _run(execute_sage_turn(
+                workspace_id="ws-1",
+                message=f"/{self._test_command_name}",
+                current_user={"user_id": "owner-1"},
+                channel_sender_id="owner-1",
+            ))
+
+        self.handler.assert_called_once()
+        sage_chat.assert_not_called()
+        self.assertEqual(result.message, "executed")
+
+    def test_non_owner_sender_id_is_refused_and_never_reaches_the_model(self):
+        """The mirror case: a real sender_id that is genuinely NOT the
+        owner must still be refused — this fix must not turn into a new
+        always-True gate. dispatch() returns None for a refused owner-gated
+        command, and _cmd_result is None falls through exactly like an
+        unrecognized command — this test only pins that the model is never
+        handed the raw command text either way; the "isn't available"-style
+        wording lives on the web-only path (direct_chat_runtime_service.py),
+        not this shared one."""
+        sage_chat = AsyncMock(return_value=self._mock_sage_chat_payload())
+        with (
+            patch("server_modules.sage_agent_runtime_service.handle_sage_chat", new=sage_chat),
+            patch(
+                "server_modules.control_plane_repository.get_workspace_by_id",
+                new=AsyncMock(return_value={"created_by_user_id": "someone-else", "identity_links": {}}),
+            ),
+        ):
+            _run(execute_sage_turn(
+                workspace_id="ws-1",
+                message=f"/{self._test_command_name}",
+                current_user={"user_id": "not-the-owner"},
+                channel_sender_id="not-the-owner",
+            ))
+
+        self.handler.assert_not_called()
+        sage_chat.assert_called_once()
+
+    @staticmethod
+    def _mock_sage_chat_payload():
+        return {
+            "message": "ordinary reply",
+            "used_context": [],
+            "tool_calls": [],
+            "available_tools": [],
+            "blocked_tools": [],
+            "approvals_required": [],
+            "memory_updates": [],
+            "trace_id": "trace-1",
+            "provider": "openai",
+            "model": "gpt-4o",
+        }
+
+
 if __name__ == "__main__":
     unittest.main()

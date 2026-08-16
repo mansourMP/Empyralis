@@ -285,12 +285,30 @@ async def execute_sage_turn(
 
         # Fallback: standalone commands like /new or /compact that aren't
         # directives still start with / after directive stripping.
+        #
+        # sender_id is REQUIRED here, not optional plumbing: this is the
+        # ONE place every owner-gated command (/config /mcp /plugins /debug
+        # /bash — none of them directives or inline shortcuts, so none of
+        # them go through _proc_msg's own sender_id-carrying dispatch calls
+        # above) resolves on the live path, for BOTH web and every channel
+        # (this function is the single unified entry both route through).
+        # Omitting it means command_registry._is_sender_owner can never
+        # return True here, so dispatch() always refuses and returns None —
+        # and the caller below then falls through to `_cleaned_msg =
+        # _remaining`, handing the raw command text (e.g. a real /bash
+        # argument) to the model as ordinary chat. Same bug shape, same
+        # fix, as command_registry.py's own sender_id fix for the web
+        # surface (see direct_chat_runtime_service.build_direct_operator_
+        # reply's history) — that fix landed on a call site this unified
+        # pipeline had already made unreachable; this is the call site
+        # that actually runs today.
         _remaining = _proc.text.strip()
         if _remaining.startswith("/"):
             _cmd_result = await _cmd_dispatch(
                 text=_remaining,
                 workspace_id=resolved_workspace_id,
                 surface="channel" if resolved_channel_origin else "web",
+                sender_id=resolved_sender_id,
                 agent_install_id=_directive_agent_install_id,
             )
             if _cmd_result is not None:

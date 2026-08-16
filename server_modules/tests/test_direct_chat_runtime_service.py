@@ -481,6 +481,53 @@ class DirectChatRuntimeServiceTests(unittest.TestCase):
         self.assertNotIn("config", reply_text.lower())
         self.assertIn("isn't available", reply_text.lower())
 
+    def test_unrecognized_slash_command_falls_through_to_ordinary_generation(self) -> None:
+        """Case 1 from the code's own comment above the registry dispatch:
+        slash_command_name is set (the message starts with "/") but is NOT
+        a real registered command name — ordinary chat text like
+        "/notarealcommand foo" or "/help me understand this file" (the
+        latter parses as command "help" with a real handler in the
+        registry, so use a name that genuinely isn't registered to isolate
+        this case from the owner-gate case above). This must fall through
+        exactly as before command dispatch existed: no "isn't available"
+        refusal, and the real generation path is reached.
+
+        Proven by mocking the entitlement-gated provider resolver
+        (sage_agent_runtime_service._resolve_cloud_provider) — the first
+        thing ANY real turn touches once past the slash-command block — to
+        raise a distinctive error and asserting that error's payload comes
+        back, rather than the registry's "isn't available" refusal. Only
+        the interception block (command_registry.dispatch_sync, unmocked
+        and real here) could have produced that refusal; reaching the
+        provider resolver instead proves the block was skipped."""
+        prepared = self._slash_command_prepared(slash_command_name="notarealcommand")
+        prepared.normalized_message = "/notarealcommand foo"
+        services = self._runtime_services(prepared)
+        services.prepare_direct_chat_request = lambda **kwargs: prepared
+
+        with mock.patch(
+            "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+            side_effect=RuntimeError("generation path reached"),
+        ):
+            events = list(
+                direct_chat_runtime_service.build_direct_operator_reply(
+                    services=services,
+                    message="/notarealcommand foo",
+                    workspace_id="default",
+                    requested_model="gpt-5.4",
+                    requested_provider="openai",
+                    session_ctx={"current_user": {"user_id": "user-abc-123"}},
+                )
+            )
+
+        final_events = [e for e in events if e.get("type") == "final"]
+        self.assertEqual(len(final_events), 1)
+        payload = final_events[0]["payload"]
+        # The registry's refusal shape ({"reply": "...isn't available..."})
+        # never fires — this is the fixture's own no_provider_reasoning_
+        # required_response() instead, which only the generation branch calls.
+        self.assertEqual(payload, {"reply": "", "actions": [], "mode": "error", "error": "no_provider"})
+
     def test_build_chat_turn_event_stream_prefers_request_meta_turn_request(self) -> None:
         captured: dict[str, object] = {}
         services = self._runtime_services(SimpleNamespace())
