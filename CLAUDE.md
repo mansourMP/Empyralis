@@ -397,6 +397,56 @@ The lesson from both: **a component that moves focus programmatically owns
 the obligation to also clear it.** Grep for `.focus()` calls with no
 matching reset before assuming a visual bug is a CSS problem.
 
+## Rail spaces: the rail is where you pick (2026-08-16)
+
+**Founder's rule, verbatim intent: "the rail is where you pick; the content
+is what you picked."** A list of navigation choices rendered inside the
+content area is a second rail pretending to be content. Two offenders fixed
+the same night, one mechanism (`primary-rail-space.ts`, pure + tested):
+
+```
+DEFAULT  Inbox · My work · Projects          ← flat, 2026-08-15, unchanged
+SPACE    ‹ Back                              a real <Link>, never router.back()
+         {space name}
+         {the space's own pick-list}         active marked like any rail row
+
+/settings/**                → Settings space (Account/Workspace/Connections/
+                              Keyboard shortcuts). Back → where you came
+                              from, workspace root on a direct load. The
+                              in-content GroupedRail sidebar in SettingsShell
+                              is DELETED; the "Settings › " crumb-parent is
+                              folded (Breadcrumbs.tsx).
+/projects/{p}/agents/**     → project-agents space, GATED by the same
+                              showsProjectAgentsRail count rule (0 empty
+                              state / 1 solo redirect / 2+ list — never a
+                              second rule). Back → the project, always.
+                              ProjectAgentsRail.tsx + agents/layout.tsx are
+                              DELETED — the rail persists across navigation
+                              by construction, so agent switches keep scroll
+                              and refetch nothing.
+```
+
+This REFINES 2026-08-15's flat rail, not reverses it: merely opening a
+project still never changes the rail — a space exists only where the
+content's whole job used to be a second nav column. Superseded mechanics
+recorded above (agents/layout.tsx persistence, ProjectAgentsRail) are gone;
+do not rebuild them.
+
+Same night, same surface, three more founder calls:
+- **Settings left the flat rail** (two doors to one room; the account menu
+  keeps its link). `"settings"` is now hand-listed in
+  `NON_RAIL_SHELL_SEGMENTS` — no longer derived from `RAIL_ITEMS`, and a
+  segment the decider misses renders a silent blank pane.
+- **Keyboard shortcuts is a routed Settings page**, not an account-popover
+  accordion. Its go-to rows DERIVE from `RAIL_ITEMS` (the list the chord
+  handler matches), because the hand-kept list advertised G C/G A for
+  surfaces removed from navigation — chords bound to nothing.
+- **A project's tab bar is exactly Tasks · Documents · Agents.** People was
+  the toolbar's avatar-stack + "+" surface duplicated as a tab ("I never
+  asked for these people... People already exist on top"). Set lives in
+  `project-views.ts`; the `/people` route stays live and unlinked, same
+  treatment as `/agents`/`/conversations`.
+
 ## Agent detail surface (2026-08-13)
 
 **Overview is gone.** Founder: *"remove overview because it's something
