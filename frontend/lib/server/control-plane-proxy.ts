@@ -52,9 +52,18 @@ const BROWSER_AUTH_UPSTREAM_PREFIX = '/api/v1/auth/';
 
 function upstreamUnavailableResponse(error: unknown): NextResponse {
   const reason = error instanceof Error ? error.message : 'upstream_unavailable';
+  // `detail` is what surfaces to the CUSTOMER: every frontend surface that
+  // renders an error runs the body through getErrorMessage (api-error.ts),
+  // which shows a string `detail` verbatim. It used to read "Control plane
+  // is unavailable. Check that the configured backend is reachable from
+  // this deployment or restart the local runtime." — operator vocabulary,
+  // seen live in the Members panel by an ordinary workspace owner with
+  // nothing to restart. Plain words, honest could-not-load (never "empty"),
+  // and safe to retry. The machine-readable `reason` beside it keeps the
+  // diagnostic detail for logs.
   return new NextResponse(
     JSON.stringify({
-      detail: 'Control plane is unavailable. Check that the configured backend is reachable from this deployment or restart the local runtime.',
+      detail: "Couldn't reach the server. Try again in a moment.",
       reason,
     }),
     {
