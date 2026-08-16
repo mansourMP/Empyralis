@@ -7,7 +7,9 @@ import Link from "next/link";
 import { useRouter, usePathname, useSelectedLayoutSegment } from "next/navigation";
 import {
   BarChart3,
+  ChevronLeft,
   ChevronRight,
+  Keyboard,
   LogOut,
   Moon,
   PanelLeftClose,
@@ -27,9 +29,9 @@ import { ProjectIcon } from "./fleet-project-identity";
 import { planAgentCountShape } from "./agent-count-shape";
 import { myWorkBadgeCount } from "./my-work";
 import { useOwnAccountId } from "./members-data";
-import { railItemsByPlacement, visibleRailItems } from "./primary-rail-nav";
+import { visibleRailItems } from "./primary-rail-nav";
+import { railSpaceFromPathname, settingsSpaceLinks, spaceBackHref, type RailSpaceLink } from "./primary-rail-space";
 import { activeProjectIdFromPathname } from "./primary-rail-project-mode";
-import { FleetHelpButton } from "./FleetHelpButton";
 import { SageLauncher } from "./SageLauncher";
 import { CreditBalanceChip } from "./CreditBalanceChip";
 import { SystemHealthButton } from "./SystemHealthButton";
@@ -46,14 +48,19 @@ import type { FleetTheme, FleetSectionKey } from "./fleet-preferences";
 //
 //     THE RAIL IS PLACES YOU GO. THE PAGE IS THINGS YOU DO.
 //
-// So this rail is FLAT and stays flat: Inbox, My work, the project list,
+// So this rail is FLAT by default: Inbox, My work, the project list,
 // "+ New project", with Settings pinned at the foot. Opening a project
 // changes the PAGE — its Tasks/Documents/Agents/People tabs — and never the
 // rail. Nothing was removed to get here (founder: "tasks agents and
-// documents must not disappear"): a project's agents are its Agents tab,
-// which still renders the compact per-agent rail agents/layout.tsx has
-// always drawn beside the pane (ProjectAgentsRail.tsx), and Settings gained
-// a row here while keeping its account-menu entry.
+// documents must not disappear"), and Settings gained a row here while
+// keeping its account-menu entry.
+//
+// ONE refinement on top of that (founder, 2026-08-16): "the rail is where
+// you pick; the content is what you picked." Inside a surface whose content
+// used to carry its OWN second nav column — a SPACE — the rail swaps its
+// flat list for that space's pick-list, with a "‹ Back" real-link row on
+// top. See primary-rail-space.ts for the whole rule and the boundary with
+// the 2026-08-15 flat decision (merely opening a project is NOT a space).
 //
 // Hardware left the rail in the 2026-07 repositioning for an unrelated
 // reason (set-once config) and lives in Settings — the /w/{ws}/hardware
@@ -294,14 +301,31 @@ export function PrimaryRail({
     () => visibleRailItems(agentCountMode === "none"),
     [agentCountMode],
   );
-  // Both render regions, from ONE list — so a placement this component does
-  // not draw cannot be added to primary-rail-nav.ts unnoticed, and the
-  // keyboard list below stays the concatenation of exactly what is on
-  // screen.
-  const { top: topRailItems, footer: footerRailItems } = useMemo(
-    () => railItemsByPlacement(railItems),
-    [railItems],
-  );
+
+  // ── Rail space (2026-08-16) ──────────────────────────────────────────────
+  // "The rail is where you pick; the content is what you picked." Inside a
+  // space the flat list above is not rendered at all — the space's own
+  // pick-list takes its place, with a "‹ Back" real-link row on top. See
+  // primary-rail-space.ts for which pathnames are spaces and why.
+  const space = useMemo(() => railSpaceFromPathname(pathname), [pathname]);
+  // Where Back returns to: the last pathname seen OUTSIDE any space. A ref,
+  // not state — it only ever changes alongside a pathname change, which
+  // re-renders this component anyway. Never valid across workspaces or from
+  // inside a space (spaceBackHref enforces both); a direct load into a space
+  // leaves it null and Back falls back to the workspace root.
+  const lastOutsideSpaceRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (railSpaceFromPathname(pathname) === null) {
+      lastOutsideSpaceRef.current = pathname;
+    }
+  }, [pathname]);
+  const spaceLinks: RailSpaceLink[] | null = useMemo(() => {
+    if (!space) return null;
+    return settingsSpaceLinks(space);
+  }, [space]);
+  const spaceBack = space ? spaceBackHref(space, lastOutsideSpaceRef.current) : null;
+  const spaceTitle = space ? "Settings" : null;
+
   const railHrefFor = useCallback(
     (item: { segment: string }) => `/w/${encodeURIComponent(workspaceId)}/${item.segment}`,
     [workspaceId],
@@ -414,6 +438,10 @@ export function PrimaryRail({
         gTimer.current = window.setTimeout(() => { gPendingRef.current = false; }, 1200);
         return;
       }
+      // Inside a space the flat list is not on screen, so the j/k cursor has
+      // nothing to move over. The g-chords above still fire — they navigate
+      // out of the space, exactly like pressing Back and then a row.
+      if (space) return;
       if (key === "j") {
         e.preventDefault();
         setFocusIdx((i) => Math.min(railItems.length - 1, i + 1));
@@ -428,7 +456,7 @@ export function PrimaryRail({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusIdx, router, workspaceId, railItems, railHrefFor]);
+  }, [focusIdx, router, workspaceId, railItems, railHrefFor, space]);
 
   // Same custom-event mechanism as fleet:open-sage (FleetShell.tsx) — no
   // prop-drilling a setter from FleetCommandPalette back down into the rail.
@@ -495,14 +523,53 @@ export function PrimaryRail({
         )}
       </div>
 
-      {/* ── The rail, flat ────────────────────────────────────────────────
-          Inbox · My work · Projects (with its own flat, always-flat project
-          list) · "+ New project". No branch: opening a project no longer
-          changes what this renders, only which project row reads as current.
-          See primary-rail-nav.ts's header for the two shapes this replaces
-          and why neither survived contact with the founder's own screen. */}
+      {/* ── The rail's one branch: a space, or the flat list ──────────────
+          Inside a space (Settings today — primary-rail-space.ts) the rail IS
+          that space's pick-list: a "‹ Back" real-link row, the space's name,
+          then its destinations, active row marked exactly like the flat
+          rows. Everywhere else: Inbox · My work · Projects (with its flat
+          project sub-list) · "+ New project" — opening a project changes
+          the page, never the rail. */}
+      {space && spaceLinks && spaceBack ? (
+        <nav className="fleet-rail-nav" aria-label={spaceTitle ?? undefined}>
+          <Link
+            href={spaceBack}
+            className="fleet-rail-item fleet-rail-space-back"
+            title={effectiveCollapsed ? "Back" : undefined}
+            aria-label="Back"
+          >
+            <span className="fleet-rail-item-icon">
+              <ChevronLeft size={RAIL_ICON} strokeWidth={1.75} />
+            </span>
+            {!effectiveCollapsed && <span className="fleet-rail-item-label">Back</span>}
+          </Link>
+          {!effectiveCollapsed && spaceTitle && (
+            <div className="fleet-rail-space-title">{spaceTitle}</div>
+          )}
+          {spaceLinks.map((link) => {
+            const Icon = link.icon;
+            return (
+              <Link
+                key={link.key}
+                href={link.href}
+                title={effectiveCollapsed ? link.label : undefined}
+                aria-label={link.label}
+                aria-current={link.active ? "page" : undefined}
+                className={`fleet-rail-item${link.active ? " fleet-rail-item--active" : ""}`}
+              >
+                {Icon ? (
+                  <span className="fleet-rail-item-icon">
+                    <Icon size={RAIL_ICON} strokeWidth={1.75} />
+                  </span>
+                ) : null}
+                {!effectiveCollapsed && <span className="fleet-rail-item-label">{link.label}</span>}
+              </Link>
+            );
+          })}
+        </nav>
+      ) : (
       <nav className="fleet-rail-nav">
-        {topRailItems.map((item, idx) => {
+        {railItems.map((item, idx) => {
           const Icon = item.icon;
           const active = segment === item.segment;
           const focused = focusIdx === idx;
@@ -605,40 +672,6 @@ export function PrimaryRail({
           );
         })}
       </nav>
-
-      {/* Pinned footer destinations — Settings today. Its own region, below
-          the scrolling nav, so a workspace with forty projects never pushes
-          it off the bottom. It is a real rail row AND still a row in the
-          account popover: two doors to one page, neither taken away. */}
-      {footerRailItems.length > 0 && (
-        <nav className="fleet-rail-nav-pinned" aria-label="Settings">
-          {footerRailItems.map((item, i) => {
-            const Icon = item.icon;
-            const active = segment === item.segment;
-            // Continues the SAME index space the j/k handler walks — the
-            // keyboard list is topRailItems concat footerRailItems, so a
-            // pinned row is reachable by keyboard exactly like any other.
-            const focused = focusIdx === topRailItems.length + i;
-            return (
-              <Link
-                key={item.key}
-                href={railHrefFor(item)}
-                title={effectiveCollapsed ? item.label : undefined}
-                aria-label={item.label}
-                aria-current={active ? "page" : undefined}
-                className={`fleet-rail-item${active ? " fleet-rail-item--active" : ""}${focused ? " fleet-rail-item--focus" : ""}`}
-              >
-                <span className="fleet-rail-item-icon">
-                  <Icon size={RAIL_ICON} strokeWidth={1.75} />
-                </span>
-                {!effectiveCollapsed && <span className="fleet-rail-item-label">{item.label}</span>}
-                {!effectiveCollapsed && (
-                  <kbd className="fleet-rail-item-chord" aria-hidden="true">G {item.chord.toUpperCase()}</kbd>
-                )}
-              </Link>
-            );
-          })}
-        </nav>
       )}
 
 
@@ -664,8 +697,9 @@ export function PrimaryRail({
           that earns equal billing with live paired-computer/gateway status
           in the rail's permanent daily row (CLAUDE.md: "most configuration
           is set once and does not deserve equal billing with the things
-          people look at daily"). Both moved into the account menu below
-          (2026-08) as additional popover rows. */}
+          people look at daily"). Theme lives in the account menu below;
+          shortcuts are a routed Settings page the menu links to
+          (settings/shortcuts, 2026-08-16). */}
       <div className="fleet-rail-controls">
         <SystemHealthButton workspaceId={workspaceId} />
         <BugReportButton workspaceId={workspaceId} />
@@ -789,7 +823,19 @@ function AccountMenu({
             {theme === "dark" ? <Sun size={14} strokeWidth={1.75} /> : <Moon size={14} strokeWidth={1.75} />}
             {theme === "dark" ? "Switch to light" : "Switch to dark"}
           </button>
-          <FleetHelpButton />
+          {/* A plain link, not an accordion — the shortcut reference is a
+              real routed Settings page now (settings/shortcuts, 2026-08-16),
+              so this row navigates like every other row here instead of
+              expanding a sub-list inside a popover. */}
+          <Link
+            className="fleet-rail-account-popover-row"
+            href={`${settingsHref}/shortcuts`}
+            role="menuitem"
+            onClick={() => setOpen(false)}
+          >
+            <Keyboard size={14} strokeWidth={1.75} />
+            Keyboard shortcuts
+          </Link>
           <button
             type="button"
             className="fleet-rail-account-popover-row"

@@ -14,7 +14,12 @@
  * Keeping this file client-free avoids the boundary entirely.
  */
 
-export const SETTINGS_SECTIONS = ["account", "workspace", "connections"] as const;
+// "shortcuts" joined 2026-08-16: the keyboard-shortcuts reference stopped
+// being an accordion inside the account-menu popover and became a real
+// routed page here — a real link, cmd-clickable, listed in the Settings
+// space's own rail (primary-rail-space.ts). The account-menu row is now a
+// plain link to it.
+export const SETTINGS_SECTIONS = ["account", "workspace", "connections", "shortcuts"] as const;
 export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
 export const DEFAULT_SETTINGS_SECTION: SettingsSection = "workspace";
 

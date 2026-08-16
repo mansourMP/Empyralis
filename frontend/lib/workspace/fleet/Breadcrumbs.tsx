@@ -14,6 +14,8 @@ import {
 import { createPortal } from "react-dom";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 
+import { isSettingsSection } from "./settings-sections";
+
 /**
  * Breadcrumbs read the URL segment chain under /w/{ws} and render one crumb per
  * segment, each linking to its cumulative path. Static segments (Projects,
@@ -164,10 +166,11 @@ export const STATIC_LABELS: Record<string, string> = {
   // this page's <h1>, see the MAN-145 title-dedup note below) reads the
   // actual active section instead of falling through to humanize()'s
   // generic capitalization, which happens to produce the same words today
-  // but shouldn't be relied on by coincidence.
+  // (except "shortcuts") but shouldn't be relied on by coincidence.
   account: "Account",
   workspace: "Workspace",
   connections: "Connections",
+  shortcuts: "Keyboard shortcuts",
   overview: "Overview",
   chat: "Chat",
   memory: "Memory",
@@ -276,6 +279,15 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
       const isStructuralChild =
         (seg === "agents" || seg === "tasks") && prev !== undefined && segments[i - 2] === "projects";
       if (isStructuralChild) return;
+      // The "settings" segment ahead of a real section is structural too
+      // (2026-08-16): the rail's Settings space is the section picker now
+      // (primary-rail-space.ts), so a "Settings" parent crumb — which also
+      // rendered as the mobile "‹ Settings" back control — would be a second
+      // picker door pointing at a bare redirect. The section's own crumb,
+      // one segment on, is the page's current h1 instead.
+      const isSettingsParent =
+        seg === "settings" && i === segments.length - 2 && isSettingsSection(segments[i + 1] || "");
+      if (isSettingsParent) return;
       // Drop the trailing tab segment itself (see isAgentDetailTrailingTab
       // above) — the agent's own crumb one step back becomes current.
       if (i === segments.length - 1 && isAgentDetailTrailingTab) return;

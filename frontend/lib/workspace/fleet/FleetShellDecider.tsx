@@ -37,6 +37,12 @@ const NON_RAIL_SHELL_SEGMENTS = [
   // Reached from Settings / the account menu rather than the rail.
   "hardware",
   "billing",
+  // Settings left the rail 2026-08-16 (two doors to one room — the account
+  // menu keeps its link, and inside /settings the rail morphs into the
+  // Settings space, see primary-rail-space.ts). The segment must stay
+  // recognized here or every settings page renders the rail and NOTHING
+  // ELSE — the exact silent-blank trap this list's header documents.
+  "settings",
   // "sage" itself no longer has real shell content (the page is just a
   // redirect() stub to /agents), but it still has to be a recognized segment
   // here — otherwise this decider swaps in `shellSlot` (null) instead of

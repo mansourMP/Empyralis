@@ -1,0 +1,133 @@
+import { Building2, Keyboard, Plug, UserCog, type LucideIcon } from "lucide-react";
+
+import { DEFAULT_SETTINGS_SECTION, SETTINGS_SECTIONS, isSettingsSection, type SettingsSection } from "./settings-sections";
+
+/**
+ * RAIL SPACES — the founder's rule, 2026-08-16, verbatim intent: "the rail
+ * is where you pick; the content is what you picked." A list of navigation
+ * choices rendered inside the content area is a second rail pretending to be
+ * content, and it is wrong.
+ *
+ * So the primary rail has exactly two shapes:
+ *
+ *   DEFAULT   the flat workspace rail (primary-rail-nav.ts — Inbox, My work,
+ *             Projects, Settings). Unchanged; still the 2026-08-15 shape.
+ *   SPACE     inside a surface that has its own pick-list, the rail shows
+ *             THAT list instead: a "‹ Back" row on top (a real link), then
+ *             the space's own destinations. The content pane holds only the
+ *             thing that was picked.
+ *
+ * This refines — does not reverse — the 2026-08-15 "flat rail" decision.
+ * What that decision rejected was the rail changing when you merely OPEN a
+ * project (the page's own Tasks/Documents/Agents tabs are the page's job).
+ * What tonight's decision adds is: when a surface's whole content used to BE
+ * a second nav column (Settings' in-content section sidebar), that column
+ * belongs in the rail, because it is a picker.
+ *
+ * Pure and dependency-light (no React, no next/navigation) for the same
+ * reason primary-rail-nav.ts and project-agents-rail-shape.ts are: a plain
+ * `tsx` test imports the REAL derivation PrimaryRail.tsx renders against
+ * (primary-rail-space.test.ts), instead of re-typing it.
+ */
+
+export type RailSpace = {
+  kind: "settings";
+  workspaceId: string;
+  /** The section the URL names, or null when it names none (the bare
+   *  /settings redirect moment) or names one that does not exist. */
+  activeSection: SettingsSection | null;
+};
+
+/** One row of a space's pick-list. Every row is a REAL link — cmd-click and
+ *  middle-click must work — and exactly one is active at a time, marked the
+ *  same way the rail already marks its active row. */
+export type RailSpaceLink = {
+  key: string;
+  label: string;
+  href: string;
+  active: boolean;
+  icon?: LucideIcon;
+};
+
+// Matches /w/{workspaceId}/settings and anything beneath it. The workspace
+// segment arrives URL-encoded (pathnames always do); it is decoded here once
+// and re-encoded by every href builder below, so a workspace id with unsafe
+// characters round-trips instead of double-encoding.
+const SETTINGS_SPACE_RE = /^\/w\/([^/]+)\/settings(?:\/([^/]+))?(?:\/|$)/;
+
+/** Which space — if any — the current pathname is inside. Null means the
+ *  rail keeps its default flat shape. */
+export function railSpaceFromPathname(pathname: string): RailSpace | null {
+  const settings = pathname.match(SETTINGS_SPACE_RE);
+  if (settings) {
+    const rawSection = settings[2] ? decodeURIComponent(settings[2]) : null;
+    return {
+      kind: "settings",
+      workspaceId: decodeURIComponent(settings[1]),
+      activeSection: rawSection && isSettingsSection(rawSection) ? rawSection : null,
+    };
+  }
+  return null;
+}
+
+function workspaceRoot(workspaceId: string): string {
+  return `/w/${encodeURIComponent(workspaceId)}`;
+}
+
+// Labels/icons for the three Settings destinations. These moved here from
+// SettingsShell.tsx's own SECTION_LABEL/SECTION_ICON when the in-content
+// sidebar was deleted — the rail is the one place the pick-list renders now,
+// so this is the one place its vocabulary lives.
+const SETTINGS_SECTION_LABEL: Record<SettingsSection, string> = {
+  account: "Account",
+  workspace: "Workspace",
+  connections: "Connections",
+  shortcuts: "Keyboard shortcuts",
+};
+
+const SETTINGS_SECTION_ICON: Record<SettingsSection, LucideIcon> = {
+  account: UserCog,
+  workspace: Building2,
+  connections: Plug,
+  shortcuts: Keyboard,
+};
+
+/** The Settings space's pick-list, derived from the same SETTINGS_SECTIONS
+ *  the routes themselves validate against — never a second hand-kept list.
+ *  A bare-/settings moment (activeSection null) marks the DEFAULT section
+ *  active, because that is where the redirect is about to land; anything
+ *  else would flash a list with no current row. */
+export function settingsSpaceLinks(space: RailSpace): RailSpaceLink[] {
+  const base = `${workspaceRoot(space.workspaceId)}/settings`;
+  const active = space.activeSection ?? DEFAULT_SETTINGS_SECTION;
+  return SETTINGS_SECTIONS.map((id) => ({
+    key: id,
+    label: SETTINGS_SECTION_LABEL[id],
+    href: `${base}/${id}`,
+    active: id === active,
+    icon: SETTINGS_SECTION_ICON[id],
+  }));
+}
+
+/**
+ * Where the "‹ Back" row points. It is a real link, so this must resolve to
+ * a concrete href at render time — never a router.back() that could walk
+ * into another workspace or out of the app entirely.
+ *
+ * `cameFrom` is the last pathname the rail saw OUTSIDE any space (tracked by
+ * PrimaryRail across its own persistent life). It is honoured only when it
+ * belongs to this same workspace and is not itself inside a space; anything
+ * else — a direct load, a bookmark, a stale path from another workspace —
+ * falls back to the workspace root.
+ */
+export function spaceBackHref(space: RailSpace, cameFrom: string | null | undefined): string {
+  const root = workspaceRoot(space.workspaceId);
+  if (
+    cameFrom &&
+    (cameFrom === root || cameFrom.startsWith(`${root}/`)) &&
+    railSpaceFromPathname(cameFrom) === null
+  ) {
+    return cameFrom;
+  }
+  return root;
+}
