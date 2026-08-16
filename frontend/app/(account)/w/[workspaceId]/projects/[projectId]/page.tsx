@@ -49,6 +49,7 @@ import { FleetRightPanel, PanelSection, PanelRow, PanelRowsSkeleton } from "@/li
 import { FleetCreateAgentWizard } from "@/lib/workspace/fleet/FleetCreateAgentWizard";
 import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
 import { FleetBoardSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
+import { PROJECT_TAB_LABEL, PROJECT_TAB_VIEWS } from "@/lib/workspace/fleet/project-views";
 import { ListChecks, FileText } from "lucide-react";
 
 const money = (n: number | undefined) => `$${(n ?? 0).toFixed(4)}`;
@@ -151,12 +152,15 @@ function DocumentsListSkeleton() {
 
 // The old flat 7-column agents table (and its own skeleton/filter/sort
 // machinery) is gone from this view — project-as-spine nav (CLAUDE.md,
-// 2026-08-13): a project's Agents section now browses through the compact
-// rail agents/layout.tsx renders beside this page (ProjectAgentsRail.tsx),
-// not a table here. See the `view === "agents"` branch below for what
-// replaced it: an empty state (0 agents, unchanged), a quiet redirect (1
-// agent — straight into its chat, no rail for a rail of one), or a plain
-// "select an agent" prompt (2+, the rail is doing the browsing).
+// 2026-08-13): a project's Agents section browses through the PRIMARY
+// rail, which morphs into the project-agents space here (2026-08-16,
+// primary-rail-space.ts — "the rail is where you pick; the content is
+// what you picked"; the earlier in-content list, ProjectAgentsRail.tsx +
+// agents/layout.tsx, is deleted). See the `view === "agents"` branch below
+// for what this pane shows: an empty state (0 agents, unchanged), a quiet
+// redirect (1 agent — straight into its chat, no list for a list of one),
+// or a plain "select an agent" prompt (2+, the rail is doing the
+// browsing).
 
 export default function ProjectDetailPage() {
   const params = useParams();
@@ -226,12 +230,14 @@ export default function ProjectDetailPage() {
   // because it's the surface a reader opens a project to act on daily; the
   // roster/activity Overview used to show is one click away on Agents.
   //
-  // PEOPLE joined them on 2026-08-15, as the fourth peer. Founder's framing:
-  // a teammate and an agent belong in the same place, so People sits beside
-  // Agents rather than living off in workspace Settings. It is the same
-  // `project_memberships` data the toolbar's own "+" already reads and
-  // writes (ProjectMemberAdd) — a tab, not a second members surface; see
-  // ProjectPeople.tsx.
+  // PEOPLE joined as a fourth TAB on 2026-08-15 and left the tab bar on
+  // 2026-08-16 (founder: "I never asked for these people... People already
+  // exist on top") — the toolbar's own avatar stack + "+" ARE the people
+  // surface, and a tab was the same surface twice in one bar. The ROUTE
+  // stays live and unlinked (same treatment as /agents and /conversations
+  // in CLAUDE.md — no redirect, no dead bookmarks), which is why `view`
+  // still knows "people": a directly-typed URL still renders it. See
+  // project-views.ts for the tab set itself.
   const view: "agents" | "tasks" | "documents" | "people" =
     pathname === `${projectBase}/agents`
       ? "agents"
@@ -402,8 +408,8 @@ export default function ProjectDetailPage() {
 
   // Where an agent's own page lives — used below both to build the solo
   // redirect and, at 2+ agents, to build the "select an agent" prompt's
-  // implicit destination (the rail itself, agents/layout.tsx, is what
-  // actually links there now — see ProjectAgentsRail.tsx).
+  // implicit destination (the primary rail's project-agents space is what
+  // actually links there now — see primary-rail-space.ts).
   const agentHref = (agentId: string) =>
     `${projectBase}/agents/${encodeURIComponent(agentId)}/chat`;
 
@@ -412,7 +418,7 @@ export default function ProjectDetailPage() {
   // rail of one is worse than no rail (same call agent-count-shape.ts's own
   // doc comment makes for a table of one), so this view redirects straight
   // into that one agent's chat instead of showing anything here. "fleet":
-  // the compact rail (agents/layout.tsx) is doing the browsing now, so this
+  // the rail's project-agents space is doing the browsing now, so this
   // pane just prompts a selection.
   const agentCountMode = useMemo(() => planAgentCountShape(inProject.length), [inProject.length]);
   const soloAgent = agentCountMode === "solo" ? inProject[0] : null;
@@ -577,25 +583,27 @@ export default function ProjectDetailPage() {
           topbar is where the earlier mobile header-overlap bug came from, and
           this row is already proven reachable at 375px. */}
       <div className="fleet-content-toolbar">
-        {/* ORDER IS THE FOUNDER'S OWN SKETCH: Tasks · Documents · Agents ·
-            People. Tasks leads because it is both the default landing view
-            (the bare `${projectBase}` URL falls through to it) and the
-            surface a project is opened to act on daily; Agents and People
-            sit adjacent because a teammate and an agent belong in the same
-            place. It used to read Agents · Tasks · Documents, which put the
-            default view second.
+        {/* ORDER IS THE FOUNDER'S OWN SKETCH: Tasks · Documents · Agents.
+            Tasks leads because it is both the default landing view (the
+            bare `${projectBase}` URL falls through to it) and the surface
+            a project is opened to act on daily. It used to read Agents ·
+            Tasks · Documents, which put the default view second.
 
             REAL LINKS, not buttons (CLAUDE.md: "primary navigation is real
             links, so cmd-click and middle-click work"). These were
             `router.replace` buttons — tolerable while the rail also offered
             a way in, and not tolerable now that this strip is THE way to
-            reach a project's four sections. `replace` keeps the original,
+            reach a project's sections. `replace` keeps the original,
             deliberate history behaviour on a plain click (Agents→Tasks→
             Documents collapses to one entry, so browser-back steps out of
             the project rather than walking every tab click) while
             ⌘/middle-click get native browser semantics for free. */}
+        {/* Exactly Tasks · Documents · Agents — the set lives in
+            project-views.ts, whose header records why People is not here
+            (the avatar stack + "+" in this same row ARE the people
+            surface; its route stays live, unlinked). */}
         <div className="fleet-segmented" role="tablist" aria-label="Project view">
-          {(["tasks", "documents", "agents", "people"] as const).map((v) => (
+          {PROJECT_TAB_VIEWS.map((v) => (
             <Link
               key={v}
               href={viewHref(v)}
@@ -604,7 +612,7 @@ export default function ProjectDetailPage() {
               aria-selected={view === v}
               className={`fleet-segmented-btn${view === v ? " fleet-segmented-btn--active" : ""}`}
             >
-              {v === "agents" ? "Agents" : v === "tasks" ? "Tasks" : v === "documents" ? "Documents" : "People"}
+              {PROJECT_TAB_LABEL[v]}
             </Link>
           ))}
         </div>
@@ -681,7 +689,7 @@ export default function ProjectDetailPage() {
           <TaskViewOptions options={viewOptions} onChange={updateViewOptions} />
         ) : null}
         {/* Filters/sort are gone — the compact rail beside this pane
-            (agents/layout.tsx) is the browse surface now, and a narrow
+            (the rail's project-agents space) is the browse surface now, and a narrow
             scan-and-pick list has nothing for a status/channel dropdown to
             narrow. The panel toggle stays: it's the only entry point to
             this project's cost/properties drawer (below), unrelated to how
@@ -839,7 +847,7 @@ export default function ProjectDetailPage() {
             // workspace-level Agents page uses for its own solo redirect.
             <div className="fleet-page-state-body">Opening {soloAgent.label || "your agent"}…</div>
           ) : (
-            // 2+ agents: the compact rail beside this pane (agents/layout.tsx)
+            // 2+ agents: the rail's project-agents space
             // is the browse surface now — this pane just prompts a pick.
             <div className="fleet-project-agents-placeholder">Select an agent to start chatting.</div>
           )}
