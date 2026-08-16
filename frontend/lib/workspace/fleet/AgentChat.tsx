@@ -942,11 +942,30 @@ export function AgentChat({
     setThinkingText("");
     setThinkingActive(false);
 
+    // The watchdog that makes `finally` unconditional. A send that dies with
+    // an HTTP error already lands in `catch` — but a stream that simply goes
+    // QUIET (a proxy holding the socket open across a backend restart,
+    // observed live 2026-08-16) leaves `reader.read()` pending forever, so
+    // `finally` never runs, `sending` stays true, and every later click on
+    // Send silently no-ops. The person sees their message with a spinner,
+    // forever, and a composer that has stopped being a composer. Any 90s
+    // window with no bytes at all aborts the request, which routes the turn
+    // into the same catch/finally every other failure already uses.
+    const sendAbort = new AbortController();
+    let watchdog: ReturnType<typeof setTimeout> | null = null;
+    let watchdogFired = false;
+    const armWatchdog = () => {
+      if (watchdog) clearTimeout(watchdog);
+      watchdog = setTimeout(() => { watchdogFired = true; sendAbort.abort(); }, 90_000);
+    };
+    armWatchdog();
+
     try {
       if (!sessionRef.current) {
         const sessionRes = await fleetAuthorizedFetch("/api/sessions", {
           method: "POST",
           credentials: "include",
+          signal: sendAbort.signal,
           headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
           body: JSON.stringify({
             tenant_id: tenantId,
@@ -964,6 +983,7 @@ export function AgentChat({
       const turnRes = await fleetAuthorizedFetch("/api/turn", {
         method: "POST",
         credentials: "include",
+        signal: sendAbort.signal,
         headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
         body: JSON.stringify({
           tenant_id: tenantId,
@@ -1083,7 +1103,12 @@ export function AgentChat({
         const decoder = new TextDecoder();
         let buffer = "";
         while (true) {
+          // Every arriving byte re-arms the watchdog: a long turn that keeps
+          // streaming keeps living, while 90s of TOTAL silence aborts. The
+          // fetch signal already covers the read — aborting rejects this
+          // await — so no second racing promise is needed here.
           const { done, value } = await reader.read();
+          armWatchdog();
           buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done }).replace(/\r/g, "");
           while (true) {
             const idx = buffer.indexOf("\n\n");
@@ -1253,8 +1278,21 @@ export function AgentChat({
         metadata: finalPayload?.metadata && typeof finalPayload.metadata === "object" ? finalPayload.metadata : {},
       }]);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not send that. Try again.");
+      // "Couldn't confirm" and "failed" are different facts and get different
+      // sentences (this codebase's own outcome-honesty law). A watchdog abort
+      // means the turn MAY have run server-side — a blind "failed, retry"
+      // would invite a duplicate — while an HTTP error is a genuine refusal.
+      if (watchdogFired) {
+        setError("No response for a while, so this send was stopped. Reload to see whether it went through before sending again.");
+      } else {
+        setError(e instanceof Error ? e.message : "Could not send that. Try again.");
+      }
+      // The typed text must never be the price of a failed send. Restored
+      // only if the composer is still empty — anything the person has typed
+      // since is theirs and is not overwritten.
+      setDraft((cur) => (cur.trim() ? cur : text));
     } finally {
+      if (watchdog) clearTimeout(watchdog);
       setStreamingText("");
       // thinkingText is deliberately NOT cleared here — it stays visible,
       // collapsed, as a clickable "Thought" row under the reply that was

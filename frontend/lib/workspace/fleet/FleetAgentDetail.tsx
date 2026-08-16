@@ -2,7 +2,7 @@
 
 import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
 
-import { Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import {
@@ -822,13 +822,26 @@ export function FleetAgentDetail({
   // conversation list." `.fleet-agent-sessions` gets its OWN scroll (see
   // fleet-theme.css) so a long history never drags the Properties section
   // above it out of view.
+  // Minted ONCE per mount, never inline in the JSX: an href built from
+  // `newAgentThreadId(...)` at render time is a DIFFERENT URL on every
+  // render, and Next prefetches Link hrefs — so each poll-driven re-render
+  // fired a fresh `?thread=<new id>` RSC prefetch, dozens per minute,
+  // filling the network log with aborted requests. Observed live on the
+  // founder's own account while diagnosing a wedged send. Clicking twice
+  // before navigating reuses one id, which lands on the same empty thread —
+  // exactly what a person expects two "New chat" clicks to mean.
+  const nextNewThreadHref = useMemo(
+    () => threadHref(newAgentThreadId(agentId)),
+    [agentId, threadHref],
+  );
+
   const sessionsContent = (
     <PanelSection
       title="Sessions"
       className="fleet-agent-sessions"
       action={
         <Link
-          href={threadHref(newAgentThreadId(agentId))}
+          href={nextNewThreadHref}
           replace
           className="fleet-icon-btn"
           aria-label="New chat"

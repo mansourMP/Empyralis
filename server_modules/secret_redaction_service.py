@@ -50,7 +50,30 @@ _SENSITIVE_VALUE_PATTERNS = (
     (re.compile(r'(?i)("auth"\s*:\s*")[A-Za-z0-9+/=]{8,}(")'), r'\1[redacted-secret]\2'),
     (re.compile(r"(?i)\b(api[_-]?key|token|secret|password|pwd)\s*[:=]\s*[^\s&\[\]]+"), r"\1=[redacted-secret]"),
     (re.compile(r"(?i)\b(cvv2?|cvc2?|security code)\s*[:=]\s*\d{3,4}\b"), r"\1: [redacted-cvc]"),
-    (re.compile(r"(?<!\w)(?:\+?\d[\d\s().-]{7,}\d)(?!\w)"), "[redacted-phone]"),
+    # The phone sweep, and the two mistakes its old shape made, both observed
+    # in a customer-visible reply (2026-08-16, `uname -a` output rendered as
+    # "Linux cc2ee0a795f4 [redacted-phone]-generic"):
+    #
+    #   1. `(?<!\w)`/`(?!\w)` do not treat `-`/`.` as word glue, so a run of
+    #      digits INSIDE a bigger technical token matched: `6.8.0-124-generic`
+    #      (a kernel version), `RELIABILITY-2-1786807636` (a test marker),
+    #      `v2.4.3-build.2026` (semver). A phone number is never embedded in
+    #      a hyphenated identifier — the boundary now refuses adjacent `-`/`.`.
+    #   2. Dot-separated compact tokens (versions, IPs, decimals like
+    #      3.14159265) are overwhelmingly technical in this product's output,
+    #      so a candidate whose only separators are dots is skipped unless it
+    #      carries a phone-shaped prefix (`+`). Cost: a bare French-style
+    #      "06.12.34.56.78" passes unredacted; every version string, IP and
+    #      decimal a shell command prints survives. On a surface whose job is
+    #      showing command output, that trade only goes one way.
+    (
+        re.compile(r"(?<![\w.-])(?:\+?\d[\d\s().-]{7,}\d)(?![\w.-])"),
+        lambda m: (
+            m.group(0)
+            if ("." in m.group(0) and not any(c in m.group(0) for c in " ()+"))
+            else "[redacted-phone]"
+        ),
+    ),
 )
 
 _MAX_RECURSION_DEPTH = 10
