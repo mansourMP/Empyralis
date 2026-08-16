@@ -9,7 +9,7 @@
  * Run: npx tsx lib/workspace/fleet/project-agents-rail-shape.test.ts
  */
 
-import { showsProjectAgentsRail } from "./project-agents-rail-shape";
+import { showsProjectAgentsRail, projectAgentsSpaceIsActive } from "./project-agents-rail-shape";
 import { planAgentCountShape } from "./agent-count-shape";
 
 let passed = 0;
@@ -41,6 +41,36 @@ for (let n = -1; n <= 20; n++) {
     `showsProjectAgentsRail(${n}) agrees with planAgentCountShape(${n}) === "fleet"`,
   );
 }
+
+// projectAgentsSpaceIsActive is what PrimaryRail (rail-morph) and
+// ProjectDetailPage (tab-strip-hide) both call — the assertion that matters
+// here is not "hidden when agents>=2" in isolation, it's that the two
+// surfaces can never disagree because they share one function.
+
+// Off the Agents route at all: never active, regardless of count — this is
+// what keeps Tasks/Documents untouched at every agent count.
+for (let n = -1; n <= 20; n++) {
+  assert(
+    projectAgentsSpaceIsActive(false, n) === false,
+    `projectAgentsSpaceIsActive(false, ${n}) is always false off the Agents route`,
+  );
+}
+
+// On the Agents route: the composition claim, proven rather than assumed —
+// for every count in a realistic domain, being "active" must agree exactly
+// with showsProjectAgentsRail, which is itself proven above to agree with
+// "the underlying mode is fleet". If this ever drifts, the rail and the tab
+// strip have started reading two different rules.
+for (let n = -1; n <= 20; n++) {
+  assert(
+    projectAgentsSpaceIsActive(true, n) === showsProjectAgentsRail(n),
+    `projectAgentsSpaceIsActive(true, ${n}) agrees with showsProjectAgentsRail(${n})`,
+  );
+}
+
+assert(projectAgentsSpaceIsActive(true, 0) === false, "0 agents on the Agents route -> not active (empty state, tab strip stays)");
+assert(projectAgentsSpaceIsActive(true, 1) === false, "1 agent on the Agents route -> not active (solo redirect, tab strip stays)");
+assert(projectAgentsSpaceIsActive(true, 2) === true, "2 agents on the Agents route -> active (rail morphs, tab strip hides)");
 
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) {

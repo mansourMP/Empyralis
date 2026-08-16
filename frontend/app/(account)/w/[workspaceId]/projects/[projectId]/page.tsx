@@ -36,6 +36,7 @@ import { breadcrumbCount, formatDate, formatNumber } from "@/lib/workspace/fleet
 import { ProjectIcon } from "@/lib/workspace/fleet/fleet-project-identity";
 import { UsageStat, bucketSeries, type UsageBucket } from "@/lib/workspace/fleet/fleet-sparkline";
 import { planAgentCountShape } from "@/lib/workspace/fleet/agent-count-shape";
+import { projectAgentsSpaceIsActive } from "@/lib/workspace/fleet/project-agents-rail-shape";
 import { FleetToolbar } from "@/lib/workspace/fleet/FleetToolbar";
 import { TaskViewOptions } from "@/lib/workspace/fleet/TaskViewOptions";
 import {
@@ -422,6 +423,14 @@ export default function ProjectDetailPage() {
   // pane just prompts a selection.
   const agentCountMode = useMemo(() => planAgentCountShape(inProject.length), [inProject.length]);
   const soloAgent = agentCountMode === "solo" ? inProject[0] : null;
+  // The SAME predicate PrimaryRail.tsx calls to decide whether it morphs
+  // into the project-agents space — never a second rule that could drift
+  // from it. When it's active the rail is already showing "‹ Back /
+  // {project} / agent rows", so this page's own Tasks·Documents·Agents tab
+  // strip is a second surface claiming to be "where you pick" at the same
+  // moment; hidden below, content-toolbar's other controls (people, panel
+  // toggle) are unaffected — they aren't pick-lists.
+  const projectAgentsRailActive = projectAgentsSpaceIsActive(view === "agents", inProject.length);
   useEffect(() => {
     if (view === "agents" && !loading && soloAgent) {
       router.replace(agentHref(soloAgent.agent_id));
@@ -601,21 +610,35 @@ export default function ProjectDetailPage() {
         {/* Exactly Tasks · Documents · Agents — the set lives in
             project-views.ts, whose header records why People is not here
             (the avatar stack + "+" in this same row ARE the people
-            surface; its route stays live, unlinked). */}
-        <div className="fleet-segmented" role="tablist" aria-label="Project view">
-          {PROJECT_TAB_VIEWS.map((v) => (
-            <Link
-              key={v}
-              href={viewHref(v)}
-              replace
-              role="tab"
-              aria-selected={view === v}
-              className={`fleet-segmented-btn${view === v ? " fleet-segmented-btn--active" : ""}`}
-            >
-              {PROJECT_TAB_LABEL[v]}
-            </Link>
-          ))}
-        </div>
+            surface; its route stays live, unlinked).
+
+            HIDDEN when the rail has morphed into the project-agents space
+            (2+ agents, on the Agents route — projectAgentsSpaceIsActive
+            above). At that moment the rail's own "‹ Back / {project} /
+            agent rows" IS the picker; rendering this strip too — with
+            "Agents" highlighted, above an empty "Select an agent" pane —
+            was two navigation surfaces both claiming that job at once
+            (CLAUDE.md, "the rail is where you pick; the content is what
+            you picked"). Reaching Tasks/Documents from inside the space is
+            the rail's own Back row, exactly like Settings' space already
+            works. At 0 or 1 agents the rail never morphs, so this stays
+            visible there, unchanged. */}
+        {!projectAgentsRailActive ? (
+          <div className="fleet-segmented" role="tablist" aria-label="Project view">
+            {PROJECT_TAB_VIEWS.map((v) => (
+              <Link
+                key={v}
+                href={viewHref(v)}
+                replace
+                role="tab"
+                aria-selected={view === v}
+                className={`fleet-segmented-btn${view === v ? " fleet-segmented-btn--active" : ""}`}
+              >
+                {PROJECT_TAB_LABEL[v]}
+              </Link>
+            ))}
+          </div>
+        ) : null}
         {/* Trails the view/layout switches, LEFT of centre — the people on a
             project read as context for the view you are choosing, so they sit
             with those controls rather than out at the edge (founder's call

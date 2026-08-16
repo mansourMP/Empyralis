@@ -31,7 +31,7 @@ import { myWorkBadgeCount } from "./my-work";
 import { useOwnAccountId } from "./members-data";
 import { visibleRailItems } from "./primary-rail-nav";
 import { projectAgentsSpaceLinks, railSpaceFromPathname, settingsSpaceLinks, spaceBackHref, type RailSpaceLink } from "./primary-rail-space";
-import { showsProjectAgentsRail } from "./project-agents-rail-shape";
+import { projectAgentsSpaceIsActive } from "./project-agents-rail-shape";
 import { activeProjectIdFromPathname } from "./primary-rail-project-mode";
 import { AgentSigil, StatusDot } from "./fleet-indicators";
 import { rememberLastViewedAgent } from "./AgentsList";
@@ -324,13 +324,14 @@ export function PrimaryRail({
         : [],
     [space, allAgents],
   );
-  // Whether the agents space actually morphs the rail is the SAME count
-  // rule as everywhere else (0 → the page's own empty state, 1 → the solo
-  // redirect, 2+ → the list), composed via project-agents-rail-shape.ts —
-  // never a second rule. Below the gate the rail simply stays flat.
+  // Whether the agents space actually morphs the rail is the SAME predicate
+  // ProjectDetailPage calls to decide whether to hide its own Tasks/
+  // Documents/Agents tab strip (project-agents-rail-shape.ts's
+  // projectAgentsSpaceIsActive) — never a second rule, and never two rules
+  // that happen to agree today. Below the gate the rail simply stays flat.
   const effectiveSpace =
     space?.kind === "project-agents"
-      ? showsProjectAgentsRail(spaceProjectAgents.length)
+      ? projectAgentsSpaceIsActive(true, spaceProjectAgents.length)
         ? space
         : null
       : space;

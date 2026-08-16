@@ -30,3 +30,29 @@ import { planAgentCountShape } from "./agent-count-shape";
 export function showsProjectAgentsRail(projectAgentCount: number): boolean {
   return planAgentCountShape(projectAgentCount) === "fleet";
 }
+
+/**
+ * Whether the project-agents rail SPACE is actually active right now — the
+ * one fact two different surfaces both need and must never compute
+ * independently:
+ *
+ *   - PrimaryRail.tsx: whether to morph into the project-agents pick-list
+ *     instead of staying the flat rail.
+ *   - The project's own content view (ProjectDetailPage): whether to hide
+ *     its Tasks/Documents/Agents tab strip, because rendering that strip
+ *     while the rail is ALSO showing a pick-list is two navigation surfaces
+ *     both claiming to be "where you pick an agent" at once — the exact
+ *     violation "the rail is where you pick" (2026-08-16) exists to
+ *     prevent.
+ *
+ * `onAgentsRoute` is each caller's own route read — PrimaryRail's
+ * `railSpaceFromPathname` regex match, the project page's own
+ * `view === "agents"` — this module deliberately knows nothing about
+ * pathnames or React, same reason showsProjectAgentsRail doesn't either.
+ * The count gate is composed from showsProjectAgentsRail, never
+ * re-derived, so both callers are one call away from disagreeing only if
+ * their OWN route read disagrees — not if the count rule ever changes.
+ */
+export function projectAgentsSpaceIsActive(onAgentsRoute: boolean, projectAgentCount: number): boolean {
+  return onAgentsRoute && showsProjectAgentsRail(projectAgentCount);
+}

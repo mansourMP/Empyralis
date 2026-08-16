@@ -192,8 +192,24 @@ assert(
   "PrimaryRail renders the project-agents pick-list from projectAgentsSpaceLinks",
 );
 assert(
-  /showsProjectAgentsRail\s*\(/.test(railSource),
-  "the agents space is gated by the SAME count rule as ever (project-agents-rail-shape.ts), never a second one",
+  /projectAgentsSpaceIsActive\s*\(/.test(railSource),
+  "the agents space is gated by the SAME predicate ProjectDetailPage hides its tab strip with (project-agents-rail-shape.ts's projectAgentsSpaceIsActive), never a second one",
+);
+
+// And the content-area half of that same predicate: ProjectDetailPage must
+// call the identical function to decide its own tab strip, not a hand-rolled
+// re-check of the count — this is the drift guard for the bug this fixed
+// (rail morphed into the agents space while the content area's own
+// Tasks/Documents/Agents strip rendered on top of it, both claiming to be
+// the picker at once).
+const projectPageSource = readFileSync(
+  new URL("../../../app/(account)/w/[workspaceId]/projects/[projectId]/page.tsx", import.meta.url),
+  "utf8",
+);
+assert(
+  projectPageSource.includes('from "@/lib/workspace/fleet/project-agents-rail-shape"') &&
+    /projectAgentsSpaceIsActive\s*\(/.test(projectPageSource),
+  "ProjectDetailPage hides its tab strip via the same projectAgentsSpaceIsActive, not a second check",
 );
 
 // And the in-content sidebar is actually GONE: SettingsShell must not render
