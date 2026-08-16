@@ -21,20 +21,8 @@ import { DEFAULT_SETTINGS_SECTION, SETTINGS_SECTIONS, isSettingsSection, type Se
  * What that decision rejected was the rail changing when you merely OPEN a
  * project (the page's own Tasks/Documents/Agents tabs are the page's job).
  * What tonight's decision adds is: when a surface's whole content used to BE
- * a second nav column — Settings' in-content section sidebar, the project
- * Agents section's in-content agent list — that column belongs in the rail,
- * because it is a picker.
- *
- * Two spaces exist:
- *   settings         /w/{id}/settings and beneath. Back → where the person
- *                    came from (workspace root as fallback).
- *   project-agents   /w/{id}/projects/{pid}/agents and beneath. Back → the
- *                    project. Whether the rail actually morphs there is
- *                    ADDITIONALLY gated by the agent count, through
- *                    project-agents-rail-shape.ts's showsProjectAgentsRail —
- *                    the same 0/1/2+ rule as always, never a second one.
- *                    This module only answers "is this pathname that space";
- *                    the caller composes the count gate.
+ * a second nav column (Settings' in-content section sidebar), that column
+ * belongs in the rail, because it is a picker.
  *
  * Pure and dependency-light (no React, no next/navigation) for the same
  * reason primary-rail-nav.ts and project-agents-rail-shape.ts are: a plain
@@ -42,21 +30,13 @@ import { DEFAULT_SETTINGS_SECTION, SETTINGS_SECTIONS, isSettingsSection, type Se
  * (primary-rail-space.test.ts), instead of re-typing it.
  */
 
-export type RailSpace =
-  | {
-      kind: "settings";
-      workspaceId: string;
-      /** The section the URL names, or null when it names none (the bare
-       *  /settings redirect moment) or names one that does not exist. */
-      activeSection: SettingsSection | null;
-    }
-  | {
-      kind: "project-agents";
-      workspaceId: string;
-      projectId: string;
-      /** The agent whose page is open, or null at the bare /agents index. */
-      activeAgentId: string | null;
-    };
+export type RailSpace = {
+  kind: "settings";
+  workspaceId: string;
+  /** The section the URL names, or null when it names none (the bare
+   *  /settings redirect moment) or names one that does not exist. */
+  activeSection: SettingsSection | null;
+};
 
 /** One row of a space's pick-list. Every row is a REAL link — cmd-click and
  *  middle-click must work — and exactly one is active at a time, marked the
@@ -75,11 +55,6 @@ export type RailSpaceLink = {
 // characters round-trips instead of double-encoding.
 const SETTINGS_SPACE_RE = /^\/w\/([^/]+)\/settings(?:\/([^/]+))?(?:\/|$)/;
 
-// Matches /w/{ws}/projects/{pid}/agents, and the agent pages beneath it —
-// the same "…/agents/{agentId}/…" id read ProjectDetailPage's own solo
-// redirect builds hrefs for.
-const PROJECT_AGENTS_SPACE_RE = /^\/w\/([^/]+)\/projects\/([^/]+)\/agents(?:\/([^/]+))?(?:\/|$)/;
-
 /** Which space — if any — the current pathname is inside. Null means the
  *  rail keeps its default flat shape. */
 export function railSpaceFromPathname(pathname: string): RailSpace | null {
@@ -90,15 +65,6 @@ export function railSpaceFromPathname(pathname: string): RailSpace | null {
       kind: "settings",
       workspaceId: decodeURIComponent(settings[1]),
       activeSection: rawSection && isSettingsSection(rawSection) ? rawSection : null,
-    };
-  }
-  const projectAgents = pathname.match(PROJECT_AGENTS_SPACE_RE);
-  if (projectAgents) {
-    return {
-      kind: "project-agents",
-      workspaceId: decodeURIComponent(projectAgents[1]),
-      projectId: decodeURIComponent(projectAgents[2]),
-      activeAgentId: projectAgents[3] ? decodeURIComponent(projectAgents[3]) : null,
     };
   }
   return null;
@@ -131,7 +97,7 @@ const SETTINGS_SECTION_ICON: Record<SettingsSection, LucideIcon> = {
  *  A bare-/settings moment (activeSection null) marks the DEFAULT section
  *  active, because that is where the redirect is about to land; anything
  *  else would flash a list with no current row. */
-export function settingsSpaceLinks(space: Extract<RailSpace, { kind: "settings" }>): RailSpaceLink[] {
+export function settingsSpaceLinks(space: RailSpace): RailSpaceLink[] {
   const base = `${workspaceRoot(space.workspaceId)}/settings`;
   const active = space.activeSection ?? DEFAULT_SETTINGS_SECTION;
   return SETTINGS_SECTIONS.map((id) => ({
@@ -143,45 +109,19 @@ export function settingsSpaceLinks(space: Extract<RailSpace, { kind: "settings" 
   }));
 }
 
-/** The project-agents space's pick-list — one row per agent of THIS project,
- *  in the caller's given order, each linking straight into that agent's
- *  chat (the same href ProjectDetailPage's own solo redirect uses). Rows
- *  carry no icon here: the component renders each agent's own sigil and
- *  status, which a LucideIcon field cannot express. */
-export function projectAgentsSpaceLinks(
-  space: Extract<RailSpace, { kind: "project-agents" }>,
-  agents: readonly { agent_id: string; label?: string | null }[],
-): RailSpaceLink[] {
-  const base = `${workspaceRoot(space.workspaceId)}/projects/${encodeURIComponent(space.projectId)}/agents`;
-  return agents.map((agent) => ({
-    key: agent.agent_id,
-    label: agent.label || "Unnamed agent",
-    href: `${base}/${encodeURIComponent(agent.agent_id)}/chat`,
-    active: agent.agent_id === space.activeAgentId,
-  }));
-}
-
 /**
  * Where the "‹ Back" row points. It is a real link, so this must resolve to
  * a concrete href at render time — never a router.back() that could walk
  * into another workspace or out of the app entirely.
  *
- * settings — `cameFrom` is the last pathname the rail saw OUTSIDE any space
- * (tracked by PrimaryRail across its own persistent life). It is honoured
- * only when it belongs to this same workspace and is not itself inside a
- * space; anything else — a direct load, a bookmark, a stale path from
- * another workspace — falls back to the workspace root.
- *
- * project-agents — always the project itself, never `cameFrom`: an agent
- * belongs to its project, so leaving its space lands on the project that
- * owns it (founder's own back list — "inbox / my work / projects" — is one
- * more hop from there, in the flat rail this returns to).
+ * `cameFrom` is the last pathname the rail saw OUTSIDE any space (tracked by
+ * PrimaryRail across its own persistent life). It is honoured only when it
+ * belongs to this same workspace and is not itself inside a space; anything
+ * else — a direct load, a bookmark, a stale path from another workspace —
+ * falls back to the workspace root.
  */
 export function spaceBackHref(space: RailSpace, cameFrom: string | null | undefined): string {
   const root = workspaceRoot(space.workspaceId);
-  if (space.kind === "project-agents") {
-    return `${root}/projects/${encodeURIComponent(space.projectId)}`;
-  }
   if (
     cameFrom &&
     (cameFrom === root || cameFrom.startsWith(`${root}/`)) &&
