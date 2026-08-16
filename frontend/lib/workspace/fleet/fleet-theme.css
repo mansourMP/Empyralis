@@ -3995,6 +3995,60 @@ a.fleet-breadcrumb:hover {
    tab list). Below the tab bar sits the tab content, full width, with the
    Properties panel floating over it as a closed-by-default overlay (see
    .fleet-detail-columns below). ───────────────────────────────────────── */
+
+/* ── Chat's own minimal header (2026-08-16) — Telegram's shape: back, who
+   you're talking to, one overflow control. Replaces .fleet-detail-tabbar
+   (below) ONLY on the Chat tab; Work and the Configure sheet keep that bar
+   unchanged. Same flex-shrink:0/non-scrolling contract as .fleet-detail-
+   tabbar, so it never scrolls away with the transcript beneath it. The
+   global breadcrumb topbar is suppressed for this one route in
+   FleetContentFrame.tsx, so this is the page's only header, not a second
+   one stacked under an emptied-out first. */
+.fleet-chat-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-card);
+}
+.fleet-chat-header-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--rail-active);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+.fleet-chat-header-identity {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1px;
+}
+.fleet-chat-header-name {
+  font-size: 14px;
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fleet-chat-header-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.fleet-chat-header-menu {
+  margin-left: auto;
+}
+
 .fleet-detail-tabbar {
   display: flex;
   align-items: center;

@@ -19,6 +19,7 @@ import {
   Loader2,
   Lock,
   MessageSquare,
+  MoreHorizontal,
   PanelRightClose,
   PanelRightOpen,
   Pencil,
@@ -72,7 +73,7 @@ import {
   type FleetScheduleItem,
 } from "./fleet-data";
 import { timeAgo, formatDateTime, formatNumber, usagePayerLabel, type AgentStatusTone, type UsageMatrixRow } from "./fleet-presentation";
-import { StatusChip, StatusDot } from "./fleet-indicators";
+import { AgentSigil, StatusChip, StatusDot } from "./fleet-indicators";
 import { PanelSection, PanelRow, FleetRightPanel, type PanelValueTone } from "./FleetRightPanel";
 import type { SageConversation } from "./SageConsolePanels";
 import type { UsageBucket } from "./fleet-sparkline";
@@ -265,6 +266,132 @@ function CostPeriodToggle({ period, onChange }: { period: CostPeriod; onChange: 
   );
 }
 
+// ── Agent chat header — the ONE minimal bar Chat renders instead of the
+// breadcrumb + Chat|Work tabs + Configure button that used to sit above it
+// all at once (founder: "main content page must be empty and just super
+// clean... I don't want it to be developer tool"). Telegram's own shape:
+// back, who you're talking to, one overflow control — never zero
+// wayfinding. Back is a real <Link> to the same destination the old
+// breadcrumb's parent crumb pointed at (the project), never router.back().
+// Sigil + StatusDot are the same pair AgentsList/ProjectAgentsRail already
+// use for "who is this and is it up" — no new avatar system invented here.
+// Work and Configure (what the removed tab strip's own Chat|Work tabs and
+// "Configure" button used to reach directly) plus Sessions (the removed
+// strip's own properties/sessions toggle) all move into the single "⋯"
+// menu — nothing deleted, just no longer permanent header real estate.
+// Reuses DocumentDetailView's own "⋯" menu shell (.fleet-list-row-menu-wrap/
+// .fleet-list-row-menu/-item, defined once in fleet-theme.css) rather than
+// inventing a fourth dropdown implementation.
+function AgentChatHeader({
+  agentId,
+  agentLabel,
+  statusTone,
+  statusLabel,
+  backHref,
+  backLabel,
+  workHref,
+  configureHref,
+  onOpenSessions,
+}: {
+  agentId: string;
+  agentLabel: string;
+  statusTone: AgentStatusTone;
+  statusLabel: string;
+  backHref: string;
+  backLabel: string;
+  workHref: string;
+  configureHref: string;
+  onOpenSessions: () => void;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (menuRef.current?.contains(e.target as Node)) return;
+      setMenuOpen(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        // Stopped so the page's own Escape handler (browser back) doesn't
+        // also fire on the same keypress that just closed this menu.
+        e.stopPropagation();
+        setMenuOpen(false);
+      }
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, [menuOpen]);
+
+  return (
+    <div className="fleet-chat-header">
+      <Link href={backHref} className="fleet-icon-btn fleet-chat-header-back" aria-label={`Back to ${backLabel}`}>
+        <ArrowLeft size={16} strokeWidth={1.75} />
+      </Link>
+      <span className="fleet-chat-header-avatar">
+        <AgentSigil seed={agentId} size={26} />
+      </span>
+      <span className="fleet-chat-header-identity">
+        <span className="fleet-chat-header-name">{agentLabel}</span>
+        <span className="fleet-chat-header-status">
+          <StatusDot tone={statusTone} size={6} />
+          {statusLabel}
+        </span>
+      </span>
+      <div className="fleet-list-row-menu-wrap fleet-chat-header-menu" ref={menuRef}>
+        <button
+          type="button"
+          className="fleet-icon-btn"
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          aria-label="More"
+          onClick={() => setMenuOpen((v) => !v)}
+        >
+          <MoreHorizontal size={16} strokeWidth={1.75} />
+        </button>
+        {menuOpen ? (
+          <div className="fleet-list-row-menu" role="menu">
+            <Link
+              href={workHref}
+              replace
+              role="menuitem"
+              className="fleet-list-row-menu-item"
+              onClick={() => setMenuOpen(false)}
+            >
+              Work
+            </Link>
+            <button
+              type="button"
+              role="menuitem"
+              className="fleet-list-row-menu-item"
+              onClick={() => {
+                setMenuOpen(false);
+                onOpenSessions();
+              }}
+            >
+              Sessions
+            </button>
+            <Link
+              href={configureHref}
+              replace
+              role="menuitem"
+              className="fleet-list-row-menu-item"
+              onClick={() => setMenuOpen(false)}
+            >
+              Configure
+            </Link>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 // ── Properties panel's cost breakdown — one row per TIER, not per raw row ──
 //
 // `costMatrix` is raw backend granularity: usage_events_repository.
@@ -368,6 +495,7 @@ export function FleetAgentDetail({
   workspaceId,
   agentId,
   agent,
+  projectId,
   projectName,
   onChat,
   initialTab,
@@ -377,6 +505,11 @@ export function FleetAgentDetail({
   workspaceId: string;
   agentId: string;
   agent: FleetAgent | null;
+  /** The URL's own projectId segment — available on first paint,
+   *  independent of the agents fetch. Used to build the chat header's back
+   *  link (AgentChatHeader below), same "resolved from the route, never
+   *  from a still-loading fetch" contract projectName already follows. */
+  projectId: string;
   /** Resolved project display name — passed by the routed page (from the URL's
    *  projectId, so it's available on first paint independent of the agents
    *  fetch). undefined = still resolving (shows a loading placeholder); pass
@@ -889,87 +1022,110 @@ export function FleetAgentDetail({
       <Suspense fallback={null}>
         <ChatThreadSearchParamBridge onChange={onThreadParamChange} />
       </Suspense>
-      {/* Tabs live at the TOP, under the breadcrumb — one navigation only.
-          Sessions opens as a floating overlay (FleetRightPanel) via the
-          toggle below — the SAME pattern the project/agents LIST pages use
-          for their own Properties toggle (FleetToolbar's panelOpen), not a
-          second implementation. This used to be a permanent collapsible
-          RIGHT RAIL, a real flex sibling that reserved width whenever
-          expanded — the founder's direction was explicit that the panel
-          "must not be something that is merged on the user interface, it
-          just should be something that appears just as a node", matching
-          the reference already shipped on the project detail page. */}
-      <div className="fleet-detail-tabbar">
-        {/* Wrap is the non-scrolling fade anchor — .fleet-detail-toptabs
-            itself is the horizontal scroller (overflow-x:auto). The old
-            fade lived on .fleet-detail-tabbar::after (the WHOLE bar,
-            properties-toggle icon included), so on a real 375px phone it
-            sat on top of that icon button instead of the actual cut-off
-            edge of Hardware/Memory — the tester saw no fade at all where
-            the tabs cut off, which read as "no scroll affordance". Anchoring
-            it to this wrap instead puts it exactly at the scroller's own
-            right edge, before the toggle button starts. */}
-        <div className="fleet-detail-toptabs-wrap">
-          <nav className="fleet-detail-toptabs" aria-label="Agent sections">
-            {/* The two you actually watch day to day — TOP_TAB_IDS. Real
-                <Link>s (not onClick buttons) with `replace` so cmd-click/
-                middle-click open a new tab while ordinary clicks keep the
-                existing no-history-entry-per-tab behavior (router.replace,
-                same as onTabChange always did). */}
-            {TABS.filter((tab) => TOP_TAB_IDS.has(tab.id)).map((tab) => {
-              const Icon = tab.icon;
-              const isActive = activeTab === tab.id;
-              return (
-                <Link
-                  key={tab.id}
-                  href={tabHref(tab.id)}
-                  replace
-                  ref={isActive ? activeTabRef : undefined}
-                  className={`fleet-detail-toptab${isActive ? " is-active" : ""}`}
-                  aria-current={isActive ? "page" : undefined}
-                >
-                  <Icon size={15} strokeWidth={1.75} />
-                  <span>{tab.label}</span>
-                </Link>
-              );
-            })}
-          </nav>
+      {/* Chat gets ONE minimal Telegram-style bar (AgentChatHeader below) —
+          not this tab strip, not the breadcrumb topbar above it (suppressed
+          for this exact route by FleetContentFrame). Founder: "main content
+          page must be empty and just super clean... I don't want it to be
+          developer tool" — naming the breadcrumb, the Chat|Work tabs, and a
+          separate Configure button as the three things visible at once
+          above an otherwise-empty chat. Work (and the nine Configure
+          sections reached from it) keep this tab strip exactly as it was;
+          nothing here changed for them. */}
+      {activeTab === "chat" ? (
+        <AgentChatHeader
+          agentId={agentId}
+          agentLabel={agent?.label || "Unnamed agent"}
+          statusTone={status.tone}
+          statusLabel={status.label}
+          backHref={`/w/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(projectId)}`}
+          backLabel={projectName || "Project"}
+          workHref={tabHref("work")}
+          configureHref={tabHref(sheetOpen ? activeTab : CONFIGURE_GROUPS[0].tabs[0])}
+          onOpenSessions={() => setPropertiesOpen(true)}
+        />
+      ) : (
+        // Tabs live at the TOP, under the breadcrumb — one navigation only.
+        // Sessions opens as a floating overlay (FleetRightPanel) via the
+        // toggle below — the SAME pattern the project/agents LIST pages use
+        // for their own Properties toggle (FleetToolbar's panelOpen), not a
+        // second implementation. This used to be a permanent collapsible
+        // RIGHT RAIL, a real flex sibling that reserved width whenever
+        // expanded — the founder's direction was explicit that the panel
+        // "must not be something that is merged on the user interface, it
+        // just should be something that appears just as a node", matching
+        // the reference already shipped on the project detail page.
+        <div className="fleet-detail-tabbar">
+          {/* Wrap is the non-scrolling fade anchor — .fleet-detail-toptabs
+              itself is the horizontal scroller (overflow-x:auto). The old
+              fade lived on .fleet-detail-tabbar::after (the WHOLE bar,
+              properties-toggle icon included), so on a real 375px phone it
+              sat on top of that icon button instead of the actual cut-off
+              edge of Hardware/Memory — the tester saw no fade at all where
+              the tabs cut off, which read as "no scroll affordance". Anchoring
+              it to this wrap instead puts it exactly at the scroller's own
+              right edge, before the toggle button starts. */}
+          <div className="fleet-detail-toptabs-wrap">
+            <nav className="fleet-detail-toptabs" aria-label="Agent sections">
+              {/* The two you actually watch day to day — TOP_TAB_IDS. Real
+                  <Link>s (not onClick buttons) with `replace` so cmd-click/
+                  middle-click open a new tab while ordinary clicks keep the
+                  existing no-history-entry-per-tab behavior (router.replace,
+                  same as onTabChange always did). */}
+              {TABS.filter((tab) => TOP_TAB_IDS.has(tab.id)).map((tab) => {
+                const Icon = tab.icon;
+                const isActive = activeTab === tab.id;
+                return (
+                  <Link
+                    key={tab.id}
+                    href={tabHref(tab.id)}
+                    replace
+                    ref={isActive ? activeTabRef : undefined}
+                    className={`fleet-detail-toptab${isActive ? " is-active" : ""}`}
+                    aria-current={isActive ? "page" : undefined}
+                  >
+                    <Icon size={15} strokeWidth={1.75} />
+                    <span>{tab.label}</span>
+                  </Link>
+                );
+              })}
+            </nav>
+          </div>
+          {/* Opens the Configure sheet (below) on the other nine sections —
+              General, Model, Capabilities, Skills, Memory, Channels,
+              Connectors, Tools, Hardware — grouped Brain/Reach/Compute via
+              the same GroupedRail Settings uses. Real link: closed, it goes
+              to the first Brain item (General); already open, it points at
+              whatever section is active, so a second click/cmd-click is a
+              same-URL no-op rather than a jump back to General. */}
+          <Link
+            href={tabHref(sheetOpen ? activeTab : CONFIGURE_GROUPS[0].tabs[0])}
+            replace
+            className="fleet-btn agent-configure-trigger"
+            aria-haspopup="dialog"
+            aria-expanded={sheetOpen}
+          >
+            <Settings size={14} strokeWidth={1.75} />
+            <span className="fleet-btn-label">Configure</span>
+          </Link>
+          {/* Same is-active/aria-pressed idiom as FleetToolbar's own list-page
+              Properties toggle — a neutral filled state while open, never an
+              accent (this is a view toggle, not a primary action). Labelled
+              "Sessions" now, not "Properties" — Properties is still the top
+              region of what opens, but Sessions is the headline reason to
+              open it (Part 2: "instead of this right panel we must have
+              sessions"). */}
+          <button
+            type="button"
+            className={`fleet-icon-btn fleet-detail-properties-toggle${propertiesOpen ? " is-active" : ""}`}
+            onClick={() => setPropertiesOpen((v) => !v)}
+            aria-label="Sessions"
+            aria-pressed={propertiesOpen}
+            title="Sessions"
+          >
+            {propertiesOpen ? <PanelRightClose size={16} strokeWidth={1.75} /> : <PanelRightOpen size={16} strokeWidth={1.75} />}
+          </button>
         </div>
-        {/* Opens the Configure sheet (below) on the other nine sections —
-            General, Model, Capabilities, Skills, Memory, Channels,
-            Connectors, Tools, Hardware — grouped Brain/Reach/Compute via
-            the same GroupedRail Settings uses. Real link: closed, it goes
-            to the first Brain item (General); already open, it points at
-            whatever section is active, so a second click/cmd-click is a
-            same-URL no-op rather than a jump back to General. */}
-        <Link
-          href={tabHref(sheetOpen ? activeTab : CONFIGURE_GROUPS[0].tabs[0])}
-          replace
-          className="fleet-btn agent-configure-trigger"
-          aria-haspopup="dialog"
-          aria-expanded={sheetOpen}
-        >
-          <Settings size={14} strokeWidth={1.75} />
-          <span className="fleet-btn-label">Configure</span>
-        </Link>
-        {/* Same is-active/aria-pressed idiom as FleetToolbar's own list-page
-            Properties toggle — a neutral filled state while open, never an
-            accent (this is a view toggle, not a primary action). Labelled
-            "Sessions" now, not "Properties" — Properties is still the top
-            region of what opens, but Sessions is the headline reason to
-            open it (Part 2: "instead of this right panel we must have
-            sessions"). */}
-        <button
-          type="button"
-          className={`fleet-icon-btn fleet-detail-properties-toggle${propertiesOpen ? " is-active" : ""}`}
-          onClick={() => setPropertiesOpen((v) => !v)}
-          aria-label="Sessions"
-          aria-pressed={propertiesOpen}
-          title="Sessions"
-        >
-          {propertiesOpen ? <PanelRightClose size={16} strokeWidth={1.75} /> : <PanelRightOpen size={16} strokeWidth={1.75} />}
-        </button>
-      </div>
+      )}
 
       {/* The relative anchor the Sessions overlay below floats against —
           .fleet-detail-body is this container's only normal-flow child and

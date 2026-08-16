@@ -68,6 +68,7 @@ export default function AgentDetailPage() {
       workspaceId={workspaceId}
       agentId={agentId}
       agent={agent}
+      projectId={projectId}
       projectName={projectName}
       initialTab={tab}
       onTabChange={(t) => router.replace(`${agentBase}/${t}`)}

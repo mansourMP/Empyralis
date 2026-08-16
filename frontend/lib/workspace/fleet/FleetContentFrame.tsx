@@ -1,9 +1,24 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
+import { usePathname } from "next/navigation";
 import { Menu } from "lucide-react";
 
 import { BreadcrumbLabelProvider, Breadcrumbs, HeaderActionSlotProvider } from "./Breadcrumbs";
+
+// An agent's Chat tab renders its own single minimal header (AgentChatHeader
+// in FleetAgentDetail.tsx: back + sigil + name + status dot + one "⋯" menu)
+// — this shell's own breadcrumb topbar (chain text, mobile hamburger, the
+// action-slot) would otherwise stack a SECOND header directly above an
+// otherwise-empty chat, which is exactly the clutter the founder named:
+// "a breadcrumb..., a Chat | Work tab strip, and a separate Configure
+// button, all visible at once above an otherwise-empty chat." Scoped to
+// this ONE route via a plain pathname match — every other tab (Work, and
+// the nine Configure sections) keeps the ordinary breadcrumb chrome
+// unchanged, and no HeaderAction ever portals into the action slot on Chat
+// today (only Work's Stop/Resume+Chat controls do), so nothing here loses a
+// destination.
+const AGENT_CHAT_ROUTE = /^\/w\/[^/]+\/projects\/[^/]+\/agents\/[^/]+\/chat$/;
 
 /**
  * The content frame for every route that lives directly inside the fleet shell
@@ -46,24 +61,28 @@ export function FleetContentFrame({
   children: ReactNode;
 }) {
   const [actionSlot, setActionSlot] = useState<HTMLDivElement | null>(null);
+  const pathname = usePathname() || "";
+  const hideTopbarChrome = AGENT_CHAT_ROUTE.test(pathname);
 
   return (
     <BreadcrumbLabelProvider>
       <HeaderActionSlotProvider slotEl={actionSlot}>
         <div className="fleet-shell-panel">
           <div className="fleet-shell-main">
-            <header className="fleet-shell-topbar">
-              <button
-                type="button"
-                className="fleet-topbar-menu-btn"
-                onClick={() => window.dispatchEvent(new Event("fleet:toggle-mobile-nav"))}
-                aria-label="Open menu"
-              >
-                <Menu size={18} strokeWidth={1.75} />
-              </button>
-              <Breadcrumbs workspaceId={workspaceId} />
-              <div className="fleet-topbar-action" ref={setActionSlot} />
-            </header>
+            {!hideTopbarChrome && (
+              <header className="fleet-shell-topbar">
+                <button
+                  type="button"
+                  className="fleet-topbar-menu-btn"
+                  onClick={() => window.dispatchEvent(new Event("fleet:toggle-mobile-nav"))}
+                  aria-label="Open menu"
+                >
+                  <Menu size={18} strokeWidth={1.75} />
+                </button>
+                <Breadcrumbs workspaceId={workspaceId} />
+                <div className="fleet-topbar-action" ref={setActionSlot} />
+              </header>
+            )}
             <div className="fleet-shell-scroll">{children}</div>
           </div>
         </div>
