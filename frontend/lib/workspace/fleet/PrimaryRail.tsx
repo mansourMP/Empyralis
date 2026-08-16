@@ -30,8 +30,11 @@ import { planAgentCountShape } from "./agent-count-shape";
 import { myWorkBadgeCount } from "./my-work";
 import { useOwnAccountId } from "./members-data";
 import { visibleRailItems } from "./primary-rail-nav";
-import { railSpaceFromPathname, settingsSpaceLinks, spaceBackHref, type RailSpaceLink } from "./primary-rail-space";
+import { projectAgentsSpaceLinks, railSpaceFromPathname, settingsSpaceLinks, spaceBackHref, type RailSpaceLink } from "./primary-rail-space";
+import { showsProjectAgentsRail } from "./project-agents-rail-shape";
 import { activeProjectIdFromPathname } from "./primary-rail-project-mode";
+import { AgentSigil, StatusDot } from "./fleet-indicators";
+import { rememberLastViewedAgent } from "./AgentsList";
 import { SageLauncher } from "./SageLauncher";
 import { CreditBalanceChip } from "./CreditBalanceChip";
 import { SystemHealthButton } from "./SystemHealthButton";
@@ -100,9 +103,9 @@ const money = (n: number) => (n === 0 ? "—" : `$${n.toFixed(4)}`);
  * across every project's agents, which is exactly the boundary "an agent
  * belongs to its project and works only there" says a nav surface must not
  * reach past. Agents are entities that live INSIDE the project that owns
- * them, reached by opening that project's own Agents tab — see
- * project-agents-rail-shape.ts and ProjectAgentsRail.tsx for the compact
- * list that replaces the old flat, workspace-wide Agents table there.
+ * them, reached by opening that project's own Agents tab — where, at 2+
+ * agents, this rail morphs into the project-agents space and lists them
+ * itself (primary-rail-space.ts, gated by project-agents-rail-shape.ts).
  *
  * COUNTS ARE NON-ZERO ONLY. Inbox and My work each show a number when they
  * have one and nothing when they don't — a zero badge is noise, and it is
@@ -308,11 +311,36 @@ export function PrimaryRail({
   // pick-list takes its place, with a "‹ Back" real-link row on top. See
   // primary-rail-space.ts for which pathnames are spaces and why.
   const space = useMemo(() => railSpaceFromPathname(pathname), [pathname]);
-  // Where Back returns to: the last pathname seen OUTSIDE any space. A ref,
-  // not state — it only ever changes alongside a pathname change, which
-  // re-renders this component anyway. Never valid across workspaces or from
-  // inside a space (spaceBackHref enforces both); a direct load into a space
-  // leaves it null and Back falls back to the workspace root.
+  // The project-agents space lists THIS project's agents, out of the same
+  // useFleetAgents fetch this component already holds — no second fetch.
+  // And because the rail itself persists across every navigation, switching
+  // agents never remounts or re-fetches this list and never loses its
+  // scroll position — the job the old in-content agents/layout.tsx split
+  // used to do, now a property of the rail being the rail.
+  const spaceProjectAgents = useMemo(
+    () =>
+      space?.kind === "project-agents"
+        ? allAgents.filter((a) => (a.project_id || "").trim() === space.projectId)
+        : [],
+    [space, allAgents],
+  );
+  // Whether the agents space actually morphs the rail is the SAME count
+  // rule as everywhere else (0 → the page's own empty state, 1 → the solo
+  // redirect, 2+ → the list), composed via project-agents-rail-shape.ts —
+  // never a second rule. Below the gate the rail simply stays flat.
+  const effectiveSpace =
+    space?.kind === "project-agents"
+      ? showsProjectAgentsRail(spaceProjectAgents.length)
+        ? space
+        : null
+      : space;
+  // Where Settings' Back returns to: the last pathname seen OUTSIDE any
+  // space. A ref, not state — it only ever changes alongside a pathname
+  // change, which re-renders this component anyway. Never valid across
+  // workspaces or from inside a space (spaceBackHref enforces both); a
+  // direct load into a space leaves it null and Back falls back to the
+  // workspace root. The project-agents space ignores it by design — its
+  // Back is always the owning project.
   const lastOutsideSpaceRef = useRef<string | null>(null);
   useEffect(() => {
     if (railSpaceFromPathname(pathname) === null) {
@@ -320,11 +348,20 @@ export function PrimaryRail({
     }
   }, [pathname]);
   const spaceLinks: RailSpaceLink[] | null = useMemo(() => {
-    if (!space) return null;
-    return settingsSpaceLinks(space);
-  }, [space]);
-  const spaceBack = space ? spaceBackHref(space, lastOutsideSpaceRef.current) : null;
-  const spaceTitle = space ? "Settings" : null;
+    if (!effectiveSpace) return null;
+    if (effectiveSpace.kind === "settings") return settingsSpaceLinks(effectiveSpace);
+    return projectAgentsSpaceLinks(effectiveSpace, spaceProjectAgents);
+  }, [effectiveSpace, spaceProjectAgents]);
+  const spaceBack = effectiveSpace ? spaceBackHref(effectiveSpace, lastOutsideSpaceRef.current) : null;
+  const spaceProject =
+    effectiveSpace?.kind === "project-agents"
+      ? projects.find((p) => p.id === effectiveSpace.projectId)
+      : null;
+  const spaceTitle = effectiveSpace
+    ? effectiveSpace.kind === "settings"
+      ? "Settings"
+      : spaceProject?.name || "Agents"
+    : null;
 
   const railHrefFor = useCallback(
     (item: { segment: string }) => `/w/${encodeURIComponent(workspaceId)}/${item.segment}`,
@@ -441,7 +478,7 @@ export function PrimaryRail({
       // Inside a space the flat list is not on screen, so the j/k cursor has
       // nothing to move over. The g-chords above still fire — they navigate
       // out of the space, exactly like pressing Back and then a row.
-      if (space) return;
+      if (effectiveSpace) return;
       if (key === "j") {
         e.preventDefault();
         setFocusIdx((i) => Math.min(railItems.length - 1, i + 1));
@@ -456,7 +493,7 @@ export function PrimaryRail({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusIdx, router, workspaceId, railItems, railHrefFor, space]);
+  }, [focusIdx, router, workspaceId, railItems, railHrefFor, effectiveSpace]);
 
   // Same custom-event mechanism as fleet:open-sage (FleetShell.tsx) — no
   // prop-drilling a setter from FleetCommandPalette back down into the rail.
@@ -524,13 +561,14 @@ export function PrimaryRail({
       </div>
 
       {/* ── The rail's one branch: a space, or the flat list ──────────────
-          Inside a space (Settings today — primary-rail-space.ts) the rail IS
-          that space's pick-list: a "‹ Back" real-link row, the space's name,
-          then its destinations, active row marked exactly like the flat
-          rows. Everywhere else: Inbox · My work · Projects (with its flat
-          project sub-list) · "+ New project" — opening a project changes
-          the page, never the rail. */}
-      {space && spaceLinks && spaceBack ? (
+          Inside a space (Settings; a project's Agents section at 2+ agents
+          — primary-rail-space.ts) the rail IS that space's pick-list: a
+          "‹ Back" real-link row, the space's name, then its destinations,
+          active row marked exactly like the flat rows. Everywhere else:
+          Inbox · My work · Projects (with its flat project sub-list) ·
+          "+ New project" — merely opening a project changes the page,
+          never the rail. */}
+      {effectiveSpace && spaceLinks && spaceBack ? (
         <nav className="fleet-rail-nav" aria-label={spaceTitle ?? undefined}>
           <Link
             href={spaceBack}
@@ -548,6 +586,13 @@ export function PrimaryRail({
           )}
           {spaceLinks.map((link) => {
             const Icon = link.icon;
+            // An agent row carries the agent's own identity (sigil + live
+            // status dot) instead of a generic icon — the same rendering
+            // the old in-content list used, now living where picking lives.
+            const agent =
+              effectiveSpace.kind === "project-agents"
+                ? spaceProjectAgents.find((a) => a.agent_id === link.key)
+                : undefined;
             return (
               <Link
                 key={link.key}
@@ -556,13 +601,24 @@ export function PrimaryRail({
                 aria-label={link.label}
                 aria-current={link.active ? "page" : undefined}
                 className={`fleet-rail-item${link.active ? " fleet-rail-item--active" : ""}`}
+                onClick={agent ? () => rememberLastViewedAgent(agent.agent_id) : undefined}
               >
-                {Icon ? (
-                  <span className="fleet-rail-item-icon">
+                <span className="fleet-rail-item-icon">
+                  {agent ? (
+                    <AgentSigil seed={agent.agent_id} size={RAIL_ICON} />
+                  ) : Icon ? (
                     <Icon size={RAIL_ICON} strokeWidth={1.75} />
-                  </span>
-                ) : null}
+                  ) : null}
+                </span>
                 {!effectiveCollapsed && <span className="fleet-rail-item-label">{link.label}</span>}
+                {!effectiveCollapsed && agent && (
+                  <span className="fleet-rail-space-status">
+                    <StatusDot
+                      tone={deriveStatus(agent.hardware_status || "unknown", Boolean(agent.stopped?.active), Boolean(agent.current_run_id)).tone}
+                      size={7}
+                    />
+                  </span>
+                )}
               </Link>
             );
           })}
