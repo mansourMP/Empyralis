@@ -116,9 +116,17 @@ export function MembersSection({ workspaceId }: { workspaceId: string }) {
   return (
     <>
       <h2 className="fleet-detail-section-title" style={{ marginTop: "var(--space-6)" }}>Members</h2>
+      {/* MAN-335: the previous line promised "every project in it (there's no
+          separate per-project membership yet)". Per-project membership is
+          real and enforced — routes_fleet._visible_project_ids filters a
+          non-owner down to their own project_memberships rows — and an
+          accepted workspace invite grants the workspace's DEFAULT project,
+          not all of them. The old sentence was left standing when the grant
+          itself was fixed, so the page went on describing a model the
+          product stopped having. */}
       <p className="fleet-subtitle" style={{ marginTop: 0 }}>
-        Everyone with access to this workspace — and every project in it (there&apos;s no separate per-project
-        membership yet).
+        Everyone with access to this workspace. An invited teammate starts in the default project;
+        owners can see every project.
       </p>
 
       {error ? <div className="fleet-page-state-body" role="alert" style={{ color: "var(--offline-text)" }}>{error}</div> : null}

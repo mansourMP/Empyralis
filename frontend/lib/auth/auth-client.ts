@@ -173,6 +173,41 @@ function authFailureMessage(status: number, detail: string): string {
   return detail || `Authentication request failed with status ${status}.`;
 }
 
+/**
+ * Thrown only when an auth request never produced a RESPONSE — the fetch
+ * itself rejected: offline, a dropped connection, or our own 30s
+ * AbortController firing. That is a genuinely different fact from the
+ * server answering with a non-2xx status.
+ *
+ * MAN-343, second half. The first half (a hiccup in the post-signup
+ * readiness poll being reported as signup failure) was fixed by splitting
+ * that poll into its own try/catch — but `signup()` ITSELF can still fail
+ * this way AFTER the server has already created the account, committed the
+ * workspace and sent the verification mail, with only the response lost on
+ * the way back. Every such failure reached the same generic catch and
+ * rendered "Couldn't create the account", which is the product's own
+ * outcome-honesty law being broken in the worst direction: reporting
+ * failure ON SUCCESS, on the very first screen a customer touches.
+ *
+ * A non-ok RESPONSE stays a plain Error on purpose — that is the server's
+ * own definitive answer that nothing was created, and it must keep
+ * rendering as a real failure.
+ *
+ * Deliberately mirrors frontend/lib/workspace/mutation-outcome.ts's
+ * `MutateNetworkError` rather than importing it: that one is the fleet
+ * mutation layer's primitive (thrown by members-data.ts, cloud-vps-setup-
+ * panel.tsx, ...), and the auth client is a separate, dependency-free
+ * module that must not start reaching into workspace code. The PATTERN is
+ * shared; see that file's doc comment for the full argument, including
+ * why a caller must re-check real state before ever reporting failure.
+ */
+export class AuthNetworkError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AuthNetworkError';
+  }
+}
+
 async function requestAuth<T>(path: string, options: AuthRequestOptions): Promise<T> {
   const controller = new AbortController();
   const timeoutHandle = window.setTimeout(() => {
@@ -191,10 +226,11 @@ async function requestAuth<T>(path: string, options: AuthRequestOptions): Promis
       body: options.body ? JSON.stringify(options.body) : undefined,
     });
   } catch (error) {
+    // No response ever arrived — the outcome is UNKNOWN, not failed.
     if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error(AUTH_TIMEOUT_MESSAGE);
+      throw new AuthNetworkError(AUTH_TIMEOUT_MESSAGE);
     }
-    throw error;
+    throw new AuthNetworkError(error instanceof Error ? error.message : 'Network request failed.');
   } finally {
     window.clearTimeout(timeoutHandle);
   }

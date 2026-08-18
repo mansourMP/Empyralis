@@ -25,6 +25,12 @@ _LOCAL_AGENT_INSTALL_LOCK = threading.Lock()
 
 CAPTAIN_AGENT_KIND = "master"
 SPECIALIST_AGENT_KIND = "specialist"
+# The workspace-level system agent (Sage / the Operator). It is seeded once per
+# workspace, belongs to NO project, and is the kind that `include_master=True`
+# opts a listing into — see list_workspace_agent_installs' own
+# `COALESCE(ad.agent_kind, 'specialist') <> 'master'` predicate, which is where
+# this literal was previously only ever spelled inline in SQL.
+MASTER_AGENT_KIND = "master"
 PRIVATE_CAPTAIN_ROLE = "private_main_agent"
 DEFAULT_SPECIALIST_MODE = "owner_edit"
 SPECIALIST_ALLOWED_MODES = (
@@ -420,6 +426,13 @@ def _row_to_install_summary(row: Any) -> Optional[Dict[str, Any]]:
         "agent_definition_version_id": str(payload.get("agent_definition_version_id") or "").strip() or None,
         "installed_by_user_id": _normalize_token(payload.get("installed_by_user_id")),
         "install_scope": str(payload.get("install_scope") or "").strip() or "workspace",
+        # MAN-201: both the Postgres and the SQLite listing queries already
+        # SELECT ad.agent_kind, and this mapper already resolved it above for
+        # project_install_contract_fields — it simply never reached a caller.
+        # It is the ONE authoritative "is this the workspace-level system
+        # agent" signal; consumers that needed it before had to guess from a
+        # label containing "sage", which is a display string.
+        "agent_kind": agent_kind,
         "owner_user_id": _normalize_token(payload.get("owner_user_id")),
         "thread_id": _normalize_token(payload.get("thread_id")),
         "label": label,
