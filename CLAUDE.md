@@ -3521,6 +3521,99 @@ words support it ("aggregating one thing is just that thing" reads as
 zero-content, not single-content) — a narrower cut than the rail could have
 taken, on purpose.
 
+## Ask AI is per-user, and `audience` never filtered anything (2026-08-18)
+
+**There is NO `audience` filter anywhere in this codebase, and a commit
+message says there is.** `1643af209` (MAN-201) states the workspace Sage
+install is removed from a non-owner's `GET /fleet/agents` "server-side" by
+`audience: "owner"`. Grep it: `audience` is COMPUTED in
+`fleet_tools.resolve_agent_audience`, emitted as an informational field, and
+read by no gate at all — its own docstring says the gate reading it is "a
+separate, later task", i.e. never built. Do not reason from that commit
+message; it sent this investigation looking for a filter that does not
+exist.
+
+The real cause was collateral damage from the MAN-115 per-project ACL:
+
+```
+seed INSERT for the master install   column list has NO project_id
+        │                            (agent_registry_repository)
+        ▼
+fleet_list_agents(include_master=True)   Sage IS returned, project_id ""
+        ▼
+routes_fleet.fleet_agents
+  owner   → _visible_project_ids returns None → branch SKIPPED    ✓ sees Sage
+  member  → set(their project ids), never contains ""             ✗ Sage gone
+        ▼
+findSageAgent → null → SageLauncher `if (!sageAgent) return null` → NOTHING
+```
+
+So a member had no Ask AI console at all — not an empty one, not a
+permission message, no control. Fixed by exempting the workspace-level agent
+from that ONE filter (`_is_workspace_scoped_agent`), which is the **same
+exemption the per-agent routes already had** —
+`_enforce_agent_project_access`'s `if not project_id: return`. The list route
+and the detail routes had disagreed about exactly one agent, and only the
+list dropped it; when a list filter and a detail guard disagree, check which
+one is missing the other's exemption.
+
+**Keyed on `agent_kind == "master"`, never on an empty `project_id`.** "Has
+no project" must never be what grants visibility, or a project-less
+specialist becomes visible to every member and MAN-115's boundary widens
+silently — that negative is asserted directly in
+`test_man201_workspace_agent_visible_to_members.py`, because every other
+assertion in that file passes under the naive fix too. `agent_kind` was
+already SELECTed by both listing queries and already resolved inside
+`_row_to_install_summary`; it just never reached a caller, so this was an
+emit, not a plumbing job.
+
+Two things verified BEFORE exposing it, not after — the reason this was safe
+to do at all: `/threads` is already scoped server-side by `owner_user_id`
+for non-privileged callers (`runtime_runs_api.list_threads`), so each
+person's conversations stay their own (the founder's 2026-08-01 decision is
+that Ask AI is PERSONAL — every member gets one, conversations are theirs);
+and the frontend already excludes this agent from every count and list
+(`isSageAgent`, `agent-count-shape.ts`'s contract), so a member's workspace
+still reads "0 agents" and no stray card appears.
+
+Still open, found while tracing and NOT fixed: `/workstation/{ws}/sage/
+turns/stream` (`routes_gateway.py`) streams the shared constant
+`SAGE_THREAD_ID` ("sage-main") to any member rather than the caller's own
+thread. It emits METADATA ONLY (thread id, workspace id, role, created_at —
+no message content), so it is not a content leak and was not a blocker for
+the fix above, but it is a vestigial shared-thread seam left behind when
+per-conversation thread ids shipped.
+
+**Signup's outcome honesty has a SECOND half, and it is not the readiness
+poll.** MAN-343's landed fix (`190b1fe60`) split the post-signup poll into
+its own try/catch — correct, and verified still working. But `signup()`
+ITSELF can reject after the server already created the account (dropped
+connection, or `auth-client`'s own 30s `AbortController`), with only the
+RESPONSE lost; `requestAuth` threw a plain `Error` for that, identical in
+shape to a real 409, so the first screen a customer touches still said
+"Couldn't create the account" about an account that exists. Now
+`AuthNetworkError` marks the no-response class only, and the page re-checks
+reality before speaking — **one login attempt with the credentials just
+typed**, because a lost response means `Set-Cookie` was lost with it, so
+checking the session alone reports "no account" even when one exists. That
+is the auth-side twin of `mutation-outcome.ts`'s `MutateNetworkError` (the
+pattern is shared, the class deliberately is not — `auth-client` must not
+import workspace code).
+
+**Bringing up a disposable stack inside an agent WORKTREE needs three
+symlinks, and nothing says so.** `venv/`, `empyralis-runtime-kernel/target/`
+and `frontend/node_modules/` are untracked build artifacts that live only in
+the primary checkout, so `start-e2e-backend.sh` refuses to boot in a fresh
+worktree. Symlink all three from `/Users/mansur/empyralis`. Two more traps
+in the same 20 minutes: preflight reports the kernel binary as STALE purely
+because a fresh checkout's mtimes are newer than the binary (`diff -r` the
+`src/` trees first — if identical, the staleness is mtime-only and
+`EMPYRALIS_ALLOW_STALE_RUNTIME_KERNEL=true` is honest rather than a
+shortcut); and the script `mktemp`s a NEW `EMPYRALIS_E2E_STATE_HOME` on
+every run, so every backend restart silently invalidates every live browser
+session — pin it, or spend a restart wondering why a working endpoint
+started returning "Invalid bearer token."
+
 **The platform-owned DigitalOcean token now resolves through the secrets
 broker, never a bare `os.getenv` — MAN-131, 2026-08-13.**
 `vps_provisioning_service._platform_digitalocean_token()` was exactly the
