@@ -4509,6 +4509,39 @@ it once (`EMPYRALIS_GATEWAY_LAUNCH_PROBE=1` prints the entrypoint and exits
 0 without starting anything) — an unproven launcher is reported
 `unverified` and its `ExecStart` is never handed out.
 
+**THE UNIT FILE IS NOT THE CONFIGURATION — the first version of that
+classifier read `/etc/systemd/system/<unit>` and therefore condemned the one
+box that had already been repaired.** Found on production minutes after the
+drop-in repair landed:
+
+```
+systemctl show   ExecStart=/var/lib/empyralis-gw/state/launch/run-gateway
+(EFFECTIVE)      Restart=always                                ← REPAIRED
+base unit FILE   ExecStart=/usr/bin/node /opt/…/dist/index.js
+(what we read)   Restart=on-failure                            ← stale, forever
+…service.d/empyralis-updatable.conf   exists, wins in systemd, never read
+reported: not_updatable, 2 blockers        reality: fully updatable
+```
+
+A drop-in IS the documented repair (§3a), so the file can never see the fix
+it is being asked to confirm — every operator who followed our instructions
+was told they had failed. Now `systemctl show <unit> --property=ExecStart …`
+(the only source that merges drop-ins) and `launchctl print <domain>/<label>`
+(the only source that reflects the job as LOADED, not as last written to
+disk — launchd has no drop-ins, but a plist edited after bootstrap is
+equally not what starts next). Three things that only measuring reveals:
+`ExecStart` comes back STRUCTURED (`{ path=… ; argv[]=… ; pid=… }`), so
+argv[] is taken up to the next ` ; ` or systemd's runtime status lands in the
+command an operator is shown; **`systemctl show` EXITS 0 FOR A UNIT IT HAS
+NEVER HEARD OF** and prints `Restart=no`, so a missing ExecStart — not the
+exit code — is what means "no such unit" (trusting that `Restart=no` invents
+a blocker); and the FILE fallback, when systemd cannot be asked at all, may
+no longer produce `not_updatable` — blockers it alone finds resolve to
+`"unknown"`, because the thing that would clear them is exactly the thing it
+cannot see. `configSource` says which source answered. The launchd fallback
+is NOT downgraded that way, deliberately: with no layering mechanism, a
+plist that reads as broken is one somebody edited to be broken.
+
 Refusal reaches the screen as its own state: the Hardware page rendered
 "Up to date" for EVERY refusal, including this one, because
 `gateway_update_refusal_code` shipped with the fingerprint and nothing ever
