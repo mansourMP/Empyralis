@@ -4920,10 +4920,29 @@ back to choose an agent (`agent_sessions.master_agent_install_id` is
 write-only — `get_agent_session` has zero callers). Adding a gate there would
 have been a control that enforces nothing.
 
-**Still open, flagged not fixed.** `routes_fleet._enforce_agent_project_access`
-keeps its fail-open shape, so a member can still reach a PROJECT-LESS agent
-through the fleet DETAIL routes (read/configure, not execute) — same root
-cause, wider blast radius, and it needs its own measured change rather than a
-drive-by. And Sage's own `hardware_access` is never stamped (its turn resolves
+**FIXED 2026-08-19: `routes_fleet._enforce_agent_project_access`'s fail-open
+shape is closed.** It used to be `if not project_id: return`, unconditional —
+so a member could reach a PROJECT-LESS agent through every fleet DETAIL route
+(activity, memory, channels, connectors, tools, capabilities, usage) with no
+project membership at all. Confirmed live on production (read-only query, no
+writes): of 16 project-less `workspace_agent_installs` rows, 15 are
+`agent_kind='master'` (correctly exempt, MAN-201) and **one is a real, enabled
+specialist** (`ainstall_c8ec63b5f3474296`, label "Ftc") that was fully
+reachable by any member of its workspace. Fixed by extracting the turn path's
+own grant rule into `agent_reachability_service.enforce_resolved_agent_access`
+and `lookup_agent_install_bundle`, shared by both callers now instead of two
+independently-drifting opinions: `agent_kind == "master"` always exempt,
+project-having agent gated by that project's ACL (unchanged), project-less
+specialist now workspace-OWNER-only. The one deliberate remaining difference
+from `enforce_agent_reachable`: an agent that cannot be resolved AT ALL
+(doesn't exist, or the lookup failed) still falls through here rather than
+404ing — this seam guards fleet DETAIL reads, where the service call right
+after it already degrades safely on its own, and 404ing here as well as on
+the turn path would make "does this id exist" answerable two different ways.
+Red-before-green: `test_fleet_agent_project_access_fail_open.py`'s regression
+test fails on the pre-fix code (no exception — the live bug) and passes after.
+Blast radius measured, not assumed: exactly one agent's behavior changes.
+
+And Sage's own `hardware_access` is never stamped (its turn resolves
 no specialist context), so setting Sage to "Cloud only" does not yet disable
 its tools; it still cannot borrow, because step 3 gates on ownership.
