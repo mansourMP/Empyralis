@@ -49,6 +49,19 @@ whatever already happened in production, and this pass has no production
 access to check); the fifth is a byte-for-byte standalone twin of instance
 2 and inherits its verdict directly.
 
+UPDATE, 2026-08-18 (later the same day): two of those five --
+`stage_4b_agent_isolation.sql` and `unify_fleet_tool_toggle_ids.sql` --
+were queried against real production over SSH by a follow-up pass with
+actual database access (see their allowlist verdicts below for the exact
+query and counts). One was a real, live bug (11 of 15 master installs
+wrong) and is now fixed with a boot-time backfill,
+`agent_registry_repository.backfill_master_agent_isolation_defaults`,
+following the same shape as instance 1's fix. The other's target state was
+already correct in production -- verified, not guessed. Their .sql files
+are untouched on purpose (historical, hand-applied, never re-run); only the
+verdict text and, for the first, a new Python backfill plus an INSERT-site
+fix changed.
+
 ── Scope ───────────────────────────────────────────────────────────────────
 
 This test deliberately does NOT scan the whole `server_modules` tree (unlike
@@ -414,19 +427,30 @@ _ACCEPTED_UNSCOPED_DML: dict[_ScanKey, str] = {
         "UPDATE",
         "workspace_agent_installs",
     ): (
-        "Found 2026-08-18 while building this guard -- the same fail-open "
-        "shape as the confirmed instances above (a bare backfill, no "
-        "self-detecting DDL after it, no bypass). This file backfills "
-        "hardware_access='all'/subagents_enabled=TRUE for every master "
-        "agent and is a ONE-TIME, hand-applied migration (never mirrored "
-        "into ensure_control_plane_schema, so it is not re-executed on "
-        "every boot the way instances 2 and 4 are) -- editing the file now "
-        "would not undo whatever already happened in production, and this "
-        "pass has no production access to check whether it did. NOT "
-        "independently verified against current production state. Flagged, "
-        "not fixed -- a real fix here is a production-verification task "
-        "(does every master agent currently show hardware_access='all'?), "
-        "not a drift-test-authoring one."
+        "VERIFIED AGAINST PRODUCTION 2026-08-18, and the migration DID "
+        "silently no-op almost everywhere. Queried the live database "
+        "directly over SSH (root@165.227.25.201, empyralis_app role, "
+        "`SET app.rls_bypass = 'on'` to read past FORCE RLS -- a plain "
+        "SELECT as that role returns zero rows too, same trap, so the "
+        "verification query itself had to route around it): 11 of 15 "
+        "agent_kind='master' installs carried hardware_access='none'/ "
+        "subagents_enabled=false, spanning every workspace created since "
+        "2026-07-07. The migration's one UPDATE only ever reached the 4 "
+        "rows that existed at the moment someone happened to run it "
+        "correctly (2026-06-25 through 2026-06-28); every workspace seeded "
+        "after that missed it. FIXED, not left flagged: "
+        "agent_registry_repository.backfill_master_agent_isolation_defaults "
+        "(cross-tenant bypass_rls=True read, per-row rls_execute write "
+        "scoped to that row's own tenant/workspace, WHERE-guard idempotency "
+        "-- same shape as backfill_task_identifiers/backfill_document_paths) "
+        "is wired into ensure_control_plane_schema() and heals every "
+        "existing wrong row on the next boot. Also fixed the root cause, "
+        "not just the historical remnant: ensure_workspace_agent_registry_"
+        "seeded's own INSERT for the master install never set either "
+        "column explicitly, so it fell through to the plain schema DEFAULT "
+        "regardless of the migration's fate -- every NEW workspace was "
+        "affected too, which is why 11 of 15 (not just the pre-migration "
+        "handful) were wrong. That INSERT now sets 'all'/TRUE explicitly."
     ),
     (
         "migrations/unify_fleet_tool_toggle_ids.sql",
@@ -434,12 +458,16 @@ _ACCEPTED_UNSCOPED_DML: dict[_ScanKey, str] = {
         "UPDATE",
         "workspace_agent_installs",
     ): (
-        "Found 2026-08-18 while building this guard -- same shape and same "
-        "reasoning as stage_4b_agent_isolation.sql immediately above: a "
-        "one-time, hand-applied, never-mirrored-into-boot backfill (renames "
-        "13 old tool_toggles JSON keys onto their canonical enforcement "
-        "names) with no self-detecting follow-up DDL. NOT independently "
-        "verified against current production state. Flagged, not fixed."
+        "VERIFIED AGAINST PRODUCTION 2026-08-18 (same session as "
+        "stage_4b_agent_isolation.sql immediately above, same bypass "
+        "technique). Target state is ALREADY CORRECT: 0 of 40 "
+        "workspace_agent_installs rows carry any of the 13 old-spelling "
+        "tool_toggles keys this migration renames (25 rows carry a "
+        "non-empty tool_toggles at all, none of them old-spelling). "
+        "Whether this migration actually ran under RLS or the old spellings "
+        "were simply never written before the canonical names shipped is "
+        "moot -- the live data is clean either way. No backfill needed; "
+        "not fixed because there is nothing to fix."
     ),
 }
 

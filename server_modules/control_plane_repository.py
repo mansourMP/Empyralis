@@ -4639,6 +4639,26 @@ async def ensure_control_plane_schema() -> Any:
                 "(extensionless) name until this succeeds on a later boot.",
                 exc,
             )
+        # The master-agent isolation backfill runs AFTER the whole schema is
+        # in place, and never blocks boot: an agent whose hardware_access
+        # is still 'none' just keeps having no hardware/subagent access
+        # until this succeeds on a later boot, which is strictly better
+        # than a control plane that refuses to start. See
+        # migrations/stage_4b_agent_isolation.sql and
+        # agent_registry_repository.backfill_master_agent_isolation_defaults
+        # for the RLS trap this repairs.
+        try:
+            from server_modules import agent_registry_repository as _agent_registry_repository
+
+            await _agent_registry_repository.backfill_master_agent_isolation_defaults(pool)
+        except Exception as exc:  # noqa: BLE001 — never let this crash bootstrap
+            LOGGER.error(
+                "MASTER AGENT ISOLATION BACKFILL FAILED (%s). Master (Sage/"
+                "Operator) installs whose hardware_access/subagents_enabled "
+                "predate migrations/stage_4b_agent_isolation.sql keep "
+                "'none'/FALSE until this succeeds on a later boot.",
+                exc,
+            )
         _SCHEMA_READY = True
     return pool
 
