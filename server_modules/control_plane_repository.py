@@ -4147,6 +4147,7 @@ async def ensure_control_plane_schema() -> Any:
         try:
             await pool.execute(
                 """
+                SET LOCAL app.rls_bypass = 'on';
                 DO $$
                 DECLARE
                     existing_constraint RECORD;
@@ -4163,6 +4164,20 @@ async def ensure_control_plane_schema() -> Any:
                             existing_constraint.conname
                         );
                     END LOOP;
+                    -- Belt and braces, same reasoning as
+                    -- migrations/add_task_sequence_numbers.sql's own SET LOCAL:
+                    -- project_tasks carries FORCE ROW LEVEL SECURITY and this
+                    -- runs as empyralis_app with no app.current_tenant_id /
+                    -- app.current_workspace_id GUC set, so without the bypass
+                    -- above this UPDATE matches ZERO rows on every boot,
+                    -- silently, exit 0 -- found 2026-08-18 while building
+                    -- server_modules/tests/test_rls_dml_drift.py. The value
+                    -- written ('todo') is a uniform vocabulary rename, not
+                    -- tenant-specific data, so a blanket bypass is safe here
+                    -- (contrast projects_repository.backfill_task_identifiers,
+                    -- which writes a per-project derived value and therefore
+                    -- scopes each write with rls_execute(tenant_id=...,
+                    -- workspace_id=...) instead of bypassing).
                     UPDATE project_tasks SET status = 'todo' WHERE status = 'open';
                     ALTER TABLE project_tasks ALTER COLUMN status SET DEFAULT 'todo';
                     ALTER TABLE project_tasks

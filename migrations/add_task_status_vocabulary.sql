@@ -56,6 +56,21 @@
 
 BEGIN;
 
+-- Belt and braces, same reasoning as migrations/add_task_sequence_numbers.sql's
+-- own SET LOCAL: project_tasks carries FORCE ROW LEVEL SECURITY
+-- (migrations/enable_rls.sql) and DEPLOY-RUNBOOK.md step 3b applies migrations
+-- as the app's own NON-SUPERUSER role (empyralis_app), which is exactly the
+-- role FORCE binds. Without this, step 2's UPDATE below matches ZERO rows on
+-- any database that already has real 'open' rows, silently -- and the ADD
+-- CONSTRAINT in step 4 would then either fail loudly on those leftover rows
+-- (a genuine 'open' row violates the new 7-value CHECK) or, on an empty
+-- table, succeed while having renamed nothing. Found 2026-08-18 while
+-- building server_modules/tests/test_rls_dml_drift.py; mirrored into the
+-- identical DO block in control_plane_repository.py's
+-- ensure_control_plane_schema(), fixed the same way there. Transaction-local
+-- (SET LOCAL) and dies with the COMMIT below.
+SET LOCAL app.rls_bypass = 'on';
+
 -- 1. Drop the old CHECK. Resolved by lookup rather than by hardcoded name:
 --    add_project_tasks.sql declared it inline on the column, so Postgres
 --    auto-named it (`project_tasks_status_check` in practice, but the
