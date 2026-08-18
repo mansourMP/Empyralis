@@ -4026,3 +4026,60 @@ message. The dedicated per-agent channel-settings surface that would let
 this constraint be checked BEFORE a credential is even entered does not
 exist in the product yet — that is a separate, larger UI gap, flagged here
 rather than built speculatively.
+
+## `workspaces.identity_links` is a DEAD column — do not read it for owner identity (2026-08-18)
+
+**Verdict: the authoritative "is this sender the owner on this channel" store
+is `personal_channels_repository`, and it always was. `identity_links` has
+never been written by anything shipped.**
+
+```
+identity_links          real column, readable (SELECT fixed by 2622b8928)
+  only writer  ─▶ routes_workspaces.py's identity-links endpoints
+                  ─▶ ZERO frontend callers ─▶ the store is EMPTY, always
+personal_channels_repository   linked_jid / linked_user_id / linked_identity
+  written by a real owner login/pairing event ─▶ the actual data
+```
+
+MAN-337 was filed claiming `get_workspace_by_id`'s SELECT omits
+`identity_links`. That was **already fixed** (`2622b8928`, column created by
+`71343713a`, parity tests exist) — and fixing it changed nothing, because
+the column it unblocked is empty. The real bug lived one level down and had
+the same symptom, which is exactly how a stale ticket wastes a dispatch.
+
+**What it cost:** `command_registry._is_sender_owner` had two checks —
+`created_by_user_id` (only ever matches a WEB sender id) and `identity_links`
+(empty). So a CHANNEL sender could not pass the owner check at all, for the
+workspace's own owner included, and `dispatch()` returns `None` on a failed
+owner check — so `/config /mcp /plugins /debug /bash` were silently
+unrecognized on Telegram/WhatsApp/Signal/iMessage/every `openclaw_*` channel
+and fell through to the model as literal chat text. The 2026-08-17 `sender_id`
+forwarding fix (`7a59619af`/`3bcf0e209`) only exercised check 1, which is why
+web looked fixed while every channel stayed broken.
+
+`sage_agent_runtime_service._resolve_channel_sender_class` was migrated off
+`identity_links` by `311133dd5`; `command_registry` was the **last consumer
+left behind** — when you migrate a shared judgment off a data source, grep for
+every reader, not just the one in front of you.
+
+Three rules. **A "two independent checks" docstring is a claim about
+COVERAGE, and an empty store satisfies neither check nor test** — the existing
+`test_command_registry.py` cases hand-build `{"identity_links": {...}}`
+fixtures production never produces, so they were green throughout (the
+"fixture that invents its own input" family, again). **Canonicalize both sides
+through `_channel_prefixed_identity_tail`** — the OpenClaw transport passes
+the conversation id (`telegram:1932934047`) where the store holds the bare
+sender, and a general "everything after the last colon" rule would hand owner
+authority to anyone who can put a colon in a sender field. And
+**`identity_links` is retained as a trailing OR disjunct, not deleted**: in a
+disjunction an empty store can only fail to grant, never wrongly grant, and
+deleting the only read would turn a live authenticated API route into a
+write-only surface — a product decision, not a drive-by one. Do not promote
+it back above the channel check, and do not add a fourth reader.
+
+**Still open, flagged not fixed:** those identity-links endpoints (`GET`/`PUT`
+`/workspaces/{id}/identity-links`) have zero frontend callers and now feed
+only a disjunct that can never decide anything real — either give them a
+surface or delete them; and `PATCH .../{channel_key}/gateways/{id}/group-policy`
+remains the same shape (built, tested, zero frontend callers), already noted
+in the multi-agent-per-box section above.
