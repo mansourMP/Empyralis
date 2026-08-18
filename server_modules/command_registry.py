@@ -136,10 +136,90 @@ def get_inline_shortcuts() -> list[str]:
     return result
 
 
-async def _is_sender_owner(sender_id: str, workspace_id: str) -> bool:
+def _channel_linked_owner_ids(workspace_id: str, channel_origin: str) -> set[str]:
+    """The sender ids that a real pairing/login event established as this
+    workspace's OWNER on a channel — read from personal_channels_repository,
+    which is the authoritative store, never workspace.identity_links.
+
+    Why this exists at all: ``identity_links`` is a real column that is real
+    and readable (get_workspace_by_id's SELECT was fixed to return it,
+    2026-08-14) and that NOTHING in the shipped product has ever written —
+    routes_workspaces.py's identity-links endpoints are its only writer and
+    they have zero frontend callers. So the channel half of
+    _is_sender_owner's owner test resolved empty on every real turn, and the
+    platform half (``created_by_user_id``) can only ever match a WEB
+    sender_id. Net effect before this function existed: an owner-gated
+    command (/config /mcp /plugins /debug /bash) sent from Telegram,
+    WhatsApp, Signal, iMessage or any openclaw_* channel could not succeed
+    for ANY sender, the workspace's own owner included — dispatch() returns
+    None for a failed owner check, so the command was silently treated as
+    unrecognized and fell through to the model as literal chat text, with
+    nothing anywhere saying why.
+
+    This is the same authoritative source, reached the same way, that
+    sage_agent_runtime_service._resolve_channel_sender_class already uses
+    for the turn's owner/audience tool-authority decision, and that
+    personal_channels_service._is_owner_message already trusts for the
+    DM-policy gate that runs BEFORE this command is ever dispatched. So a
+    sender the DM gate has already recognised as the owner is no longer a
+    stranger by the time the command gate asks the same question.
+
+    ``channel_origin`` narrows to that channel's own linked identity when
+    the caller knows it (every real channel dispatch does —
+    sage_command_dispatcher.dispatch_command forwards it). With no
+    channel_origin the union across channels is returned, preserving the
+    channel-agnostic posture the identity_links branch already had; that is
+    only reachable from callers that never supplied one, and a miss there
+    fails closed exactly as before.
+
+    Both sides go through _channel_prefixed_identity_tail — the SAME
+    canonicalizer the DM gate and the sender-class resolver use — because
+    this lane addresses one person two ways: the OpenClaw transport passes
+    the CONVERSATION id ("telegram:1932934047") where the stored identity is
+    the bare sender ("1932934047"). Stripping only a prefix the channel
+    registry itself names is what keeps that safe: a general "everything
+    after the last colon" rule would let an attacker-supplied
+    "anything:<owner id>" canonicalize onto the owner's own id.
+    """
+    try:
+        from server_modules.personal_channels_repository import (
+            list_owner_linked_channel_identities_for_workspace,
+        )
+        from server_modules.personal_channels_service import (
+            _channel_prefixed_identity_tail,
+        )
+
+        linked_by_channel = list_owner_linked_channel_identities_for_workspace(
+            workspace_id
+        )
+    except Exception:
+        return set()
+
+    wanted_channel = str(channel_origin or "").strip().lower()
+    owner_ids: set[str] = set()
+    for channel_key, linked_id in (linked_by_channel or {}).items():
+        clean_channel_key = str(channel_key or "").strip().lower()
+        if not clean_channel_key or not str(linked_id or "").strip():
+            continue
+        if wanted_channel and clean_channel_key != wanted_channel:
+            continue
+        try:
+            canonical = _channel_prefixed_identity_tail(
+                channel_key=clean_channel_key, value=linked_id
+            )
+        except Exception:
+            continue
+        if canonical:
+            owner_ids.add(canonical)
+    return owner_ids
+
+
+async def _is_sender_owner(
+    sender_id: str, workspace_id: str, channel_origin: str = "",
+) -> bool:
     """Check if *sender_id* is the workspace owner.
 
-    Two independent checks, either one is sufficient:
+    Three independent checks, any one is sufficient:
 
     1. ``created_by_user_id`` — the workspace's own platform-account owner
        column (control_plane_repository.get_workspace_by_id's Postgres
@@ -153,14 +233,21 @@ async def _is_sender_owner(sender_id: str, workspace_id: str) -> bool:
        for the owner included, with the raw command text falling through
        to the model as literal chat. See this module's own docstring/the
        audit that found this.
-    2. ``identity_links`` — matches *sender_id* against the workspace's
-       identity_links (identity_links[channel_type] = {user_id,
-       sender_hash} — the same owner-linkage triage_service.
-       resolve_sender_identity() checks for channel sender classification).
-       Deliberately channel-agnostic: this signature has no channel_origin,
-       and a sender_id (a Telegram numeric id, a Discord snowflake, ...) is
-       not expected to collide across channel types, so a match on ANY
-       linked channel is treated as owner.
+    2. ``personal_channels_repository`` — the AUTHORITATIVE answer for a
+       CHANNEL sender, and the only one of the three that a Telegram/
+       WhatsApp/Signal/iMessage/openclaw_* sender can ever satisfy. See
+       _channel_linked_owner_ids above for why check 3 alone left every
+       channel owner locked out of their own owner-gated commands.
+    3. ``identity_links`` — kept, unchanged, as a disjunct. It is safe HERE
+       in a way it was not safe as the sage runtime's SOLE source: this is
+       an OR, so an empty store can only ever fail to grant, never wrongly
+       grant or silently downgrade. It is retained rather than deleted
+       because routes_workspaces.py's identity-links endpoints are live
+       authenticated API routes that really do write this column — deleting
+       the only read would make that write a no-op, which is a product
+       decision (a write-only surface) and not a side effect this fix gets
+       to take. Do not promote it back above check 2, and do not treat its
+       presence as evidence the channel path works.
 
     Fails to False (not owner) on any missing input or lookup error — an
     owner-gated command must never execute for a sender we couldn't
@@ -182,6 +269,31 @@ async def _is_sender_owner(sender_id: str, workspace_id: str) -> bool:
     created_by_user_id = str(workspace.get("created_by_user_id") or "").strip()
     if created_by_user_id and created_by_user_id == clean_sender_id:
         return True
+
+    clean_channel_origin = str(channel_origin or "").strip()
+    channel_owner_ids = _channel_linked_owner_ids(
+        clean_workspace_id, clean_channel_origin
+    )
+    if channel_owner_ids:
+        # The SENDER goes through the same canonicalizer the stored side
+        # did, or the OpenClaw transport's "telegram:<id>" conversation id
+        # never equals the bare "<id>" a real login wrote.
+        candidate_sender_ids = {clean_sender_id}
+        if clean_channel_origin:
+            try:
+                from server_modules.personal_channels_service import (
+                    _channel_prefixed_identity_tail,
+                )
+
+                canonical_sender = _channel_prefixed_identity_tail(
+                    channel_key=clean_channel_origin, value=clean_sender_id
+                )
+                if canonical_sender:
+                    candidate_sender_ids.add(canonical_sender)
+            except Exception:
+                pass
+        if candidate_sender_ids & channel_owner_ids:
+            return True
 
     raw_links = workspace.get("identity_links")
     identity_links: Dict[str, Any] = {}
@@ -291,7 +403,9 @@ async def process_message(
         remaining = _re.sub(r"\s{2,}", " ", remaining).strip()
 
     # ── 3. Access control ──────────────────────────────────────────────
-    is_owner = await _is_sender_owner(sender_id, workspace_id)
+    is_owner = await _is_sender_owner(
+        sender_id, workspace_id, str(kwargs.get("channel_origin") or ""),
+    )
     authorized_directives: list[tuple[str, str]] = []
     for name, args in found_directives:
         cmd = get(name)
@@ -490,7 +604,9 @@ async def dispatch(
     # do not reveal the command exists to an unauthorized sender.
     if cmd and cmd.access == "owner":
         sender_id = str(kwargs.get("sender_id") or kwargs.get("channel_sender_id") or "")
-        if not await _is_sender_owner(sender_id, workspace_id):
+        if not await _is_sender_owner(
+            sender_id, workspace_id, str(kwargs.get("channel_origin") or ""),
+        ):
             return None
 
     return await handler(
