@@ -56,14 +56,26 @@ BEGIN
     END IF;
 END $$;
 
--- Existing rows carry a flat slug ("auth"); every document in this table is
--- markdown (body TEXT rendered by MarkdownLite), so give them the extension
--- that makes the tree read like a repository. Guarded on "has no dot in the
--- final segment" so it cannot double-append on a re-run, and scoped to rows
--- with no slash so it can never rewrite a path somebody has already set.
-UPDATE project_documents
-   SET path = path || '.md'
- WHERE path NOT LIKE '%.%'
-   AND path NOT LIKE '%/%';
-
 COMMIT;
+
+-- DDL ONLY ABOVE. This migration used to also carry a DML backfill here --
+-- "existing rows carry a flat slug; give them the '.md' extension that
+-- makes the tree read like a repository" -- and it could never run.
+-- `project_documents` is FORCE ROW LEVEL SECURITY (migrations/
+-- enable_rls.sql) behind empyralis_rls_scope_match(tenant_id, workspace_id),
+-- and DEPLOY-RUNBOOK step 3b applies this file as the app's own
+-- NON-SUPERUSER role (`empyralis_app`), which FORCE binds. `psql` sets none
+-- of the `app.*` GUCs, so the UPDATE's policy evaluated false for every
+-- row: 0 rows touched, exit 0, no error anywhere -- the exact shape
+-- add_task_sequence_numbers.sql's own backfill hit on a different table
+-- (see that migration and CLAUDE.md's "GEN-12 backfill" entry). WORSE than
+-- an ordinary silent backfill here specifically: renaming `slug` to `path`
+-- makes the CONTROL_PLANE_SCHEMA_SQL mirror's `NOT EXISTS (... 'path')`
+-- guard false on every later boot too, so a database that missed this
+-- migration's one shot could never self-heal on restart either. The
+-- backfill now lives in Python --
+-- project_documents_repository.backfill_document_paths(), called from
+-- control_plane_repository.ensure_control_plane_schema() -- decoupled from
+-- the one-shot rename guard on purpose: its own guard is the ROW's shape
+-- (no dot, no slash), so it runs, and can heal, on every boot rather than
+-- once.

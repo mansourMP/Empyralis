@@ -900,6 +900,28 @@ CREATE INDEX IF NOT EXISTS idx_project_documents_project
 -- schema the repository no longer speaks. Guarded both ways so re-running
 -- it (every boot) is a no-op. See that migration for why this is a rename
 -- rather than a second column, and why there are no folder rows.
+--
+-- DDL ONLY BELOW -- NO DML, and that is deliberate, not an oversight. This
+-- block used to also append '.md' to a bare (dot-less, slash-less) path
+-- right here, in the same statement as the rename. It never touched a row.
+-- `project_documents` is FORCE ROW LEVEL SECURITY (migrations/
+-- enable_rls.sql) behind empyralis_rls_scope_match(tenant_id, workspace_id),
+-- and DEPLOY-RUNBOOK step 3b applies both this file and the migration as
+-- the app's own NON-SUPERUSER role (`empyralis_app`), which FORCE binds. A
+-- plain pool.execute() carrying no `app.tenant_id`/`app.workspace_id` GUCs
+-- therefore ran the UPDATE against a policy that evaluates false for every
+-- row -- 0 rows touched, exit 0, no error anywhere. Reproduced exactly on a
+-- disposable NOSUPERUSER NOBYPASSRLS-owned table: the rename applied (DDL
+-- is not subject to RLS) and the append silently did not (DML is). WORSE
+-- than an ordinary silent backfill: renaming the column makes `path` exist,
+-- so the `NOT EXISTS (... 'path')` guard around this whole block is false
+-- on every later boot -- the block never runs again, and a database that
+-- missed its one shot could never self-heal here. The backfill now lives in
+-- project_documents_repository.backfill_document_paths(), called below,
+-- decoupled from this one-shot rename guard on purpose (its own guard is
+-- the ROW's shape -- no dot, no slash -- so it runs, and can heal, on
+-- every boot). See projects_repository.backfill_task_identifiers for the
+-- identical trap on a different table, fixed the identical way.
 DO $$
 BEGIN
     IF EXISTS (
@@ -910,8 +932,6 @@ BEGIN
         WHERE table_name = 'project_documents' AND column_name = 'path'
     ) THEN
         ALTER TABLE project_documents RENAME COLUMN slug TO path;
-        UPDATE project_documents SET path = path || '.md'
-         WHERE path NOT LIKE '%.%' AND path NOT LIKE '%/%';
     END IF;
 END $$;
 
@@ -4547,6 +4567,24 @@ async def ensure_control_plane_schema() -> Any:
             )
         # ── Phase 1C: auth-store tables (sessions, devices, policies, etc.) ──
         await pool.execute(AUTH_STORE_SCHEMA_SQL)
+        # The document-path backfill runs AFTER the whole schema is in
+        # place, and never blocks boot: a document without its `.md`
+        # extension still renders and edits fine (path is just a string),
+        # so a control plane that fails to append it is strictly better
+        # than one that refuses to start. See the comment above the
+        # `project_documents` slug->path DO $$ block for the RLS trap this
+        # repairs.
+        try:
+            from server_modules import project_documents_repository as _project_documents_repository
+
+            await _project_documents_repository.backfill_document_paths(pool)
+        except Exception as exc:  # noqa: BLE001 — never let this crash bootstrap
+            LOGGER.error(
+                "DOCUMENT PATH BACKFILL FAILED (%s). Documents whose path "
+                "predates migrations/add_document_paths.sql keep their bare "
+                "(extensionless) name until this succeeds on a later boot.",
+                exc,
+            )
         _SCHEMA_READY = True
     return pool
 

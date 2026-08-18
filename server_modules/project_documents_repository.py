@@ -338,6 +338,109 @@ def default_path_for_title(title: Any) -> str:
     return normalize_document_path(title, fallback="document")
 
 
+# ── Document path backfill (migrations/add_document_paths.sql) ─────────────
+# WHY THIS EXISTS IN PYTHON, and it is the same trap as
+# projects_repository.backfill_task_identifiers on a different table -- read
+# that one first, this is the identical shape one table over.
+# `project_documents` carries FORCE ROW LEVEL SECURITY (migrations/
+# enable_rls.sql) behind empyralis_rls_scope_match(tenant_id, workspace_id),
+# and DEPLOY-RUNBOOK step 3b applies BOTH the migration file and
+# CONTROL_PLANE_SCHEMA_SQL as the app's own NON-SUPERUSER role
+# (`empyralis_app`), which FORCE binds. So the `slug` -> `path` rename's own
+# backfill --
+#
+#   ALTER TABLE ... RENAME COLUMN     DDL, not subject to RLS   -> APPLIED
+#   UPDATE project_documents SET ...  DML, policy evaluates FALSE -> 0 rows
+#
+# -- silently touched nothing on a real database, exit 0, no error anywhere.
+# WORSE than an ordinary silent backfill: the rename makes `path` exist, so
+# the `NOT EXISTS (... 'path')` guard around the whole rename block is false
+# on every later boot -- that block never runs again, and a database that
+# missed its one shot could never self-heal there. Reproduced on a
+# disposable NOSUPERUSER NOBYPASSRLS-owned table exactly like the
+# task-identifier bug: column renamed, rows unchanged.
+#
+# THIS FUNCTION IS DECOUPLED FROM THAT ONE-SHOT GUARD ON PURPOSE. It runs on
+# EVERY boot, scoped by a guard on the ROW itself (`path` has neither a dot
+# nor a slash), so a database that already missed its chance heals on its
+# next restart rather than needing the rename to fire again.
+#
+# COLLISION-SAFE, never silently clobbering: if `<name>.md` is already taken
+# by another document in the same project, this reuses _unique_path's own
+# `-2`, `-3`, ... suffixing rather than raising or overwriting -- the same
+# disambiguation create_document already gives a human typing a duplicate
+# title.
+async def backfill_document_paths(pool: Any) -> Dict[str, int]:
+    """Append `.md` to any `project_documents.path` that has neither a dot
+    nor a slash -- the extension migrations/add_document_paths.sql's own
+    UPDATE could never apply under FORCE RLS (see the block comment above).
+
+    Returns a count dict; the guard makes every step a no-op once applied.
+    Safe to call on every boot and safe to call concurrently with a fresh
+    write, because the WHERE clause on the UPDATE is what makes it
+    idempotent, not a "has this run" flag."""
+    stats = {"documents_backfilled": 0}
+    if pool is None:
+        return stats
+
+    # Cross-tenant, so this READ genuinely needs the bypass; every WRITE
+    # below is scoped to the single (tenant, workspace) the row itself
+    # names, same split as backfill_task_identifiers.
+    candidates = await control_plane_repository.rls_fetch(
+        pool,
+        """
+        SELECT id, tenant_id, workspace_id, project_id, path
+        FROM project_documents
+        WHERE path NOT LIKE '%.%' AND path NOT LIKE '%/%'
+        ORDER BY tenant_id, workspace_id, project_id, created_at ASC, id ASC
+        """,
+        bypass_rls=True,
+    )
+    for doc in candidates or []:
+        tenant_id = str(doc["tenant_id"] or "")
+        workspace_id = str(doc["workspace_id"] or "")
+        project_id = str(doc["project_id"] or "")
+        original_path = str(doc["path"] or "")
+        base = f"{original_path}{DEFAULT_DOCUMENT_EXTENSION}"
+        # Live read under the row's own scope, so a sibling document
+        # already renamed earlier in THIS loop is visible to the collision
+        # check -- the same discipline _unique_task_key uses inside the
+        # task backfill.
+        target_path = await _unique_path(
+            pool,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            base=base,
+        )
+        # The WHERE guard IS the idempotency: once this UPDATE lands the
+        # row carries a dot and can never match again on a later boot, so
+        # two processes racing to boot at once cannot double-append.
+        result = await control_plane_repository.rls_execute(
+            pool,
+            """
+            UPDATE project_documents
+            SET path = $1
+            WHERE id = $2 AND path NOT LIKE '%.%' AND path NOT LIKE '%/%'
+            """,
+            target_path,
+            str(doc["id"] or ""),
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
+        if str(result or "").strip().endswith(" 1"):
+            stats["documents_backfilled"] += 1
+
+    if stats["documents_backfilled"]:
+        LOGGER.warning(
+            "DOCUMENT PATH BACKFILL: appended .md to %d document path(s) "
+            "that predated migrations/add_document_paths.sql's own "
+            "(RLS-defeated) backfill.",
+            stats["documents_backfilled"],
+        )
+    return stats
+
+
 def _coerce_metadata(value: Any) -> Dict[str, Any]:
     """Postgres JSONB sometimes arrives already-decoded (dict) and sometimes
     as a raw JSON string, depending on the pool's codec setup -- same
