@@ -441,3 +441,100 @@ export function useFleetDocumentRevisions(workspaceId: string, documentId: strin
 
   return { revisions, loading, error, refresh };
 }
+
+// ── Change feed (cross-document commit log) ─────────────────────────────────
+//
+// GET /api/w/{workspace_id}/fleet/document-activity[?project_id=...]
+// (routes_fleet.fleet_document_activity, backed by
+// project_documents_repository.list_project_document_activity).
+//
+// THE FOUNDER'S OWN ASK: "I should see who is pushing, who changed what...
+// much more details like this" -- GitHub's commit log, not bare git. Every
+// fact it wants (who, what, when, human-or-agent) was ALREADY RECORDED on
+// project_document_revisions the day DocumentHistory.tsx shipped; the only
+// reader ended `AND document_id = $x`, so a revision was invisible unless
+// you already knew which document to open. This is a READ gap, not a data
+// gap -- see list_project_document_activity's own docstring.
+//
+// NOT under /fleet/documents -- a sibling route, not nested under a
+// document id (routes_fleet.py declares it at .../fleet/document-activity,
+// singular, no id segment), so it gets its own small request helper rather
+// than reusing documentsRequest's `/fleet/documents${suffix}` path prefix.
+//
+// project_id OMITTED means workspace-wide, across every project this
+// caller can see -- the SAME route serves both scopes in Task 2's own
+// numbering (project feed first, workspace feed is "one less filter"), so
+// there is one hook, one component, parameterized by an optional
+// projectId rather than two parallel implementations that could drift.
+
+/** One entry in the cross-document feed -- every field FleetDocumentRevision
+ *  already carries, plus the two the feed needs that a single document's own
+ *  history does not: which document changed, by title and path (a document
+ *  detail page already knows its own title; a feed spanning many documents
+ *  does not). Deliberately a superset, not a parallel shape, so
+ *  DocumentHistory.tsx's actor-resolution logic works unmodified against a
+ *  feed entry -- see document-activity-feed.tsx. */
+export type FleetDocumentActivityEntry = FleetDocumentRevision & {
+  document_path: string;
+  document_title: string;
+};
+
+function normalizeDocumentActivityEntry(raw: any): FleetDocumentActivityEntry {
+  return {
+    ...normalizeDocumentRevision(raw),
+    document_path: String(raw?.document_path || ""),
+    document_title: String(raw?.document_title || ""),
+  };
+}
+
+async function documentActivityRequest(workspaceId: string, projectId?: string | null): Promise<any> {
+  const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+  const path = `/api/w/${encodeURIComponent(workspaceId)}/fleet/document-activity${query}`;
+  const res = await fleetAuthorizedFetch(path, {
+    method: "GET",
+    credentials: "include",
+    headers: buildCookieAuthHeaders("GET"),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data?.ok === false) {
+    throw new Error(apiErrorMessage(data, `HTTP ${res.status}`));
+  }
+  return data;
+}
+
+/** The change feed, newest first. `projectId` omitted or null reads the
+ *  WORKSPACE-wide feed (every project this caller can see); a real id scopes
+ *  it to one project, exactly like useFleetDocuments/useFleetWorkspaceDocuments
+ *  split the same way for the tree above it. NOT polled -- same reasoning as
+ *  every other plain fetch in this file: a feed opened once and left open
+ *  does not need to self-refresh, and `refresh` is handed back for a caller
+ *  that wants a manual one (e.g. after this reader's own save lands). */
+export function useFleetDocumentActivity(workspaceId: string, projectId?: string | null) {
+  const [activity, setActivity] = useState<FleetDocumentActivityEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    if (!workspaceId) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await documentActivityRequest(workspaceId, projectId);
+      const items = Array.isArray(data?.activity) ? data.activity.map(normalizeDocumentActivityEntry) : [];
+      setActivity(items);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load this change feed.");
+    } finally {
+      setLoading(false);
+    }
+  }, [workspaceId, projectId]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  return { activity, loading, error, refresh };
+}

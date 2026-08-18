@@ -12,6 +12,15 @@
  * (routes_fleet.fleet_list_document_revisions) + useFleetDocumentRevisions
  * (documents-data.ts) are the wiring; this file is the surface.
  *
+ * `stamp`/`resolveRevisionActor`/`RevisionActorBadge`/`RevisionDiff` are
+ * EXPORTED and reused, unmodified, by document-activity-feed.tsx (the
+ * cross-document change feed) -- a feed entry (FleetDocumentActivityEntry)
+ * is a strict superset of FleetDocumentRevision, so the identical
+ * actor-resolution and diff-rendering logic applies with no branching. One
+ * implementation of "how do we draw who changed this," not two that could
+ * quietly disagree about a human vs. an agent.
+ *
+
  * STRUCTURE mirrors TaskDetailView.tsx's own Activity section (a plain
  * `.fleet-task-page-section` with an `<h2>`, below the main content) --
  * the same "who did what, when" shape a task's comment/activity feed
@@ -52,11 +61,11 @@ import type { FleetAgent } from "./fleet-data";
 import type { WorkspaceMember } from "./members-data";
 import "./document-detail.css";
 
-function stamp(value: string): string {
+export function stamp(value: string): string {
   return formatDateTime(value, { dateStyle: "medium", timeStyle: "short" });
 }
 
-type ResolvedRevisionActor = {
+export type ResolvedRevisionActor = {
   kind: "human" | "agent" | "external_agent" | "other";
   label: string;
   /** AgentSigil's seed / MemberAvatar's tint key -- stable per actor so the
@@ -74,7 +83,7 @@ function externalAgentShortId(id: string): string {
   return id.replace(/^ext_agent_/, "").slice(0, 8);
 }
 
-function resolveRevisionActor(
+export function resolveRevisionActor(
   revision: FleetDocumentRevision,
   agents: FleetAgent[],
   members: WorkspaceMember[],
@@ -143,7 +152,7 @@ function resolveRevisionActor(
   };
 }
 
-function RevisionActorBadge({ actor }: { actor: ResolvedRevisionActor }) {
+export function RevisionActorBadge({ actor }: { actor: ResolvedRevisionActor }) {
   if (actor.kind === "human") {
     return (
       <span className="fleet-doc-history-actor">
@@ -182,7 +191,7 @@ function diffLineClass(line: string): string {
 /** Renders the stored unified diff readably -- added/removed lines, not a
  *  raw blob (the founder's own ask). A blank line renders as a non-breaking
  *  space so it still occupies a row instead of collapsing to nothing. */
-function RevisionDiff({ diff }: { diff: string }) {
+export function RevisionDiff({ diff }: { diff: string }) {
   const lines = diff.split("\n");
   return (
     <pre className="fleet-doc-history-diff">
