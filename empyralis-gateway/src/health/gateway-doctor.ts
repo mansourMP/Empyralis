@@ -16,6 +16,7 @@ import {
   createSystemdJobRegistrar,
   type GatewaySupervisorInstallOutcome,
 } from "../update/gateway-supervisor-install";
+import { resolveGatewayLaunchEntrypoint } from "../update/gateway-launch-path";
 
 /**
  * In-gateway "doctor": detect -> (safe) repair -> re-validate, exposed as the
@@ -479,12 +480,34 @@ function defaultEntryPath(): string {
   return require.main?.filename || process.argv[1] || process.execPath;
 }
 
+/** The path a supervisor unit written by this process should launch.
+ *
+ *  NOT simply defaultEntryPath(): that is the path THIS process was launched
+ *  from, and writing it back into the unit is self-perpetuating — a gateway
+ *  started once from a fixed checkout pins that checkout forever, so every
+ *  later self-update swaps a `current` symlink the unit never resolves
+ *  through and the box comes back running the identical build (MAN-355).
+ *  resolveGatewayLaunchEntrypoint prefers the release layout's `current`
+ *  build when it actually resolves, and otherwise returns exactly this
+ *  process's own entrypoint — the one path known to work at this instant.
+ *  See gateway-launch-path.ts for the full boot-failure reasoning. */
+function defaultSupervisorEntryPath(
+  env: NodeJS.ProcessEnv,
+  stateDir: string | undefined,
+): string {
+  return resolveGatewayLaunchEntrypoint({
+    runningEntryPath: defaultEntryPath(),
+    stateDir,
+    env,
+  });
+}
+
 function defaultAuditSupervisorInstall(
   env: NodeJS.ProcessEnv,
   platform: NodeJS.Platform,
   stateDir: string | undefined,
 ): (attemptRepair: boolean) => Promise<GatewaySupervisorInstallOutcome> {
-  const entryPath = defaultEntryPath();
+  const entryPath = defaultSupervisorEntryPath(env, stateDir);
   const logDir = stateDir ? path.join(stateDir, "logs") : os.tmpdir();
   const registerJob = platform === "darwin"
     ? createLaunchdJobRegistrar(typeof process.getuid === "function" ? process.getuid() : 0)
