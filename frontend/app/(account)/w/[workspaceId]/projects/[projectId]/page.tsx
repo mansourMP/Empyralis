@@ -2,7 +2,7 @@
 
 import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import Link from "next/link";
 import { useParams, usePathname, useRouter } from "next/navigation";
 
@@ -24,9 +24,10 @@ import { TasksList } from "@/lib/workspace/fleet/TasksList";
 import { TasksBoard } from "@/lib/workspace/fleet/TasksBoard";
 import { TasksGroupedList } from "@/lib/workspace/fleet/TasksGroupedList";
 import { TaskComposer } from "@/lib/workspace/fleet/TaskComposer";
-import { useFleetDocuments } from "@/lib/workspace/fleet/documents-data";
+import { useFleetDocuments, type FleetDocumentActivityEntry } from "@/lib/workspace/fleet/documents-data";
 import { DocumentsList } from "@/lib/workspace/fleet/DocumentsList";
 import { DocumentComposer } from "@/lib/workspace/fleet/DocumentComposer";
+import { DocumentActivityFeed } from "@/lib/workspace/fleet/document-activity-feed";
 import { MemberAvatarStack } from "@/lib/workspace/fleet/MemberAvatarStack";
 import { ProjectMemberAdd } from "@/lib/workspace/fleet/ProjectMemberAdd";
 import { ProjectPeople } from "@/lib/workspace/fleet/ProjectPeople";
@@ -130,21 +131,29 @@ function TasksGroupedSkeleton() {
 }
 
 /**
- * Documents-list skeleton — DocumentsList.tsx reuses `.fleet-tasks-list`/
- * `.fleet-task-row` wholesale (a different header, no per-task columns), so
- * this needs its own header rather than TasksListSkeleton's.
+ * Documents-list skeleton — TREE-shaped, matching what actually arrives
+ * (DocumentsList.tsx renders an inferred folder tree, `.fleet-doc-tree*`).
+ * It used to draw a two-column table header ("Document | Updated") because
+ * the list itself was a table; leaving that behind would make the loading
+ * state and the loaded state two different layouts, i.e. a visible reflow
+ * on every open. The indents below are a plausible shape, not a prediction:
+ * they exist so the placeholder occupies the same kind of space, never to
+ * claim a specific tree is coming.
  */
+const DOCUMENT_SKELETON_ROWS = [0, 1, 1, 0, 1];
+
 function DocumentsListSkeleton() {
   return (
-    <div className="fleet-tasks-list" aria-busy="true" aria-label="Loading">
-      <div className="fleet-tasks-list-header" role="row">
-        <span>Document</span>
-        <span>Updated</span>
-      </div>
-      {[0, 1, 2, 3].map((i) => (
-        <div key={i} className="fleet-task-row" style={{ gridTemplateColumns: "minmax(260px, 1fr) 160px", cursor: "default" }}>
-          <span className="fleet-skeleton-bar" style={{ width: `${40 + (i % 3) * 15}%`, height: 13 }} />
-          <span className="fleet-skeleton-bar" style={{ width: 90, height: 12 }} />
+    <div className="fleet-doc-tree" aria-busy="true" aria-label="Loading">
+      {DOCUMENT_SKELETON_ROWS.map((depth, i) => (
+        <div
+          key={i}
+          className="fleet-doc-tree-row"
+          style={{ "--doc-tree-depth": depth, cursor: "default" } as CSSProperties}
+        >
+          <span className="fleet-doc-tree-spacer" aria-hidden="true" />
+          <span className="fleet-skeleton-bar" style={{ width: 14, height: 14 }} />
+          <span className="fleet-skeleton-bar" style={{ width: `${34 + (i % 3) * 14}%`, height: 12 }} />
         </div>
       ))}
     </div>
@@ -323,6 +332,14 @@ export default function ProjectDetailPage() {
   // itself no-ops without one, same guard useFleetTasks's own fetcher uses.
   const { documents, loading: documentsLoading, error: documentsError, refresh: refreshDocuments } = useFleetDocuments(workspaceId, projectId);
   const [documentComposerOpen, setDocumentComposerOpen] = useState(false);
+  // Documents | Activity — this project's own change feed (the founder's
+  // own ask, GitHub's per-repo "Commits" mapped onto this project — see
+  // document-activity-feed.tsx's own header). Plain component state, not
+  // persisted, same posture as viewOptions.layout's exclusion from "is
+  // anything non-default" above: a display mode picked per visit, not a
+  // preference worth remembering. Reset is implicit — leaving the
+  // Documents view and coming back always starts on the tree.
+  const [documentSurface, setDocumentSurface] = useState<"tree" | "activity">("tree");
   // Write gate: create/edit/delete controls for a document render only when
   // this resolves `true` — `null` (still loading) and `false` (a viewer, or
   // a member with no project_memberships row here) both hide them outright,
@@ -513,6 +530,13 @@ export default function ProjectDetailPage() {
   // pattern).
   const documentHref = useCallback(
     (documentId: string) => `${projectBase}/documents/${encodeURIComponent(documentId)}`,
+    [projectBase],
+  );
+  // Same route, keyed off a change-feed entry's own document_id rather than
+  // a FleetDocument's id — DocumentActivityFeed's rows carry a different
+  // shape than DocumentsList's.
+  const documentActivityHref = useCallback(
+    (entry: FleetDocumentActivityEntry) => `${projectBase}/documents/${encodeURIComponent(entry.document_id)}`,
     [projectBase],
   );
 
@@ -711,6 +735,37 @@ export default function ProjectDetailPage() {
         {view === "tasks" && tasks.length > 0 ? (
           <TaskViewOptions options={viewOptions} onChange={updateViewOptions} />
         ) : null}
+        {/* Documents | Activity — this project's own change feed (Task 2,
+            founder's own ask). Same right-aligned slot TaskViewOptions
+            occupies for the Tasks view (`.fleet-view-options`'s own
+            margin-left:auto), shown only once there is a tree to switch
+            away from — a document with zero documents has no history to
+            offer either, and this mirrors TaskViewOptions' own `tasks.length
+            > 0` guard immediately above. */}
+        {view === "documents" && documents.length > 0 ? (
+          <div className="fleet-view-options">
+            <div className="fleet-segmented" role="tablist" aria-label="Documents view">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={documentSurface === "tree"}
+                className={`fleet-segmented-btn${documentSurface === "tree" ? " fleet-segmented-btn--active" : ""}`}
+                onClick={() => setDocumentSurface("tree")}
+              >
+                Documents
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={documentSurface === "activity"}
+                className={`fleet-segmented-btn${documentSurface === "activity" ? " fleet-segmented-btn--active" : ""}`}
+                onClick={() => setDocumentSurface("activity")}
+              >
+                Activity
+              </button>
+            </div>
+          </div>
+        ) : null}
         {/* Filters/sort are gone — the compact rail beside this pane
             (the rail's project-agents space) is the browse surface now, and a narrow
             scan-and-pick list has nothing for a status/channel dropdown to
@@ -817,6 +872,18 @@ export default function ProjectDetailPage() {
                 onStatusChange={handleStatusChange}
               />
             )
+          ) : view === "documents" && documentSurface === "activity" ? (
+            // This project's own feed — projectId supplied, the narrower of
+            // the two scopes DocumentActivityFeed serves (see that file's
+            // own header; the workspace-wide reading is /context's toggle).
+            <DocumentActivityFeed
+              workspaceId={workspaceId}
+              projectId={projectId}
+              hrefForDocument={documentActivityHref}
+              agents={agents}
+              members={members}
+              identityLookupFailed={Boolean(agentsError || membersError)}
+            />
           ) : view === "documents" ? (
             documentsLoading && documents.length === 0 ? (
               <DocumentsListSkeleton />

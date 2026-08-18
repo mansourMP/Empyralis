@@ -1258,30 +1258,77 @@ async def _enforce_document_project_access(
 async def fleet_list_documents(
     request: Request,
     workspace_id: str,
-    project_id: str = Query(..., min_length=1, description="Documents are project-scoped -- required"),
+    project_id: Optional[str] = Query(None, description="Filter to one project; omitted = every project this caller can see"),
     current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
-    """List a project's documents, alphabetically by title. `viewer` is
-    enough -- reading a project's shared knowledge is the same tier that
-    reads its tasks and its member roster. Gated on the named project (a
-    list call always names one; documents have no cross-project view the
-    way fleet_list_tasks does), so a caller with no project_memberships row
-    for this project sees a 404, not an empty list that would still confirm
-    the project exists. Bodies are omitted from the list response (see
-    project_documents_repository.list_documents's own include_body=False
-    default) -- fetch a single document via GET .../documents/{id} for its
-    content."""
+    """List documents, ordered by path -- a repository tree, not a feed.
+    `viewer` is enough: reading a project's shared knowledge is the same
+    tier that reads its tasks and its member roster.
+
+    TWO MODES, ONE ACL, and it is the SAME enforce-when-scoped /
+    filter-when-not shape fleet_list_tasks above already uses -- copied
+    deliberately rather than invented, because a second ACL shape on the
+    surface that holds a team's accumulated knowledge is exactly the risk
+    CLAUDE.md keeps recording ("a filtered item list beside an unfiltered
+    summary is still a disclosure"):
+
+      project_id given    -> enforce_project_access on THAT project, so a
+                             caller with no membership row gets a 404 and
+                             not an empty list that would still confirm the
+                             project exists.
+      project_id omitted  -> _visible_project_ids decides. None means
+                             "workspace owner, every project"; a concrete
+                             set is this member's own project_memberships,
+                             passed to the repository as the scope. An owner
+                             is resolved to their real project id list
+                             rather than an unscoped read, so there is no
+                             code path here that reads documents without a
+                             project scope bound to the query.
+
+    This is what the workspace-level Context view reads. Bodies are omitted
+    (see project_documents_repository.list_documents's include_body=False
+    default) -- fetch a single document via GET .../documents/{id}."""
     resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
     tenant_id = await _resolve_tenant(resolved_workspace_id)
-    await auth_module.enforce_project_access(current_user, resolved_workspace_id, project_id, minimum_role="viewer")
     from server_modules import project_documents_repository as documents
 
-    try:
-        rows = await documents.list_documents(
-            tenant_id=tenant_id,
-            workspace_id=resolved_workspace_id,
-            project_id=project_id,
+    scope_project_ids: Optional[List[str]] = None
+    if project_id:
+        await auth_module.enforce_project_access(
+            current_user, resolved_workspace_id, project_id, minimum_role="viewer",
         )
+    else:
+        visible_ids = await _visible_project_ids(current_user, resolved_workspace_id, tenant_id)
+        if visible_ids is None:
+            # Owner. Resolve to the real id list rather than reading
+            # unscoped -- list_documents has no "everything" mode by
+            # design, and giving it one for the owner case would be the
+            # loaded gun this codebase already disarmed elsewhere.
+            from server_modules import projects_repository as _projects
+
+            scope_project_ids = [
+                str(row.get("id") or "").strip()
+                for row in (await _projects.list_projects(
+                    tenant_id=tenant_id, workspace_id=resolved_workspace_id,
+                ) or [])
+                if str(row.get("id") or "").strip()
+            ]
+        else:
+            scope_project_ids = sorted(visible_ids)
+
+    try:
+        if project_id:
+            rows = await documents.list_documents(
+                tenant_id=tenant_id,
+                workspace_id=resolved_workspace_id,
+                project_id=project_id,
+            )
+        else:
+            rows = await documents.list_documents(
+                tenant_id=tenant_id,
+                workspace_id=resolved_workspace_id,
+                project_ids=scope_project_ids or [],
+            )
         return {"ok": True, "documents": rows}
     except Exception as exc:
         return {"ok": False, "error": str(exc), "documents": []}
@@ -1365,10 +1412,79 @@ async def fleet_list_document_revisions(
         return {"ok": False, "error": str(exc)}
 
 
+@router.get("/api/w/{workspace_id}/fleet/document-activity")
+async def fleet_document_activity(
+    request: Request,
+    workspace_id: str,
+    project_id: Optional[str] = Query(None, description="Filter to one project; omitted = every project this caller can see"),
+    limit: int = Query(50, ge=1, le=200),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Every document revision in scope, newest first -- the repository's
+    commit log to fleet_list_document_revisions' single-file history.
+
+    READ ONLY, AND DELIBERATELY SO. There is no restore/revert here and none
+    is planned from this surface: restoring a revision is a WRITE with real
+    consequences (it would overwrite whatever is current, which is the very
+    silent-loss class MAN-354 was filed for), and a feed that quietly grows
+    a destructive control is the shape this codebase keeps getting bitten
+    by. The feed answers "who changed what, and when"; changing anything is
+    done on the document itself, where the stale-write precondition applies.
+
+    SCOPE: identical enforce-when-scoped / filter-when-not shape as
+    fleet_list_documents and fleet_list_tasks -- a named project is checked
+    with enforce_project_access, an omitted one resolves to this caller's
+    own visible projects. The project ids reaching SQL are always ones this
+    request resolved, never a caller-supplied string trusted through."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
+    from server_modules import project_documents_repository as documents
+
+    try:
+        if project_id:
+            await auth_module.enforce_project_access(
+                current_user, resolved_workspace_id, project_id, minimum_role="viewer",
+            )
+            rows = await documents.list_project_document_activity(
+                tenant_id=tenant_id,
+                workspace_id=resolved_workspace_id,
+                project_id=project_id,
+                limit=limit,
+            )
+        else:
+            visible_ids = await _visible_project_ids(current_user, resolved_workspace_id, tenant_id)
+            if visible_ids is None:
+                from server_modules import projects_repository as _projects
+
+                scope = [
+                    str(row.get("id") or "").strip()
+                    for row in (await _projects.list_projects(
+                        tenant_id=tenant_id, workspace_id=resolved_workspace_id,
+                    ) or [])
+                    if str(row.get("id") or "").strip()
+                ]
+            else:
+                scope = sorted(visible_ids)
+            rows = await documents.list_project_document_activity(
+                tenant_id=tenant_id,
+                workspace_id=resolved_workspace_id,
+                project_ids=scope,
+                limit=limit,
+            )
+        return {"ok": True, "activity": rows}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "activity": []}
+
+
 class FleetCreateDocumentRequest(BaseModel):
     project_id: str = Field(min_length=1)
     title: str = Field(min_length=1)
     body: str = ""
+    # Where the document lives in the project's tree ("specs/api/auth.md").
+    # Optional: omitted, create_document derives it from the title, which is
+    # what the "New document" button wants. Folders are inferred from the
+    # slashes -- there is nothing to create first, exactly as in git.
+    path: Optional[str] = None
 
 
 @router.post("/api/w/{workspace_id}/fleet/documents")
@@ -1402,6 +1518,7 @@ async def fleet_create_document(
             project_id=body.project_id,
             title=body.title,
             body=body.body,
+            path=body.path,
             created_by=str((current_user or {}).get("user_id") or "").strip() or None,
             # A dashboard session is always a human -- see project_documents_
             # repository's changed_by_type vocabulary (human/agent/external_agent).
@@ -1415,6 +1532,12 @@ async def fleet_create_document(
 class FleetPatchDocumentRequest(BaseModel):
     title: Optional[str] = None
     body: Optional[str] = None
+    # A move/rename inside the project's tree -- `git mv`. Omitted or empty
+    # leaves the document exactly where it is; a title change never moves it
+    # on its own (see update_document's docstring). Covered by the same
+    # base_sha256 precondition as title and body, so a stale save can no
+    # more silently un-move a document than it can revert its text.
+    path: Optional[str] = None
     # The stale-write precondition -- the `state_sha256` of the document
     # state this edit was composed on top of (every body-bearing document
     # read carries one; see project_documents_repository.
@@ -1480,6 +1603,7 @@ async def fleet_patch_document(
             expected_sha256=(str(body.base_sha256 or "").strip() or None),
             title=body.title,
             body=body.body,
+            path=body.path,
             updated_by=str((current_user or {}).get("user_id") or "").strip() or None,
             changed_by_type="human",
         )

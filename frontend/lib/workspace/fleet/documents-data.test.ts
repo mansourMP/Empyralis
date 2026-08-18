@@ -60,19 +60,34 @@ assert(
   "every character invalid on some OS's filesystem is replaced: : \" < >",
 );
 assert(
-  documentExportFilename("", "fallback-slug") === "fallback-slug.md",
-  "an empty title falls back to the document's own slug",
+  documentExportFilename("", "fallback-name.md") === "fallback-name.md",
+  "an empty title falls back to the document's own filename",
+);
+// `slug` became `path` when the documents surface went GitHub-shaped, so the
+// fallback is a PATH now. A download is one file: only the last segment can
+// be the filename, and the ".md" it already carries must not be doubled.
+assert(
+  documentExportFilename("", "specs/api/auth.md") === "auth.md",
+  "the fallback is the path's LAST SEGMENT, never the whole path flattened by the sanitizer",
+);
+assert(
+  documentExportFilename("", "/specs//api/auth.md") === "auth.md",
+  "leading and duplicated slashes in the path never leak into the filename",
+);
+assert(
+  documentExportFilename("Auth spec.md", "specs/auth.md") === "Auth spec.md",
+  "a title that already ends in .md keeps exactly one extension",
 );
 assert(
   documentExportFilename("", "") === "document.md",
-  "an empty title AND an empty slug still produce a real filename, never a bare '.md'",
+  "an empty title AND an empty path still produce a real filename, never a bare '.md'",
 );
 assert(
   documentExportFilename("   ", "   ") === "document.md",
-  "whitespace-only title and slug are both treated as absent",
+  "whitespace-only title and path are both treated as absent",
 );
 assert(
-  documentExportFilename("Plain title", "plain-title").endsWith(".md"),
+  documentExportFilename("Plain title", "plain-title.md").endsWith(".md"),
   "the extension is always .md, regardless of input",
 );
 

@@ -89,14 +89,49 @@ class DocumentStateSha256Tests(unittest.TestCase):
         token straight out of the database -- two independent sources, the
         discipline CLAUDE.md's own "a check that derives its own
         expectations from the thing it checks is blind" note demands."""
+        # Re-pinned when `path` joined the token (documents became
+        # GitHub-shaped). Both literals below were derived INDEPENDENTLY of
+        # this implementation, with shell shasum:
+        #   h() { printf '%s' "$1" | shasum -a 256 | cut -d' ' -f1; }
+        #   printf '%s%s%s' "$(h TITLE)" "$(h BODY)" "$(h PATH)" | shasum -a 256
         self.assertEqual(
             documents.document_state_sha256("Runbook", "hello"),
-            "52eab4d9ed9613f9219c7d4f96ee463763aaf7c4a1675f0fc44fc9a7b82ad889",
+            "e1746794e2f1e8f0cd9fb4dae58fb74251a21bc16a4ea993f286ca87df4c619c",
+            "a pathless document state -- the two-argument call still describes a real state",
+        )
+        self.assertEqual(
+            documents.document_state_sha256("Runbook", "hello", "specs/api/auth.md"),
+            "6aae137f40a7de869ea79854026531e66fdf80703dd649f2afc20caae9027ca4",
         )
         self.assertEqual(
             documents.document_state_sha256("", ""),
             documents.document_state_sha256(None, None),
             "None and empty string are the same document state (the SQL side COALESCEs both to '')",
+        )
+        self.assertEqual(
+            documents.document_state_sha256("", "", ""),
+            "74313561d1897af3dc03f4fae174960d28968f92b49230523faca462b848db60",
+        )
+
+    def test_a_move_is_a_conflict_like_any_other_edit(self):
+        """PATH IS COVERED BY THE TOKEN. Two documents identical in title and
+        body but living at different paths are different states, so a save
+        composed against one is refused against the other. Without this a
+        stale autosave could silently un-move a document somebody else had
+        just moved -- the same silent loss the precondition exists to stop,
+        pointed at the tree instead of the text."""
+        self.assertNotEqual(
+            documents.document_state_sha256("Runbook", "hello", "notes/runbook.md"),
+            documents.document_state_sha256("Runbook", "hello", "specs/runbook.md"),
+        )
+
+    def test_the_three_field_boundary_cannot_be_forged(self):
+        """The digest-concatenation argument, extended to three fields: a
+        naive title||body||path would collide these two genuinely different
+        states."""
+        self.assertNotEqual(
+            documents.document_state_sha256("a", "b", "cd"),
+            documents.document_state_sha256("a", "bc", "d"),
         )
 
     def test_identical_content_is_the_same_token(self):

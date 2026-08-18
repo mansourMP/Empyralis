@@ -531,12 +531,12 @@ export function DocumentDetailView({
     const url = URL.createObjectURL(blob);
     const link = window.document.createElement("a");
     link.href = url;
-    link.download = documentExportFilename(draftRef.current.title, document.slug);
+    link.download = documentExportFilename(draftRef.current.title, document.path);
     window.document.body.appendChild(link);
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
-  }, [document.slug]);
+  }, [document.path]);
 
   // canWrite-only (DocumentMenu never renders this item for a viewer).
   // Duplicates the DRAFT, not the last-saved document — a duplicate should
@@ -852,12 +852,18 @@ export function DocumentDetailView({
  *    item, still the only one behind a confirm swap.
  *
  *  CUT, and why:
- *  - Rename — the title is already a live, always-editable <input> for a
- *    canWrite reader (see this file's own header, "DIRECT MANIPULATION").
- *    A "Rename" menu item next to it would be the exact "why the fuck do I
- *    need to edit for" mode-toggle the founder rejected the first time,
- *    just moved one level down — a second way to do a thing that already
- *    has zero friction is not a feature, it's a decoy control.
+ *  - Rename — the title is CLICK-TO-EDIT in place for a canWrite reader:
+ *    it renders as the page heading, and clicking it swaps in an <input>
+ *    that commits on blur or Enter (`editingTitle` + `skipBlurCommit`,
+ *    the same idiom TaskDetailView uses). One click, no mode to enter and
+ *    no state to leave. A "Rename" menu item next to it would be the exact
+ *    "why the fuck do I need to edit for" mode-toggle the founder rejected
+ *    the first time, just moved one level down — a second way to do a thing
+ *    that already costs one click is not a feature, it's a decoy control.
+ *    (This comment used to claim the title was an "always-editable <input>"
+ *    and cite a header section called "DIRECT MANIPULATION" that does not
+ *    exist — both were stale from before the 2026-08-12 click-to-edit
+ *    rework, and the conclusion happened to survive the correction.)
  *  - Move to another project — needs a genuinely new backend concept
  *    (fleet_patch_document only accepts title/body today; moving a
  *    document means a destination-project membership check and extending

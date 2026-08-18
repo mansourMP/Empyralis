@@ -1,4 +1,4 @@
-import { FolderKanban, Inbox, ListChecks, type LucideIcon } from "lucide-react";
+import { FolderKanban, Inbox, Library, ListChecks, type LucideIcon } from "lucide-react";
 
 /**
  * The primary rail's destinations — pulled into its own pure,
@@ -61,6 +61,17 @@ import { FolderKanban, Inbox, ListChecks, type LucideIcon } from "lucide-react";
  * (workspace data), not AGENTS, so it does not reach past the project
  * boundary that rule is about. See my-work.ts for what lands in it.
  *
+ * "Context" answers "where is that document" — every document in the
+ * workspace, in one GitHub-shaped tree (workspace = org, project = repo,
+ * document.path = file path; see document-tree.ts). It sits beside Projects
+ * for the same reason Projects does and My work does not disqualify itself:
+ * it aggregates workspace DATA, never AGENTS, so it does not reach past the
+ * boundary the project-as-spine rule is about. It earns a top-level place
+ * because until it existed a document could only be found by first
+ * remembering which project it was filed in — CLAUDE.md's own positioning
+ * puts the team's accumulated CONTEXT at the centre of the product, and it
+ * had no front door.
+ *
  * NO ACTIVITY ROW, deliberately. It was floated and dropped in the same
  * conversation: per-agent activity already exists on the agent's own Work
  * tab, and CLAUDE.md's "a surface must earn its place" is explicit that an
@@ -92,6 +103,7 @@ export const RAIL_ITEMS: RailNavItem[] = [
   { key: "inbox", label: "Inbox", segment: "inbox", icon: Inbox, chord: "i", aggregatesAgents: true },
   { key: "my-work", label: "My work", segment: "my-work", icon: ListChecks, chord: "m" },
   { key: "projects", label: "Projects", segment: "projects", icon: FolderKanban, chord: "p" },
+  { key: "context", label: "Context", segment: "context", icon: Library, chord: "c" },
 ];
 
 /** The rail items actually shown — `hideAggregations` true at
