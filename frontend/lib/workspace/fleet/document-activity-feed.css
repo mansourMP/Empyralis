@@ -1,0 +1,78 @@
+/**
+ * The cross-document change feed (document-activity-feed.tsx). A SEPARATE
+ * FILE from document-detail.css, following that file's own convention
+ * (several agents work the documents surface at once; a brand-new class no
+ * other file has a rule for cannot collide on import order) — every
+ * selector below is new (`.fleet-doc-activity-*`); the shared row shell
+ * (`.fleet-doc-history-item`/`-head`/`-diff`) is reused UNMODIFIED from
+ * document-detail.css, on purpose, so a feed row and a single document's
+ * own History row read as the same convention rather than a redraw of it.
+ *
+ * TOKENS ONLY — see document-detail.css's own header for why.
+ */
+
+/* The Tree/Activity (or, on a project page, Documents/Activity) toggle row
+   both context/page.tsx and the project detail page's Documents view
+   render above their content — a plain `.fleet-segmented` pair, this rule
+   is just its spacing from whatever content sits under it. */
+.fleet-doc-context-toolbar {
+  margin-bottom: 16px;
+}
+
+.fleet-doc-activity-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+/* Slightly more breathing room than a single document's own History rows —
+   this list spans many documents, so each entry is doing more work (naming
+   which document changed, not just when). */
+.fleet-doc-activity-item {
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--border);
+}
+.fleet-doc-activity-item:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+/* The document a row is ABOUT — a real link (CLAUDE.md: primary navigation
+   is real links, cmd/middle-click must work), styled as the row's own
+   secondary subject next to the actor badge that already owns the primary
+   weight on that line. */
+.fleet-doc-activity-target {
+  color: var(--text-primary);
+  text-decoration: none;
+  font-weight: var(--weight-medium, 500);
+}
+.fleet-doc-activity-target:hover {
+  text-decoration: underline;
+}
+
+/* Workspace-scope only (DocumentActivityFeed's own `showProjectLabel`) — a
+   quiet chip, not a link: a feed row already names its document, so the
+   project is context for scanning, not something to click through to a
+   project's own home from every row. */
+.fleet-doc-activity-project {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill, 999px);
+  padding: 1px 8px;
+}
+
+/* The document's path, under the head line — GitHub shows a commit's file
+   path in exactly this quiet, monospace register, distinct from the title
+   line above it. */
+.fleet-doc-activity-path {
+  display: block;
+  margin: 2px 0 8px;
+  font-family: var(--app-font-mono, ui-monospace, monospace);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}

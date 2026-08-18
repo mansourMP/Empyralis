@@ -1967,6 +1967,43 @@ def _read_context_files_payload(*, workspace_id: str, agent_install_id: str | No
     return files if isinstance(files, dict) else {}
 
 
+async def _load_context_layer_index(
+    *, tenant_id: str, workspace_id: str, agent_install_id: str, user_id: str,
+) -> str:
+    """The document index block for this turn, or "" -- never raises.
+
+    Paths only. See agent_document_scope_service.document_tree_index for why
+    the bodies stay behind document__read, and resolve_agent_document_project_
+    scope for how an install with no project of its own (the Operator) gets a
+    scope at all."""
+    try:
+        from server_modules import agent_document_scope_service as _doc_scope
+        from server_modules import project_documents_repository as _documents
+
+        scope = await _doc_scope.resolve_agent_document_project_scope(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            agent_install_id=agent_install_id,
+            user_id=user_id,
+        )
+        if not scope.project_ids:
+            return ""
+        rows = await _documents.list_documents(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            project_ids=scope.project_ids,
+            include_body=False,
+        )
+        return _doc_scope.document_tree_index(rows)
+    except Exception:
+        # This module has no module-level `logger` (every user makes its own),
+        # so make one here rather than relying on a name that isn't there.
+        logging.getLogger(__name__).exception(
+            "context layer index unavailable workspace=%s agent=%s", workspace_id, agent_install_id,
+        )
+        return ""
+
+
 def _load_memory_context(*, workspace_id: str) -> str:
     return sage_memory_service.build_sage_memory_context_block(
         workspace_id=workspace_id,
@@ -5607,6 +5644,28 @@ async def _handle_sage_chat_unguarded(
     if memory_context:
         used_context.append("sage_memory")
 
+    # ── The context layer, PUSHED AS AN INDEX (paths only, never bodies) ──
+    # "Connected by default" (founder, MAN-352): every agent should know the
+    # team's documents exist and what is in them. What it must NOT be is a
+    # retrieval pipeline -- this codebase deleted its RAG/embeddings stack on
+    # purpose, following Claude Code's own finding that agentic search beats
+    # RAG, and injecting bodies here would rebuild it by the back door. So
+    # the model gets `ls -R` and reaches for document__read itself.
+    #
+    # `_spec_install_id` is "" for the workspace-level Operator, which is
+    # exactly the case the resolver answers from the ASKING PERSON's own
+    # projects -- see agent_document_scope_service. Best-effort: a documents
+    # outage must never take a turn down, and an absent index degrades to
+    # "the agent doesn't mention documents", not to an error.
+    context_layer_index = await _load_context_layer_index(
+        tenant_id=normalized_tenant_id,
+        workspace_id=normalized_workspace_id,
+        agent_install_id=_spec_install_id,
+        user_id=actor_user_id,
+    )
+    if context_layer_index:
+        used_context.append("context_layer")
+
     attachment_context = await _load_attachment_context(
         workspace_id=normalized_workspace_id,
         attachments=attachments,
@@ -6218,7 +6277,10 @@ async def _handle_sage_chat_unguarded(
             "before answering, don't guess."
         )
         _spec_memory_block = _spec_memory_why + (f"\n\n## Your memory\n{memory_context}" if memory_context else "")
-        _specialist_system_prompt = f"{_spec_persona}{_spec_scope_rule}{_spec_autonomy_rule}{_spec_intro_rule}{_spec_honesty_rule}{_spec_capability_manifest_block}{_channel_action_honesty_rule}{_spec_memory_block}{_audience_instructions}{attachment_context}{mcp_tool_inventory}"
+        _spec_context_layer_block = (
+            f"\n\n## {context_layer_index}" if context_layer_index else ""
+        )
+        _specialist_system_prompt = f"{_spec_persona}{_spec_scope_rule}{_spec_autonomy_rule}{_spec_intro_rule}{_spec_honesty_rule}{_spec_capability_manifest_block}{_channel_action_honesty_rule}{_spec_memory_block}{_spec_context_layer_block}{_audience_instructions}{attachment_context}{mcp_tool_inventory}"
         envelope = _build_prompt_envelope(
             workspace_id=normalized_workspace_id,
             message=normalized_message,
@@ -6228,7 +6290,13 @@ async def _handle_sage_chat_unguarded(
         envelope = _build_prompt_envelope(
             workspace_id=normalized_workspace_id,
             message=normalized_message,
-            system_prompt=f"{instruction_bundle.system_prompt.rstrip()}{_audience_instructions}{sage_surface_guardrails}{_channel_action_honesty_rule}{attachment_context}{mcp_tool_inventory}",
+            # The context layer rides on the OPERATOR's prompt too, and this
+            # is the branch that actually matters for it: the workspace-level
+            # agent is the one that could not read a single document before
+            # this pass. Computing the index and then only handing it to
+            # specialists would be the same "built and never wired" defect
+            # one level down.
+            system_prompt=f"{instruction_bundle.system_prompt.rstrip()}{_audience_instructions}{sage_surface_guardrails}{_channel_action_honesty_rule}" + (f"\n\n## {context_layer_index}" if context_layer_index else "") + f"{attachment_context}{mcp_tool_inventory}",
         )
 
     # ── BYO-brain Phase 2: on-box local model turn ─────────────────────────
