@@ -4576,3 +4576,136 @@ session is attributed to the `external_mcp_client` fallback.
 `list_workspace_mcp_api_keys` drops `external_agent_id`/`display_name`/
 `roster_warning` that key CREATION already computes, so the keys UI could not
 show a key's identity even if it wanted to.
+
+## An agent is a PRINCIPAL: reachability is the gate, placement is the consent (2026-08-18, MAN-356)
+
+**Verdict: a workspace member could run shell commands on the founder's own
+Mac, through two independent holes that compose.** Both proven live on a
+disposable stack (two users, two projects), both closed, both re-verified.
+
+```
+HOLE 1  reachability was OBSCURITY
+  GET  /fleet/agents      as a non-member  ->  200, agent absent   (filtered)
+  POST /api/turn  naming that same id      ->  200, turn RAN       (no gate)
+  8 turn-path modules, project-ACL calls found: 0. The ACL lived only in the
+  LIST endpoints; POST /turn gated on WORKSPACE membership alone.
+
+HOLE 2  execution borrowed ANY box
+  _resolve_direct_tool_gateway_id(workspace_id, *, session_ctx)   no caller id
+  registration_is_usable(registration, *, workspace_id)           no owner id
+  -> ended in "any live active gateway registered to the workspace"
+```
+
+**The model, the founder's own: humans touch work artifacts; the agent touches
+machines; NOBODY reaches a machine THROUGH an agent.** There are deliberately
+no per-person tool-authority tiers — he rejected that outright ("we are not
+going to decrease the skills of this agent"). So the gate is REACHABILITY, and
+execution follows PLACEMENT.
+
+**Fix 1 — `agent_reachability_service.enforce_agent_reachable`, and it FAILS
+CLOSED. That property is the whole point, not a detail.** The obvious
+implementation reuses `routes_fleet._enforce_agent_project_access`; do not.
+That helper returns (allows) on a missing project, and `project_id` is nullable
+BY SCHEMA — `REFERENCES projects(id) ON DELETE SET NULL` — with pre-migration
+installs never backfilled (`fleet-data.ts` fabricates a default project id so
+those URLs do not 404). A gate derived from it is *already* partly vacuous and
+would become entirely vacuous the day agents stop carrying a project: still
+present, still shaped like a gate, enforcing nothing. That is the worst
+available outcome for a security seam.
+
+```
+agent_kind == "master"   ALWAYS reachable   workspace-scoped, MAN-201
+project_id present       the project ACL decides
+project_id ABSENT        workspace OWNER only — never a member
+install unresolvable     REFUSE (404, never 403 — a 403 is an enumeration oracle)
+```
+
+Keyed on `agent_kind`, NEVER on an empty `project_id`: "has no project" must
+never be what grants reach, or a project-less SPECIALIST silently inherits
+Sage's exemption. When the grant stops being project-derived, only this
+function's body changes — in one place.
+
+**The two helpers are deliberately NOT merged.** `_enforce_agent_project_access`
+guards fleet DETAIL reads, where a missing agent falls through to the service
+call's own not-found; this one answers "may this principal reach this agent at
+all", where "could not establish a grant" must mean no.
+
+**Fix 2 — execution follows placement, and PLACEMENT IS THE CONSENT MOMENT.**
+That is why no per-person hardware permission exists on this path: a box
+reaches an agent because the HARDWARE'S OWNER put it there (the Hardware tab /
+the wizard's Placement step write `preferred_gateway_id`; the U3-K project
+default re-checks the machine owner's own live opt-in on every resolution).
+
+```
+1. hardware_access == "none"  -> None, always            (cloud-only agent)
+2. the agent's PLACEMENT      -> that box, if usable+live
+3. no placement               -> only a box the ASKING PERSON OWNS
+4. otherwise                  -> None
+```
+
+`_resolve_live_gateway_from_workspace` is DELETED, replaced by
+`_resolve_live_gateway_owned_by(workspace_id, owner_user_id, ...)` filtering on
+`gateway_registrations.user_id` — the person who paired the box. An empty
+owner id matches NOTHING (fail closed; `""` must never be a wildcard).
+
+**Sage is the sharpest case and the reason step 3 exists rather than "no
+placement -> no box".** A Sage turn resolves no specialist context, stamps no
+`preferred_gateway_id`, and therefore ALWAYS hit the old workspace scan — and
+Sage is the one agent every member can reach by design. Step 3 keeps the
+founder's own workflow intact (he owns the Mac, so he still reaches it through
+Sage) while making the cross-person case structurally impossible.
+
+**`hardware_access` was rendered and enforced NOWHERE** —
+`fleet_tools.resolve_hardware_access` had exactly one non-test caller, building
+a list payload. It now rides on `SpecialistRuntimeContext.hardware_access` into
+`session_ctx["metadata"]["agent_hardware_access"]`. It gates TOOL reach only,
+never the BYO-brain binding: `mode: local` + `hardware_access: none` is a
+legitimate agent whose model runs on a box while its shell tools stay
+cloud-side, and folding the two would silently un-host that agent's brain.
+An ABSENT bucket is "unknown", not "none" — Sage stamps nothing, and inferring
+"none" would take the operator's hardware away on a guess rather than a setting.
+
+**UNKNOWN is not "none", and collapsing them un-places agents silently.**
+This was caught by the EXISTING `test_specialist_runtime_context.py` suite
+going red — 5 tests — not by review. `fleet_tools.resolve_hardware_access`
+normalizes an ABSENT value to `"none"`, which is correct for its own job
+(rendering a picker) and wrong as an enforcement decision: the SQLite
+local-bundle path carries no such column, so a missing key means "nobody told
+me", not "the owner chose cloud-only". Only an EXPLICIT `"none"` suppresses
+placement; unknown carries `""` onward, and both sides of the seam
+(`SpecialistRuntimeContext.hardware_access`, whose default is `""` and not
+`"none"`, and the resolver's `agent_hardware_access` metadata key) make the
+same distinction the same way. The fix was to my own new code, not to the
+tests — a normalizer written for DISPLAY is not automatically safe as a GATE.
+
+**The model's own `gateway_id` argument is a HINT, never authorization.**
+Call sites did `payload.get("gateway_id") or _resolve(...)`, so a model naming
+a box skipped placement entirely. It is now passed IN and honoured only when it
+names this agent's placement; otherwise dropped (logged) and resolution
+continues, so the turn lands on the right box rather than no box.
+
+**Returning None is the degradation, never an exception** — the callers already
+expect it (`_hardware_action_offline_result`, and every gateway branch guarded
+by `if ... and gateway_id`). An offline placement degrades to no machine, never
+to somebody else's.
+
+**Verified live, before and after, not from code.** Member outside the project:
+`POST /api/turn` 200 -> 404. Negative controls all still 200 (owner -> private
+agent, member -> shared-project agent, member -> Sage). Red-before-green on
+both fixes by swapping the pre-fix shape back in: the fail-open variant is
+caught by 2 tests, the unscoped borrow by 5.
+
+**`POST /sessions` and `POST /threads/{id}/turns` are NOT reachability paths —
+verified, not assumed.** Neither calls any turn-executing function; neither
+model accepts an agent install id; and stored session metadata is never read
+back to choose an agent (`agent_sessions.master_agent_install_id` is
+write-only — `get_agent_session` has zero callers). Adding a gate there would
+have been a control that enforces nothing.
+
+**Still open, flagged not fixed.** `routes_fleet._enforce_agent_project_access`
+keeps its fail-open shape, so a member can still reach a PROJECT-LESS agent
+through the fleet DETAIL routes (read/configure, not execute) — same root
+cause, wider blast radius, and it needs its own measured change rather than a
+drive-by. And Sage's own `hardware_access` is never stamped (its turn resolves
+no specialist context), so setting Sage to "Cloud only" does not yet disable
+its tools; it still cannot borrow, because step 3 gates on ownership.

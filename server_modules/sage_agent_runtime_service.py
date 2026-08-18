@@ -3761,6 +3761,14 @@ async def _run_sage_action_loop_v3(
     sender_class: str = "owner",
     agent_install_id: str = "",
     preferred_gateway_id: str = "",
+    # MAN-356: the acting agent's own hardware_access bucket ("none" |
+    # "gateway" | "vps"), resolved upstream by specialist_runtime_context.
+    # Stamped into session_ctx below so the SYNC tool resolver
+    # (skills_service._resolve_direct_tool_gateway_id) can gate machine-backed
+    # tools without an async install lookup of its own. Empty for Sage, whose
+    # own turns resolve no specialist context -- see the resolver for what an
+    # unknown bucket means there.
+    hardware_access: str = "",
     # Fleet Model tab's model_config.reasoning_effort, already resolved +
     # validated by the caller (handle_sage_chat) against
     # _VALID_REASONING_EFFORTS. Empty = no override (provider/model default).
@@ -4060,11 +4068,24 @@ async def _run_sage_action_loop_v3(
         # A specialist's preferred box (Hardware tab / Model tab box-picker) is
         # surfaced as the FIRST candidate _resolve_direct_tool_gateway_id checks
         # (skills_service.py) — it's already validated for workspace-usability
-        # and liveness there, with the existing workspace-wide scan as fallback
-        # when this box is offline or unset.
+        # and liveness there.
+        #
+        # MAN-356: that comment used to end "...with the existing workspace-wide
+        # scan as fallback when this box is offline or unset," and THAT was the
+        # vulnerability, named in this file's own comment. An offline or unset
+        # box now degrades to no box (or, for an unplaced agent, only to a box
+        # the ASKING PERSON owns) — never to whichever machine happens to be
+        # live in the workspace, which could be another member's paired Mac.
         _preferred_gw = str(preferred_gateway_id or "").strip()
         if _preferred_gw:
             session_ctx["metadata"]["gateway_id"] = _preferred_gw
+        # The acting agent's hardware bucket, so the sync tool resolver can
+        # gate machine-backed tools. Only stamped when actually resolved —
+        # an absent key means "unknown", which the resolver treats
+        # differently from an explicit "none" (see its docstring).
+        _hw_access = str(hardware_access or "").strip().lower()
+        if _hw_access:
+            session_ctx["metadata"]["agent_hardware_access"] = _hw_access
         if _specialist_toolset is not None:
             session_ctx["specialist_guard"] = {
                 "agent_install_id": _acting_install_id,
@@ -6443,6 +6464,7 @@ async def _handle_sage_chat_unguarded(
         # Phase 4B: run the tool loop as the resolved specialist (empty for Sage).
         agent_install_id=_spec_install_id,
         preferred_gateway_id=str(getattr(_spec, "preferred_gateway_id", "") or "").strip(),
+        hardware_access=str(getattr(_spec, "hardware_access", "") or "").strip(),
         reasoning_effort=requested_reasoning_effort,
         credit_idempotency_key=turn_credit_idempotency_key,
         attribution=_turn_attribution,
@@ -6527,6 +6549,7 @@ async def _handle_sage_chat_unguarded(
                     sender_id=sender_id,
                     agent_install_id=_spec_install_id,
                     preferred_gateway_id=str(getattr(_spec, "preferred_gateway_id", "") or "").strip(),
+                    hardware_access=str(getattr(_spec, "hardware_access", "") or "").strip(),
                     reasoning_effort=requested_reasoning_effort,
                     credit_idempotency_key=turn_credit_idempotency_key,
                     engine_options=_effective_engine_options,

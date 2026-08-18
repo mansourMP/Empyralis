@@ -13,7 +13,7 @@ from typing import Any, Callable, Optional
 
 from fastapi import HTTPException
 
-from server_modules import rust_runtime_kernel_client
+from server_modules import agent_reachability_service, rust_runtime_kernel_client
 from server_modules.agent_turn import (
     AgentTurnRequest,
     agent_turn,
@@ -294,6 +294,15 @@ async def start_turn(
         run_request=run_request,
     )
     resolved_turn_request = resolution.turn_request
+    # MAN-356: may this caller reach the agent this turn names? The route's
+    # own dependency only proves workspace MEMBERSHIP; the per-project ACL
+    # lived solely in the list endpoints, so a member outside a project could
+    # name that project's agent by id and get a real turn against it. Guard
+    # sits here, at the ingress waist every turn crosses, rather than on each
+    # route — see agent_reachability_service's own module docstring.
+    await agent_reachability_service.enforce_turn_agent_reachability(
+        resolved_turn_request, current_user,
+    )
     _enforce_turn_ingress_run_api_decision(
         operation="start_turn",
         turn_request=resolved_turn_request,
@@ -351,6 +360,13 @@ async def start_run_start(
         current_user=current_user,
         body=request,
         stamp_request_owner_fn=stamp_request_owner_fn,
+    )
+    # MAN-356, same gate as start_turn above. `/runs/start` resolves its own
+    # turn_request and never crosses start_turn, so it needs the guard in its
+    # own right — the two ingress functions ARE the waist, and there is a
+    # drift test asserting both still call this.
+    await agent_reachability_service.enforce_turn_agent_reachability(
+        resolution.turn_request, current_user,
     )
     _enforce_turn_ingress_run_api_decision(
         operation="start_run",
