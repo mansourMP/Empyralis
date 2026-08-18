@@ -184,20 +184,44 @@ async def _enforce_agent_project_access(
     minimum_role: str = "viewer",
 ) -> None:
     """Resolve the project this agent belongs to and enforce MAN-115 access
-    to it. If the agent can't be resolved to a project (doesn't exist, or —
-    not expected in practice — has none), this deliberately does NOT raise:
-    there is nothing to leak for an agent that isn't there, and the
-    underlying service call a route makes right after this will itself
-    return a normal not-found/empty result."""
-    from server_modules import project_tasks_service as tasks
+    to it, using the SAME grant rule `agent_reachability_service.
+    enforce_resolved_agent_access` already enforces on the turn path — one
+    decision, shared, rather than two independently-drifting opinions.
 
-    project_id = await tasks.agent_project_id(
-        tenant_id=tenant_id, workspace_id=resolved_workspace_id, agent_id=agent_id,
-    )
-    if not project_id:
+    CORRECTION (2026-08-19): this used to be `if not project_id: return` —
+    an unconditional fail-open on ANY project-less agent. That was live and
+    exploitable: `project_id` is nullable BY SCHEMA (`ON DELETE SET NULL`),
+    and a real production row (a specialist, not the workspace master) was
+    project-less and enabled, so any workspace member could reach it through
+    every fleet DETAIL route (activity, memory, channels, connectors, tools,
+    capabilities, usage) with no project membership at all. Fixed to the same
+    rule `enforce_agent_reachable` uses: `agent_kind == "master"` is always
+    exempt (MAN-201 — Ask AI must stay reachable by every member), a
+    project-having agent is gated by that project's own ACL (unchanged), and
+    a project-less SPECIALIST is now workspace-OWNER-only, never an ordinary
+    member.
+
+    The one thing this helper still does differently from
+    `enforce_agent_reachable`, on purpose: if the agent bundle cannot be
+    resolved at all (doesn't exist here, or the lookup failed), this still
+    does NOT raise — there is nothing to leak for an agent that isn't there,
+    and the underlying service call a route makes right after this will
+    itself return a normal not-found/empty result. `enforce_agent_reachable`
+    is the one that must fail closed on an unresolvable bundle (it is the
+    ONLY gate on the turn-execution path); this one is a defense-in-depth
+    check ahead of a call that already degrades safely on its own."""
+    from server_modules import agent_reachability_service as reachability
+
+    clean_agent_id = str(agent_id or "").strip()
+    if not clean_agent_id:
         return
-    await auth_module.enforce_project_access(
-        current_user, resolved_workspace_id, project_id, minimum_role=minimum_role,
+    bundle = await reachability.lookup_agent_install_bundle(
+        clean_agent_id, tenant_id=tenant_id, workspace_id=resolved_workspace_id,
+    )
+    if bundle is None:
+        return
+    await reachability.enforce_resolved_agent_access(
+        current_user, resolved_workspace_id, bundle, minimum_role=minimum_role,
     )
 
 

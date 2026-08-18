@@ -16,10 +16,19 @@ route in this file already uses.
 
 Mirrors test_routes_fleet_member_rbac.py's pattern: real ASGI requests
 through the REAL auth_module.enforce_workspace_access/enforce_project_access
-(not mocked), with only the one primitive project_tasks_service.
-agent_project_id / projects_repository.is_project_member patched -- so a
-403/404 here is the dependency wiring actually rejecting, never a mock
-standing in for it.
+(not mocked), with only the install-bundle lookup (agent_registry_repository.
+get_workspace_agent_install_bundle) / projects_repository.is_project_member
+patched -- so a 403/404 here is the dependency wiring actually rejecting,
+never a mock standing in for it.
+
+2026-08-19 (fail-open fix): `_enforce_agent_project_access` was rewritten to
+resolve the agent through `agent_reachability_service.
+lookup_agent_install_bundle` (the same bundle-based lookup the turn-path
+guard uses) instead of `project_tasks_service.agent_project_id`, so it can
+tell "project-less specialist" apart from "doesn't exist" -- the earlier
+project_tasks_service call conflated both into a bare `None`. These tests
+were updated to patch the new lookup accordingly; the scenarios and
+assertions are unchanged.
 """
 
 from __future__ import annotations
@@ -63,8 +72,10 @@ def _owner_user() -> dict:
 
 def _agent_lives_in_project_b():
     return patch(
-        "server_modules.project_tasks_service.agent_project_id",
-        new=AsyncMock(return_value="project-b"),
+        "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+        new=AsyncMock(
+            return_value={"id": "agent-in-project-b", "agent_kind": "specialist", "project_id": "project-b"}
+        ),
     )
 
 
@@ -171,7 +182,7 @@ async def test_scope_workspace_is_unaffected_by_the_new_gate() -> None:
     with (
         patch("server_modules.routes_fleet._resolve_tenant", new=AsyncMock(return_value="tenant-1")),
         patch(
-            "server_modules.project_tasks_service.agent_project_id",
+            "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
             new=AsyncMock(side_effect=AssertionError("scope=workspace must never resolve an agent's project")),
         ),
         patch(
