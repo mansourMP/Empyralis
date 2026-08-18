@@ -4376,6 +4376,79 @@ surface or delete them; and `PATCH .../{channel_key}/gateways/{id}/group-policy`
 remains the same shape (built, tested, zero frontend callers), already noted
 in the multi-agent-per-box section above.
 
+## A launcher pins the path it was launched from (2026-08-18, MAN-355)
+
+**Verdict: the launchers do NOT agree, and MAN-355's premise that none of
+them resolve the release layout is wrong — two of four already do.** Check
+each launcher separately; "the gateway's launcher" is a claim about
+cardinality, and this repo has four.
+
+```
+LAUNCHER                              RESOLVES current/ ?   EVIDENCE
+install-agent-computer.sh run-gateway  YES, checked FIRST   a357779f9, 2026-07-21
+deploy/packer/files/run-gateway        YES, verbatim copy   7fed6ee4c, 2026-07-29
+gateway-supervisor-install.ts (unit)   NO — and worse       require.main.filename
+prod empyralis-gateway-channels.svc    NO — bespoke         ExecStart=/usr/bin/node
+                                                            /opt/empyralis-app/
+                                                            empyralis-gateway/dist/index.js
+```
+
+**The third one was SELF-PERPETUATING, which is the part worth remembering.**
+`gateway-doctor.ts`'s `defaultEntryPath()` returned `require.main.filename` —
+the path THIS process was launched from — and handed it to the unit/plist
+writer. A gateway started once from a fixed checkout therefore wrote that
+fixed checkout back into its own supervisor unit, so every later self-update
+swapped a symlink the unit never resolved through and the box came back
+running the identical build. Detection existed (`d4510de13`'s fingerprint ->
+`previous_update_changed_nothing`); repair did not. Fixed by
+`gateway-launch-path.ts`, which MIRRORS run-gateway's ordering rather than
+inventing a second rule, and only ever chooses between two already-existing
+paths — `gateway-release-layout.ts`'s ownership constraint (self-update
+stages next to the state dir precisely because the unprivileged service user
+cannot write the root-owned install tree) is preserved untouched.
+
+**Boot-failure posture, and it is the whole safety argument:** the layout
+entrypoint is returned ONLY when it resolves to a real file at unit-write
+time. A missing/dangling `current`, or a probe that throws, falls back to the
+running process's own entrypoint — the one path known to work at that
+instant. Worst case is the unit keeping the path it already had.
+
+**The fix reaches FRESH installs only, and that limit is structural.**
+`SUPERVISOR_PRESENCE_CHECK.detect` short-circuits: `detectGatewaySupervisor`
+reads env hints, so a process already running under systemd/launchd returns
+`"pass"` and NEVER calls `auditSupervisorInstall`. The unit-writing path is
+therefore only reachable on an UNSUPERVISED box. An already-supervised box
+carrying a mis-pinned unit does not self-heal — do not claim it does.
+
+**Migration, per box class — most boxes need NOTHING:**
+
+```
+installed AFTER 2026-07-21 (installer) / 2026-07-29 (packer)   already correct
+installed BEFORE those dates      run-gateway on disk lacks the block, is
+                                  root-owned, and is never re-run ─▶ needs root
+production (165.227.25.201)       bespoke: NO run-gateway exists at all;
+                                  hand-rolled unit ─▶ needs root
+```
+
+Production's own state dir is `/var/lib/empyralis-gw/state`, owned by
+`empyralis-gw` and already inside the unit's `ReadWritePaths`, so the layout
+(`/var/lib/empyralis-gw/gateway-releases`) IS writable by the service user —
+staging works today; only the launch pointer is wrong. The repair is one
+`ExecStart` edit plus `daemon-reload` + restart, i.e. an operator action, not
+something a gateway can do to itself. Per this file's own rule, the blast
+radius is small and known personally — there are no anonymous production
+users on the gateway.
+
+**Flagged while here, NOT fixed:
+`__tests__/exec-file-timeout-child-leak.test.ts`'s drift assertion is
+VACUOUS.** It scans `path.resolve(__dirname, "..")` for files ending `.ts`,
+but `npm test` runs from `dist/__tests__`, so it walks `dist/` — which
+contains zero `.ts` files. The guard CLAUDE.md cites as banning raw
+`execFile` timeouts in `src/` currently enforces nothing and reports green.
+`gateway-launch-path-wiring.test.ts` avoids the same trap with an explicit
+src-tree resolver plus a canary assertion; copy that shape, and give every
+source-scanning test a canary.
+
 ## The MCP surface advertised more than it could do (2026-08-18, MAN-205/207)
 
 **Verdict: three of the four tools MAN-205 named were still dead, each for a
