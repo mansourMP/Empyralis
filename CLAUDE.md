@@ -4561,6 +4561,87 @@ contains zero `.ts` files. The guard CLAUDE.md cites as banning raw
 src-tree resolver plus a canary assertion; copy that shape, and give every
 source-scanning test a canary.
 
+## A migration's BACKFILL cannot run under RLS, and it says nothing (2026-08-18)
+
+**Verdict: `GEN-12` task identifiers were absent from every task on
+production not because the code was missing — it shipped 2026-08-13 and is
+correct — but because the migration's backfill was silently filtered to zero
+rows by our own row-level security. Exit 0, columns created, index created,
+nothing written.**
+
+```
+projects / project_tasks   FORCE ROW LEVEL SECURITY,
+                           policy empyralis_rls_scope_match(tenant_id, workspace_id)
+DEPLOY-RUNBOOK step 3b     apply migrations as `empyralis_app` — NON-superuser,
+                           so FORCE binds it — and psql sets none of
+                           app.current_tenant_id / app.current_workspace_id /
+                           app.rls_bypass
+
+  ALTER TABLE / CREATE INDEX   DDL, RLS does not apply   ─▶ APPLIED
+  SELECT / UPDATE ... projects DML, policy is FALSE      ─▶ 0 rows, no error
+```
+
+Reproduced exactly on a disposable database with a `NOSUPERUSER NOBYPASSRLS`
+role owning the tables (production's configuration): the pre-fix migration
+printed `BEGIN / DO / COMMIT`, created both columns AND `uq_projects_task_key`,
+and left `task_key` NULL / `task_seq` 0 / `number` NULL. Production, five days
+later: 9 of 10 projects unkeyed, 34 tasks, 0 numbered.
+
+**THE RULE: a migration that only ADDS COLUMNS is safe to hand to psql; a
+migration that BACKFILLS a tenant-scoped table is not.** The two runbook rules
+already in this file compose into a trap — "apply migrations as the app's own
+role" (correct, ownership) plus "every scoped table is FORCE RLS" (correct,
+isolation) means every DML statement in every migration against those 40+
+tables silently addresses the empty set. Nothing reports a row count, so a
+backfill that did nothing is indistinguishable from one with nothing to do.
+Grep any migration you are about to apply for `UPDATE`/`INSERT`/`SELECT`
+against a scoped table before trusting its exit code.
+
+The backfill now lives in `projects_repository.backfill_task_identifiers()`,
+called from `ensure_control_plane_schema()` — so every database heals on its
+next boot instead of on somebody remembering a psql step, and it REUSES
+`_unique_task_key` (the same function `create_project` calls) rather than the
+second SQL transcription of the same slug→key derivation the migration
+carried. The migration file is now DDL only, carries `SET LOCAL
+app.rls_bypass = 'on'`, and `test_task_identifier_backfill.py` bans DML from
+returning to it — structurally, because the broken version passes every
+behavioural test not run as the app role.
+
+**A `task_seq = 0` seed guard is WRONG and the original migration had it.**
+Caught by a test, not by review. A task created by the live allocator between
+the deploy and the repair moves `task_seq` to 1 while older tasks are still
+unnumbered; the backfill numbers them 2..N (offset by `MAX(number)`), the
+`= 0` guard SKIPS the seed, and the next `create_task` allocates 2 — colliding
+with a live task. The correct predicate is `task_seq < MAX(number)`: raising is
+always right (every number issued came out of `task_seq`, so `task_seq >=
+MAX(number)` is the invariant), lowering is never right, and deleting tasks can
+only shrink `MAX(number)` so it can never walk the counter backwards into
+reissuing a live number — which is the hazard the original "one-time seed"
+comment was actually reaching for.
+
+Two more things worth not re-deriving. **Ordering is `created_at ASC, id ASC`**
+— oldest task is GEN-1, and the id tiebreak is what makes a re-run a genuine
+no-op rather than a reshuffle; identities appear in comments, links and agent
+memory, so a RENUMBERING backfill is worse than no backfill. And **the
+concurrent-allocation race is closed with a row lock**, not hope: numbering and
+seeding one project happen in a transaction that opens with `SELECT ... FOR
+UPDATE` on that project's row — the same row `create_task`'s `UPDATE projects
+SET task_seq = task_seq + 1` locks — so a task created mid-backfill blocks
+until the seed commits.
+
+**The display path needed no fix.** `taskDisplayId` already composed
+`project_task_key` + `number` with an honest hex-slice fallback, and is already
+the call at all four render sites. Proven end-to-end against real Postgres:
+real service → `project_task_key='GEN', number=1` → `GEN-1`.
+
+**Flagged, deliberately NOT fixed: `ensure_control_plane_schema` has a SECOND
+instance of this bug.** Its `workspace_agent_installs` label-dedupe `DO $$`
+block runs through a plain `pool.execute()`, which sets no scope GUCs, against
+a table that is also FORCE RLS — so it too addresses zero rows on every boot.
+Fixing it is one line, and I did not, because the fix's visible effect is
+RENAMING the founder's own duplicate-labelled agents the next time the backend
+restarts. That is his call, not a side effect of a task-numbering ticket.
+
 ## The MCP surface advertised more than it could do (2026-08-18, MAN-205/207)
 
 **Verdict: three of the four tools MAN-205 named were still dead, each for a
