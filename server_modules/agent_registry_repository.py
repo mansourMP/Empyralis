@@ -899,12 +899,13 @@ async def ensure_workspace_agent_registry_seeded(
                     id, tenant_id, workspace_id, agent_definition_id, agent_definition_version_id, installed_by_user_id,
                     install_scope, owner_user_id, thread_id, label, status, enabled, runtime_profile_id, compiled_workflow_version_id,
                     root_folder_uri, tool_toggles, folder_grants, connector_bindings, memory_scope_overrides,
-                    policy_context_overrides, metadata, created_at, updated_at
+                    policy_context_overrides, metadata, hardware_access, subagents_enabled, created_at, updated_at
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6,
                     'workspace', NULL, NULL, $7, 'active', TRUE, $8, NULL,
                     NULL, '{}'::jsonb, '[]'::jsonb, '{}'::jsonb, '{}'::jsonb,
-                    '{"trust_mode":"guarded","session_mode":"copilot"}'::jsonb, '{"system_agent":true,"hidden_from_agents_dashboard":true}'::jsonb, NOW(), NOW()
+                    '{"trust_mode":"guarded","session_mode":"copilot"}'::jsonb, '{"system_agent":true,"hidden_from_agents_dashboard":true}'::jsonb,
+                    'all', TRUE, NOW(), NOW()
                 )
                 ON CONFLICT (id) DO NOTHING
                 """,
@@ -917,6 +918,87 @@ async def ensure_workspace_agent_registry_seeded(
                 master_definition["name"],
                 f"rprof_{workspace_slug}_empyralis-cloud",
             )
+
+
+async def backfill_master_agent_isolation_defaults(pool: Any) -> Dict[str, int]:
+    """Heal `workspace_agent_installs` rows for the workspace-level master
+    agent (Sage/the Operator, `agent_kind = 'master'`) that are missing the
+    `hardware_access = 'all'` / `subagents_enabled = TRUE` defaults
+    `migrations/stage_4b_agent_isolation.sql` was meant to backfill.
+
+    That migration is a ONE-TIME, hand-applied `.sql` file — never mirrored
+    into `ensure_control_plane_schema()` — applied by `psql "$DATABASE_URL"`
+    as the non-superuser `empyralis_app` role (DEPLOY-RUNBOOK.md step 3b)
+    against `workspace_agent_installs`, which carries FORCE ROW LEVEL
+    SECURITY. Verified live against production 2026-08-18: 11 of 15 master
+    installs currently carry `hardware_access='none'` /
+    `subagents_enabled=false`, spanning every workspace created since
+    2026-07-07 -- the migration's one UPDATE only ever reached the 4 rows
+    that existed at the moment someone happened to run it correctly; every
+    workspace seeded since has silently missed it.
+
+    This is also NOT purely historical: `ensure_workspace_agent_registry_
+    seeded`'s own INSERT for the master install never set either column
+    explicitly, so every new workspace fell through to the plain column
+    DEFAULT ('none' / FALSE) regardless of this migration's fate. That
+    INSERT now sets both explicitly (see the block immediately above), so
+    this backfill's remaining job is healing rows already written wrong --
+    but it stays idempotent and boot-time rather than one-shot, the same
+    posture as `projects_repository.backfill_task_identifiers` and
+    `project_documents_repository.backfill_document_paths`, so any row that
+    somehow still slips through self-heals on the next restart rather than
+    depending on every write path staying perfectly in sync forever.
+
+    Returns a count dict; every step is a no-op once applied. Safe to call
+    on every boot and safe to call concurrently with a workspace being
+    seeded for the first time.
+    """
+    stats = {"master_installs_repaired": 0}
+    if pool is None:
+        return stats
+
+    # Cross-tenant, so this READ genuinely needs the bypass; every WRITE
+    # below is scoped to the single (tenant, workspace) the row itself
+    # names, same split as backfill_task_identifiers /
+    # backfill_document_paths. Real per-tenant customer rows, never a
+    # uniform system value, so a blanket bypass_rls=True on the WRITE would
+    # be the wrong shape even though it would "work".
+    candidates = await control_plane_repository.rls_fetch(
+        pool,
+        """
+        SELECT wai.id, wai.tenant_id, wai.workspace_id
+        FROM workspace_agent_installs wai
+        JOIN agent_definitions ad ON ad.id = wai.agent_definition_id
+        WHERE ad.agent_kind = 'master'
+          AND (wai.hardware_access IS DISTINCT FROM 'all'
+               OR wai.subagents_enabled IS DISTINCT FROM TRUE)
+        ORDER BY wai.tenant_id, wai.workspace_id, wai.id
+        """,
+        bypass_rls=True,
+    )
+    for row in candidates or []:
+        tenant_id = str(row["tenant_id"] or "")
+        workspace_id = str(row["workspace_id"] or "")
+        # The WHERE guard IS the idempotency, same as the sibling
+        # backfills: once a row carries 'all'/TRUE it can never match again
+        # on a later boot, so two processes booting at once cannot race
+        # each other into a double-write.
+        result = await control_plane_repository.rls_execute(
+            pool,
+            """
+            UPDATE workspace_agent_installs
+            SET hardware_access = 'all', subagents_enabled = TRUE
+            WHERE id = $1
+              AND (hardware_access IS DISTINCT FROM 'all'
+                   OR subagents_enabled IS DISTINCT FROM TRUE)
+            """,
+            str(row["id"] or ""),
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
+        if str(result or "").strip().endswith(" 1"):
+            stats["master_installs_repaired"] += 1
+    return stats
 
 
 async def list_runtime_profiles(
