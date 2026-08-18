@@ -158,8 +158,18 @@ async def create_workspace_mcp_api_key(
     ``key`` field contains the plaintext — it is NOT stored and cannot be
     retrieved later.
 
-    *writes_enabled* gates write tools (create_agent, configure_agent,
-    message_agent, memory_write) on a per-key basis.  Defaults to ``False``.
+    *writes_enabled* gates the workspace-CONFIGURATION write tools on a
+    per-key basis — create_project, create_agent, configure_agent,
+    message_agent, assign_channel_bot, release_channel_bot,
+    connect_connector, trigger_test_turn.  Defaults to ``False``.
+
+    It does NOT gate the task and document tools; those are bounded to work
+    already visible through this same key and are argued separately in
+    ``mcp_server.py``'s module docstring ("Write-gate decision").  The
+    authoritative list is ``mcp_server.EMPYRALIST_MCP_TOOLS`` and the
+    ``_check_write`` call sites beside it — this sentence used to name
+    ``memory_write``, a tool deleted long enough ago that the name was the
+    only trace of it left.
 
     Every key mints an external-agent roster identity in the same call (THE
     IDENTITY RULE: identity is minted by the platform at the connection

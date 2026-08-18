@@ -13,6 +13,13 @@
     (sage_turn_adapter.execute_sage_turn), validates agent_id against the
     caller's own workspace before touching it, never falls back to a
     synthesized/legacy-Sage reply, and surfaces real errors/timeouts honestly
+(h) The other three MAN-205 tools -- empyralis_get_agent_conversations,
+    empyralis_trigger_test_turn, empyralis_connect_connector -- could never
+    have succeeded for ANY caller, each for a different reason (an invented
+    auth key nothing reads; a missing keyword-only argument; a stand-in
+    request object missing the attribute the callee reads first). These
+    exercise the fixes AND ban the three shapes from coming back, because a
+    behavioural test only covers the tools that exist today.
 """
 
 from __future__ import annotations
@@ -821,6 +828,527 @@ class MCPListDocumentRevisionsToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["ok"])
         self.assertIn("not found in your workspace", result["error"])
         list_rev_mock.assert_not_awaited()
+
+
+# ── (h) The three MAN-205 tools that could never have run ─────────────
+
+
+class _FakeDeadToolCtx:
+    pass
+
+
+def _dead_tool_resolved(workspace_id="ws-dead-A", writes_enabled=True):
+    return {
+        "workspace_id": workspace_id,
+        "writes_enabled": writes_enabled,
+        "external_agent_id": "ext_agent_deadbeefdeadbeef",
+        "external_agent_display_name": "Probe Bot",
+    }
+
+
+def _patched_dead_tool(*, resolved=None, tenant_id="tenant-dead-A"):
+    resolved = resolved if resolved is not None else _dead_tool_resolved()
+    return (
+        patch.object(mcp_server, "_resolve_workspace", new=AsyncMock(return_value=resolved)),
+        patch.object(mcp_server, "_ledger_mcp_call", new=AsyncMock()),
+        patch(
+            "server_modules.control_plane_repository.resolve_tenant_id_for_workspace",
+            new=AsyncMock(return_value=tenant_id),
+        ),
+    )
+
+
+class MCPActingIdentityTests(unittest.TestCase):
+    """``_mcp_current_user`` is the identity handed to services that run the
+    REAL ``auth.enforce_workspace_access`` on it.
+
+    The bug it replaces was not a weak check -- it was a check handed an
+    identity it could only ever reject, because the dict carried
+    ``mcp_workspace_id``, a key ``auth.py`` reads nowhere.
+    """
+
+    def _identity(self, ws="ws-dead-A", tenant="tenant-dead-A"):
+        return mcp_server._mcp_current_user(_dead_tool_resolved(workspace_id=ws), ws, tenant)
+
+    def test_identity_passes_the_real_owner_check_for_its_own_workspace(self):
+        from server_modules import auth as auth_module
+
+        resolved = auth_module.enforce_workspace_access(
+            self._identity(), "ws-dead-A", tenant_id="tenant-dead-A", minimum_role="owner",
+        )
+        self.assertEqual(resolved, "ws-dead-A")
+
+    def test_identity_is_scoped_to_exactly_one_workspace_and_one_tenant(self):
+        """The dangerous fix for a 403 is ``is_admin``/``auth_admin``, which
+        makes both of these return None -- i.e. every workspace of every
+        tenant. A bearer key is scoped to ONE workspace and must stay there."""
+        from server_modules import auth as auth_module
+
+        identity = self._identity()
+        self.assertEqual(auth_module.allowed_workspace_ids(identity), {"ws-dead-A"})
+        self.assertEqual(auth_module.allowed_tenant_ids(identity), {"tenant-dead-A"})
+        self.assertFalse(auth_module.current_user_has_auth_admin_access(identity))
+
+    def test_identity_cannot_reach_another_workspace(self):
+        from fastapi import HTTPException
+
+        from server_modules import auth as auth_module
+
+        with self.assertRaises(HTTPException):
+            auth_module.enforce_workspace_access(
+                self._identity(), "ws-belongs-to-someone-else", minimum_role="viewer",
+            )
+
+    def test_identity_carries_the_keys_report_the_acting_external_agent(self):
+        identity = self._identity()
+        self.assertEqual(identity["user_id"], "ext_agent_deadbeefdeadbeef")
+        self.assertEqual(identity["auth_type"], "api_key")
+
+
+class MCPGetAgentConversationsToolTests(unittest.IsolatedAsyncioTestCase):
+
+    async def test_conversations_reaches_the_service_instead_of_403ing_on_its_own_identity(self):
+        """Before the fix this call died inside
+        ``require_deployed_agent_admin_access`` on EVERY invocation, so the
+        service function was never once reached. Asserting the call COUNT,
+        not just the return value: "it returned ok" is satisfied just as
+        happily by a tool that answered without doing anything."""
+        payload = {"conversations": [{"session_id": "s1"}], "has_more": False}
+        p1, p2, p3 = _patched_dead_tool()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.deployed_agent_service.list_deployed_agent_conversations",
+                new=AsyncMock(return_value=payload),
+            ) as list_mock:
+            result = await mcp_server.empyralis_get_agent_conversations(
+                agent_id="da-1", ctx=_FakeDeadToolCtx(),
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["conversations"], payload["conversations"])
+        list_mock.assert_awaited_once()
+        kwargs = list_mock.await_args.kwargs
+        self.assertEqual(kwargs["owner_workspace_id"], "ws-dead-A")
+        self.assertEqual(kwargs["deployed_agent_id"], "da-1")
+
+    async def test_conversations_hands_the_service_an_identity_auth_can_actually_evaluate(self):
+        """The specific regression: the ``current_user`` reaching the service
+        must be one ``enforce_workspace_access`` resolves, not a dict whose
+        only workspace hint is a key nothing reads."""
+        from server_modules import auth as auth_module
+
+        captured = {}
+
+        async def _capture(**kwargs):
+            captured.update(kwargs)
+            return {"conversations": []}
+
+        p1, p2, p3 = _patched_dead_tool()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.deployed_agent_service.list_deployed_agent_conversations",
+                new=_capture,
+            ):
+            await mcp_server.empyralis_get_agent_conversations(agent_id="da-1", ctx=_FakeDeadToolCtx())
+
+        current_user = captured["current_user"]
+        self.assertNotIn("mcp_workspace_id", current_user)
+        self.assertEqual(
+            auth_module.enforce_workspace_access(current_user, "ws-dead-A", minimum_role="owner"),
+            "ws-dead-A",
+        )
+
+
+class MCPTriggerTestTurnToolTests(unittest.IsolatedAsyncioTestCase):
+
+    async def test_test_turn_passes_tenant_id_and_a_real_request_model(self):
+        """``execute_test_turn`` takes ``tenant_id`` keyword-only with NO
+        default and reads ``request.runtime_mode``/``request.customer_profile``.
+        Omitting either is a TypeError/AttributeError on every call."""
+        from server_modules.schemas import (
+            DeployedAgentTestTurnRequest,
+            DeployedAgentTestTurnResponse,
+        )
+
+        response = DeployedAgentTestTurnResponse(reply="pong", trace_id="t-1")
+        p1, p2, p3 = _patched_dead_tool()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.deployed_agent_test_turn_service.execute_test_turn",
+                new=AsyncMock(return_value=response),
+            ) as turn_mock, \
+            patch.object(mcp_server, "_WRITE_ENABLED_GLOBAL", True):
+            result = await mcp_server.empyralis_trigger_test_turn(
+                agent_id="da-1", message="ping", ctx=_FakeDeadToolCtx(),
+            )
+
+        turn_mock.assert_awaited_once()
+        kwargs = turn_mock.await_args.kwargs
+        self.assertEqual(kwargs["tenant_id"], "tenant-dead-A")
+        self.assertEqual(kwargs["workspace_id"], "ws-dead-A")
+        request = kwargs["request"]
+        self.assertIsInstance(request, DeployedAgentTestTurnRequest)
+        # The two fields the callee reads that the old stand-in never had.
+        self.assertEqual(request.runtime_mode, "text_agent")
+        self.assertIsNone(request.customer_profile)
+        # A pydantic response must be flattened, not wrapped under "result".
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["reply"], "pong")
+        self.assertNotIn("result", result)
+
+    async def test_test_turn_still_reports_a_real_failure_honestly(self):
+        p1, p2, p3 = _patched_dead_tool()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.deployed_agent_test_turn_service.execute_test_turn",
+                new=AsyncMock(side_effect=ValueError("Deployed agent not found.")),
+            ), \
+            patch.object(mcp_server, "_WRITE_ENABLED_GLOBAL", True):
+            result = await mcp_server.empyralis_trigger_test_turn(
+                agent_id="da-missing", message="ping", ctx=_FakeDeadToolCtx(),
+            )
+        self.assertFalse(result["ok"])
+        self.assertIn("Deployed agent not found.", result["error"])
+
+
+class MCPConnectConnectorToolTests(unittest.IsolatedAsyncioTestCase):
+
+    def test_the_request_object_answers_what_the_oauth_service_actually_reads(self):
+        """Driven through the REAL ``connection_oauth_service`` helpers rather
+        than a mock: ``request_origin`` reads ``request.headers`` FIRST, which
+        is the attribute the old ``SimpleNamespace(base_url=...)`` did not
+        have. A mock of these functions would have passed against the broken
+        object too."""
+        from server_modules import connection_oauth_service as cos
+
+        with patch.dict(os.environ, {"EMPYRALIS_PUBLIC_BASE_URL": "https://empyralis.example"}):
+            request = mcp_server._public_origin_request()
+            self.assertEqual(cos.request_origin(request), "https://empyralis.example")
+            self.assertEqual(
+                cos.callback_url(request, "github"),
+                "https://empyralis.example/api/connections/oauth/github/callback",
+            )
+
+    def test_the_callback_url_never_carries_the_mcp_mount_path(self):
+        """Reusing the live MCP request would look correct and produce
+        ``/mcp/api/connections/...`` -- a URL the customer only discovers is
+        wrong after they have already granted access."""
+        from server_modules import connection_oauth_service as cos
+
+        with patch.dict(os.environ, {"EMPYRALIS_PUBLIC_BASE_URL": "https://empyralis.example"}):
+            url = cos.callback_url(mcp_server._public_origin_request(), "github")
+        self.assertNotIn("/mcp/", url)
+
+    async def test_connect_connector_returns_the_authorization_url(self):
+        p1, p2, p3 = _patched_dead_tool()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.connection_oauth_service.start_oauth",
+                return_value={"authorization_url": "https://accounts.example/auth?x=1"},
+            ) as start_mock, \
+            patch.object(mcp_server, "_WRITE_ENABLED_GLOBAL", True):
+            result = await mcp_server.empyralis_connect_connector(
+                provider="github", ctx=_FakeDeadToolCtx(),
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["authorization_url"], "https://accounts.example/auth?x=1")
+        start_mock.assert_called_once()
+        passed_request = start_mock.call_args.kwargs["request"]
+        # Not a stand-in: the real object the service's own type hint names.
+        from starlette.requests import Request as StarletteRequest
+
+        self.assertIsInstance(passed_request, StarletteRequest)
+
+
+class MCPDeadToolShapeDriftTests(unittest.TestCase):
+    """Source assertions. Each of these three shapes type-checks, imports
+    cleanly, and fails 100% of the time at RUNTIME -- which is exactly why
+    all three shipped. A behavioural test can only cover the tools that
+    exist today; these cover the next one someone writes.
+    """
+
+    def _source(self):
+        import pathlib
+
+        return pathlib.Path(mcp_server.__file__).read_text(encoding="utf-8")
+
+    def _code_tokens(self):
+        """Identifiers + string literals that are real CODE in mcp_server.py.
+
+        Docstrings are excluded (comments never enter the AST at all) so a
+        passage EXPLAINING one of these banned shapes does not read as one --
+        otherwise the only way to document the bug would be to reintroduce
+        its own tripwire.
+        """
+        import ast
+
+        tree = ast.parse(self._source())
+        docstring_nodes = set()
+        for node in ast.walk(tree):
+            if isinstance(
+                node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+            ):
+                body = getattr(node, "body", None) or []
+                first = body[0] if body else None
+                if (
+                    isinstance(first, ast.Expr)
+                    and isinstance(first.value, ast.Constant)
+                    and isinstance(first.value.value, str)
+                ):
+                    docstring_nodes.add(id(first.value))
+
+        tokens = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name):
+                tokens.add(node.id)
+            elif isinstance(node, ast.Attribute):
+                tokens.add(node.attr)
+            elif isinstance(node, ast.alias):
+                tokens.add(node.name)
+                if node.asname:
+                    tokens.add(node.asname)
+            elif isinstance(node, ast.keyword) and node.arg:
+                tokens.add(node.arg)
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if id(node) not in docstring_nodes:
+                    tokens.add(node.value)
+        return tokens
+
+    def test_no_tool_invents_an_auth_key_that_auth_py_never_reads(self):
+        """``mcp_workspace_id`` was written by two tools and read by nothing,
+        so both were a guaranteed 403. Any successor key is equally silent,
+        so ban this one by name and require the shared helper instead."""
+        import pathlib
+
+        self.assertNotIn("mcp_workspace_id", self._code_tokens())
+
+        auth_source = (
+            pathlib.Path(mcp_server.__file__).parent / "server_modules" / "auth.py"
+        ).read_text(encoding="utf-8")
+        # The keys the shared identity is built from are proven against
+        # auth.py itself -- two different sources, not one file agreeing
+        # with itself.
+        for key in ("workspace_access", "auth_type", "role"):
+            self.assertIn(f'"{key}"', auth_source, f"auth.py does not read {key!r}")
+
+    def test_no_tool_passes_a_simplenamespace_where_a_request_is_expected(self):
+        """``SimpleNamespace`` answers exactly the attributes whoever wrote it
+        thought of, and AttributeErrors on the first one they did not."""
+        self.assertNotIn("SimpleNamespace", self._code_tokens())
+
+    def test_the_deployed_agent_tools_pass_every_argument_with_no_default(self):
+        """Derived from the live signatures, never from a hand-copied list --
+        the expected set and the actual set must come from different places,
+        or the check can only confirm itself."""
+        import ast
+        import inspect
+
+        from server_modules import deployed_agent_service, deployed_agent_test_turn_service
+
+        tree = ast.parse(self._source())
+        calls_by_tool = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.AsyncFunctionDef):
+                continue
+            if not node.name.startswith("empyralis_"):
+                continue
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Call):
+                    calls_by_tool.setdefault(node.name, []).append(inner)
+
+        checks = [
+            ("empyralis_trigger_test_turn", "execute_test_turn",
+             deployed_agent_test_turn_service.execute_test_turn),
+            ("empyralis_get_agent_conversations", "list_deployed_agent_conversations",
+             deployed_agent_service.list_deployed_agent_conversations),
+        ]
+        for tool_name, callee_name, callee in checks:
+            required = {
+                name for name, param in inspect.signature(callee).parameters.items()
+                if param.kind is inspect.Parameter.KEYWORD_ONLY
+                and param.default is inspect.Parameter.empty
+            }
+            passed = set()
+            for call in calls_by_tool.get(tool_name, []):
+                func = call.func
+                attr = getattr(func, "attr", None) or getattr(func, "id", None)
+                if attr == callee_name:
+                    passed |= {kw.arg for kw in call.keywords if kw.arg}
+            self.assertTrue(
+                required <= passed,
+                f"{tool_name} omits {sorted(required - passed)} on {callee_name}() -- "
+                "a keyword-only argument with no default is a TypeError on every call",
+            )
+
+
+# ── (i) MAN-207 Tier 1: assign_task + list_tasks ──────────────────────
+
+
+class MCPAssignTaskToolTests(unittest.IsolatedAsyncioTestCase):
+    """``create_task`` fires NO wakeup and NO notification (verified in
+    project_tasks_service: neither bounded_scheduler_service nor
+    task_notification_service is called from it). Assignment is the only
+    step that reaches anyone, and it had no MCP tool at all."""
+
+    async def test_agent_assignment_takes_the_agent_path_and_reports_the_wakeup(self):
+        p1, p2, p3 = _patched_dead_tool()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.project_tasks_service.assign_task",
+                new=AsyncMock(return_value={"task": {"id": "t-1"}, "wake_request": {"id": "wr-1"}}),
+            ) as agent_mock, \
+            patch(
+                "server_modules.project_tasks_service.assign_task_to_user", new=AsyncMock(),
+            ) as user_mock:
+            result = await mcp_server.empyralis_assign_task(
+                task_id="t-1", agent_id="ainstall_nova", ctx=_FakeDeadToolCtx(),
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["assignee_kind"], "agent")
+        self.assertEqual(result["wake_request"], {"id": "wr-1"})
+        agent_mock.assert_awaited_once()
+        # The twin must not also run -- the two have different side effects.
+        user_mock.assert_not_awaited()
+        kwargs = agent_mock.await_args.kwargs
+        self.assertEqual(kwargs["tenant_id"], "tenant-dead-A")
+        self.assertEqual(kwargs["workspace_id"], "ws-dead-A")
+        self.assertEqual(kwargs["agent_id"], "ainstall_nova")
+
+    async def test_user_assignment_takes_the_user_path(self):
+        p1, p2, p3 = _patched_dead_tool()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.project_tasks_service.assign_task", new=AsyncMock(),
+            ) as agent_mock, \
+            patch(
+                "server_modules.project_tasks_service.assign_task_to_user",
+                new=AsyncMock(return_value={"task": {"id": "t-1"}, "wake_request": None}),
+            ) as user_mock:
+            result = await mcp_server.empyralis_assign_task(
+                task_id="t-1", user_id="user-9", ctx=_FakeDeadToolCtx(),
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["assignee_kind"], "user")
+        user_mock.assert_awaited_once()
+        agent_mock.assert_not_awaited()
+
+    async def test_both_or_neither_is_refused_without_assigning_anything(self):
+        """An assignment sent to the wrong kind of teammate is worse than one
+        that did not happen, so neither case is guessed at. Asserting the
+        call COUNT: "returned ok: false" alone would not notice a tool that
+        refused AFTER already writing."""
+        for kwargs in ({"agent_id": "a-1", "user_id": "u-1"}, {}):
+            with self.subTest(kwargs=kwargs):
+                p1, p2, p3 = _patched_dead_tool()
+                with p1, p2, p3, \
+                    patch(
+                        "server_modules.project_tasks_service.assign_task", new=AsyncMock(),
+                    ) as agent_mock, \
+                    patch(
+                        "server_modules.project_tasks_service.assign_task_to_user", new=AsyncMock(),
+                    ) as user_mock:
+                    result = await mcp_server.empyralis_assign_task(
+                        task_id="t-1", ctx=_FakeDeadToolCtx(), **kwargs
+                    )
+                self.assertFalse(result["ok"])
+                agent_mock.assert_not_awaited()
+                user_mock.assert_not_awaited()
+
+    async def test_a_committed_assignment_with_a_failed_wakeup_says_both(self):
+        """"assigned" and "assigned and someone is on it" are different
+        facts. The assignment commits independently of the wakeup (quiet
+        hours, a rate cap), so reporting only the first is the collapse
+        CLAUDE.md's outcome-honesty rule exists for."""
+        p1, p2, p3 = _patched_dead_tool()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.project_tasks_service.assign_task",
+                new=AsyncMock(return_value={
+                    "task": {"id": "t-1"}, "wake_request": None, "wake_error": "quiet hours",
+                }),
+            ):
+            result = await mcp_server.empyralis_assign_task(
+                task_id="t-1", agent_id="ainstall_nova", ctx=_FakeDeadToolCtx(),
+            )
+
+        self.assertTrue(result["ok"])              # the assignment DID commit
+        self.assertEqual(result["wake_error"], "quiet hours")
+        self.assertIn("nothing was woken", result["note"])
+
+
+class MCPListTasksToolTests(unittest.IsolatedAsyncioTestCase):
+
+    async def test_list_tasks_returns_the_whole_board_not_just_the_callers_slice(self):
+        rows = [{"id": "t-1"}, {"id": "t-2"}]
+        p1, p2, p3 = _patched_dead_tool()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.project_tasks_service.list_tasks", new=AsyncMock(return_value=rows),
+            ) as list_mock:
+            result = await mcp_server.empyralis_list_tasks(sort="priority", ctx=_FakeDeadToolCtx())
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["tasks"], rows)
+        kwargs = list_mock.await_args.kwargs
+        self.assertEqual(kwargs["workspace_id"], "ws-dead-A")
+        self.assertEqual(kwargs["sort"], "priority")
+        # No assignee filter: that is what makes this the BOARD rather than
+        # a second copy of list_my_tasks.
+        self.assertIsNone(kwargs.get("assignee_agent_id"))
+
+    async def test_a_project_outside_the_workspace_is_refused_not_reported_as_empty(self):
+        """"not your project" and "no tasks" are different answers."""
+        p1, p2, p3 = _patched_dead_tool()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.projects_repository.get_project", new=AsyncMock(return_value=None),
+            ), \
+            patch(
+                "server_modules.project_tasks_service.list_tasks", new=AsyncMock(),
+            ) as list_mock:
+            result = await mcp_server.empyralis_list_tasks(
+                project_id="proj-not-mine", ctx=_FakeDeadToolCtx(),
+            )
+        self.assertFalse(result["ok"])
+        self.assertIn("not found in your workspace", result["error"])
+        list_mock.assert_not_awaited()
+
+
+class MCPToolRegistryDriftTests(unittest.IsolatedAsyncioTestCase):
+    """``EMPYRALIST_MCP_TOOLS`` is a hand-kept list sitting beside the
+    decorators that do the actual registering -- the same "a list copied
+    into a second place" shape this codebase has been bitten by before.
+
+    The expected set and the actual set come from DIFFERENT sources: the
+    literal list, versus what the live FastMCP server would answer
+    ``tools/list`` with. A list agreeing with itself proves nothing.
+    """
+
+    async def test_the_advertised_list_matches_what_the_server_actually_registers(self):
+        if mcp_server.empyralist_mcp is None:
+            self.skipTest("mcp SDK not installed")
+        registered = {t.name for t in await mcp_server.empyralist_mcp.list_tools()}
+        declared = set(mcp_server.EMPYRALIST_MCP_TOOLS)
+        self.assertEqual(
+            declared, registered,
+            "EMPYRALIST_MCP_TOOLS has drifted from the real registrations: "
+            f"declared-only={sorted(declared - registered)} "
+            f"registered-only={sorted(registered - declared)}",
+        )
+
+    async def test_every_advertised_tool_is_actually_callable(self):
+        """An advertised name that resolves to nothing is the same class of
+        defect as MAN-205's four: discoverable, then useless."""
+        if mcp_server.empyralist_mcp is None:
+            self.skipTest("mcp SDK not installed")
+        missing = [
+            name for name in mcp_server.EMPYRALIST_MCP_TOOLS
+            if not callable(getattr(mcp_server, name, None))
+        ]
+        self.assertEqual(missing, [])
 
 
 if __name__ == "__main__":

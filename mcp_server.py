@@ -37,6 +37,14 @@ Read + chat (always live):
 Tasks (always live — see "Write-gate decision" below):
   - ``empyralis_list_my_tasks`` → project_tasks_service.list_my_tasks (assigned to
     this key's external_agent_id, OR unassigned/backlog)
+  - ``empyralis_list_tasks`` → project_tasks_service.list_tasks (the WHOLE
+    board, whoever it is assigned to — list_my_tasks is the narrow slice;
+    an agent that cannot see the board cannot triage it)
+  - ``empyralis_assign_task`` → project_tasks_service.assign_task (agent) /
+    assign_task_to_user (person). THE step that makes filed work happen:
+    ``create_task`` fires no wakeup and no notification, so an unassigned
+    task reaches nobody. Exactly one of agent_id/user_id; agent -> a
+    scheduled wakeup, user -> a notification, and the response says which.
   - ``empyralis_get_task`` → project_tasks_service.get_task
   - ``empyralis_update_task_status`` → project_tasks_service.update_task (status only)
   - ``empyralis_set_task_priority`` → project_tasks_service.update_task (priority only;
@@ -177,6 +185,8 @@ EMPYRALIST_MCP_TOOLS = [
     # see the write-gate rationale in the module docstring)
     "empyralis_create_task",
     "empyralis_list_my_tasks",
+    "empyralis_list_tasks",
+    "empyralis_assign_task",
     "empyralis_get_task",
     "empyralis_update_task_status",
     "empyralis_set_task_priority",
@@ -239,6 +249,49 @@ def _resolve_public_base_url() -> str:
         if base:
             return base
     return ""
+
+
+def _public_origin_request() -> Any:
+    """A real ``starlette.requests.Request`` whose origin is this deployment's
+    own public base URL.
+
+    Exists because ``connection_oauth_service.start_oauth`` takes a ``Request``
+    and derives the OAuth callback URL from it (``request_origin`` reads
+    ``request.headers`` then falls back to ``request.base_url``). MCP tool
+    calls have no HTTP request with the right origin to hand it — the live one
+    is mounted under ``/mcp`` — so this constructs one from a genuine ASGI
+    scope.
+
+    Genuine is the point (MAN-205): the previous
+    ``SimpleNamespace(base_url=...)`` satisfied exactly the one attribute its
+    author knew about and raised ``AttributeError`` on the first one they did
+    not, which is why the connector tool never worked. A real ``Request``
+    answers every attribute the callee reaches for, today and after it grows
+    another.
+    """
+    from urllib import parse as _urlparse
+
+    from starlette.requests import Request as _StarletteRequest
+
+    base = _resolve_public_base_url() or "http://localhost:8001"
+    parts = _urlparse.urlsplit(base)
+    scheme = parts.scheme or "http"
+    netloc = parts.netloc or "localhost:8001"
+    return _StarletteRequest(
+        {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": scheme,
+            "path": "/",
+            "raw_path": b"/",
+            "root_path": "",
+            "query_string": b"",
+            "headers": [(b"host", netloc.encode("latin-1", "ignore"))],
+            "server": (parts.hostname or "localhost", parts.port or (443 if scheme == "https" else 80)),
+            "client": None,
+        }
+    )
 
 
 # ── API key resolution ──────────────────────────────────────────────────
@@ -493,6 +546,48 @@ if empyralist_mcp is not None:
         from server_modules import control_plane_repository as cpr
         return await cpr.resolve_tenant_id_for_workspace(ws, default="default")
 
+    def _mcp_current_user(
+        resolved: Dict[str, Any], ws: str, tenant: str,
+    ) -> Dict[str, Any]:
+        """The acting identity for a service that runs ``auth.enforce_workspace_access``
+        on its ``current_user`` rather than trusting a bare ``workspace_id``.
+
+        MAN-205. Two tools used to hand those services an ad-hoc dict carrying
+        an INVENTED key::
+
+            {"user_id": "external_mcp_client", "email": "", "mcp_workspace_id": ws}
+                                                ^^^^^^^^^^^^^^^^^ read NOWHERE in
+                                                auth.py — grep it: the only two
+                                                occurrences in the repo were the
+                                                two dicts that wrote it.
+
+        So ``allowed_workspace_ids()`` saw a user with no workspace grant at
+        all and returned the EMPTY SET, and every call died 403 before it
+        reached any real logic. The check was never wrong — it was handed an
+        identity it could only reject.
+
+        This grants exactly the workspace the API key already resolved to, at
+        owner role, and nothing else. Deliberately NOT ``is_admin`` /
+        ``auth_admin``: either of those makes ``allowed_workspace_ids`` and
+        ``allowed_tenant_ids`` return ``None`` — i.e. every workspace of every
+        tenant — which would quietly turn a single-workspace bearer key into a
+        cross-tenant one. The real check still runs; it can now evaluate.
+        """
+        return {
+            "user_id": str(resolved.get("external_agent_id") or "").strip() or "external_mcp_client",
+            "email": "",
+            "auth_type": "api_key",
+            "role": "owner",
+            "workspace_access": {
+                ws: {
+                    "workspace_id": ws,
+                    "tenant_id": tenant,
+                    "role": "owner",
+                    "tenant_role": "owner",
+                },
+            },
+        }
+
     # ── Read + chat tools (always live) ──────────────────────────────
 
     @empyralist_mcp.tool(
@@ -573,9 +668,9 @@ if empyralist_mcp is not None:
         ``agent_id`` is a deployed-agent id. Returns ``ok: False`` with a clear
         reason when the agent is not a customer-facing deployed agent.
         """
-        r = await _resolve(ctx); ws = _ws(r)
+        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
         from server_modules import deployed_agent_service
-        current_user = {"user_id": "external_mcp_client", "email": "", "mcp_workspace_id": ws}
+        current_user = _mcp_current_user(r, ws, tenant)
         try:
             payload = await deployed_agent_service.list_deployed_agent_conversations(
                 deployed_agent_id=agent_id, current_user=current_user,
@@ -836,6 +931,146 @@ if empyralist_mcp is not None:
                 "anything specifically assigned to you."
             )
         return result
+
+    @empyralist_mcp.tool(
+        title="List Tasks",
+        annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False),
+    )
+    async def empyralis_list_tasks(
+        project_id: str = "", status: str = "", sort: str = "",
+        top_level_only: bool = False, ctx: Context = None,
+    ) -> Dict[str, Any]:
+        """List the whole board for your workspace — every task, whoever it is
+        assigned to. ``empyralis_list_my_tasks`` is the narrow slice (yours,
+        plus unassigned); this is the board an agent needs to actually TRIAGE
+        it: see what is already in flight, what is blocked, and what nobody
+        has picked up, before filing or claiming anything.
+
+        Optionally filter to one project_id (verified against YOUR workspace
+        before anything is read, so "not your project" and "no tasks" stay
+        different answers), one status (backlog|todo|in_progress|
+        awaiting_input|blocked|in_review|done), or top_level_only=True to
+        hide sub-tasks and see just the parent cards.
+
+        sort='priority' returns it triage-ordered — urgent first, untriaged
+        last. Priority is Linear's scale, where a LOWER number is MORE
+        urgent: 1 = urgent, 4 = low, 0 = none.
+        """
+        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        from server_modules import project_tasks_service as tasks
+        if project_id:
+            from server_modules import projects_repository as _p
+            project = await _p.get_project(
+                tenant_id=tenant, workspace_id=ws, project_id=project_id,
+            )
+            if not isinstance(project, dict):
+                await _ledger_mcp_call(r, "empyralis_list_tasks", False, project_id=project_id)
+                return {
+                    "ok": False,
+                    "error": (
+                        f"Project '{project_id}' was not found in your workspace. "
+                        "Call empyralis_list_projects to see the project_id values you can use."
+                    ),
+                    "tasks": [],
+                }
+        try:
+            rows = await tasks.list_tasks(
+                tenant_id=tenant, workspace_id=ws,
+                project_id=project_id or None,
+                status=status or None,
+                sort=sort or None,
+                top_level_only=bool(top_level_only),
+            )
+        except Exception as exc:  # noqa: BLE001
+            await _ledger_mcp_call(r, "empyralis_list_tasks", False, error=str(exc))
+            return {"ok": False, "error": str(exc), "tasks": []}
+        await _ledger_mcp_call(r, "empyralis_list_tasks", True, task_count=len(rows), project_id=project_id)
+        return {"ok": True, "tasks": rows}
+
+    @empyralist_mcp.tool(
+        title="Assign Task",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
+    )
+    async def empyralis_assign_task(
+        task_id: str, agent_id: str = "", user_id: str = "", ctx: Context = None,
+    ) -> Dict[str, Any]:
+        """Assign a task to a platform agent, or to a person in this workspace.
+
+        This is what makes filed work actually HAPPEN. ``empyralis_create_task``
+        fires nothing at all — no wakeup, no notification — so a task created
+        and left unassigned sits on the board with nobody woken for it.
+        Assignment is the step that reaches someone.
+
+        Pass EXACTLY ONE of ``agent_id`` (a platform agent, from
+        empyralis_list_agents) or ``user_id`` (a person in this workspace).
+        Passing both, or neither, is refused rather than guessed at — an
+        assignment sent to the wrong kind of teammate is worse than one that
+        did not happen.
+
+        The two do genuinely different things downstream, and the response
+        says which happened rather than making you assume:
+          agent_id -> schedules a wakeup, so the agent picks the work up
+          user_id  -> creates a notification; people are not woken by schedulers
+
+        The wakeup can fail on its own (quiet hours, a rate cap) while the
+        assignment itself commits — those are two facts, so both come back:
+        ``wake_request`` when one was scheduled, ``wake_error`` when the
+        assignment stuck but nothing was woken. "Assigned" and "assigned and
+        someone is on it" are not the same claim.
+        """
+        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        clean_agent_id = str(agent_id or "").strip()
+        clean_user_id = str(user_id or "").strip()
+        if bool(clean_agent_id) == bool(clean_user_id):
+            detail = (
+                "Pass exactly one of agent_id or user_id."
+                if clean_agent_id
+                else "Pass agent_id (a platform agent) or user_id (a person in this workspace)."
+            )
+            await _ledger_mcp_call(r, "empyralis_assign_task", False, task_id=task_id)
+            return {"ok": False, "error": detail, "task_id": task_id}
+
+        from server_modules import project_tasks_service as tasks
+        assignee_kind = "agent" if clean_agent_id else "user"
+        try:
+            if clean_agent_id:
+                result = await tasks.assign_task(
+                    tenant_id=tenant, workspace_id=ws, task_id=task_id,
+                    agent_id=clean_agent_id, triggered_by="agent",
+                )
+            else:
+                result = await tasks.assign_task_to_user(
+                    tenant_id=tenant, workspace_id=ws, task_id=task_id,
+                    user_id=clean_user_id, triggered_by="agent",
+                )
+        except Exception as exc:  # noqa: BLE001 — unknown task, or an assignee outside this workspace
+            await _ledger_mcp_call(
+                r, "empyralis_assign_task", False, task_id=task_id, assignee_kind=assignee_kind,
+            )
+            return {"ok": False, "error": str(exc), "task_id": task_id}
+
+        result = result if isinstance(result, dict) else {}
+        wake_error = str(result.get("wake_error") or "").strip()
+        await _ledger_mcp_call(
+            r, "empyralis_assign_task", True,
+            task_id=task_id, assignee_kind=assignee_kind, woken=bool(result.get("wake_request")),
+        )
+        payload: Dict[str, Any] = {
+            "ok": True,
+            "task": result.get("task"),
+            "assignee_kind": assignee_kind,
+            "wake_request": result.get("wake_request"),
+        }
+        if wake_error:
+            # The assignment committed; the wakeup did not. Saying only
+            # "assigned" here would be the same collapse CLAUDE.md's
+            # outcome-honesty rule exists for.
+            payload["wake_error"] = wake_error
+            payload["note"] = (
+                "The task is assigned, but nothing was woken for it "
+                f"({wake_error}). It will be picked up on the next wake."
+            )
+        return payload
 
     @empyralist_mcp.tool(
         title="Get Task",
@@ -1525,16 +1760,30 @@ if empyralist_mcp is not None:
         provider: str, ctx: Context = None,
     ) -> Dict[str, Any]:
         """Begin connecting an OAuth connector (e.g. 'gmail', 'github', 'slack').
-        Returns an ``authorization_url`` the human opens to grant access. Requires writes_enabled."""
+        Returns an ``authorization_url`` the human opens to grant access. Requires writes_enabled.
+
+        MAN-205: this used to pass ``SimpleNamespace(base_url=...)`` as the
+        ``request``. ``start_oauth`` -> ``callback_url`` -> ``request_origin``
+        reads ``request.headers`` first, so every call raised
+        ``AttributeError`` before an authorization_url could exist — the tool
+        was advertised and had never once succeeded.
+
+        The replacement is a REAL ``starlette.requests.Request`` built from a
+        real ASGI scope, not a wider stand-in: a stand-in only covers the
+        attributes whoever wrote it happened to think of, which is exactly
+        how this broke. The live MCP request is deliberately NOT reused —
+        this app is mounted at ``/mcp``, so its ``base_url`` carries that
+        root path and the derived callback URL would be
+        ``/mcp/api/connections/oauth/...``, i.e. a 404 the customer only
+        discovers after granting access.
+        """
         r = await _resolve(ctx); _check_write(r); ws = _ws(r)
-        from types import SimpleNamespace
         from server_modules import connection_oauth_service
-        base = _resolve_public_base_url()
-        shim_request = SimpleNamespace(base_url=(base + "/") if base else "http://localhost:8001/")
         try:
             started = connection_oauth_service.start_oauth(
                 provider=str(provider or "").strip().lower(),
-                workspace_id=ws, surface="sage", request=shim_request, user_id="external_mcp_client",
+                workspace_id=ws, surface="sage", request=_public_origin_request(),
+                user_id=str(r.get("external_agent_id") or "").strip() or "external_mcp_client",
             )
         except Exception as exc:  # noqa: BLE001 — e.g. provider not OAuth-configured on this server
             await _ledger_mcp_call(r, "empyralis_connect_connector", False, provider=provider)
@@ -1552,21 +1801,44 @@ if empyralist_mcp is not None:
         agent_id: str, message: str, ctx: Context = None,
     ) -> Dict[str, Any]:
         """Send a test message to a deployed agent and get its reply, without a
-        real customer. ``agent_id`` is a deployed-agent id. Requires writes_enabled."""
-        r = await _resolve(ctx); _check_write(r); ws = _ws(r)
-        from types import SimpleNamespace
+        real customer. ``agent_id`` is a deployed-agent id. Requires writes_enabled.
+
+        MAN-205: this tool could never once have run. ``execute_test_turn``
+        takes ``tenant_id`` as a keyword-only argument with NO default, and
+        this call site never passed it -> ``TypeError`` on every invocation,
+        every time, since the tool was registered. The request was also a
+        ``SimpleNamespace(message, channel)`` while the callee reads
+        ``request.runtime_mode`` and ``request.customer_profile`` — so even
+        with the TypeError fixed it would have died on ``AttributeError``
+        two lines later.
+
+        Both are fixed by building the call the way the REAL producer builds
+        it (``routes_deployed_agents.test_turn_deployed_agent``): the actual
+        ``DeployedAgentTestTurnRequest`` pydantic model rather than a
+        hand-rolled stand-in that cannot notice a field it is missing, and
+        ``result.model_dump()`` rather than an ``isinstance(dict)`` branch
+        that would have quietly wrapped a pydantic object under ``"result"``.
+        """
+        r = await _resolve(ctx); _check_write(r); ws = _ws(r); tenant = await _tenant(ws)
         from server_modules import deployed_agent_test_turn_service
-        current_user = {"user_id": "external_mcp_client", "email": "", "mcp_workspace_id": ws}
-        request = SimpleNamespace(message=message, channel="test")
+        from server_modules.schemas import DeployedAgentTestTurnRequest
+        current_user = _mcp_current_user(r, ws, tenant)
+        request = DeployedAgentTestTurnRequest(
+            workspace_id=ws, message=message, channel="test",
+        )
         try:
             result = await deployed_agent_test_turn_service.execute_test_turn(
-                deployed_agent_id=agent_id, workspace_id=ws, request=request, current_user=current_user,
+                deployed_agent_id=agent_id, workspace_id=ws, tenant_id=tenant,
+                request=request, current_user=current_user,
             )
         except Exception as exc:  # noqa: BLE001 — readiness / not-a-deployed-agent surfaces cleanly
             await _ledger_mcp_call(r, "empyralis_trigger_test_turn", False, agent_id=agent_id)
             return {"ok": False, "error": str(exc), "agent_id": agent_id}
+        payload = result.model_dump() if hasattr(result, "model_dump") else (
+            result if isinstance(result, dict) else {"result": result}
+        )
         await _ledger_mcp_call(r, "empyralis_trigger_test_turn", True, agent_id=agent_id)
-        return {"ok": True, "agent_id": agent_id, **(result if isinstance(result, dict) else {"result": result})}
+        return {"ok": True, "agent_id": agent_id, **payload}
 
 
 # ── Mount + lifespan ─────────────────────────────────────────────────────

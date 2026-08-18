@@ -4167,3 +4167,131 @@ only a disjunct that can never decide anything real — either give them a
 surface or delete them; and `PATCH .../{channel_key}/gateways/{id}/group-policy`
 remains the same shape (built, tested, zero frontend callers), already noted
 in the multi-agent-per-box section above.
+
+## The MCP surface advertised more than it could do (2026-08-18, MAN-205/207)
+
+**Verdict: three of the four tools MAN-205 named were still dead, each for a
+DIFFERENT reason — and every one of them type-checks, imports cleanly, and
+fails 100% of the time at runtime. That combination is why all three
+shipped.** A `tools/list` entry that always fails is worse than an absent
+one: a connected client discovers it, calls it, and retries it.
+
+```
+empyralis_chat                     ALREADY FIXED — build_operator_namespace
+                                   is gone from the whole repo; routes through
+                                   sage_turn_adapter.execute_sage_turn now
+empyralis_get_agent_conversations  current_user carried "mcp_workspace_id"
+                                     ↑ read NOWHERE in auth.py. the only two
+                                       occurrences in the repo were the two
+                                       dicts that WROTE it
+                                   → allowed_workspace_ids() = set()  → 403, always
+empyralis_trigger_test_turn        execute_test_turn(tenant_id=…) is keyword-only
+                                   with NO default; the call site never passed it
+                                   → TypeError, always. and the SimpleNamespace
+                                     request lacked runtime_mode/customer_profile,
+                                     so the fix for that would have died 2 lines on
+empyralis_connect_connector        request_origin reads request.headers FIRST;
+                                   the shim had only base_url
+                                   → AttributeError, always
+```
+
+**The right treatment differs per cause, and a blanket one would have been
+wrong.** All three had live backends, so all three were wiring bugs and all
+three were fixed. Removal is the correct answer only when the backend is
+gone — which is exactly what an earlier pass did to `empyralis_memory_read`
+/`_list`/`_write` (its note is still in `mcp_server.py`), and the precedent
+to follow rather than re-litigate.
+
+Three rules, one per cause, because each is a shape not a typo:
+
+**A hand-built `current_user` is an authorization claim, and inventing a key
+makes it unfalsifiable.** `_mcp_current_user` is now the one place that
+builds it: exactly the workspace the key already resolved to, at owner role,
+nothing else. Deliberately NOT `is_admin`/`auth_admin` — either makes
+`allowed_workspace_ids`/`allowed_tenant_ids` return `None`, i.e. *every
+workspace of every tenant*, which is the obvious-looking fix for a 403 and
+would quietly turn a single-workspace bearer key into a cross-tenant one.
+The check was never wrong; it was handed an identity it could only reject.
+
+**Build the call from the PRODUCER, not from what the argument seems to
+need.** `routes_deployed_agents.test_turn_deployed_agent` passes `tenant_id`
+and a real `DeployedAgentTestTurnRequest` and calls `.model_dump()` on the
+result; the MCP call site did none of the three. Same family as the fixture
+rule already in this file, one level up — a `SimpleNamespace` answers exactly
+the attributes whoever wrote it thought of and `AttributeError`s on the first
+one they did not, which is a guarantee of breakage the moment the callee
+grows a field.
+
+**A stand-in Request is a real `starlette.requests.Request` or it is a bug.**
+`_public_origin_request()` builds one from a genuine ASGI scope. The LIVE MCP
+request is deliberately NOT reused: this app mounts at `/mcp`, so its
+`base_url` carries that root path and the derived OAuth callback would be
+`/mcp/api/connections/oauth/…` — a 404 the customer only discovers *after*
+granting access.
+
+**`create_task` fires NOTHING — no wakeup, no notification. That is the
+functional gap, and MAN-207 states it slightly wrong.** Three behaviours,
+not two:
+
+```
+create_task          project_tasks_service:872   neither. an activity row, best-effort.
+assign_task          :1936  schedules the wakeup.  no notification.
+assign_task_to_user  :2079  creates the notification. no wakeup, ON PURPOSE —
+                            "people are not woken by schedulers"
+```
+
+So work filed over MCP and left unassigned reached nobody, and the only
+working escape hatch was commenting with an @-mention. `empyralis_assign_task`
+(one tool, exactly one of `agent_id`/`user_id`, both-or-neither refused rather
+than guessed) and `empyralis_list_tasks` (the whole board — `list_my_tasks`'
+`WHERE` is `assignee = caller OR assignee IS NULL`, so a client could not see
+what was in flight) close it. `wake_error` is surfaced: the assignment commits
+independently of the wakeup, so "assigned" and "assigned and someone is on it"
+are two facts.
+
+**`EMPYRALIST_MCP_TOOLS` is a hand-kept literal beside the decorators that do
+the real registering** — the "list copied into a second place" shape. Now
+drift-tested against what the live FastMCP server answers `tools/list` with,
+two different sources. Three more AST assertions ban the shapes above by
+structure (over CODE tokens only, docstrings excluded, or documenting a
+banned shape would trip its own tripwire).
+
+**Verify an MCP tool over the PROTOCOL with the service UNMOCKED, or you
+prove nothing.** Both dead deployed-agent tools return `ok: true` through a
+real `tools/call` on the BROKEN code when their service edge is mocked —
+both failed *inside* the callee. Driving the real
+`create_connected_server_and_client_session` with the services live is what
+separates them:
+
+```
+BEFORE  get_agent_conversations → 403: Workspace is not bound to a tenant
+        trigger_test_turn       → execute_test_turn() missing 'tenant_id'
+        connect_connector       → 'SimpleNamespace' has no attribute 'headers'
+AFTER   all three reach the real workspace lookup and answer from DATA
+```
+
+**MAN-198 is STALE — close it.** Six of its seven claims were fixed by
+`90c1725c7` (2026-08-01) or describe `ProjectOverview.tsx`, deleted wholesale
+in `a54d58ff3`. The display name IS threaded through create_task /
+comment_on_task / the three document writes; `_ledger_mcp_call` actor is the
+real `ext_agent_*`; `list_unified_roster` has a caller and a route
+(`GET /api/w/{id}/fleet/roster`) the frontend consumes. Two narrow residuals
+survive and deserve their own tickets, not MAN-198's framing:
+`workspace_labels_service.attach_label` persists `added_by` and
+`list_task_labels` never selects it (dark data), and
+`update_task_status`/`add_task_label`/`remove_task_label` still pass no actor
+display name.
+
+**Still open on this surface, flagged not fixed.** `empyralis_message_agent`
+is advertised and *always* returns `ok: false` by design — a dead control on
+the model's tool list, and the product-law violation is the advertisement,
+not the missing backend. `empyralis_assign_channel_bot` takes a plaintext
+BotFather/Discord token as a tool ARGUMENT, so the secret travels through
+model context and into transcripts — MAN-207 recommends dropping it and that
+recommendation still stands (its cross-workspace IDOR, MAN-206, IS fixed:
+both provisioning services now call `agent_install_in_scope`). The OAuth
+path mints no `external_agent_id` at all, so every write from a Connector
+session is attributed to the `external_mcp_client` fallback.
+`list_workspace_mcp_api_keys` drops `external_agent_id`/`display_name`/
+`roster_warning` that key CREATION already computes, so the keys UI could not
+show a key's identity even if it wanted to.
