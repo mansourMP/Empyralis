@@ -1359,6 +1359,15 @@ function GatewaySelfUpdateControl({
   const currentVersion = gateway.gateway_version || null;
   const latestVersion = gateway.latest_gateway_version || null;
   const updateAvailable = Boolean(gateway.gateway_update_available);
+  // "Nothing newer exists" and "this computer cannot receive updates at all"
+  // were both rendering as "Up to date" — the backend has carried a refusal
+  // code since the build fingerprint shipped and nothing on this page ever
+  // read it. That is this codebase's own outcome-honesty law broken on the
+  // one screen where a stuck box is visible.
+  const launchRepair =
+    gateway.gateway_update_refusal_code === "launch_path_not_updatable"
+      ? gateway.gateway_launch_repair ?? null
+      : null;
 
   const [busy, setBusy] = useState(false);
   const [verifying, setVerifying] = useState(false);
@@ -1411,7 +1420,9 @@ function GatewaySelfUpdateControl({
   // Nothing meaningful to show for a box whose gateway_version this backend
   // has never recorded (a gateway build old enough to predate self-update
   // reports no version at all) AND has no known newer build to offer either.
-  if (!currentVersion && !updateAvailable) {
+  // A box that reports itself un-updatable is the exception: that is the one
+  // state a person most needs to see, whatever its version says.
+  if (!currentVersion && !updateAvailable && !launchRepair) {
     return null;
   }
 
@@ -1429,10 +1440,53 @@ function GatewaySelfUpdateControl({
             {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
             {busy ? "Starting…" : `Update to v${latestVersion}`}
           </button>
+        ) : launchRepair ? (
+          <span className="fleet-list-row-desc">Can&apos;t receive updates</span>
         ) : (
           <span className="fleet-list-row-desc">Up to date</span>
         )}
       </span>
+      {launchRepair && (
+        <div
+          className="fleet-hw-note"
+          style={{ paddingTop: 10, width: "100%", display: "flex", flexDirection: "column", gap: 8 }}
+        >
+          <span>{gateway.gateway_update_refusal_reason}</span>
+          {/* Each blocker is its own fact with its own fix. Merging them into
+              one sentence sends someone to correct half of the problem. */}
+          {(launchRepair.blockers ?? []).map((blocker) => (
+            <span key={String(blocker?.code)} className="fleet-list-row-desc">
+              {blocker?.detail}
+            </span>
+          ))}
+          {launchRepair.state === "ready" && (launchRepair.commands ?? []).length > 0 ? (
+            <>
+              <span className="fleet-list-row-desc">{launchRepair.detail}</span>
+              {/* Shown rather than performed, and that is not a shortcut: the
+                  gateway runs unprivileged inside a read-only mount namespace
+                  with NoNewPrivileges set, so no button here could ever work,
+                  and a button that cannot work is a dead control. */}
+              <pre
+                style={{
+                  margin: 0,
+                  padding: 10,
+                  overflowX: "auto",
+                  fontSize: 12,
+                  lineHeight: 1.5,
+                  background: "var(--bg-inset)",
+                  border: "1px solid var(--border)",
+                  borderRadius: 6,
+                  whiteSpace: "pre",
+                }}
+              >
+                {(launchRepair.commands ?? []).join("\n")}
+              </pre>
+            </>
+          ) : (
+            <span className="fleet-list-row-desc">{launchRepair.detail}</span>
+          )}
+        </div>
+      )}
       {error && (
         <span className="fleet-channel-expand-error" style={{ margin: 0, width: "100%" }}>
           {error}

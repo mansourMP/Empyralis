@@ -39,6 +39,8 @@ import {
   isGatewayBuildFingerprint,
   resolveRunningGatewayDistDir,
 } from "./update/gateway-build-fingerprint";
+import { classifyGatewayLaunchUpdatability } from "./update/gateway-launch-updatability";
+import { ensureGatewayLaunchRepair } from "./update/gateway-launch-repair";
 import { GatewayDoctorRuntime, type GatewayDoctorCheckResult, type GatewayDoctorRunResult } from "./health/gateway-doctor";
 import { collectPassiveInventorySnapshot } from "./health/service-inventory";
 import { setCliSetupLocallyEnabled, setShellFullAccessLocallyEnabled } from "./runtime/desktop-permissions";
@@ -631,10 +633,40 @@ async function main(): Promise<void> {
       reason: (buildFingerprintOutcome as { reason: string }).reason,
     });
   }
+  // CAN AN UPDATE ON THIS BOX EVER TAKE EFFECT — a property of the supervisor
+  // unit that starts the NEXT process, which this one cannot rewrite (see
+  // update/gateway-launch-updatability.ts for the three measured barriers).
+  // Read-only, never fatal, and it fails toward "unknown" so a box we cannot
+  // classify keeps exactly the update behaviour it has today.
+  const runningEntryPath = require.main?.filename || process.argv[1] || process.execPath;
+  const launchUpdatability = await classifyGatewayLaunchUpdatability({
+    stateDir: config.stateDir,
+  });
+  // Only a box that is actually stuck gets a launcher written for it. The
+  // gateway does the whole repair EXCEPT the one line it is structurally
+  // forbidden from writing, and proves the launcher runs before anything
+  // recommends pointing a unit at it — an unproven launcher in an ExecStart=
+  // is how a stale box becomes a dead one.
+  let launchRepair = null;
+  if (launchUpdatability.status === "not_updatable") {
+    launchRepair = await ensureGatewayLaunchRepair({
+      stateDir: config.stateDir,
+      runningEntryPath,
+    });
+    await journal.append("system", "gateway.launch_path.not_updatable", {
+      unitPath: launchUpdatability.unitPath,
+      launchCommand: launchUpdatability.launchCommand,
+      blockers: launchUpdatability.blockers.map((blocker) => blocker.code),
+      repairLauncherPath: launchRepair?.launcherPath ?? null,
+      repairVerified: launchRepair?.verified ?? false,
+      repairFailureReason: launchRepair?.failureReason ?? null,
+    });
+  }
   const runtimeMetadata = buildRuntimeMetadata(
     GATEWAY_VERSION,
     capabilityRouter.supportedCapabilities(),
     buildFingerprint,
+    { ...launchUpdatability, repair: launchRepair },
   );
   const client = new GatewayWsClient(
     config,
