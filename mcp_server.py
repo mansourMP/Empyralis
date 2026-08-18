@@ -735,9 +735,12 @@ if empyralist_mcp is not None:
             # belonging to a DIFFERENT workspace returns None here exactly
             # like a nonexistent one. This is the check MAN-206 found
             # missing in the since-removed empyralis_assign_channel_bot; do
-            # it before anything else touches agent_id. MAN-206 itself is
-            # NOT closed by that removal -- it also names the HTTP route,
-            # which still needs its own fix.
+            # it before anything else touches agent_id. The HTTP half of
+            # MAN-206 is already fixed at the service layer -- both
+            # hosted_bot_provisioning_service.assign_byo_bot and
+            # discord_bot_provisioning_service.assign_agent_discord now
+            # confirm the caller-supplied install id belongs to this
+            # (tenant, workspace) before writing (verified 2026-08-18).
             bundle = await reg.get_workspace_agent_install_bundle(
                 requested_agent_id, tenant_id=tenant, workspace_id=ws,
             )
