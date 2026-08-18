@@ -3825,6 +3825,90 @@ A "known unfixed" note in this file is a claim with a timestamp, not a live
 state, and the check that would have caught both stale notices above is one
 command.
 
+## `gateway_version` is a dead signal, and MAN-331's own fix would have looped the fleet (2026-08-18)
+
+**Verdict: setting `EMPYRALIS_GATEWAY_LATEST_VERSION` — MAN-331's literal
+proposed fix — makes every box reinstall the same build forever. Do not set
+it. The staleness signal is a CONTENT FINGERPRINT, not a version.**
+
+```
+GATEWAY_VERSION = "0.1.0"   index.ts:41. `git log -S` over the whole repo
+                            returns ONE commit: the one that introduced it.
+                            Never bumped. Nothing in the release pipeline
+                            stamps it.
+publish channel = "latest"  release-gateway-linux.yml:93 — a push to main
+                            publishes to agent-computer/latest/. The
+                            published thing carries no version number.
+
+  set it to "latest"  ─▶ is_newer("0.1.0","latest") = False. Never fires.
+                         Dormant exactly as today, but now LOOKS configured.
+  set it to "0.2.0"   ─▶ fires on every box. Installs the `latest` tarball,
+                         whose GATEWAY_VERSION is still "0.1.0". Box comes
+                         back reporting 0.1.0. update_available STILL true.
+
+  0.1.0 ──update──▶ 0.1.0 ──update──▶ 0.1.0 ──▶ ...   forever, every poll,
+                                                       every box, and the
+                                                       0.2.0/ URL is a 404
+```
+
+Measured directly against the pre-fix code, not reasoned about:
+`gateway_update_status({"gateway_version":"0.1.0"})` with
+`EMPYRALIS_GATEWAY_LATEST_VERSION=0.2.0` returned `update_available=True`
+plus a real artifact URL. That is the loop, one env var away, on boxes
+nobody can SSH into to stop.
+
+**The rule this leaves behind: NEVER ADVERTISE AN UPDATE WHOSE SUCCESS
+COULD NOT BE OBSERVED.** If a finished update would leave the box reporting
+the identical build identity it reports now, then "it worked" and "it did
+nothing" are the same observation — the same "two different facts may never
+share one signal" law this file already states for delivery outcomes and
+invite mail. `gateway_build_identity_service.plan_gateway_update_
+advertisement()` refuses instead, with four distinct codes
+(`no_published_build` / `uncomparable_published_version` /
+`update_would_be_unobservable` / `previous_update_changed_nothing`) because
+each sends an operator to fix a different thing. The refusal rides on
+`gateway_update_status`'s payload, which the Hardware page already fetches —
+no new route. The trigger path enforces the same refusal, so the loop is not
+one button-press away; an explicit `target_version` AND `artifact_url` still
+bypasses it, deliberately, because that is a human naming a build rather
+than the system choosing one.
+
+**The signal is `gateway-build-fingerprint.ts`: sha256 over every `.js`/
+`.json` under the RUNNING `dist/`, path and content, sorted.** Derived, not
+authored — so it changes on every real build with nobody remembering to bump
+anything, which is the exact property "0.1.0" lacks. Path is in the digest
+(a moved file is a different build, since imports resolve by path); mtime is
+NOT (two boxes that built the same commit at different times must agree, or
+every box looks permanently drifted). Measured 31ms over 144 files / 1.96MB
+— cheap enough to be unconditional. `resolveRunningGatewayDistDir()` derives
+from `__dirname`, never config: a configured path can name an install root
+the process never loaded a byte from, which is precisely the failure
+`gateway-self-update-runtime.ts`'s own BOOTSTRAP NOTE describes. Reported on
+every connect (`gateway_build_fingerprint`), persisted onto the registration
+beside `gateway_version`, and published by CI as a `.fingerprint` sidecar
+computed by REQUIRING the shipped module itself — never a second copy of the
+hash in YAML, which would drift silently and report the whole fleet stale.
+
+**It is NOT the `.sha256` sidecar, and they are not interchangeable.** That
+one covers a compressed archive including timestamps and gzip framing, so it
+answers "did I download the same file"; a running gateway cannot recompute
+it. The fingerprint covers the extracted tree, which is the only thing a box
+can say about itself.
+
+**Still the founder's call, built but deliberately NOT enabled:** whether a
+gateway may auto-update itself unattended. The safe half is done — the
+mechanism can no longer loop, and there is finally a signal that can tell a
+current box from a stale one. Turning it on means setting
+`EMPYRALIS_GATEWAY_LATEST_BUILD_FINGERPRINT` from the published sidecar.
+Nothing was set in production by this pass.
+
+**MAN-264 is ALREADY FIXED and its description is stale** — `a912e46e6`
+(ancestor of HEAD) added `deploy/packer/scripts/60-docker.sh` plus five
+Docker assertions in `80-verify.sh`. The ticket's central claim
+(`deploy/packer/scripts/*.sh` has zero Docker references) is false against
+current main. Verified before building anything, per this file's own rule
+about stale tickets.
+
 ## Multi-agent-per-box (2026-08-13) — one gateway, N agents, verified
 
 The founder's own question: does one Agent Computer correctly serve several

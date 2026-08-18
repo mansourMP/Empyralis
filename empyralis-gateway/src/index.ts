@@ -34,6 +34,11 @@ import { GatewayCliSetupRuntime } from "./llm/cli-setup-runtime";
 import { GatewaySelfUpdateRuntime } from "./update/gateway-self-update-runtime";
 import { GatewayRestartRuntime } from "./update/gateway-restart-runtime";
 import { readAndClearPendingGatewayRestartMarker } from "./update/gateway-restart-pending";
+import {
+  computeGatewayBuildFingerprint,
+  isGatewayBuildFingerprint,
+  resolveRunningGatewayDistDir,
+} from "./update/gateway-build-fingerprint";
 import { GatewayDoctorRuntime, type GatewayDoctorCheckResult, type GatewayDoctorRunResult } from "./health/gateway-doctor";
 import { collectPassiveInventorySnapshot } from "./health/service-inventory";
 import { setCliSetupLocallyEnabled, setShellFullAccessLocallyEnabled } from "./runtime/desktop-permissions";
@@ -601,9 +606,35 @@ async function main(): Promise<void> {
     gatewayId: config.gatewayId,
     deviceId: config.deviceId,
   });
+  // Computed once at startup, from the directory this very module was loaded
+  // out of — not from config, which can name an install root this process
+  // never executed a byte from (the exact production failure mode
+  // gateway-self-update-runtime.ts's BOOTSTRAP NOTE describes).
+  //
+  // MEASURED, not estimated: 31ms over 144 files / 1.96MB on a real build,
+  // once per boot. Cheap enough to be unconditional, which matters — a
+  // staleness check that is skipped under load is a staleness check that is
+  // absent exactly when a box is in trouble.
+  //
+  // Never fatal: a box that cannot fingerprint itself still connects and
+  // still serves every capability. It just reports an unknown build, and the
+  // backend degrades to refusing an update it could not verify rather than
+  // firing one blind.
+  const buildFingerprintOutcome = await computeGatewayBuildFingerprint(
+    resolveRunningGatewayDistDir(),
+  );
+  const buildFingerprint = isGatewayBuildFingerprint(buildFingerprintOutcome)
+    ? buildFingerprintOutcome.fingerprint
+    : null;
+  if (!buildFingerprint) {
+    await journal.append("system", "gateway.build_fingerprint.unavailable", {
+      reason: (buildFingerprintOutcome as { reason: string }).reason,
+    });
+  }
   const runtimeMetadata = buildRuntimeMetadata(
     GATEWAY_VERSION,
     capabilityRouter.supportedCapabilities(),
+    buildFingerprint,
   );
   const client = new GatewayWsClient(
     config,

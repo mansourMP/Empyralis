@@ -40,7 +40,7 @@ import os
 from typing import Any, Dict, Optional
 from uuid import uuid4
 
-from server_modules import gateway_execution_service
+from server_modules import gateway_build_identity_service, gateway_execution_service
 
 # Must match GATEWAY_SELF_UPDATE_CAPABILITY in
 # empyralis-gateway/src/update/gateway-self-update-runtime.ts.
@@ -147,19 +147,49 @@ def gateway_update_status(registration: Dict[str, Any]) -> Dict[str, Any]:
 
     gateway_version reads off registration.metadata (persisted at
     gateway_protocol_service.py's connect handler, ~line 2405) rather than
-    the ephemeral session row, so it survives a disconnect."""
+    the ephemeral session row, so it survives a disconnect.
+
+    The advertise/refuse decision itself lives in
+    gateway_build_identity_service.plan_gateway_update_advertisement() — see
+    that module for why a bare version comparison cannot be trusted here, and
+    why an update whose success would be unobservable is refused rather than
+    offered. The refusal is carried on the payload (`gateway_update_refusal_
+    code` / `_reason`) instead of being collapsed into a plain False: "there
+    is no newer build" and "there is one, but installing it would loop
+    forever" are different facts and must not share a signal."""
     metadata = registration.get("metadata") if isinstance(registration.get("metadata"), dict) else {}
-    current_version = str(metadata.get("gateway_version") or "").strip() or None
+    identity = gateway_build_identity_service.build_identity(registration)
+    current_version = identity["gateway_version"]
+    current_fingerprint = identity["gateway_build_fingerprint"]
     platform, arch = _split_platform(str(registration.get("platform") or ""))
     latest = resolve_latest_gateway_version(platform=platform, arch=arch)
     latest_version = latest["latest_version"]
-    update_available = bool(
-        current_version and latest_version and is_newer_gateway_version(current_version, latest_version)
+    plan = gateway_build_identity_service.plan_gateway_update_advertisement(
+        current_version=current_version,
+        latest_version=latest_version,
+        current_fingerprint=current_fingerprint,
+        published_fingerprint=str(
+            os.environ.get("EMPYRALIS_GATEWAY_LATEST_BUILD_FINGERPRINT") or ""
+        ).strip()
+        or None,
+        last_update_fingerprint=str(
+            metadata.get("gateway_last_self_update_fingerprint") or ""
+        ).strip()
+        or None,
+        version_is_newer=bool(
+            current_version
+            and latest_version
+            and is_newer_gateway_version(current_version, latest_version)
+        ),
     )
+    update_available = bool(plan["update_available"])
     return {
         "gateway_version": current_version,
+        "gateway_build_fingerprint": current_fingerprint,
         "latest_gateway_version": latest_version,
         "gateway_update_available": update_available,
+        "gateway_update_refusal_code": plan["refusal_code"],
+        "gateway_update_refusal_reason": plan["reason"],
         "latest_gateway_artifact_url": latest["artifact_url"] if update_available else None,
     }
 
@@ -183,11 +213,31 @@ async def trigger_gateway_self_update(
     """
     resolved_target_version = str(target_version or "").strip()
     resolved_artifact_url = str(artifact_url or "").strip()
-    if not resolved_target_version or not resolved_artifact_url:
+    explicitly_targeted = bool(resolved_target_version and resolved_artifact_url)
+    if not explicitly_targeted:
         platform, arch = _split_platform(str(registration.get("platform") or ""))
         latest = resolve_latest_gateway_version(platform=platform, arch=arch)
         resolved_target_version = resolved_target_version or str(latest["latest_version"] or "").strip()
         resolved_artifact_url = resolved_artifact_url or str(latest["artifact_url"] or "").strip()
+        # Same refusal the status payload carries, enforced on the ACTION as
+        # well as on the advertisement. Advertising honestly while still
+        # dispatching on demand would leave the loop one button-press away,
+        # and the button in question is one an automated retry can press.
+        #
+        # An explicit target_version AND artifact_url skips this on purpose:
+        # that is an operator naming a specific build deliberately, which is
+        # the documented escape hatch for exactly the situation where the
+        # automatic signal is untrustworthy. The unobservability problem is a
+        # reason to refuse to CHOOSE a target automatically, never a reason to
+        # refuse a human who has already chosen one.
+        status = gateway_update_status(registration)
+        refusal_code = status.get("gateway_update_refusal_code")
+        if refusal_code:
+            raise GatewaySelfUpdateError(
+                str(status.get("gateway_update_refusal_reason") or "").strip()
+                or "This computer cannot be updated automatically right now.",
+                status_code=409,
+            )
     if not resolved_target_version or not resolved_artifact_url:
         raise GatewaySelfUpdateError(
             "No published gateway build is configured to update to yet. "

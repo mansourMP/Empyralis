@@ -395,6 +395,13 @@ export class GatewayWsClient {
         "gateway.connect",
         {
           gateway_version: runtimeMetadata.gatewayVersion,
+          // Sent on every connect, beside the version, because the version is
+          // the same six characters on every box in the fleet and always has
+          // been (update/gateway-build-fingerprint.ts explains why). This is
+          // the only field on this frame that can actually tell two builds
+          // apart, and the backend refuses to advertise a self-update it
+          // could not verify took effect without it.
+          gateway_build_fingerprint: runtimeMetadata.buildFingerprint,
           device_metadata: runtimeMetadata.deviceMetadata,
           requested_capabilities: runtimeMetadata.requestedCapabilities,
           journal_cursor: await this.journal.lastCursor(),

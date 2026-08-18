@@ -20,6 +20,7 @@ import type { GatewayRuntimeMetadata } from "../runtime/runtime-metadata";
 function makeRuntimeMetadata(requestedCapabilities: string[]): GatewayRuntimeMetadata {
   return {
     gatewayVersion: "0.1.0",
+    buildFingerprint: null,
     hostname: "agent-box",
     platform: "darwin-arm64",
     pid: 123,

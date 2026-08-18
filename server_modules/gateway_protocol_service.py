@@ -2449,6 +2449,7 @@ async def handle_gateway_websocket(
             checkpoint_cursor=connect_payload.get("checkpoint_cursor"),
             metadata={
                 "gateway_version": connect_payload.get("gateway_version"),
+                "gateway_build_fingerprint": connect_payload.get("gateway_build_fingerprint"),
                 "device_metadata": connect_payload.get("device_metadata"),
                 "requested_capabilities": connect_payload.get("requested_capabilities"),
                 "auth_session_id": session_id,
@@ -2469,6 +2470,14 @@ async def handle_gateway_websocket(
                 # session-metadata copy at touch_gateway_session() above was
                 # the only place it landed before this line existed).
                 "gateway_version": connect_payload.get("gateway_version"),
+                # Persisted for the SAME reason gateway_version is, and it is
+                # the field that actually carries the information: every box
+                # reports gateway_version "0.1.0" and always has, so the
+                # fingerprint beside it is the only thing on this frame that
+                # can distinguish the build a box is running from the build it
+                # is supposed to be running. gateway_build_identity_service
+                # reads it from here.
+                "gateway_build_fingerprint": connect_payload.get("gateway_build_fingerprint"),
             },
             # Refresh from what THIS connect declares — a Gateway build that
             # adds a capability (e.g. a new disconnect/reset action) becomes

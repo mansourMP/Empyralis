@@ -180,6 +180,49 @@ jobs:
           ls -l "$OUT"
           echo "GATEWAY_TARBALL=$TARBALL" >> "$GITHUB_ENV"
 
+      # The BUILD FINGERPRINT of what this run publishes, written beside the
+      # tarball as `<tarball>.fingerprint`.
+      #
+      # This is NOT the same fact as the `.sha256` sidecar next to it, and
+      # the two are not interchangeable. The sha256 covers a COMPRESSED
+      # ARCHIVE — it includes timestamps, file ordering and gzip framing, so
+      # it answers "did I download the same bytes" and changes even when the
+      # code does not. The fingerprint covers the EXTRACTED dist/ tree, which
+      # is what a running gateway can actually recompute about itself, and is
+      # therefore the only one of the two a box can ever report back.
+      #
+      # Why this exists at all: `gateway_version` is the hardcoded string
+      # "0.1.0" on every box ever built, and this workflow publishes under
+      # the channel name "latest" rather than a version — so there is no
+      # version comparison anywhere in this system that can distinguish a
+      # current build from a 15-day-stale one. See
+      # empyralis-gateway/src/update/gateway-build-fingerprint.ts.
+      #
+      # Computed by REQUIRING the very module being shipped, never by
+      # reimplementing the hash here: a second copy of the algorithm in YAML
+      # would drift from the box's copy silently, and two implementations
+      # that disagree would report every gateway in the fleet as stale.
+      - name: Compute published build fingerprint
+        run: |
+          set -euo pipefail
+          STAGE="$RUNNER_TEMP/gateway-stage"
+          OUT="$RUNNER_TEMP/out"
+          FINGERPRINT="$(node -e '
+            const { computeGatewayBuildFingerprint } =
+              require(process.env.STAGE + "/dist/update/gateway-build-fingerprint");
+            computeGatewayBuildFingerprint(process.env.STAGE + "/dist").then((r) => {
+              if (!r.fingerprint) {
+                console.error("could not fingerprint the staged build: " + r.reason);
+                process.exit(1);
+              }
+              process.stdout.write(r.fingerprint);
+            });
+          ')"
+          echo "$FINGERPRINT" > "$OUT/$GATEWAY_TARBALL.fingerprint"
+          echo "published build fingerprint: $FINGERPRINT"
+        env:
+          STAGE: ${{ runner.temp }}/gateway-stage
+
       # Re-runs the exact extraction both consumers perform, so a layout
       # regression fails here rather than silently on a customer droplet.
       #
@@ -363,6 +406,11 @@ jobs:
           DEST="s3://${BUCKET}/agent-computer/${RELEASE_VERSION}/"
           aws s3 cp "$RUNNER_TEMP/out/$GATEWAY_TARBALL" "$DEST" --endpoint-url "$ENDPOINT"
           aws s3 cp "$RUNNER_TEMP/out/$GATEWAY_TARBALL.sha256" "$DEST" --endpoint-url "$ENDPOINT"
+          # Published beside the checksum so the backend has a real value for
+          # EMPYRALIS_GATEWAY_LATEST_BUILD_FINGERPRINT — the one input that
+          # lets gateway_build_identity_service tell a current box from a
+          # stale one, since every box reports gateway_version "0.1.0".
+          aws s3 cp "$RUNNER_TEMP/out/$GATEWAY_TARBALL.fingerprint" "$DEST" --endpoint-url "$ENDPOINT"
 
       # Publish the installer script itself, from the SAME commit that built
       # the artifact above.

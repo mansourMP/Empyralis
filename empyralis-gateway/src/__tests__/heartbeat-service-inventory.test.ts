@@ -18,6 +18,7 @@ const TEST_RESOURCES: GatewayResourceMetrics = {
 test("gateway heartbeat payload carries passive service inventory separately from execution capabilities", () => {
   const runtimeMetadata: GatewayRuntimeMetadata = {
     gatewayVersion: "0.1.0",
+    buildFingerprint: null,
     hostname: "agent-box",
     platform: "linux-x64",
     pid: 123,
@@ -97,6 +98,7 @@ test("gateway heartbeat payload transmits the gateway's real health state instea
   // reports at send time — see cloud/ws-client.ts sendHeartbeat().
   const runtimeMetadata: GatewayRuntimeMetadata = {
     gatewayVersion: "0.1.0",
+    buildFingerprint: null,
     hostname: "agent-box",
     platform: "linux-x64",
     pid: 123,
