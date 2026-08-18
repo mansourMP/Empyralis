@@ -142,7 +142,28 @@ test("no gateway module reintroduces execFile's own `timeout` option", () => {
   // So this is a drift assertion in the same spirit as the local-bridge
   // channel-map ones — the option is banned in src/, and the one place allowed
   // to spawn against a deadline is exec-file-with-timeout.ts.
-  const srcDir = path.resolve(__dirname, "..");
+  // Resolve the real SOURCE tree, never `__dirname/..`. `npm test` runs the
+  // COMPILED suite from dist/__tests__, so `__dirname/..` is dist/ — which
+  // holds only .js and is skipped by the `.ts` filter below, meaning this
+  // scan examined ZERO files and passed unconditionally. It had been inert
+  // since it was written; CLAUDE.md meanwhile cited it as the guard banning
+  // raw execFile timeouts (the ~50 immortal-process leak). A drift test that
+  // cannot fail is worse than none: it reports the rule as enforced.
+  // The canary below fails loudly if this root ever stops holding sources.
+  const srcDir = (() => {
+    for (const candidate of [
+      path.resolve(__dirname, ".."),                  // running from src/
+      path.resolve(__dirname, "..", "..", "src"),     // running from dist/__tests__
+    ]) {
+      if (fs.existsSync(path.join(candidate, "shell", "exec-file-with-timeout.ts"))) {
+        return candidate;
+      }
+    }
+    throw new Error(
+      "exec-file drift scan could not locate the TypeScript source tree — "
+      + "the guard would silently scan nothing. Fix the resolver, do not delete this test.",
+    );
+  })();
   const allowed = path.join(srcDir, "shell", "exec-file-with-timeout.ts");
   const offenders: string[] = [];
 
@@ -155,7 +176,15 @@ test("no gateway module reintroduces execFile's own `timeout` option", () => {
         continue;
       }
       if (!entry.name.endsWith(".ts") || full === allowed) continue;
-      const source = fs.readFileSync(full, "utf8");
+      // Strip comments BEFORE matching. This file's own siblings document the
+      // old bad pattern in prose ("this used to be execFileSync(..., { timeout:
+      // 3_000 })"), and a scanner that reads prose flags the very comment
+      // explaining the fix — a false positive that trains people to delete the
+      // guard. A drift test must scan CODE.
+      const source = fs
+        .readFileSync(full, "utf8")
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/(^|[^:])\/\/.*$/gm, "$1");
       if (!/\bexecFile(Sync)?\s*\(/.test(source)) continue;
       // Only the options-object form matters; `timeoutMs`/`timeoutSeconds`
       // parameters are this codebase's own naming and are not the trap.
