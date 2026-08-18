@@ -52,6 +52,7 @@ from server_modules.capability_risk_classifier_service import (
 )
 from server_modules.runtime_common import require_api_key
 from server_modules import (
+    agent_computer_orphan_service,
     agent_computer_profile_service,
     cli_setup_service,
     codex_model_catalog_service,
@@ -2905,6 +2906,26 @@ async def revoke_gateway_registration(
                 gateway_id=gateway_id,
                 reason=str(mutation_plan.get("revocation_reason") or "").strip() or "Gateway registration revoked.",
                 actor_user_id=str((current_user or {}).get("user_id") or "").strip(),
+            )
+        # MAN-353: revoking a registration does NOT destroy the cloud
+        # resource behind it, and for two days nothing anywhere said so — a
+        # box sat revoked and billing. This does not destroy it either
+        # (that is DELETE /hardware/vps/{vps_id}, an explicit owner action);
+        # it names what is still running so the fact is not silent. Purely
+        # additive to the response and never fatal: the revoke has already
+        # committed, so a failure to DESCRIBE the aftermath must never be
+        # reported as a failure to revoke.
+        try:
+            backing = await agent_computer_orphan_service.resolve_revoked_registration_backing(
+                registration
+            )
+            if backing is not None:
+                revoked_payload["backing_agent_computer"] = backing
+        except Exception:
+            LOGGER.exception(
+                "revoke_gateway_registration: revoked gateway_id=%s but could not resolve whether a "
+                "cloud resource is still billing for it",
+                gateway_id,
             )
         return revoked_payload
     except ValueError as exc:
