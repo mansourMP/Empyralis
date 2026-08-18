@@ -362,7 +362,6 @@ _ENFORCEMENT_TOOL_NAME: dict[str, str] = {
     "fleet-list-agents": "fleet__list_agents",
     "fleet-get-agent-activity": "fleet__get_agent_activity",
     "fleet-configure-agent": "fleet__configure_agent",
-    "fleet-message-agent": "fleet__message_agent",
     "memory-read": "memory_read",
     "memory-write": "memory_write",
 }
@@ -948,55 +947,6 @@ async def _live_fleet_configure_agent_skill(
     }
 
 
-async def _live_fleet_message_agent_skill(
-    *,
-    tenant_id: str,
-    workspace_id: str,
-    goal: str,
-    agent_label: str,
-    **kwargs: Any,
-) -> dict[str, Any]:
-    """Executor for fleet-message-agent — delegates to fleet_tools."""
-    from server_modules.fleet_tools import fleet_message_agent
-    import re as _re
-
-    match = _re.search(r"ainstall_[0-9a-fA-F]+", str(goal or ""))
-    agent_id = match.group(0) if match else ""
-    if not agent_id:
-        match2 = _re.search(r"[0-9a-fA-F]{8,}", str(goal or ""))
-        agent_id = match2.group(0) if match2 else ""
-
-    if not agent_id:
-        return {
-            "status": "error",
-            "reply": "I need an agent install id to message it. Which agent?",
-            "artifact": None,
-            "steps": [
-                {"label": "Messaging agent", "detail": "No agent id found in request", "status": "error", "kind": "fleet"},
-            ],
-        }
-
-    result = await fleet_message_agent(
-        actor_id=agent_label or "sage",
-        workspace_id=workspace_id,
-        tenant_id=tenant_id,
-        agent_id=agent_id,
-        message=str(goal or "").strip(),
-    )
-    return {
-        "status": "ok" if result.get("ok") else "error",
-        "reply": (
-            f"Message enqueued for agent {agent_id}."
-            if result.get("ok")
-            else f"Could not message agent: {result.get('error', 'unknown error')}"
-        ),
-        "artifact": result,
-        "steps": [
-            {"label": "Messaging agent", "detail": agent_id, "status": "done" if result.get("ok") else "error", "kind": "fleet"},
-        ],
-    }
-
-
 # ── Populate adapter executors (must be after all executor functions) ──
 _ADAPTER_EXECUTORS.update({
     "web_search": _live_web_search,
@@ -1215,23 +1165,6 @@ _BUILT_IN_SKILLS: tuple[SkillDefinition, ...] = (
         requires_approval=True,
         skill_class="system",
         executor=_live_fleet_configure_agent_skill,
-    ),
-    SkillDefinition(
-        id="fleet-message-agent",
-        label="Message Agent",
-        description=(
-            "Not implemented -- always fails. Agent-to-agent messaging has "
-            "no delivery path yet; calling this returns an explicit error "
-            "telling you to create/assign a task to the target agent "
-            "instead. Operator only."
-        ),
-        permission_label="Fleet management",
-        execution_mode="live",
-        action_class="write",
-        connector_scopes=(),
-        trigger_terms=("message agent", "tell agent", "ask agent"),
-        skill_class="system",
-        executor=_live_fleet_message_agent_skill,
     ),
     # ── Phase N: Agent memory tools ─────────────────────────────────────
     SkillDefinition(

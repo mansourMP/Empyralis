@@ -2107,31 +2107,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             audience_note="Operator-only: reconfigures a fleet agent. Owner/operator access.",
         ),
         ToolDescriptor(
-            tool_name="fleet__message_agent",
-            label="Message Agent",
-            connector_id="fleet",
-            action_id="message_agent",
-            description=(
-                "Not implemented -- always returns ok: false. Agent-to-agent "
-                "messaging has no delivery path yet (nothing ever reads it "
-                "back); calling this only gets you an explicit error telling "
-                "you to create/assign a task to the target agent instead. "
-                "Do not call this tool to hand off work -- use fleet tasks "
-                "or ask the owner."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "agent_id": {"type": "string", "description": "The target agent install id."},
-                    "message": {"type": "string", "description": "The message to enqueue for this agent."},
-                },
-                "required": ["agent_id", "message"],
-            },
-            risk_level="moderate",
-            audience_safe=False,
-            audience_note="Operator-only: not implemented, always fails (see description).",
-        ),
-        ToolDescriptor(
             tool_name="fleet__schedule_task",
             label="Schedule Task",
             connector_id="fleet",
@@ -7078,7 +7053,6 @@ def execute_single_direct_tool_call(
             fleet_get_agent_activity,
             fleet_get_project_activity,
             fleet_configure_agent,
-            fleet_message_agent,
             schedule_task,
             schedule_recurring_task,
             list_recurring_tasks,
@@ -7181,22 +7155,6 @@ def execute_single_direct_tool_call(
                     tenant_id=tenant_id,
                     agent_id=agent_id,
                     patch=patch,
-                )
-            )
-            return json.dumps(result, ensure_ascii=False)
-
-        if action_id == "message_agent":
-            agent_id = str(argument_payload.get("agent_id") or "").strip()
-            message = str(argument_payload.get("message") or "").strip()
-            if not agent_id or not message:
-                raise RuntimeError("Tool 'fleet__message_agent' requires agent_id and message.")
-            result = callbacks.run_async_tool_call(
-                fleet_message_agent(
-                    actor_id=actor_id,
-                    workspace_id=workspace_id,
-                    tenant_id=tenant_id,
-                    agent_id=agent_id,
-                    message=message,
                 )
             )
             return json.dumps(result, ensure_ascii=False)

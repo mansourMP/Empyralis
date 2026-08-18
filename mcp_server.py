@@ -125,12 +125,23 @@ Write (gated behind ``EMPYRALIS_MCP_WRITE_ENABLED=true`` + per-key writes_enable
   - ``empyralis_create_project`` → projects_repository.create_project
   - ``empyralis_create_agent`` → fleet_create_agent (+ projects_repository.assign_install_to_project)
   - ``empyralis_configure_agent`` → fleet_configure_agent
-  - ``empyralis_message_agent`` → fleet_message_agent (ALWAYS returns
-    ``ok: false`` -- agent-to-agent messaging has no delivery path yet;
-    see docs/design/audit-silent-failures.md C1 and the tool's own
-    docstring below)
-  - ``empyralis_assign_channel_bot`` → hosted_bot_provisioning_service / discord_bot_provisioning_service
   - ``empyralis_release_channel_bot`` → hosted_bot_provisioning_service / discord_bot_provisioning_service
+
+NO CREDENTIAL EVER ENTERS THIS SURFACE. ``empyralis_assign_channel_bot`` was
+removed (MAN-207): it took a plaintext BotFather/Discord bot token as a tool
+ARGUMENT, so the secret travelled through the calling model's context and into
+that client's stored transcript before it ever reached us. An MCP bearer key
+lives in a config file; it must never also be a secret-INGESTION path. That
+made ``writes_enabled`` mean two unrelated things at once ("may reconfigure the
+workspace" and "may hand me a credential") — with the tool gone the boolean
+means one thing again, and the never-list is defensible in a sentence: no tool
+here accepts a credential.
+
+``empyralis_release_channel_bot`` deliberately STAYS. It takes no token, and it
+only tears a binding down — the reverse direction is not a secret path, and
+removing an owner's ability to free a stuck binding would be a capability lost
+for no security gain. Assigning a bot is done by its owner in the product,
+where the token is written straight to the vault instead of through a model.
   - ``empyralis_connect_connector`` → connection_oauth_service.start_oauth (returns authorization_url)
   - ``empyralis_trigger_test_turn`` → deployed_agent_test_turn_service.execute_test_turn
 
@@ -208,8 +219,6 @@ EMPYRALIST_MCP_TOOLS = [
     "empyralis_create_project",
     "empyralis_create_agent",
     "empyralis_configure_agent",
-    "empyralis_message_agent",
-    "empyralis_assign_channel_bot",
     "empyralis_release_channel_bot",
     "empyralis_connect_connector",
     "empyralis_trigger_test_turn",
@@ -724,9 +733,14 @@ if empyralist_mcp is not None:
             # Workspace-scoped lookup -- get_workspace_agent_install_bundle's
             # WHERE clause includes wai.workspace_id = ws, so an install id
             # belonging to a DIFFERENT workspace returns None here exactly
-            # like a nonexistent one. This is the check MAN-206
-            # (empyralis_assign_channel_bot) skipped; do it before anything
-            # else touches agent_id.
+            # like a nonexistent one. This is the check MAN-206 found
+            # missing in the since-removed empyralis_assign_channel_bot; do
+            # it before anything else touches agent_id. The HTTP half of
+            # MAN-206 is already fixed at the service layer -- both
+            # hosted_bot_provisioning_service.assign_byo_bot and
+            # discord_bot_provisioning_service.assign_agent_discord now
+            # confirm the caller-supplied install id belongs to this
+            # (tenant, workspace) before writing (verified 2026-08-18).
             bundle = await reg.get_workspace_agent_install_bundle(
                 requested_agent_id, tenant_id=tenant, workspace_id=ws,
             )
@@ -1713,55 +1727,6 @@ if empyralist_mcp is not None:
         )
         await _ledger_mcp_call(r, "empyralis_configure_agent", result.get("ok", False), agent_id=agent_id)
         return result
-
-    @empyralist_mcp.tool(
-        title="Message Agent",
-        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
-    )
-    async def empyralis_message_agent(
-        agent_id: str, message: str, ctx: Context = None,
-    ) -> Dict[str, Any]:
-        """Not implemented -- always returns ok: false. Agent-to-agent
-        messaging has no delivery path today (nothing ever reads it back);
-        the error explains this and tells you to create/assign a task to
-        the target agent instead. Do not retry this tool."""
-        r = await _resolve(ctx); _check_write(r); ws = _ws(r)
-        from server_modules.fleet_tools import fleet_message_agent
-        result = await fleet_message_agent(
-            workspace_id=ws, agent_id=agent_id, message=message, actor_id="external_mcp_client",
-        )
-        await _ledger_mcp_call(r, "empyralis_message_agent", result.get("ok", False), agent_id=agent_id)
-        return result
-
-    @empyralist_mcp.tool(
-        title="Assign Channel Bot",
-        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True),
-    )
-    async def empyralis_assign_channel_bot(
-        agent_id: str, channel: str, token: str, ctx: Context = None,
-    ) -> Dict[str, Any]:
-        """Bind a BYO bot to an agent so it owns that channel. ``channel`` is
-        'telegram' or 'discord'. One bot binds to exactly one agent. Requires writes_enabled."""
-        r = await _resolve(ctx); _check_write(r); ws = _ws(r); tenant = await _tenant(ws)
-        ch = str(channel or "").strip().lower()
-        try:
-            if ch in ("discord", "discord_bot"):
-                from server_modules import discord_bot_provisioning_service as prov
-                result = await prov.assign_agent_discord(
-                    agent_install_id=agent_id, workspace_id=ws, tenant_id=tenant, token=token,
-                )
-            elif ch in ("telegram", "telegram_bot"):
-                from server_modules import hosted_bot_provisioning_service as prov
-                result = await prov.assign_byo_bot(
-                    agent_install_id=agent_id, workspace_id=ws, tenant_id=tenant, token=token,
-                )
-            else:
-                return {"ok": False, "error": f"Unsupported channel '{channel}'. Use 'telegram' or 'discord'."}
-        except Exception as exc:  # noqa: BLE001 — includes the one-bot-one-agent guarantee
-            await _ledger_mcp_call(r, "empyralis_assign_channel_bot", False, agent_id=agent_id, channel=ch)
-            return {"ok": False, "error": str(exc), "channel": ch}
-        await _ledger_mcp_call(r, "empyralis_assign_channel_bot", True, agent_id=agent_id, channel=ch)
-        return {"ok": True, "channel": ch, "binding": result}
 
     @empyralist_mcp.tool(
         title="Release Channel Bot",

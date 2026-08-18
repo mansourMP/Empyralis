@@ -160,8 +160,7 @@ async def create_workspace_mcp_api_key(
 
     *writes_enabled* gates the workspace-CONFIGURATION write tools on a
     per-key basis — create_project, create_agent, configure_agent,
-    message_agent, assign_channel_bot, release_channel_bot,
-    connect_connector, trigger_test_turn.  Defaults to ``False``.
+    release_channel_bot, connect_connector, trigger_test_turn.  Defaults to ``False``.
 
     It does NOT gate the task and document tools; those are bounded to work
     already visible through this same key and are argued separately in

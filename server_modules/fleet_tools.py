@@ -426,6 +426,10 @@ _FLEET_ACTION_TITLES: Dict[str, str] = {
     "create_agent_failed": "Setup failed",
     "configure_agent": "Configured",
     "configure_agent_failed": "Configuration failed",
+    # Historical only — agent-to-agent messaging was removed (see
+    # fleet_get_agent_activity's docstring). No writer emits these actions
+    # any more; they exist so ledger rows predating the removal still render
+    # as words instead of a raw action token.
     "message_agent": "Received a message",
     "message_agent_failed": "Message delivery failed",
     "message_agent_refused": "Message not deliverable (not implemented)",
@@ -1012,9 +1016,15 @@ async def fleet_get_agent_activity(
     owner configuration isn't part of that story.
 
     One deliberate exception: `message_agent_refused`. This is the ledger
-    row `fleet_message_agent` writes every time a message TO this agent
-    can't be delivered (no delivery path exists yet — see that function's
-    docstring). It's already workspace-wide visible in the Inbox
+    row the removed `fleet_message_agent` wrote every time a message TO this
+    agent couldn't be delivered. NOTHING WRITES IT ANY MORE — the whole
+    agent-to-agent messaging surface was deleted rather than left advertised
+    as a control that always fails (CLAUDE.md's "No dead controls") — but
+    rows written before that removal are still in every production ledger,
+    and dropping the clause would make them silently vanish from the one
+    page someone debugging "why didn't my message land" actually looks at.
+    Keep this clause for the history; do not read it as a live writer.
+    It's already workspace-wide visible in the Inbox
     (`fleet-data.ts` doesn't filter fleet_control at all), but until now it
     was the one fleet_control action silently dropped from the very page —
     this agent's own Overview — where someone debugging "why didn't my
@@ -1703,7 +1713,7 @@ async def fleet_configure_agent(
             # manual rename through this PATCH never did, and no DB constraint
             # backed it either, so two agents could silently end up sharing a
             # display name. Names are the display layer only (routing is
-            # always by agent_id, never label — see fleet_message_agent /
+            # always by agent_id, never label — see
             # get_workspace_agent_install_bundle), but a collision still
             # breaks two real things: a human scanning the fleet roster, and
             # the closed-roster mention autocomplete that has to resolve a
@@ -1945,62 +1955,6 @@ async def fleet_configure_agent(
                     "notes": [f"Could not clean up channels on the previous computer right now ({exc})."],
                 }
     return response
-
-
-async def fleet_message_agent(
-    *,
-    actor_id: str,
-    workspace_id: str,
-    tenant_id: str = "system",
-    agent_id: str = "",
-    message: str = "",
-) -> Dict[str, Any]:
-    """Agent-to-agent messaging is NOT implemented. This always fails.
-
-    Historically this wrote the message into the target agent's
-    ``install_metadata.fleet_inbox`` and unconditionally returned
-    ``{"ok": True, "status": "enqueued"}``. Nothing in the turn-building
-    pipeline ever reads ``fleet_inbox`` back -- not
-    ``sage_agent_runtime_service.py``, not
-    ``sage_instruction_compiler_service.py``, not
-    ``direct_chat_generation_service.py``, not ``agent_turn.py`` -- so every
-    prior call silently discarded its message while reporting success. See
-    docs/design/audit-silent-failures.md C1 for the full verification.
-
-    The platform's decided design for real agent-to-agent handoff is
-    task/mention-based delivery through the scheduler -- a separate, later
-    build (do NOT resurrect fleet_inbox as a stopgap; fix the real delivery
-    path instead). Until that ships, this function fails loudly and
-    explicitly instead of lying, per the platform's no-silent-failure rule:
-    every caller -- the internal fleet skill, the tool-broker's
-    ``fleet__message_agent`` action, and the external ``empyralis_message_agent``
-    MCP tool -- gets an explicit, model-facing error telling it what to do
-    instead, rather than a false ``ok: true`` for a message that will never
-    be read.
-    """
-    if not str(agent_id or "").strip():
-        return {"ok": False, "error": "agent_id is required"}
-    if not str(message or "").strip():
-        return {"ok": False, "error": "message is required"}
-
-    error = (
-        "Agent-to-agent messaging is not implemented -- this message will "
-        "NOT be delivered and will NOT be read by the target agent (there "
-        "is no delivery path; see docs/design/audit-silent-failures.md C1). "
-        "Do not retry this tool. Instead, ask the workspace owner to create "
-        "a task and assign it to the target agent, or route the instruction "
-        "through the owner directly, so the work is durable and visible "
-        "instead of an unread message."
-    )
-    await _ledger_fleet_action(
-        action="message_agent_refused",
-        actor_id=actor_id,
-        workspace_id=workspace_id,
-        target_agent_id=agent_id,
-        status="failed",
-        metadata={"reason": "no_delivery_path", "message_length": len(str(message))},
-    )
-    return {"ok": False, "error": error}
 
 
 # ── Owner-only stop control ────────────────────────────────────────────────

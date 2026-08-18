@@ -340,6 +340,11 @@ function sdkToolCallSubject(toolName: string, argsPreview: unknown): { label: st
     const labels: Record<string, string> = {
       create_agent: "Creating an agent", list_agents: "Listing agents", get_agent_activity: "Reading agent activity",
       get_project_activity: "Reading project activity", configure_agent: "Configuring an agent",
+      // message_agent is HISTORICAL ONLY -- the agent-to-agent messaging
+      // tool was removed (it always failed; CLAUDE.md's "No dead controls").
+      // Nothing emits this action any more, but trace steps recorded before
+      // the removal still do, and dropping the entry would render them as
+      // the generic "Fleet action" instead of what they actually were.
       message_agent: "Messaging an agent", schedule_task: "Scheduling a task",
     };
     return { label: labels[action] || "Fleet action", detail: pick("name", "agent_id"), kind: "tool" };
