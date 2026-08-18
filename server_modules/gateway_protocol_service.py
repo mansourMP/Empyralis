@@ -2450,6 +2450,7 @@ async def handle_gateway_websocket(
             metadata={
                 "gateway_version": connect_payload.get("gateway_version"),
                 "gateway_build_fingerprint": connect_payload.get("gateway_build_fingerprint"),
+                "gateway_launch_updatability": connect_payload.get("gateway_launch_updatability"),
                 "device_metadata": connect_payload.get("device_metadata"),
                 "requested_capabilities": connect_payload.get("requested_capabilities"),
                 "auth_session_id": session_id,
@@ -2478,6 +2479,14 @@ async def handle_gateway_websocket(
                 # is supposed to be running. gateway_build_identity_service
                 # reads it from here.
                 "gateway_build_fingerprint": connect_payload.get("gateway_build_fingerprint"),
+                # Whether an update on this box could ever take effect (MAN-355).
+                # Persisted on the REGISTRATION for the same reason as the two
+                # above: the box most worth asking this about is one that has
+                # gone dark, and the session row does not survive that.
+                # Refreshed on every connect, so a box whose unit an operator
+                # has just repaired stops reporting itself stuck as soon as it
+                # reconnects — no second action, no cache to clear.
+                "gateway_launch_updatability": connect_payload.get("gateway_launch_updatability"),
             },
             # Refresh from what THIS connect declares — a Gateway build that
             # adds a capability (e.g. a new disconnect/reset action) becomes

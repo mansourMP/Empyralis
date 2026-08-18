@@ -86,6 +86,7 @@ REFUSAL_NO_PUBLISHED_BUILD = "no_published_build"
 REFUSAL_UNCOMPARABLE_PUBLISHED_VERSION = "uncomparable_published_version"
 REFUSAL_UPDATE_WOULD_BE_UNOBSERVABLE = "update_would_be_unobservable"
 REFUSAL_PREVIOUS_UPDATE_CHANGED_NOTHING = "previous_update_changed_nothing"
+REFUSAL_LAUNCH_PATH_NOT_UPDATABLE = "launch_path_not_updatable"
 
 _REFUSAL_REASONS: Dict[str, str] = {
     REFUSAL_NO_PUBLISHED_BUILD: (
@@ -105,7 +106,26 @@ _REFUSAL_REASONS: Dict[str, str] = {
         "This computer already installed the published build and came back running exactly the "
         "same code, so installing it again would change nothing."
     ),
+    REFUSAL_LAUNCH_PATH_NOT_UPDATABLE: (
+        "This computer is set up to start its gateway from a fixed location that updates are "
+        "never installed into, so an update would install correctly and then start the old copy "
+        "again. Whoever set this computer up has to point it at the update location once; it "
+        "cannot change that itself."
+    ),
 }
+
+# The gateway's own word for "an update here could never take effect" — see
+# empyralis-gateway/src/update/gateway-launch-updatability.ts, which computes
+# it from the supervisor unit that starts the NEXT process rather than from
+# the path this one happens to be running from.
+#
+# Only this exact value ever refuses. "unknown", a missing field and a build
+# too old to report one all mean "keep today's behaviour": a wrong "unknown"
+# costs a signal, a wrong refusal takes updates away from a healthy box, and
+# most of the fleet reports nothing here at all until it is rebuilt.
+LAUNCH_STATUS_NOT_UPDATABLE = "not_updatable"
+LAUNCH_STATUS_UPDATABLE = "updatable"
+LAUNCH_STATUS_UNKNOWN = "unknown"
 
 
 def build_identity(registration: Dict[str, Any]) -> Dict[str, Optional[str]]:
@@ -132,6 +152,7 @@ def plan_gateway_update_advertisement(
     published_fingerprint: Optional[str] = None,
     last_update_fingerprint: Optional[str] = None,
     version_is_newer: bool = False,
+    launch_updatability: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Decide whether an update may be advertised, and if not, say which fact stopped it.
 
@@ -158,6 +179,16 @@ def plan_gateway_update_advertisement(
             "refusal_code": code,
             "reason": _REFUSAL_REASONS[code],
         }
+
+    # AHEAD OF EVERYTHING, including the loop brake. A box whose supervisor
+    # unit points outside the release layout cannot be changed by an update at
+    # all, so every other question about it is downstream of this one — and
+    # `previous_update_changed_nothing`, which is what such a box eventually
+    # reports, is the SYMPTOM. Naming the symptom first would send an operator
+    # to look at build fingerprints when the fix is one line in a service
+    # definition.
+    if str(launch_updatability or "").strip() == LAUNCH_STATUS_NOT_UPDATABLE:
+        return refuse(REFUSAL_LAUNCH_PATH_NOT_UPDATABLE)
 
     if not latest_version and not published_fingerprint:
         return refuse(REFUSAL_NO_PUBLISHED_BUILD)
@@ -212,3 +243,145 @@ def plan_gateway_update_advertisement(
     # against. The update is still observable — if it changes anything, the
     # fingerprint moves, and the loop brake above catches it if it does not.
     return {"update_available": True, "refusal_code": None, "reason": ""}
+
+
+def launch_report(registration: Dict[str, Any]) -> Dict[str, Any]:
+    """What this gateway last said about whether an update could reach it.
+
+    Same source as build_identity(): registration.metadata, not the ephemeral
+    session row — a box that has gone dark is exactly the one someone wants to
+    look this up for.
+
+    A build that predates the check reports nothing, which reads as UNKNOWN
+    rather than as a problem. That direction is load-bearing: every box in the
+    fleet reports nothing here until it is rebuilt, and refusing them all would
+    be a far worse bug than the stale box this exists to surface.
+    """
+    metadata = registration.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    report = metadata.get("gateway_launch_updatability")
+    if not isinstance(report, dict):
+        return {"status": LAUNCH_STATUS_UNKNOWN, "reported": False}
+    status = str(report.get("status") or "").strip() or LAUNCH_STATUS_UNKNOWN
+    if status not in (
+        LAUNCH_STATUS_UPDATABLE,
+        LAUNCH_STATUS_NOT_UPDATABLE,
+        LAUNCH_STATUS_UNKNOWN,
+    ):
+        status = LAUNCH_STATUS_UNKNOWN
+    blockers = report.get("blockers")
+    if not isinstance(blockers, list):
+        blockers = []
+    repair = report.get("repair")
+    if not isinstance(repair, dict):
+        repair = {}
+    return {
+        "status": status,
+        "reported": True,
+        "supervisor": str(report.get("supervisor") or "").strip() or None,
+        "unit_path": str(report.get("unitPath") or "").strip() or None,
+        "launch_command": str(report.get("launchCommand") or "").strip() or None,
+        "expected_entrypoint": str(report.get("expectedEntrypoint") or "").strip() or None,
+        "blockers": [
+            {
+                "code": str(entry.get("code") or "").strip(),
+                "detail": str(entry.get("detail") or "").strip(),
+            }
+            for entry in blockers
+            if isinstance(entry, dict)
+        ],
+        "repair_launcher_path": str(repair.get("launcherPath") or "").strip() or None,
+        "repair_exec_start_line": str(repair.get("execStartLine") or "").strip() or None,
+        "repair_verified": bool(repair.get("verified")),
+        "repair_failure_reason": str(repair.get("failureReason") or "").strip() or None,
+    }
+
+
+def plan_gateway_launch_repair(report: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The exact one-time change a human has to make, or an honest refusal to
+    hand them one.
+
+    Three states, never collapsed, because they send a person to three
+    different places:
+
+        ready        the gateway wrote a launcher AND proved it runs. Here is
+                     the line, the reload and the restart.
+        unverified   the gateway could not prove its own launcher runs. Saying
+                     "put this in your ExecStart" anyway is how a stale box
+                     becomes a dead one, so the instruction is withheld and
+                     the reason is named instead.
+        None         nothing is wrong, or nothing is known.
+
+    The commands are shown rather than performed, and that is not a shortcut:
+    the gateway runs unprivileged, inside a mount namespace where `/` is
+    read-only, with NoNewPrivileges set — all three measured on production
+    rather than assumed. There is no version of this it can do for itself, and
+    a button that cannot work is a dead control.
+    """
+    if str(report.get("status") or "") != LAUNCH_STATUS_NOT_UPDATABLE:
+        return None
+    unit_path = report.get("unit_path")
+    exec_start_line = report.get("repair_exec_start_line")
+    if not report.get("repair_verified") or not exec_start_line or not unit_path:
+        detail = "This computer could not prepare its own repair"
+        if report.get("repair_failure_reason"):
+            detail += f" — {report['repair_failure_reason']}"
+        detail += ". Whoever set it up will have to look at it directly."
+        return {
+            "state": "unverified",
+            "unit_path": unit_path,
+            "current_launch_command": report.get("launch_command"),
+            "blockers": report.get("blockers") or [],
+            "detail": detail,
+        }
+    unit_name = str(unit_path).rsplit("/", 1)[-1]
+    launcher_path = str(exec_start_line).split("=", 1)[-1].strip()
+    if str(report.get("supervisor") or "") == "launchd":
+        commands = [
+            f"/usr/bin/plutil -replace ProgramArguments -json '[\"/bin/sh\", \"{launcher_path}\"]' {unit_path}",
+            f"/usr/bin/plutil -replace KeepAlive -bool true {unit_path}",
+            f"launchctl bootout gui/$(id -u)/{unit_name.replace('.plist', '')} || true",
+            f"launchctl bootstrap gui/$(id -u) {unit_path}",
+        ]
+    else:
+        # A systemd DROP-IN, never `sed` over the shipped unit. Three reasons,
+        # each of which has bitten something in this repo before: the empty
+        # `ExecStart=` is systemd's own documented way to reset a list, so it
+        # works whether the unit has one ExecStart or several; `Restart=always`
+        # is ADDED rather than substituted, so a unit with no `Restart=` line
+        # at all (systemd's default is `no`) is fixed too, which a substitution
+        # would silently miss; and reverting is deleting one file rather than
+        # reconstructing a line from memory on a box nobody can reach.
+        #
+        # Restart=always belongs in the same edit, not a later one: the clean
+        # exit an update ends with only brings the box back under `always`, and
+        # production carries `on-failure`.
+        drop_in_dir = f"/etc/systemd/system/{unit_name}.d"
+        drop_in_path = f"{drop_in_dir}/empyralis-updatable.conf"
+        commands = [
+            f"sudo mkdir -p {drop_in_dir}",
+            f"sudo tee {drop_in_path} >/dev/null <<'EOF'\n"
+            "[Service]\n"
+            "ExecStart=\n"
+            f"{exec_start_line}\n"
+            "Restart=always\n"
+            "EOF",
+            "sudo systemctl daemon-reload",
+            f"sudo systemctl restart {unit_name}",
+        ]
+    return {
+        "state": "ready",
+        "unit_path": unit_path,
+        "unit_name": unit_name,
+        "current_launch_command": report.get("launch_command"),
+        "exec_start_line": exec_start_line,
+        "launcher_path": report.get("repair_launcher_path"),
+        "blockers": report.get("blockers") or [],
+        "commands": commands,
+        "detail": (
+            "Run these once on this computer, as someone with administrator access. "
+            "Nothing has to be done again afterwards — the new start-up command follows "
+            "every future update on its own."
+        ),
+    }

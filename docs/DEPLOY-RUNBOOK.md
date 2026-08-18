@@ -176,6 +176,89 @@ Run against `https://empyralis.ai`, not the IP, so cookies/CORS get exercised fo
 9. Open the site on a phone (real device or devtools mobile emulation) → layout doesn't break, login works, chat is usable.
 10. `journalctl -u empyralis-frontend -u empyralis-backend --since "10 minutes ago" | grep -i error` → nothing unexpected (a few pre-existing Server-Action-ID-mismatch lines from stale browser tabs are known and harmless, see Known Gaps).
 
+## 3a. Repairing a gateway that cannot receive updates (MAN-355)
+
+**Symptom, and the only place it shows:** the Hardware page's Gateway version
+row says **"Can't receive updates"** instead of "Up to date", with a reason and
+a command block underneath it. That is the box telling you its own supervisor
+unit starts the gateway from a fixed path that updates are never installed
+into, so a self-update would download, stage, swap — and then start the old
+copy again.
+
+**Why the gateway cannot fix this itself** (measured on production
+2026-08-18, read-only — three independent barriers, any one of them fatal):
+
+```
+Uid 995 (empyralis-gw)   /etc/systemd/system is root:root 0755
+                         `sudo -u empyralis-gw test -w` → NOT WRITABLE
+ProtectSystem=strict     `/` is mounted `ro` inside the unit's own mount
+                         namespace — even root inside it cannot write there
+NoNewPrivileges=true     no setuid, no sudo, no escalation path
+```
+
+plus `systemctl daemon-reload` needs root or a polkit rule the box does not
+have. So this repair is an operator action, permanently, and it is the ONLY
+part of the fix that is: the gateway has already written and **test-run** a
+launcher in its own state dir, and the page prints the exact `ExecStart=` for
+it.
+
+**The repair, on the box, once.** The Hardware page prints these with the real
+unit name and paths filled in — prefer them over the shape below, which is what
+production's own `empyralis-gateway-channels.service` needs:
+
+```bash
+sudo mkdir -p /etc/systemd/system/empyralis-gateway-channels.service.d
+sudo tee /etc/systemd/system/empyralis-gateway-channels.service.d/empyralis-updatable.conf >/dev/null <<'EOF'
+[Service]
+ExecStart=
+ExecStart=/var/lib/empyralis-gw/state/launch/run-gateway
+Restart=always
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart empyralis-gateway-channels.service
+```
+
+Three things about that block are deliberate, not style:
+
+- **A drop-in, never `sed` over the shipped unit.** The empty `ExecStart=` is
+  systemd's own documented way to reset the list, so it works whether the unit
+  declares one `ExecStart` or several; reverting is `rm` on one file plus a
+  `daemon-reload`, rather than reconstructing a line from memory.
+- **`Restart=always` is part of the same edit.** Production carries
+  `Restart=on-failure`, under which the clean exit a self-update ends with
+  leaves the gateway switched OFF rather than starting the new build. Fixing
+  the path alone would trade a stale box for a dead one.
+- **The launcher is boot-safe by construction.** It prefers the release layout
+  when a build is actually staged there and otherwise execs the exact path the
+  gateway was running from when it wrote the file — so on a box that has never
+  self-updated, the restart above starts precisely what is running today. The
+  gateway also runs it once in probe mode before the page ever offers it, and
+  the page shows the commands only when that probe succeeded.
+
+**Verify:**
+
+```bash
+systemctl show -p ExecStart -p Restart --value empyralis-gateway-channels.service
+systemctl is-active empyralis-gateway-channels.service     # → active
+```
+
+then reload the Hardware page: the row goes back to "Up to date" (or offers a
+real update) on the gateway's next reconnect, with nothing to clear.
+
+**Rollback**, if the service does not come back:
+
+```bash
+sudo rm /etc/systemd/system/empyralis-gateway-channels.service.d/empyralis-updatable.conf
+sudo systemctl daemon-reload
+sudo systemctl restart empyralis-gateway-channels.service
+```
+
+**Boxes provisioned by `scripts/install-agent-computer.sh` or the Packer image
+need NOTHING** — both write a `run-gateway` launcher that already checks the
+release layout first (since 2026-07-21 / 2026-07-29 respectively), and the
+gateway reports them as updatable. Only hand-installed boxes, and boxes
+installed before those dates, need this.
+
 ## 4. Known gaps — deliberate, not fixed in this pass
 
 - **Redis is not running on the VPS**, and `EMPYRALIS_SKIP_REDIS_CHECK=true` is currently set to paper over that. Two real options, not a default to silently pick: (a) install and run Redis on the box, unset the skip flag, or (b) confirm nothing production-critical actually needs Redis on this deployment and leave the skip flag set *deliberately*, with that decision written down somewhere better than a stale env var. Not resolved here because it's a real infrastructure decision, not a bug fix.

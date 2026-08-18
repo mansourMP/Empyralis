@@ -4439,6 +4439,72 @@ something a gateway can do to itself. Per this file's own rule, the blast
 radius is small and known personally — there are no anonymous production
 users on the gateway.
 
+**Second half, same day: a gateway CANNOT repair its own unit — measured,
+not reasoned — so the product reports instead, and hands over the one line
+it is forbidden to write.** Three independent barriers on production
+(165.227.25.201, read-only), any ONE of them fatal to self-repair:
+
+```
+Uid 995 (empyralis-gw)   /etc/systemd/system is root:root 0755
+                         `sudo -u empyralis-gw test -w` → NOT WRITABLE
+ProtectSystem=strict     `/` is `ro` inside the unit's own mount namespace,
+                         so even root INSIDE it cannot write there
+NoNewPrivileges=true     no setuid, no sudo, no escalation
+```
+
+plus `daemon-reload` needs root or a polkit rule the box lacks. Anything
+proposing that a gateway rewrite its own systemd unit is proposing something
+that cannot happen; do not re-litigate it without re-measuring those three.
+
+So: `gateway-launch-updatability.ts` classifies, `gateway-launch-repair.ts`
+prepares, and a human applies four lines. Four things about it are
+load-bearing:
+
+**The judged thing is the LAUNCHER, never the running path.** A freshly
+installed box has never self-updated, so no `gateway-releases/current` exists
+and it runs out of the installer's root-owned tree — an entrypoint outside
+the layout, on a box whose next update would work perfectly. Judging by
+`require.main.filename` would condemn most of the fleet. Discovery is
+`/proc/self/cgroup` (systemd puts the unit NAME nowhere in the environment,
+and production's unit is `empyralis-gateway-channels.service`, not the
+default name `resolveExpectedSupervisorUnit` would guess), then the unit's
+own `ExecStart`; a shell launcher is credited by two STRUCTURAL tokens it
+must contain to work at all (`/current/gateway/dist/index.js` plus
+`EMPYRALIS_GATEWAY_INSTALL_ROOT`/`gateway-releases`), held to the REAL
+installer heredoc by `gateway-launch-updatability-installer-drift.test.ts`
+rather than to a fixture copy.
+
+**`Restart=on-failure` is a SECOND, independent blocker and production has
+it.** The self-update runtime's supervised handoff exits 0 and trusts the
+supervisor to bring the new build up — which only `always`/`on-success` do.
+Fixing the path alone would trade a stale box for a dead one, so both go in
+one drop-in and both are reported as separate facts with separate details.
+
+**Every failure to read, find or parse resolves to `"unknown"`, never to
+`"not_updatable"`** — and the backend refuses ONLY on an explicit
+`"not_updatable"`. A wrong "unknown" costs a signal; a wrong refusal takes
+updates away from every healthy box at once, and the whole fleet reports
+nothing here until it is rebuilt.
+
+**The launcher is boot-safe by construction and PROVEN before it is
+recommended.** Pointing an `ExecStart` at `<layout>/current/gateway/dist/
+index.js` directly is a loaded gun — on a box that has never self-updated
+that file does not exist and the first restart strands the machine forever.
+The generated `/bin/sh` launcher prefers the layout and otherwise execs the
+exact path the gateway is running from at write time, and the gateway RUNS
+it once (`EMPYRALIS_GATEWAY_LAUNCH_PROBE=1` prints the entrypoint and exits
+0 without starting anything) — an unproven launcher is reported
+`unverified` and its `ExecStart` is never handed out.
+
+Refusal reaches the screen as its own state: the Hardware page rendered
+"Up to date" for EVERY refusal, including this one, because
+`gateway_update_refusal_code` shipped with the fingerprint and nothing ever
+read it. Now "Can't receive updates" plus the reason, the blockers and the
+copy-pasteable drop-in. The commands are shown rather than performed on
+purpose — no button on that page could ever work, and a button that cannot
+work is a dead control. Operator procedure lives in
+`docs/DEPLOY-RUNBOOK.md` §3a, with rollback.
+
 **Flagged while here, NOT fixed:
 `__tests__/exec-file-timeout-child-leak.test.ts`'s drift assertion is
 VACUOUS.** It scans `path.resolve(__dirname, "..")` for files ending `.ts`,

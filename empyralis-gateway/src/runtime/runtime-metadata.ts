@@ -6,6 +6,16 @@ import {
   type AgentComputerDesktopSession,
 } from "./service-mode";
 
+import type { GatewayLaunchRepairPlan } from "../update/gateway-launch-repair";
+import type { GatewayLaunchUpdatability } from "../update/gateway-launch-updatability";
+
+/** The classification plus the half of the repair the gateway was able to
+ *  prepare for itself, carried together because a report of "stuck" without
+ *  the fix beside it is a fact nobody can act on. */
+export type GatewayLaunchUpdatabilityReport = GatewayLaunchUpdatability & {
+  repair: GatewayLaunchRepairPlan | null;
+};
+
 export interface GatewayNativeRuntimeMetadata {
   os: NodeJS.Platform;
   arch: string;
@@ -29,6 +39,15 @@ export interface GatewayRuntimeMetadata {
    *  which is what makes it refuse to advertise an unobservable update rather
    *  than guess. */
   buildFingerprint: string | null;
+  /** Whether a self-update on this box could ever take effect — a property
+   *  of the supervisor unit that starts the NEXT process, not of this one.
+   *  See update/gateway-launch-updatability.ts.
+   *
+   *  Null when this build predates the check or it could not be computed.
+   *  The backend must treat null exactly like "unknown": keep today's
+   *  behaviour. Only an explicit "not_updatable" ever takes an update
+   *  away. */
+  launchUpdatability: GatewayLaunchUpdatabilityReport | null;
   hostname: string;
   platform: string;
   pid: number;
@@ -42,6 +61,7 @@ export function buildRuntimeMetadata(
   gatewayVersion: string,
   requestedCapabilities: string[] = [],
   buildFingerprint: string | null = null,
+  launchUpdatability: GatewayLaunchUpdatabilityReport | null = null,
 ): GatewayRuntimeMetadata {
   const nativeRuntime: GatewayNativeRuntimeMetadata = {
     os: process.platform,
@@ -54,6 +74,7 @@ export function buildRuntimeMetadata(
   return {
     gatewayVersion,
     buildFingerprint,
+    launchUpdatability,
     hostname: nativeRuntime.hostname,
     platform: `${process.platform}-${process.arch}`,
     pid: process.pid,

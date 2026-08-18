@@ -19,6 +19,7 @@ test("gateway heartbeat payload carries passive service inventory separately fro
   const runtimeMetadata: GatewayRuntimeMetadata = {
     gatewayVersion: "0.1.0",
     buildFingerprint: null,
+    launchUpdatability: null,
     hostname: "agent-box",
     platform: "linux-x64",
     pid: 123,
@@ -99,6 +100,7 @@ test("gateway heartbeat payload transmits the gateway's real health state instea
   const runtimeMetadata: GatewayRuntimeMetadata = {
     gatewayVersion: "0.1.0",
     buildFingerprint: null,
+    launchUpdatability: null,
     hostname: "agent-box",
     platform: "linux-x64",
     pid: 123,

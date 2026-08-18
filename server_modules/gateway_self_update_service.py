@@ -164,6 +164,12 @@ def gateway_update_status(registration: Dict[str, Any]) -> Dict[str, Any]:
     platform, arch = _split_platform(str(registration.get("platform") or ""))
     latest = resolve_latest_gateway_version(platform=platform, arch=arch)
     latest_version = latest["latest_version"]
+    # Whether an update could take effect on this box AT ALL — a property of
+    # the supervisor unit that starts the next process, which the gateway
+    # reports and structurally cannot repair (MAN-355). Refused ahead of every
+    # other question, because `previous_update_changed_nothing` is what such a
+    # box eventually reports and it is the symptom, not the cause.
+    launch = gateway_build_identity_service.launch_report(registration)
     plan = gateway_build_identity_service.plan_gateway_update_advertisement(
         current_version=current_version,
         latest_version=latest_version,
@@ -181,6 +187,7 @@ def gateway_update_status(registration: Dict[str, Any]) -> Dict[str, Any]:
             and latest_version
             and is_newer_gateway_version(current_version, latest_version)
         ),
+        launch_updatability=launch["status"],
     )
     update_available = bool(plan["update_available"])
     return {
@@ -191,6 +198,11 @@ def gateway_update_status(registration: Dict[str, Any]) -> Dict[str, Any]:
         "gateway_update_refusal_code": plan["refusal_code"],
         "gateway_update_refusal_reason": plan["reason"],
         "latest_gateway_artifact_url": latest["artifact_url"] if update_available else None,
+        # Carried beside the refusal, never instead of it: a person told
+        # "this computer cannot receive updates" and given nothing to do about
+        # it has been informed of a dead end. None whenever there is nothing
+        # to repair or nothing known.
+        "gateway_launch_repair": gateway_build_identity_service.plan_gateway_launch_repair(launch),
     }
 
 

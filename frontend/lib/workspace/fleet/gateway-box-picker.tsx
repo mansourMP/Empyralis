@@ -107,6 +107,25 @@ export type FleetGateway = {
   latest_gateway_version?: string | null;
   gateway_update_available?: boolean;
   latest_gateway_artifact_url?: string | null;
+  /** WHY an update is not being offered, when there is a reason worth naming.
+   *  "there is nothing newer" and "this computer cannot receive updates at
+   *  all" are different facts and must never both render as "Up to date" —
+   *  which is exactly what this page did until MAN-355. Stable codes from
+   *  gateway_build_identity_service; never matched on the reason prose. */
+  gateway_update_refusal_code?: string | null;
+  gateway_update_refusal_reason?: string | null;
+  /** The one-time change a human has to apply, when the box has one and could
+   *  prove it works. `unverified` means the box knows it is stuck but could
+   *  not prepare its own fix — a real third state, not a missing `ready`. */
+  gateway_launch_repair?: {
+    state?: "ready" | "unverified" | string;
+    detail?: string | null;
+    unit_path?: string | null;
+    current_launch_command?: string | null;
+    exec_start_line?: string | null;
+    commands?: string[] | null;
+    blockers?: { code?: string; detail?: string }[] | null;
+  } | null;
 };
 
 /** Whether this box has a local model runtime (Ollama) ready to serve turns. */

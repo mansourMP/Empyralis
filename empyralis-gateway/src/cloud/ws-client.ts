@@ -402,6 +402,14 @@ export class GatewayWsClient {
           // apart, and the backend refuses to advertise a self-update it
           // could not verify took effect without it.
           gateway_build_fingerprint: runtimeMetadata.buildFingerprint,
+          // Whether an update on this box could ever take effect. Reported
+          // rather than repaired, because the unit that decides it is one
+          // this process is structurally forbidden from writing (unprivileged
+          // user, read-only /, NoNewPrivileges — all three measured on
+          // production). The backend refuses to advertise an update to a box
+          // that cannot receive one, and puts the one-line operator fix on
+          // the Hardware page, which is the only place a human will see it.
+          gateway_launch_updatability: runtimeMetadata.launchUpdatability,
           device_metadata: runtimeMetadata.deviceMetadata,
           requested_capabilities: runtimeMetadata.requestedCapabilities,
           journal_cursor: await this.journal.lastCursor(),
