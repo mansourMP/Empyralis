@@ -440,14 +440,27 @@ Documents into the rail too (so ALL of a project's sections would live in
 one persistent rail structure, Linear's Team-sidebar shape) — the founder
 rejected that direction directly: *"everything in one [list] is not
 something I am looking for."* The fix taken instead was the opposite move:
-revert `d5833c615` outright (`fec3bc118`). `ProjectAgentsRail.tsx` and
-`agents/layout.tsx` are BACK, not gone — a project's Agents section renders
-its agent list in the content area again, exactly as it did before that
-commit, and the rail stays flat at all times inside a project. Do not
-re-attempt either shape (agents-in-rail, or the broader "fold every project
-section into the rail") without the founder asking for it specifically —
-both were tried and both were rejected live, one implicitly (by the bug
-report) and one explicitly (by name).
+revert `d5833c615` outright (`fec3bc118`).
+
+**CORRECTION, 2026-08-18 — the paragraph that used to sit here was stale and
+said the OPPOSITE of the code, which matters because it read as a standing
+prohibition.** It claimed `ProjectAgentsRail.tsx` and `agents/layout.tsx`
+were "BACK, not gone" and that agents-in-rail must not be re-attempted. In
+fact the revert was itself reverted (`862f80877`, "Reapply") after the
+founder said he had used and wanted the rail version, and `16501a4e7` then
+fixed the real defect — the project tab strip rendering in content while the
+rail showed the same picker, i.e. the two-navigation-surfaces bug that caused
+the original complaint. Both files are DELETED; the project-agents rail space
+is live. Verified by `ls` on 2026-08-18: neither file exists.
+
+What survives from that night is the narrower, still-correct rule: only ONE
+surface may be the picker at a time. What does NOT survive is "never put
+agents in the rail" — that shape shipped, and the founder has since decided
+agents leave projects entirely and become a top-level surface (MAN-357), so
+the rail is where they belong.
+
+The broader "fold every project section into the rail" shape remains rejected
+by name (*"everything in one [list] is not something I am looking for"*).
 
 Same night, same surface, three more founder calls:
 - **Settings left the flat rail** (two doors to one room; the account menu
