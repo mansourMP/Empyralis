@@ -184,10 +184,15 @@ class ProjectDocumentsServiceLayerTests(_BridgeAsyncTestCase):
         )
         self.assertTrue(all("body" in d for d in listed_with_body))
 
+        # Passing the REAL precondition token here rather than None keeps
+        # this lifecycle test exercising the path the product actually uses
+        # -- a conditional write that matches. The refusal path has its own
+        # file (test_document_stale_write_precondition.py).
         updated = await documents.update_document(
             tenant_id=self.tenant_a,
             workspace_id=self.ws_a,
             document_id=created["id"],
+            expected_sha256=created["state_sha256"],
             body="# Deploy steps\n\n1. Build\n2. Test\n3. Ship",
             updated_by="user_beta",
         )
@@ -201,7 +206,8 @@ class ProjectDocumentsServiceLayerTests(_BridgeAsyncTestCase):
         self.assertEqual(updated["slug"], "runbook")
 
         renamed = await documents.update_document(
-            tenant_id=self.tenant_a, workspace_id=self.ws_a, document_id=created["id"], title="Deploy Runbook",
+            tenant_id=self.tenant_a, workspace_id=self.ws_a, document_id=created["id"],
+            expected_sha256=updated["state_sha256"], title="Deploy Runbook",
         )
         self.assertEqual(renamed["title"], "Deploy Runbook")
         self.assertEqual(renamed["slug"], "runbook", "renaming a document must not reslug it")
@@ -259,8 +265,11 @@ class ProjectDocumentsServiceLayerTests(_BridgeAsyncTestCase):
         self.assertNotIn(doc_b["id"], listed_ids_a)
 
         # update_document: tenant B cannot mutate tenant A's document by id.
+        # expected_sha256=None deliberately: the tenant/workspace filter
+        # must block this on its own, with no help from the precondition.
         cross_update = await documents.update_document(
-            tenant_id=self.tenant_b, workspace_id=self.ws_b, document_id=doc_a["id"], title="Hijacked",
+            tenant_id=self.tenant_b, workspace_id=self.ws_b, document_id=doc_a["id"],
+            expected_sha256=None, title="Hijacked",
         )
         self.assertIsNone(cross_update, "update_document mutated a document belonging to a different tenant.")
         unchanged = await documents.get_document(

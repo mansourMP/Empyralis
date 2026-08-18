@@ -512,3 +512,94 @@ h6.fleet-doc-heading { font-size: 14px; }
   color: var(--app-danger);
   background: color-mix(in srgb, var(--app-danger) 10%, transparent);
 }
+
+/* ── Stale-write conflict ─────────────────────────────────────────────────
+   Shown when a save was REFUSED because the document changed underneath the
+   person (an agent's document__edit, or a teammate). It sits between the
+   meta line and the body — directly above the text it is about, so the
+   decision is made looking at the writing it concerns rather than at a
+   toast in a corner.
+
+   Deliberately NOT a modal. The person's own draft has to stay readable and
+   editable while they decide; a dialog over it would hide exactly the thing
+   they are choosing about. And deliberately not styled as an error: nothing
+   failed and nothing was lost, so this borrows the WARNING vocabulary the
+   channel doors already use for a consequence worth reading, never
+   --app-danger, which this surface spends on destruction. */
+.fleet-doc-conflict {
+  margin: 12px 0 18px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--warning-text) 40%, var(--border));
+  border-radius: var(--radius-card);
+  background: color-mix(in srgb, var(--warning-text) 7%, var(--bg-inset));
+}
+
+.fleet-doc-conflict-title {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.fleet-doc-conflict-reassurance {
+  margin: 4px 0 0;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+/* Dense inside the group, airy between groups. */
+.fleet-doc-conflict-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+/* A quiet third control — it reveals information, it does not resolve
+   anything, so it must not read as a third option with equal weight. */
+.fleet-doc-conflict-toggle {
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.fleet-doc-conflict-toggle:hover {
+  color: var(--text-secondary);
+}
+
+.fleet-doc-conflict-consequences {
+  margin: 10px 0 0;
+  padding-left: 0;
+  list-style: none;
+  font-size: var(--text-xs);
+  line-height: 1.65;
+  color: var(--text-muted);
+}
+
+.fleet-doc-conflict-consequence-label {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+/* Reuses .fleet-doc-history-diff wholesale (same monospace inset block the
+   revision history already renders a diff in) — one diff treatment on this
+   page, not two. Only the spacing differs, because here it opens inside an
+   already-inset banner. */
+.fleet-doc-conflict-diff {
+  margin-top: 12px;
+  max-height: 220px;
+  background: var(--bg-surface);
+}
+
+.fleet-doc-conflict-legend {
+  margin: 6px 0 0;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}

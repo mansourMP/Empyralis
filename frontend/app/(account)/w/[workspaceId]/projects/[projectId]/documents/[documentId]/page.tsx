@@ -107,10 +107,19 @@ export default function DocumentDetailPage() {
   // identity churn avoided) so this is safe by construction rather than by
   // coincidence — see that file's own note on why it only reseeds on a
   // genuinely different document.
+  // Returns the saved document rather than void: its `state_sha256` is the
+  // stale-write precondition for the NEXT autosave, and DocumentDetailView
+  // does not reseed from this prop (same id, see above), so the view can
+  // only learn the new base from the return value. A DocumentConflictError
+  // propagates untouched — the view owns that decision, and `document` is
+  // deliberately NOT updated on a refusal: nothing was written, and folding
+  // the incoming version in here would swap the page's baseline out from
+  // under a person who has not chosen yet.
   const handleSave = useCallback(
-    async (patch: { title: string; body: string }) => {
+    async (patch: { title: string; body: string; base_sha256?: string }) => {
       const updated = await patchFleetDocument(workspaceId, documentId, patch);
       setDocument(updated);
+      return updated;
     },
     [workspaceId, documentId],
   );

@@ -1440,6 +1440,20 @@ if empyralist_mcp is not None:
                 changed_by_type="external_agent",
                 changed_by_display_name=author_name,
             )
+        except documents.DocumentPreconditionFailed as exc:
+            # "somebody else changed it" is not the same fact as "your
+            # old_string did not match" -- both leave the document
+            # untouched, but only one of them is fixed by re-reading and
+            # reapplying the SAME edit. Hand back the current body so that
+            # retry costs no extra round trip.
+            await _ledger_mcp_call(r, "empyralis_edit_document", False, document_id=document_id)
+            return {
+                "ok": False,
+                "conflict": True,
+                "error": str(exc),
+                "document_id": document_id,
+                "current_document": exc.current_document,
+            }
         except Exception as exc:  # noqa: BLE001 -- includes the "must match exactly once" failure
             await _ledger_mcp_call(r, "empyralis_edit_document", False, document_id=document_id)
             return {"ok": False, "error": str(exc), "document_id": document_id}
@@ -1458,7 +1472,7 @@ if empyralist_mcp is not None:
         annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
     )
     async def empyralis_update_document(
-        document_id: str, title: str = "", body: str = "", ctx: Context = None,
+        document_id: str, title: str = "", body: str = "", base_sha256: str = "", ctx: Context = None,
     ) -> Dict[str, Any]:
         """Replace a document's title and/or WHOLE body -- the FALLBACK
         path for a genuine full rewrite. Prefer empyralis_edit_document for
@@ -1474,6 +1488,16 @@ if empyralist_mcp is not None:
 
         Workspace-scoped like empyralis_get_task -- any document in any
         project in your workspace, not only ones you created.
+
+        `base_sha256`: PASS THIS. Every empyralis_get_document response
+        carries the document's `state_sha256`; sending it back here makes
+        this write a compare-and-swap -- it lands only if nothing changed in
+        between, and otherwise fails with the current content so you can
+        reapply on top of it. Omitting it makes this an UNCONDITIONAL
+        overwrite that will silently destroy a teammate's unsaved edit or
+        another agent's change if one landed while you were composing this
+        body. Prefer empyralis_edit_document, which carries its own
+        precondition and needs nothing from you.
 
         Every update is automatically recorded in this document's revision
         history — see empyralis_list_document_revisions."""
@@ -1493,11 +1517,27 @@ if empyralist_mcp is not None:
         try:
             document = await documents.update_document(
                 tenant_id=tenant, workspace_id=ws, document_id=document_id,
+                # Explicit None when the caller supplied no base: this tool
+                # is documented as the whole-body fallback and a model that
+                # never read the document has no base to offer, so the
+                # unconditional write stays REACHABLE but has to be asked
+                # for -- it is not what happens when a parameter is
+                # forgotten in this file.
+                expected_sha256=str(base_sha256 or "").strip() or None,
                 title=clean_title or None, body=clean_body or None,
                 updated_by=author_id,
                 changed_by_type="external_agent",
                 changed_by_display_name=author_name,
             )
+        except documents.DocumentPreconditionFailed as exc:
+            await _ledger_mcp_call(r, "empyralis_update_document", False, document_id=document_id)
+            return {
+                "ok": False,
+                "conflict": True,
+                "error": str(exc),
+                "document_id": document_id,
+                "current_document": exc.current_document,
+            }
         except Exception as exc:  # noqa: BLE001
             await _ledger_mcp_call(r, "empyralis_update_document", False, document_id=document_id)
             return {"ok": False, "error": str(exc), "document_id": document_id}

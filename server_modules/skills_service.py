@@ -6807,6 +6807,16 @@ def execute_single_direct_tool_call(
                     tenant_id=_caller_tenant_id,
                     workspace_id=workspace_id,
                     document_id=document["id"],
+                    # The stale-write precondition (project_documents_
+                    # repository.update_document): the state hash of the
+                    # body THIS replacement was computed against. Without
+                    # it, a person's autosave (or another agent's edit)
+                    # landing between the read above and the write here is
+                    # silently overwritten -- and this dispatch re-implements
+                    # the read/replace/write itself rather than going through
+                    # edit_document_by_replace, so it does not inherit that
+                    # function's own precondition and has to carry its own.
+                    expected_sha256=str(document.get("state_sha256") or "") or None,
                     body=new_body,
                     updated_by=_caller_agent_id,
                     # A platform agent's own tool call -- see project_documents_
