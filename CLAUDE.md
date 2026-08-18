@@ -601,6 +601,31 @@ row. **"Built, tested, and never wired" has a schema-shaped variant** — when
 you find a migration, grep for the code that writes the columns before
 assuming the feature exists.
 
+**The silent-zero-rows shape above is now a structural guard, not just a
+warning in this file.** `server_modules/tests/test_rls_dml_drift.py`
+(2026-08-18) scans `CONTROL_PLANE_SCHEMA_SQL` plus the rest of
+`ensure_control_plane_schema()`'s body in `control_plane_repository.py`
+(the boot-schema surface DEPLOY-RUNBOOK.md step 3b runs as the
+non-superuser `empyralis_app` role) and every `migrations/*.sql` file, for
+any line starting `UPDATE `/`INSERT INTO`/`DELETE FROM` against a table
+carrying FORCE ROW LEVEL SECURITY — parsed independently from
+`migrations/enable_rls.sql`, never from either scanned source. Building it
+turned up a fourth live instance (`project_tasks` status-vocabulary DO
+block, same file) and five historical migration-file offenders; the
+fourth is fixed (`SET LOCAL app.rls_bypass = 'on'`, same pattern as the
+already-fixed `add_task_sequence_numbers.sql`), two are self-detecting
+(a later `CREATE UNIQUE INDEX` would fail loudly on any real duplicate),
+one is a byte-for-byte twin of instance 2's own verdict, and two
+(`stage_4b_agent_isolation.sql`'s `hardware_access`/`subagents_enabled`
+backfill, `unify_fleet_tool_toggle_ids.sql`'s key-rename backfill) are
+flagged, not fixed — one-time historical migrations this pass had no
+production access to verify, spun off as a separate task. Instance 2
+(`workspace_agent_installs` label dedupe) stays in the allowlist exactly as
+before, unfixed pending the same product decision. Three canaries (empty
+`enable_rls.sql` parse, missing boot-schema block, empty `migrations/`
+directory) each raise loudly rather than let the scan enforce nothing —
+verified live by breaking each on purpose and watching it fail.
+
 **A capability branch is a live-path branch, and the OWNER can be the one
 locked out.** The sharpest instance so far, 2026-08-12. `DocumentDetailView`
 rendered `canWrite ? <textarea> : <MarkdownLite>` — so a document's own
