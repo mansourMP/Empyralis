@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import logging
 import mimetypes
 import os
 from pathlib import Path
@@ -14,6 +15,12 @@ from server_modules.capability_registry import resolve_capability, workflow_tool
 from server_modules import execution_mode_policy
 from server_modules import local_tool_executor
 from server_modules import authority_mandate_service
+
+# MAN-356: this module carried no logging at all. The one call site is the
+# gateway resolver dropping a model-supplied `gateway_id` that is not the
+# agent's placement — a decision that is otherwise completely silent, and
+# CLAUDE.md's rule is that a swallowed decision must name what it lost.
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -3874,12 +3881,39 @@ def _local_direct_tool_gateway_fallback_enabled() -> bool:
     return token in _LOCAL_DIRECT_TOOL_GATEWAY_FALLBACK_ENVS
 
 
-def _resolve_live_gateway_from_workspace(
+def _resolve_live_gateway_owned_by(
     workspace_id: str,
+    owner_user_id: str,
     *,
     gateway_state_repository: Any,
     gateway_protocol_service: Any,
 ) -> str | None:
+    """A live gateway in this workspace that `owner_user_id` OWNS, or None.
+
+    MAN-356. This replaced `_resolve_live_gateway_from_workspace`, which
+    returned ANY live active gateway registered to the workspace and had no
+    parameter that could express whose machine it was. CLAUDE.md's law is
+    "Hardware attaches to its owner, never to the project… a project invite
+    is not physical access" — and the old function made that law structurally
+    inexpressible, so a workspace member reaching any agent could land shell
+    and filesystem execution on the founder's own paired Mac.
+
+    `gateway_registrations.user_id` is the person who paired the box (see
+    gateway_state_repository's schema: user_id NOT NULL, and the
+    workspace_id+user_id+device_id index). Requiring it to equal the asking
+    human is the whole gate: you can still reach your OWN machine through an
+    agent that has no explicit placement, and you can never reach anybody
+    else's.
+
+    An empty `owner_user_id` matches nothing. That is deliberate and is the
+    fail-CLOSED direction: an identity-less turn (a channel/system principal)
+    has no person whose machine it could borrow, and `""` must never behave
+    like a wildcard — the same "a scope column with a default is a loaded
+    gun" rule this codebase already applies to agent_id on inbound writes.
+    """
+    clean_owner_id = str(owner_user_id or "").strip()
+    if not clean_owner_id:
+        return None
     for registration in gateway_state_repository.list_workspace_gateway_registrations(
         str(workspace_id or "default").strip() or "default",
         include_revoked=False,
@@ -3888,6 +3922,8 @@ def _resolve_live_gateway_from_workspace(
         if not gateway_id:
             continue
         if str(registration.get("status") or "").strip().lower() != "active":
+            continue
+        if str(registration.get("user_id") or "").strip() != clean_owner_id:
             continue
         if gateway_protocol_service.gateway_connection_is_live(gateway_id):
             return gateway_id
@@ -3898,7 +3934,40 @@ def _resolve_direct_tool_gateway_id(
     workspace_id: str,
     *,
     session_ctx: Dict[str, Any] | None,
+    requested_gateway_id: Any = None,
 ) -> str | None:
+    """Which machine may this turn's tools execute on? None = no machine.
+
+    MAN-356. EXECUTION FOLLOWS THE AGENT'S PLACEMENT. The order is:
+
+      1. hardware_access == "none"  -> None, always. The agent is cloud-only.
+      2. the agent's PLACEMENT       -> that box, if usable + live.
+      3. no placement                -> only a box the ASKING PERSON owns.
+      4. otherwise                   -> None.
+
+    PLACEMENT IS THE CONSENT MOMENT, and that is why no per-person hardware
+    permission exists anywhere in this path. A box reaches an agent because
+    the HARDWARE'S OWNER put it there — either directly (the Hardware tab /
+    the create-agent wizard's Placement step, both of which write
+    install_metadata.preferred_gateway_id) or through a project default that
+    specialist_runtime_context re-checks against the machine owner's own live
+    opt-in on every single resolution. Nobody reaches a machine THROUGH an
+    agent; the agent reaches the machine its owner gave it.
+
+    Returning None is a CLEAN DEGRADATION, never an error, and the callers
+    already expect it: `_hardware_action_offline_result` is the honest
+    "that machine isn't reachable" answer, and the gateway branches are all
+    guarded by `if ... and gateway_id`. An agent with no reachable box runs
+    cloud-side with fewer capabilities, which is exactly what CLAUDE.md's
+    hardware law asks for — "a clean degradation, never an error and never a
+    silent borrow."
+
+    `requested_gateway_id` is the model's own `hardware__action` argument. It
+    is VALIDATED here, never trusted: it may only select a box this agent was
+    already placed on. Before this, callers did
+    `payload.get("gateway_id") or _resolve_direct_tool_gateway_id(...)`, so a
+    model that simply named a box bypassed placement entirely.
+    """
     from server_modules import gateway_protocol_service, gateway_state_repository
     from server_modules import workspace_scope as _ws
     from server_modules.hardware_runtime_adapters import gateway_adapter as _gateway_adapter
@@ -3908,6 +3977,19 @@ def _resolve_direct_tool_gateway_id(
     )
 
     metadata = _direct_tool_session_metadata(session_ctx)
+
+    # (1) The agent's own hardware bucket. An explicit "none" ends it here —
+    # this is the setting the product has rendered on every agent's Hardware
+    # tab since stage_4b while enforcing it nowhere (resolve_hardware_access
+    # had exactly one non-test caller, building a list payload). An ABSENT
+    # key is "unknown", not "none": Sage's own turns resolve no specialist
+    # context and stamp nothing, and defaulting those to "none" would take
+    # the workspace operator's hardware away on an inference rather than on a
+    # setting anyone chose. Unknown falls through to (3), where the caller
+    # can still only ever reach their own machine.
+    if str(metadata.get("agent_hardware_access") or "").strip().lower() == "none":
+        return None
+
     candidate_ids: List[str] = []
     for key in (
         "gateway_id",
@@ -3923,6 +4005,23 @@ def _resolve_direct_tool_gateway_id(
             value = str(item or "").strip()
             if value and value not in candidate_ids:
                 candidate_ids.append(value)
+
+    # (2a) A model-supplied `gateway_id` is a HINT, never an authorization.
+    # It is honoured only when it names a box this agent was already placed
+    # on; otherwise it is dropped and resolution continues, so the turn lands
+    # on the agent's real placement (or the caller's own machine) instead of
+    # wherever the model pointed. Dropped rather than refused because the
+    # model usually just echoes an id back from an earlier tool result — the
+    # safe outcome is "the right box", not "no box".
+    requested = str(requested_gateway_id or "").strip()
+    if requested:
+        if requested in candidate_ids:
+            candidate_ids = [requested] + [c for c in candidate_ids if c != requested]
+        else:
+            logger.info(
+                "direct tool gateway: ignoring requested gateway_id %s — not this agent's placement",
+                requested,
+            )
     for gateway_id in candidate_ids:
         registration = gateway_state_repository.get_gateway_registration(gateway_id)
         if not registration:
@@ -3941,8 +4040,26 @@ def _resolve_direct_tool_gateway_id(
             continue
         if gateway_protocol_service.gateway_connection_is_live(gateway_id):
             return gateway_id
-    resolved_gateway_id = _resolve_live_gateway_from_workspace(
+    # (3) No placement resolved — either the agent was never placed on a box,
+    # or the box it was placed on is offline/unusable. Fall back ONLY to a
+    # machine the ASKING PERSON owns.
+    #
+    # MAN-356: this used to be `_resolve_live_gateway_from_workspace`, i.e.
+    # any live gateway in the workspace, with no notion of who was asking or
+    # whose machine it was — the silent borrow that let a member run commands
+    # on the founder's Mac. Scoping it to the caller's own registrations keeps
+    # every legitimate case working (you reach your own box through an agent
+    # you have not explicitly placed) while making the cross-person case
+    # structurally impossible rather than merely unlikely.
+    #
+    # The identity comes from verified session context, NEVER from the tool
+    # call's own arguments — the same rule the gateway file/shell mount
+    # already follows a few hundred lines below, and the same rule that makes
+    # memory_write_private's partition unspoofable.
+    caller_user_id = _resolve_session_user_id(session_ctx)
+    resolved_gateway_id = _resolve_live_gateway_owned_by(
         normalized_workspace_id,
+        caller_user_id,
         gateway_state_repository=gateway_state_repository,
         gateway_protocol_service=gateway_protocol_service,
     )
@@ -4295,9 +4412,15 @@ def _execute_hardware_action_tool_call(
             }
         }
     metadata = _direct_tool_session_metadata(session_ctx)
-    gateway_id = str(payload.get("gateway_id") or "").strip() or _resolve_direct_tool_gateway_id(
+    # MAN-356: the model's own `gateway_id` argument no longer short-circuits
+    # placement resolution — it is passed IN to be validated against the
+    # agent's placement. `payload` here is the tool call's arguments, so the
+    # old `payload.get("gateway_id") or _resolve(...)` let a model name any
+    # box in the workspace and skip the resolver entirely.
+    gateway_id = _resolve_direct_tool_gateway_id(
         workspace_id,
         session_ctx=session_ctx,
+        requested_gateway_id=payload.get("gateway_id"),
     )
     trace_context = session_ctx.get("trace_context") if isinstance(session_ctx, dict) else None
     trace_id = (
@@ -4438,9 +4561,15 @@ async def _execute_hardware_action_tool_call_async(
             }
         }
     metadata = _direct_tool_session_metadata(session_ctx)
-    gateway_id = str(payload.get("gateway_id") or "").strip() or _resolve_direct_tool_gateway_id(
+    # MAN-356: the model's own `gateway_id` argument no longer short-circuits
+    # placement resolution — it is passed IN to be validated against the
+    # agent's placement. `payload` here is the tool call's arguments, so the
+    # old `payload.get("gateway_id") or _resolve(...)` let a model name any
+    # box in the workspace and skip the resolver entirely.
+    gateway_id = _resolve_direct_tool_gateway_id(
         workspace_id,
         session_ctx=session_ctx,
+        requested_gateway_id=payload.get("gateway_id"),
     )
     trace_context = session_ctx.get("trace_context") if isinstance(session_ctx, dict) else None
     trace_id = (

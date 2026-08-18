@@ -75,8 +75,26 @@ class SpecialistRuntimeContext:
     # The paired box this specialist's TOOL calls (shell/file/browser) prefer,
     # distinct from gateway_binding above (which names the box that hosts the
     # AI brain itself, only used in local/cli_subscription mode). Empty = no
-    # preference; dispatch falls back to any live gateway in the workspace.
+    # preference.
+    #
+    # MAN-356: "empty means fall back to any live gateway in the workspace"
+    # was this field's old contract and it was the bug — a member reaching
+    # ANY agent could land execution on someone else's paired Mac, because
+    # the resolver had no parameter that could express whose machine it was.
+    # Empty now means NO PLACEMENT, and skills_service._resolve_direct_tool_
+    # gateway_id will only consider a box the CALLING PERSON owns.
     preferred_gateway_id: str = ""
+    # MAN-356: the agent's own hardware_access bucket — "none" | "gateway" |
+    # "vps", or "" for UNKNOWN (the install carried no such column, e.g. the
+    # SQLite local-bundle path). Until this shipped, resolve_hardware_access
+    # had exactly ONE non-test caller and it was building a UI list payload —
+    # the per-agent hardware setting was rendered in the product and enforced
+    # nowhere. This field is what carries it onto the live execution path.
+    #
+    # Default is "" and NOT "none": a context built without this field must
+    # read as "nobody told me", never as "the owner chose cloud-only", or
+    # every such agent silently loses its hardware.
+    hardware_access: str = ""
     project_id: str = ""
     context_policy: Dict[str, Any] = field(default_factory=dict)
     is_specialist: bool = True
@@ -199,6 +217,33 @@ async def resolve_specialist_runtime_context(
     project_id = _text(bundle.get("project_id"))
     source: Dict[str, Any] = {"resolved_from": "install_bundle", "master_id": master_id}
 
+    # MAN-356: hardware_access is now READ on the execution path, not just
+    # rendered. "none" is the wizard's own value for a cloud-only agent
+    # (FleetCreateAgentWizard writes `placement === "cloud" ? "none" : placement`),
+    # so an agent nobody placed on hardware must not acquire a box here —
+    # neither its own stale preference nor the project default. Suppressing
+    # the field rather than checking hardware_access again downstream keeps
+    # ONE answer to "which box does this agent use": if it has no hardware,
+    # it has no box, and every consumer sees the same empty value.
+    from server_modules.fleet_tools import resolve_hardware_access
+
+    # UNKNOWN is not "none", and collapsing them would silently un-place every
+    # agent whose bundle does not carry the column. `resolve_hardware_access`
+    # normalizes an ABSENT value to "none" (correct for its own job — rendering
+    # a picker), so it cannot be the whole decision here: the SQLite local
+    # bundle path does not carry this column at all, and a missing key there
+    # means "nobody told me", not "the owner chose cloud-only".
+    #
+    # Only an EXPLICIT "none" suppresses placement. Unknown carries "" onward,
+    # which skills_service._resolve_direct_tool_gateway_id treats as unknown
+    # too — the same distinction, made the same way, on both sides of the seam.
+    _hardware_access_is_set = _text(bundle.get("hardware_access")) != ""
+    hardware_access = resolve_hardware_access(bundle) if _hardware_access_is_set else ""
+    if hardware_access == "none":
+        if preferred_gateway_id:
+            source["preferred_gateway_id_denied"] = "hardware_access_none"
+        preferred_gateway_id = ""
+
     # Phase U3-K: project-level default-gateway fallback. Projects are
     # already the product's collaboration boundary (members live on the
     # project, not a Teams layer above it), so a project can carry a default
@@ -261,7 +306,13 @@ async def resolve_specialist_runtime_context(
                 if not gateway_binding and mode in ("cli_subscription", "local"):
                     gateway_binding = project_default_gateway_id
                     source["gateway_binding_from"] = "project_default"
-                if not preferred_gateway_id:
+                # MAN-356: hardware_access gates TOOL reach (preferred_
+                # gateway_id) and deliberately NOT the brain binding above.
+                # They are different axes: `mode: local` + `hardware_access:
+                # none` is a legitimate agent whose MODEL runs on a box while
+                # its shell/file tools stay cloud-side, and folding the two
+                # together would silently un-host that agent's brain.
+                if not preferred_gateway_id and hardware_access != "none":  # unknown ("") still inherits
                     preferred_gateway_id = project_default_gateway_id
                     source["preferred_gateway_id_from"] = "project_default"
             else:
@@ -285,6 +336,7 @@ async def resolve_specialist_runtime_context(
         reasoning_effort=_text(_model_config.get("reasoning_effort")).lower(),
         engine=_text(_model_config.get("engine")).lower(),
         preferred_gateway_id=preferred_gateway_id,
+        hardware_access=hardware_access,
         project_id=project_id,
         context_policy=dict(_ctx_policy),
         is_specialist=True,
