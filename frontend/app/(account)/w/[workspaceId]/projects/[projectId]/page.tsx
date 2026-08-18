@@ -2,7 +2,7 @@
 
 import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import Link from "next/link";
 import { useParams, usePathname, useRouter } from "next/navigation";
 
@@ -130,21 +130,29 @@ function TasksGroupedSkeleton() {
 }
 
 /**
- * Documents-list skeleton — DocumentsList.tsx reuses `.fleet-tasks-list`/
- * `.fleet-task-row` wholesale (a different header, no per-task columns), so
- * this needs its own header rather than TasksListSkeleton's.
+ * Documents-list skeleton — TREE-shaped, matching what actually arrives
+ * (DocumentsList.tsx renders an inferred folder tree, `.fleet-doc-tree*`).
+ * It used to draw a two-column table header ("Document | Updated") because
+ * the list itself was a table; leaving that behind would make the loading
+ * state and the loaded state two different layouts, i.e. a visible reflow
+ * on every open. The indents below are a plausible shape, not a prediction:
+ * they exist so the placeholder occupies the same kind of space, never to
+ * claim a specific tree is coming.
  */
+const DOCUMENT_SKELETON_ROWS = [0, 1, 1, 0, 1];
+
 function DocumentsListSkeleton() {
   return (
-    <div className="fleet-tasks-list" aria-busy="true" aria-label="Loading">
-      <div className="fleet-tasks-list-header" role="row">
-        <span>Document</span>
-        <span>Updated</span>
-      </div>
-      {[0, 1, 2, 3].map((i) => (
-        <div key={i} className="fleet-task-row" style={{ gridTemplateColumns: "minmax(260px, 1fr) 160px", cursor: "default" }}>
-          <span className="fleet-skeleton-bar" style={{ width: `${40 + (i % 3) * 15}%`, height: 13 }} />
-          <span className="fleet-skeleton-bar" style={{ width: 90, height: 12 }} />
+    <div className="fleet-doc-tree" aria-busy="true" aria-label="Loading">
+      {DOCUMENT_SKELETON_ROWS.map((depth, i) => (
+        <div
+          key={i}
+          className="fleet-doc-tree-row"
+          style={{ "--doc-tree-depth": depth, cursor: "default" } as CSSProperties}
+        >
+          <span className="fleet-doc-tree-spacer" aria-hidden="true" />
+          <span className="fleet-skeleton-bar" style={{ width: 14, height: 14 }} />
+          <span className="fleet-skeleton-bar" style={{ width: `${34 + (i % 3) * 14}%`, height: 12 }} />
         </div>
       ))}
     </div>

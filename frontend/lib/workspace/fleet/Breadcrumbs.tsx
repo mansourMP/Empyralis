@@ -157,6 +157,10 @@ export const STATIC_LABELS: Record<string, string> = {
   "my-work": "My work",
   conversations: "Conversations",
   projects: "Projects",
+  // Every document in the workspace, one GitHub-shaped tree (see
+  // document-tree.ts). Named explicitly so it can never drift from the rail
+  // label, which is the same word.
+  context: "Context",
   agents: "Agents",
   hardware: "Hardware",
   billing: "Usage",
@@ -242,9 +246,13 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
       segments.length >= 3 &&
       AGENT_DETAIL_TABS.has(lastSeg) &&
       segments[segments.length - 3] === "agents";
-    // …/projects/{id}/agents and …/projects/{id}/tasks with NOTHING after
-    // them are the project detail page's own Agents/Tasks views (a real
-    // route each now, not client state — see ProjectDetailPage's `view`).
+    // …/projects/{id}/agents, …/tasks and …/documents with NOTHING after
+    // them are the project detail page's own Agents/Tasks/Documents views (a
+    // real route each now, not client state — see ProjectDetailPage's `view`).
+    // "documents" was missing from both this list and the structural-child
+    // list below until 2026-08-18, so a project's Documents tab was the one
+    // of its three peers whose page <h1> renamed itself to the generic word
+    // "Documents" instead of staying the project's own name.
     // Folded the same way the agent-tab case above is: the project's own
     // crumb, one segment back, is what should read as current on all three
     // of its views (Overview/Agents/Tasks), same as MAN-145 already decided
@@ -253,7 +261,7 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
     // to the generic word "Tasks" or "Agents" on every click.
     const isProjectViewTrailingSegment =
       segments.length >= 3 &&
-      (lastSeg === "agents" || lastSeg === "tasks") &&
+      (lastSeg === "agents" || lastSeg === "tasks" || lastSeg === "documents") &&
       segments[segments.length - 3] === "projects";
     const effectiveLastIndex =
       isAgentDetailTrailingTab || isProjectViewTrailingSegment ? segments.length - 2 : segments.length - 1;
@@ -268,16 +276,19 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
     segments.forEach((seg, i) => {
       acc += `/${seg}`;
       const prev = segments[i - 1];
-      // Skip the structural "agents"/"tasks" segment that sits between a
-      // project id and a child id (…/projects/{id}/agents/{agentId},
-      // …/projects/{id}/tasks/{taskId} — neither bare path is a distinct
-      // page, so crumbing it would draw a dead link mid-chain), AND the same
-      // segment when it's the project's own Agents/Tasks view and therefore
-      // trailing with nothing after it (isProjectViewTrailingSegment above,
-      // which the effectiveLastIndex adjustment already accounts for by
-      // making the PROJECT crumb current instead).
+      // Skip the structural "agents"/"tasks"/"documents" segment that sits
+      // between a project id and a child id (…/projects/{id}/agents/{agentId},
+      // …/tasks/{taskId}, …/documents/{documentId} — none of those bare paths
+      // is a distinct page, so crumbing one would draw a dead link mid-chain),
+      // AND the same segment when it's the project's own Agents/Tasks/Documents
+      // view and therefore trailing with nothing after it
+      // (isProjectViewTrailingSegment above, which the effectiveLastIndex
+      // adjustment already accounts for by making the PROJECT crumb current
+      // instead).
       const isStructuralChild =
-        (seg === "agents" || seg === "tasks") && prev !== undefined && segments[i - 2] === "projects";
+        (seg === "agents" || seg === "tasks" || seg === "documents") &&
+        prev !== undefined &&
+        segments[i - 2] === "projects";
       if (isStructuralChild) return;
       // The "settings" segment ahead of a real section is structural too
       // (2026-08-16): the rail's Settings space is the section picker now

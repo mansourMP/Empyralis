@@ -1,0 +1,142 @@
+/**
+ * The documents TREE (DocumentsList.tsx) — GitHub-shaped: inferred folders
+ * from document paths, directories before files.
+ *
+ * A SEPARATE FILE, not an addition to fleet-theme.css, following the same
+ * collision-avoidance convention task-detail.css and document-detail.css
+ * already state in their own headers: several agents work this tree at once
+ * and fleet-theme.css is the file they all reach for. Everything here is a
+ * BRAND-NEW class fleet-theme.css has no rule for at all (`.fleet-doc-tree*`)
+ * — nothing below redefines a selector that file owns, so import order
+ * cannot change the result.
+ *
+ * TOKENS ONLY, so both themes work without a second palette: --border,
+ * --text-primary/-secondary/-muted, --bg-card-hover, --accent-ring,
+ * --radius-control, --dur-1/--ease-out (theme-tokens.css, keyed off
+ * [data-theme] on <html>). No literal colour appears in this file.
+ *
+ * NO ACCENT ANYWHERE. Hover and the open/closed state are a neutral wash and
+ * a rotated chevron — fleet-theme.css's own opening rule ("accent is one
+ * reserved colour, the single primary action and the active nav item, full
+ * stop"). The one accent on a documents page is its "New document" button.
+ *
+ * MOTION: the chevron's rotation only, --dur-1/--ease-out. Transform, on a
+ * state change. The disclosure itself does not animate its height — an
+ * animated height on a nested, arbitrarily deep tree janks on every real
+ * document set and buys nothing (MAN-126: transform/opacity/panel size only).
+ */
+
+.fleet-doc-tree {
+  --doc-tree-indent: 18px;
+  --doc-tree-row-pad-x: 8px;
+  max-width: 1400px;
+}
+
+/* Dense INSIDE a group (rows are 30px and touch), airy BETWEEN groups (each
+   project's section is separated, in the cross-project view below). */
+.fleet-doc-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 30px;
+  padding: 4px var(--doc-tree-row-pad-x);
+  padding-left: calc(var(--doc-tree-row-pad-x) + (var(--doc-tree-depth, 0) * var(--doc-tree-indent)));
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-control);
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+.fleet-doc-tree-row:hover {
+  background: var(--bg-card-hover);
+}
+.fleet-doc-tree-row:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: -2px;
+}
+
+.fleet-doc-tree-chevron {
+  flex: none;
+  color: var(--text-muted);
+  transition: transform var(--dur-1) var(--ease-out);
+}
+.fleet-doc-tree-row[aria-expanded="true"] .fleet-doc-tree-chevron {
+  transform: rotate(90deg);
+}
+/* A file has no disclosure control, so it reserves the chevron's width to
+   keep every name on one vertical line within its depth. */
+.fleet-doc-tree-spacer {
+  flex: none;
+  width: 14px;
+}
+
+.fleet-doc-tree-icon {
+  flex: none;
+  color: var(--text-muted);
+}
+
+.fleet-doc-tree-name {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fleet-doc-tree-row--folder .fleet-doc-tree-name,
+.fleet-doc-tree-row--project .fleet-doc-tree-name {
+  font-weight: 500;
+}
+
+/* Shown only while a group is CLOSED — see DocumentsList.tsx's own note. It
+   answers "how much is hidden behind this," which is exactly the fact the
+   open state already shows for itself. */
+.fleet-doc-tree-count {
+  flex: none;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+.fleet-doc-tree-meta {
+  flex: none;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+/* The timestamp is secondary information on a row whose job is the name;
+   it steps back until the row is under the cursor. Colour changes are
+   INSTANT here, per fleet-theme.css's motion rule — only the chevron moves. */
+.fleet-doc-tree-row--file:hover .fleet-doc-tree-meta {
+  color: var(--text-secondary);
+}
+
+/* ── Cross-project view (/w/{id}/context) ────────────────────────────────
+   Airy between groups: one project's tree is a unit, and the gap is what
+   says so. No boxes, no cards — a bordered card per project would draw
+   twenty-four rectangles on a workspace with twenty-four projects. */
+.fleet-doc-tree-project + .fleet-doc-tree-project {
+  margin-top: 18px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+.fleet-doc-tree-project-head {
+  margin: 0;
+  font-size: inherit;
+  font-weight: inherit;
+}
+.fleet-doc-tree-row--project {
+  min-height: 34px;
+}
+.fleet-doc-tree-row--project .fleet-doc-tree-icon {
+  color: var(--text-secondary);
+}
+
+@media (max-width: 640px) {
+  .fleet-doc-tree {
+    --doc-tree-indent: 14px;
+    --doc-tree-row-pad-x: 4px;
+  }
+}

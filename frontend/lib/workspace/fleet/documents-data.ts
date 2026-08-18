@@ -66,7 +66,13 @@ export type FleetDocument = {
   id: string;
   project_id: string | null;
   title: string;
-  slug: string;
+  /** The document's PATH inside its project — slashes and all
+   *  ("specs/api/auth.md"). Git's model is the spec: there are no folder
+   *  objects, a folder is an inferred prefix of this string, and a document
+   *  at the root of its project is just "auth.md". Replaced `slug` (a flat,
+   *  folderless identifier) when the documents surface became GitHub-shaped.
+   *  See document-tree.ts for the derivation every reader goes through. */
+  path: string;
   /** Present on a single-document read (GET .../documents/{id}) and on the
    *  create/patch responses. Absent on a list row — see the file header. */
   body?: string;
@@ -92,7 +98,7 @@ function normalizeDocument(raw: any): FleetDocument {
     id: String(raw?.id || ""),
     project_id: raw?.project_id ? String(raw.project_id) : null,
     title: String(raw?.title || ""),
-    slug: String(raw?.slug || ""),
+    path: String(raw?.path || ""),
     ...(typeof raw?.body === "string" ? { body: raw.body as string } : {}),
     ...(typeof raw?.state_sha256 === "string" && raw.state_sha256
       ? { state_sha256: raw.state_sha256 as string }
@@ -228,6 +234,51 @@ export function useFleetDocuments(workspaceId: string, projectId: string | null)
   return { documents, loading, error, refresh };
 }
 
+/** EVERY document in every project this caller may see — the workspace-wide
+ *  read behind /w/{id}/context (the founder's org/repo/path mapping, with a
+ *  project standing in for a repo).
+ *
+ *  Same route, `project_id` simply omitted. The scoping is the BACKEND's
+ *  (routes_fleet.fleet_list_documents filters to the caller's visible
+ *  projects), never a client-side filter over a wider read — the same
+ *  posture useFleetWorkspaceTasks already takes for the tasks route it
+ *  shares this shape with.
+ *
+ *  A separate hook rather than a nullable `projectId` on useFleetDocuments:
+ *  in that one, a null project already means "there is no project here, do
+ *  not fetch". Overloading the same null to mean "fetch EVERYTHING" would
+ *  make a project page that has not resolved its id yet quietly load the
+ *  whole workspace. */
+export function useFleetWorkspaceDocuments(workspaceId: string) {
+  const [documents, setDocuments] = useState<FleetDocument[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    if (!workspaceId) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await documentsRequest(workspaceId, "GET", "");
+      const items = Array.isArray(data?.documents) ? data.documents.map(normalizeDocument) : [];
+      setDocuments(items);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load this workspace's documents.");
+    } finally {
+      setLoading(false);
+    }
+  }, [workspaceId]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  return { documents, loading, error, refresh };
+}
+
 /** One document, WITH its body — the read a detail page needs, never served
  *  by the list route (see the file header). */
 export async function fetchFleetDocument(workspaceId: string, documentId: string): Promise<FleetDocument> {
@@ -284,11 +335,23 @@ export function duplicateDocumentTitle(title: string): string {
  *  straight onto the browser's `<a download>` attribute. Strips the
  *  characters invalid on Windows/macOS/Linux path segments (a title is free
  *  text and commonly contains `/` or `:`), collapses whitespace, and falls
- *  back to the document's slug and then a fixed name so an untitled
- *  document still downloads something sane instead of a bare ".md". */
-export function documentExportFilename(title: string, slug: string): string {
-  const base = (title || "").trim() || (slug || "").trim() || "document";
-  const safe = base.replace(/[\\/:*?"<>|]+/g, "-").replace(/\s+/g, " ").trim();
+ *  back to the document's own filename and then a fixed name so an untitled
+ *  document still downloads something sane instead of a bare ".md".
+ *
+ *  The fallback is the LAST SEGMENT of the document's path, never the whole
+ *  path: a download is one file, so "specs/api/auth.md" must land as
+ *  "auth.md" rather than as the sanitizer's "specs-api-auth.md". A trailing
+ *  ".md" on whatever base wins is stripped before the extension goes back
+ *  on, so a path-derived name can never come out as "auth.md.md". */
+export function documentExportFilename(title: string, path: string): string {
+  const leaf = (path || "").split("/").map((s) => s.trim()).filter(Boolean).pop() || "";
+  const base = (title || "").trim() || leaf || "document";
+  const safe = base
+    .replace(/[\\/:*?"<>|]+/g, "-")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\.md$/i, "")
+    .trim();
   return `${safe || "document"}.md`;
 }
 

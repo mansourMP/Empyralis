@@ -880,18 +880,40 @@ CREATE TABLE IF NOT EXISTS project_documents (
     workspace_id TEXT NOT NULL,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     title TEXT NOT NULL,
-    slug TEXT NOT NULL,
+    path TEXT NOT NULL,
     body TEXT NOT NULL DEFAULT '',
     created_by TEXT NULL,
     updated_by TEXT NULL,
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (project_id, slug)
+    UNIQUE (project_id, path)
 );
 
 CREATE INDEX IF NOT EXISTS idx_project_documents_project
     ON project_documents(tenant_id, workspace_id, project_id, title);
+
+-- Documents are GitHub-shaped: `path` (with slashes) replaced `slug`. A
+-- database created before migrations/add_document_paths.sql still has the
+-- old column, and CREATE TABLE IF NOT EXISTS above is a no-op on it -- so
+-- the rename has to happen here too or an existing box would boot with a
+-- schema the repository no longer speaks. Guarded both ways so re-running
+-- it (every boot) is a no-op. See that migration for why this is a rename
+-- rather than a second column, and why there are no folder rows.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'project_documents' AND column_name = 'slug'
+    ) AND NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'project_documents' AND column_name = 'path'
+    ) THEN
+        ALTER TABLE project_documents RENAME COLUMN slug TO path;
+        UPDATE project_documents SET path = path || '.md'
+         WHERE path NOT LIKE '%.%' AND path NOT LIKE '%/%';
+    END IF;
+END $$;
 
 -- Project document revisions (feat/document-mcp-tools-and-revisions): the
 -- durable-history table project_documents' own comment above predicted --

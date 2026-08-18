@@ -8,7 +8,9 @@
  * before filing it, only a title and a body, and the body is what the plain
  * markdown textarea on the document's own page is for (CLAUDE.md: create/
  * edit both land there, not duplicated into this dialog too). Created
- * empty; the reader opens it and clicks Edit to start writing.
+ * empty; the document opens on its own page and a click anywhere in the
+ * body starts writing — there is no Edit button anywhere in this product,
+ * and this comment used to say there was.
  *
  * Reuses .fleet-composer-backdrop / .fleet-composer / .fleet-composer-head /
  * .fleet-composer-close / .fleet-composer-paper / .fleet-composer-title

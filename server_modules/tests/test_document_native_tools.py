@@ -123,7 +123,7 @@ def _document_row(**overrides) -> dict:
         "workspace_id": "ws-1",
         "project_id": "proj-1",
         "title": "Runbook",
-        "slug": "runbook",
+        "path": "runbook.md",
         "body": "# Runbook\n\nStep one.\nStep two.\n",
         "created_by": "agent-1",
         "updated_by": "agent-1",
@@ -223,11 +223,16 @@ class DocumentListReadNativeToolTests(unittest.TestCase):
         result = _call("document__list", {}, pool=pool)
         self.assertTrue(result["ok"])
         self.assertEqual(len(result["documents"]), 1)
-        self.assertEqual(result["documents"][0]["slug"], "runbook")
+        self.assertEqual(result["documents"][0]["path"], "runbook.md")
         # No body in the list summary.
         self.assertNotIn("body", result["documents"][0])
         _query, args = pool.fetch_calls[0]
-        self.assertIn("proj-1", args)
+        self.assertIn(
+            ["proj-1"], args,
+            "the read scope reaching SQL must be EXACTLY this agent's own project -- "
+            "pinned as the whole list, not merely 'contains proj-1', so a widened "
+            "scope fails here instead of passing on a substring",
+        )
 
     def test_agent_with_no_project_gets_clear_error_on_list(self):
         pool = _QueuedFakePool(fetchrow_results=[None])
@@ -235,21 +240,21 @@ class DocumentListReadNativeToolTests(unittest.TestCase):
             _call("document__list", {}, pool=pool)
         self.assertIn("no project", str(ctx.exception))
 
-    def test_read_by_slug_succeeds(self):
+    def test_read_by_path_succeeds(self):
         pool = _QueuedFakePool(
             fetchrow_results=[{"project_id": "proj-1"}, _document_row()],
         )
-        result = _call("document__read", {"slug": "runbook"}, pool=pool)
+        result = _call("document__read", {"path": "runbook.md"}, pool=pool)
         self.assertTrue(result["ok"])
         self.assertEqual(result["document"]["body"], _document_row()["body"])
 
-    def test_read_missing_slug_in_own_project_gets_clear_error(self):
+    def test_read_missing_path_in_own_project_gets_clear_error(self):
         pool = _QueuedFakePool(
             fetchrow_results=[{"project_id": "proj-1"}, None],
         )
         with self.assertRaises(RuntimeError) as ctx:
-            _call("document__read", {"slug": "no-such-doc"}, pool=pool)
-        self.assertIn("No document with slug", str(ctx.exception))
+            _call("document__read", {"path": "no-such-doc.md"}, pool=pool)
+        self.assertIn("No document at path", str(ctx.exception))
 
     def test_read_by_id_cross_project_is_rejected(self):
         pool = _QueuedFakePool(
@@ -257,9 +262,18 @@ class DocumentListReadNativeToolTests(unittest.TestCase):
         )
         with self.assertRaises(RuntimeError) as ctx:
             _call("document__read", {"id": "doc-1"}, pool=pool)
-        self.assertIn("different project", str(ctx.exception))
+        # Wording changed when reads became scope-based (a turn can have
+        # several projects in reach, so "a different project" stopped being
+        # accurate). The PROPERTY under test is unchanged and is asserted
+        # more tightly than before: the denial must not leak the other
+        # project's identity.
+        self.assertIn("not in reach", str(ctx.exception))
+        self.assertNotIn(
+            "proj-OTHER", str(ctx.exception),
+            "a denial must not disclose which project the document actually belongs to",
+        )
 
-    def test_read_requires_slug_or_id(self):
+    def test_read_requires_path_or_id(self):
         pool = _QueuedFakePool(fetchrow_results=[{"project_id": "proj-1"}])
         with self.assertRaises(RuntimeError):
             _call("document__read", {}, pool=pool)
@@ -277,7 +291,7 @@ class EditUniqueMatchTests(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             _call(
                 "document__edit",
-                {"slug": "runbook", "old_string": "Step three.", "new_string": "Step four."},
+                {"path": "runbook.md", "old_string": "Step three.", "new_string": "Step four."},
                 pool=pool,
             )
         self.assertIn("not found", str(ctx.exception))
@@ -295,7 +309,7 @@ class EditUniqueMatchTests(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             _call(
                 "document__edit",
-                {"slug": "runbook", "old_string": "Step one.", "new_string": "Step ONE."},
+                {"path": "runbook.md", "old_string": "Step one.", "new_string": "Step ONE."},
                 pool=pool,
             )
         self.assertIn("appears 2 times", str(ctx.exception))
@@ -312,7 +326,7 @@ class EditUniqueMatchTests(unittest.TestCase):
         )
         result = _call(
             "document__edit",
-            {"slug": "runbook", "old_string": "Step two.", "new_string": "Step TWO, revised."},
+            {"path": "runbook.md", "old_string": "Step two.", "new_string": "Step TWO, revised."},
             pool=pool,
         )
         self.assertTrue(result["ok"])
@@ -331,7 +345,7 @@ class EditUniqueMatchTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             _call(
                 "document__edit",
-                {"slug": "runbook", "old_string": "Step one.", "new_string": "Step one."},
+                {"path": "runbook.md", "old_string": "Step one.", "new_string": "Step one."},
                 pool=pool,
             )
 
@@ -340,25 +354,25 @@ class EditUniqueMatchTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             _call(
                 "document__edit",
-                {"slug": "runbook", "old_string": "", "new_string": "anything"},
+                {"path": "runbook.md", "old_string": "", "new_string": "anything"},
                 pool=pool,
             )
 
-    def test_edit_on_a_slug_outside_callers_project_is_not_found(self):
-        # get_document_by_slug is itself WHERE project_id = <caller's own> --
-        # a different project's slug simply never resolves, so the caller
+    def test_edit_on_a_path_outside_callers_project_is_not_found(self):
+        # get_document_by_path is itself WHERE project_id = <caller's own> --
+        # a different project's path simply never resolves, so the caller
         # never learns whether it exists (see connector_id == "document"
         # dispatch's own comment: "so a denial reads as 'not visible to this
-        # agent' instead of leaking whether some other project's slug/id
+        # agent' instead of leaking whether some other project's path/id
         # happens to exist").
         pool = _QueuedFakePool(fetchrow_results=[{"project_id": "proj-1"}, None])
         with self.assertRaises(RuntimeError) as ctx:
             _call(
                 "document__edit",
-                {"slug": "someone-elses-doc", "old_string": "x", "new_string": "y"},
+                {"path": "someone-elses-doc.md", "old_string": "x", "new_string": "y"},
                 pool=pool,
             )
-        self.assertIn("No document with slug", str(ctx.exception))
+        self.assertIn("No document at path", str(ctx.exception))
 
 
 class WriteCreateOnlyTests(unittest.TestCase):
@@ -366,25 +380,25 @@ class WriteCreateOnlyTests(unittest.TestCase):
         pool = _QueuedFakePool(
             fetchrow_results=[
                 {"project_id": "proj-1"},  # agent_project_id
-                None,                       # get_document_by_slug: no collision
-                _document_row(title="New Doc", slug="new-doc", body="Hello."),  # INSERT ... RETURNING
+                None,                       # get_document_by_path: no collision
+                _document_row(title="New Doc", path="new-doc.md", body="Hello."),  # INSERT ... RETURNING
             ],
-            fetch_results=[[]],  # _unique_slug's own existing-slugs SELECT
+            fetch_results=[[]],  # _unique_path's own existing-paths SELECT
         )
         result = _call("document__write", {"title": "New Doc", "body": "Hello."}, pool=pool)
         self.assertTrue(result["ok"])
-        self.assertEqual(result["document"]["slug"], "new-doc")
+        self.assertEqual(result["document"]["path"], "new-doc.md")
         # created_by/updated_by stamped with the acting agent's identity --
         # create_document's INSERT reuses the same $8 placeholder for both.
         _query, args = pool.fetchrow_calls[-1]
         self.assertIn("INSERT INTO project_documents", _query)
         self.assertEqual(args[-1], "agent-1")
 
-    def test_write_rejects_a_colliding_slug_without_mutating_anything(self):
+    def test_write_rejects_a_colliding_path_without_mutating_anything(self):
         pool = _QueuedFakePool(
             fetchrow_results=[
                 {"project_id": "proj-1"},
-                _document_row(title="Runbook", slug="runbook"),  # collision found
+                _document_row(title="Runbook", path="runbook.md"),  # collision found
             ],
         )
         with self.assertRaises(RuntimeError) as ctx:
@@ -392,7 +406,7 @@ class WriteCreateOnlyTests(unittest.TestCase):
         self.assertIn("already exists", str(ctx.exception))
         self.assertIn("document__edit", str(ctx.exception))
         # Only the collision-check fetchrow ran -- no INSERT attempted, and
-        # _unique_slug's own fetch never fired either.
+        # _unique_path's own fetch never fired either.
         self.assertEqual(len(pool.fetchrow_calls), 2)
         self.assertEqual(len(pool.fetch_calls), 0)
 
@@ -511,7 +525,7 @@ class DocumentToolTier1VisibilityTests(unittest.TestCase):
         edit_tool = names_and_tools["document__edit"]
         self.assertEqual(edit_tool.get("connector_id"), "document")
         required = (edit_tool.get("parameters") or {}).get("required") or []
-        self.assertEqual(set(required), {"slug", "old_string", "new_string"})
+        self.assertEqual(set(required), {"path", "old_string", "new_string"})
         # The failure modes must be stated in the description an agent
         # actually reads, not just enforced silently at dispatch time.
         description = edit_tool.get("description") or ""

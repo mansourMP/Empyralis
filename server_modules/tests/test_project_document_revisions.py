@@ -124,7 +124,7 @@ def _document_row(**overrides) -> dict:
         "workspace_id": "ws-1",
         "project_id": "proj-1",
         "title": "Runbook",
-        "slug": "runbook",
+        "path": "runbook",
         "body": "line one\nline two\n",
         "created_by": "user-1",
         "updated_by": "user-1",
@@ -188,14 +188,14 @@ class CreateDocumentRevisionTests(unittest.TestCase):
         independent, not one atomic thing a caller could half-see."""
         pool = _QueuedFakePool(
             fetch_results=[[]],
-            fetchrow_results=[_document_row(title="Runbook", slug="runbook", body="hi")],
+            fetchrow_results=[_document_row(title="Runbook", path="runbook", body="hi")],
         )
         with _patched_pool(pool):
             document = _run(documents.create_document(
                 tenant_id="tenant-1", workspace_id="ws-1", project_id="proj-1", title="Runbook", body="hi",
             ))
         self.assertEqual(document["id"], "doc-1")
-        self.assertEqual(document["slug"], "runbook")
+        self.assertEqual(document["path"], "runbook")
         self.assertEqual(document["body"], "hi")
 
 
