@@ -137,6 +137,32 @@ async def app_lifespan(_: Any):
             _logging.getLogger(__name__).warning(
                 "Agent Computer metering loop startup failed: %s", _agent_computer_metering_startup_exc
             )
+        # MAN-353 (detection half): periodic READ-ONLY sweep that names any
+        # Agent Computer still running (and still billing) after every
+        # Gateway registration bound to it was revoked. Same startup/shutdown
+        # guarding convention as the metering block immediately above. See
+        # server_modules/agent_computer_orphan_service.py: it reports, it
+        # never destroys -- reaping is a separate, founder-approved change.
+        try:
+            from server_modules import agent_computer_orphan_service
+
+            _agent_computer_orphan_task = asyncio.create_task(
+                agent_computer_orphan_service.agent_computer_orphan_loop()
+            )
+
+            async def _cancel_agent_computer_orphan_task() -> None:
+                _agent_computer_orphan_task.cancel()
+                try:
+                    await _agent_computer_orphan_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+            stack.push_async_callback(_cancel_agent_computer_orphan_task)
+        except Exception as _agent_computer_orphan_startup_exc:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "Agent Computer orphan sweep loop startup failed: %s", _agent_computer_orphan_startup_exc
+            )
         # Start Telegram background polling for local dev
         try:
             from server_modules import sage_telegram_hosted_service as _hosted
