@@ -144,6 +144,37 @@ async def _visible_project_ids(
     return set(ids)
 
 
+def _is_workspace_scoped_agent(agent: Dict[str, Any]) -> bool:
+    """Is this the workspace-level system agent (Sage / the Operator)?
+
+    MAN-201. The founder's decision (2026-08-01) is that Ask AI is a PERSONAL
+    surface every workspace member gets, with each person's conversations
+    their own — not owner-only and not shared. It was unreachable for a
+    member, and the cause was NOT an `audience` gate (no such filter exists
+    anywhere in the codebase; `audience` is emitted as an informational
+    field and read by nothing). It was collateral damage from the MAN-115
+    per-project ACL filter: this install is workspace-scoped by design, so
+    it carries no project_id, and `"" in visible_ids` is False for every
+    non-owner — the filter has no concept for an agent that belongs to the
+    workspace rather than to a project.
+
+    This is the SAME exemption `_enforce_agent_project_access` (right below)
+    has always applied on the per-agent routes — `if not project_id: return`
+    — so the list endpoint and the detail endpoints agreed on everything
+    except this one agent, and only the list dropped it.
+
+    Deliberately keyed on `agent_kind == "master"`, the producer's own
+    authoritative field, and NOT on an empty project_id: a plain specialist
+    that somehow ends up project-less must stay hidden from people who were
+    never added to its project, so "has no project" alone must never be
+    what grants visibility. The frontend already excludes this agent from
+    every fleet count and list (fleet-presentation.ts's isSageAgent, and
+    agent-count-shape.ts's contract that Sage never counts), so letting it
+    through here re-enables the Ask AI console without adding a card.
+    """
+    return str(agent.get("agent_kind") or "").strip().lower() == "master"
+
+
 async def _enforce_agent_project_access(
     current_user: Dict[str, Any],
     resolved_workspace_id: str,
@@ -344,7 +375,10 @@ async def fleet_agents(
                 ]
             elif visible_ids is not None:
                 result["agents"] = [
-                    a for a in result["agents"] if str(a.get("project_id") or "").strip() in visible_ids
+                    a
+                    for a in result["agents"]
+                    if str(a.get("project_id") or "").strip() in visible_ids
+                    or _is_workspace_scoped_agent(a)
                 ]
         return result
     except Exception as exc:

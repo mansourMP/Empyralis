@@ -944,6 +944,12 @@ async def fleet_list_agents(
             "purpose_preset": resolve_purpose_preset(inst_dict),
             "audience": resolve_agent_audience(inst_dict),
             "project_id": str(inst_dict.get("project_id") or "").strip(),
+            # MAN-201: "master" is the workspace-level system agent (Sage /
+            # the Operator) — workspace-scoped by design, so it has no
+            # project_id and the per-project ACL filter in routes_fleet has
+            # to know to let it through rather than treating "" as "a
+            # project you are not a member of".
+            "agent_kind": str(inst_dict.get("agent_kind") or "").strip() or "specialist",
             "status": str(inst_dict.get("status") or "active").strip(),
             "enabled": bool(inst_dict.get("enabled", True)),
             "subagents_enabled": resolve_subagents_enabled(inst_dict),

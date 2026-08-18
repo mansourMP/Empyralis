@@ -5,11 +5,13 @@ import { FormEvent, useEffect, useState } from 'react';
 import { ArrowRight, Lock, Mail, User } from 'lucide-react';
 
 import {
+  AuthNetworkError,
   awaitBrowserAuthReady,
   clearExternalAuthPending,
   getPendingExternalAuthProvider,
   googleLogin,
   listAuthProviders,
+  login,
   signup,
   type AuthProviderOptions,
   watchExternalAuthCompletion,
@@ -104,6 +106,10 @@ export default function SignupPage() {
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // MAN-343: "the account was not created" and "the account MAY have been
+  // created, but the response was lost" are different facts. This flag is
+  // what keeps them from sharing one message — see handleSubmit.
+  const [ambiguous, setAmbiguous] = useState(false);
   const [isHydrated, setIsHydrated] = useState(false);
   const [providers, setProviders] = useState<AuthProviderOptions>({
     email: { enabled: true },
@@ -235,6 +241,51 @@ export default function SignupPage() {
         inviteCode || undefined,
       );
     } catch (nextError) {
+      // MAN-343, second half. A rejection here is TWO different facts and
+      // they must not share one message:
+      //
+      //   a real HTTP answer (409 already registered, 422 weak password)
+      //     -> the server says nothing was created. A flat failure is
+      //        correct and is what still renders.
+      //   AuthNetworkError (no response at all — abort at 30s, dropped
+      //   connection)
+      //     -> the outcome is UNKNOWN. The request may have reached the
+      //        server, created the account, provisioned the workspace and
+      //        sent the verification mail, with only the RESPONSE lost.
+      //        Saying "Couldn't create the account" here is reporting
+      //        failure on success, which either makes someone retry into a
+      //        confusing duplicate-email error or walk away from an account
+      //        that already exists.
+      //
+      // So before ever reporting failure, re-check the real state — the
+      // same "verify what actually happened, then speak" shape
+      // frontend/app/join/[token]/page.tsx already uses for invite accept.
+      // The check that answers it here is one login attempt with the
+      // credentials just typed: if the account got created, it succeeds and
+      // also leaves this browser genuinely signed in, so the normal
+      // /verify-email path is reachable exactly as if signup had returned
+      // cleanly. (A lost response means Set-Cookie was lost with it, so
+      // checking the session alone would report "no account" even when one
+      // exists — which is why this re-checks by logging in rather than by
+      // calling me().)
+      if (nextError instanceof AuthNetworkError) {
+        const recovered = await login(email, password).then(() => true).catch(() => false);
+        if (recovered) {
+          setAmbiguous(false);
+          setError(null);
+          window.location.replace(nextTarget === '/' ? '/verify-email' : `/verify-email?next=${encodeURIComponent(nextTarget)}`);
+          setSubmitting(false);
+          return;
+        }
+        // Still genuinely unknown: the login attempt did not confirm an
+        // account. Never claim it failed — say what is actually true and
+        // make retrying safe to reason about.
+        setAmbiguous(true);
+        setError(nextError.message);
+        setSubmitting(false);
+        return;
+      }
+      setAmbiguous(false);
       setError(nextError instanceof Error ? nextError.message : 'Signup failed.');
       setSubmitting(false);
       return;
@@ -406,7 +457,24 @@ export default function SignupPage() {
               <span className="app-auth-provider-note">Empyralis is invite-only right now.</span>
             </label>
           ) : null}
-          {error ? <AuthErrorNotice title="Couldn’t create the account" message={error} /> : null}
+          {error ? (
+            ambiguous ? (
+              // MAN-343: NOT "couldn't create the account" — we genuinely do
+              // not know, and the honest sentence is also the useful one. A
+              // hard failure claim here is what makes someone either retry
+              // into a duplicate-email error or abandon an account that
+              // already exists.
+              <div role="alert" className="app-auth-error">
+                <strong>We couldn’t confirm your account</strong>
+                <span>
+                  The request didn’t complete, so we can’t tell whether the account was created.
+                  It’s safe to try again — if it already went through, logging in will pick it up.
+                </span>
+              </div>
+            ) : (
+              <AuthErrorNotice title="Couldn’t create the account" message={error} />
+            )
+          ) : null}
           <AppButton type="submit" disabled={submitting} className="app-auth-submit">
             <span>{submitting ? 'Creating account…' : 'Create account'}</span>
             <ArrowRight size={16} aria-hidden="true" />
