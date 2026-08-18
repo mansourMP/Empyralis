@@ -1182,5 +1182,174 @@ class MCPDeadToolShapeDriftTests(unittest.TestCase):
             )
 
 
+# ── (i) MAN-207 Tier 1: assign_task + list_tasks ──────────────────────
+
+
+class MCPAssignTaskToolTests(unittest.IsolatedAsyncioTestCase):
+    """``create_task`` fires NO wakeup and NO notification (verified in
+    project_tasks_service: neither bounded_scheduler_service nor
+    task_notification_service is called from it). Assignment is the only
+    step that reaches anyone, and it had no MCP tool at all."""
+
+    async def test_agent_assignment_takes_the_agent_path_and_reports_the_wakeup(self):
+        p1, p2, p3 = _patched_dead_tool()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.project_tasks_service.assign_task",
+                new=AsyncMock(return_value={"task": {"id": "t-1"}, "wake_request": {"id": "wr-1"}}),
+            ) as agent_mock, \
+            patch(
+                "server_modules.project_tasks_service.assign_task_to_user", new=AsyncMock(),
+            ) as user_mock:
+            result = await mcp_server.empyralis_assign_task(
+                task_id="t-1", agent_id="ainstall_nova", ctx=_FakeDeadToolCtx(),
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["assignee_kind"], "agent")
+        self.assertEqual(result["wake_request"], {"id": "wr-1"})
+        agent_mock.assert_awaited_once()
+        # The twin must not also run -- the two have different side effects.
+        user_mock.assert_not_awaited()
+        kwargs = agent_mock.await_args.kwargs
+        self.assertEqual(kwargs["tenant_id"], "tenant-dead-A")
+        self.assertEqual(kwargs["workspace_id"], "ws-dead-A")
+        self.assertEqual(kwargs["agent_id"], "ainstall_nova")
+
+    async def test_user_assignment_takes_the_user_path(self):
+        p1, p2, p3 = _patched_dead_tool()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.project_tasks_service.assign_task", new=AsyncMock(),
+            ) as agent_mock, \
+            patch(
+                "server_modules.project_tasks_service.assign_task_to_user",
+                new=AsyncMock(return_value={"task": {"id": "t-1"}, "wake_request": None}),
+            ) as user_mock:
+            result = await mcp_server.empyralis_assign_task(
+                task_id="t-1", user_id="user-9", ctx=_FakeDeadToolCtx(),
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["assignee_kind"], "user")
+        user_mock.assert_awaited_once()
+        agent_mock.assert_not_awaited()
+
+    async def test_both_or_neither_is_refused_without_assigning_anything(self):
+        """An assignment sent to the wrong kind of teammate is worse than one
+        that did not happen, so neither case is guessed at. Asserting the
+        call COUNT: "returned ok: false" alone would not notice a tool that
+        refused AFTER already writing."""
+        for kwargs in ({"agent_id": "a-1", "user_id": "u-1"}, {}):
+            with self.subTest(kwargs=kwargs):
+                p1, p2, p3 = _patched_dead_tool()
+                with p1, p2, p3, \
+                    patch(
+                        "server_modules.project_tasks_service.assign_task", new=AsyncMock(),
+                    ) as agent_mock, \
+                    patch(
+                        "server_modules.project_tasks_service.assign_task_to_user", new=AsyncMock(),
+                    ) as user_mock:
+                    result = await mcp_server.empyralis_assign_task(
+                        task_id="t-1", ctx=_FakeDeadToolCtx(), **kwargs
+                    )
+                self.assertFalse(result["ok"])
+                agent_mock.assert_not_awaited()
+                user_mock.assert_not_awaited()
+
+    async def test_a_committed_assignment_with_a_failed_wakeup_says_both(self):
+        """"assigned" and "assigned and someone is on it" are different
+        facts. The assignment commits independently of the wakeup (quiet
+        hours, a rate cap), so reporting only the first is the collapse
+        CLAUDE.md's outcome-honesty rule exists for."""
+        p1, p2, p3 = _patched_dead_tool()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.project_tasks_service.assign_task",
+                new=AsyncMock(return_value={
+                    "task": {"id": "t-1"}, "wake_request": None, "wake_error": "quiet hours",
+                }),
+            ):
+            result = await mcp_server.empyralis_assign_task(
+                task_id="t-1", agent_id="ainstall_nova", ctx=_FakeDeadToolCtx(),
+            )
+
+        self.assertTrue(result["ok"])              # the assignment DID commit
+        self.assertEqual(result["wake_error"], "quiet hours")
+        self.assertIn("nothing was woken", result["note"])
+
+
+class MCPListTasksToolTests(unittest.IsolatedAsyncioTestCase):
+
+    async def test_list_tasks_returns_the_whole_board_not_just_the_callers_slice(self):
+        rows = [{"id": "t-1"}, {"id": "t-2"}]
+        p1, p2, p3 = _patched_dead_tool()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.project_tasks_service.list_tasks", new=AsyncMock(return_value=rows),
+            ) as list_mock:
+            result = await mcp_server.empyralis_list_tasks(sort="priority", ctx=_FakeDeadToolCtx())
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["tasks"], rows)
+        kwargs = list_mock.await_args.kwargs
+        self.assertEqual(kwargs["workspace_id"], "ws-dead-A")
+        self.assertEqual(kwargs["sort"], "priority")
+        # No assignee filter: that is what makes this the BOARD rather than
+        # a second copy of list_my_tasks.
+        self.assertIsNone(kwargs.get("assignee_agent_id"))
+
+    async def test_a_project_outside_the_workspace_is_refused_not_reported_as_empty(self):
+        """"not your project" and "no tasks" are different answers."""
+        p1, p2, p3 = _patched_dead_tool()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.projects_repository.get_project", new=AsyncMock(return_value=None),
+            ), \
+            patch(
+                "server_modules.project_tasks_service.list_tasks", new=AsyncMock(),
+            ) as list_mock:
+            result = await mcp_server.empyralis_list_tasks(
+                project_id="proj-not-mine", ctx=_FakeDeadToolCtx(),
+            )
+        self.assertFalse(result["ok"])
+        self.assertIn("not found in your workspace", result["error"])
+        list_mock.assert_not_awaited()
+
+
+class MCPToolRegistryDriftTests(unittest.IsolatedAsyncioTestCase):
+    """``EMPYRALIST_MCP_TOOLS`` is a hand-kept list sitting beside the
+    decorators that do the actual registering -- the same "a list copied
+    into a second place" shape this codebase has been bitten by before.
+
+    The expected set and the actual set come from DIFFERENT sources: the
+    literal list, versus what the live FastMCP server would answer
+    ``tools/list`` with. A list agreeing with itself proves nothing.
+    """
+
+    async def test_the_advertised_list_matches_what_the_server_actually_registers(self):
+        if mcp_server.empyralist_mcp is None:
+            self.skipTest("mcp SDK not installed")
+        registered = {t.name for t in await mcp_server.empyralist_mcp.list_tools()}
+        declared = set(mcp_server.EMPYRALIST_MCP_TOOLS)
+        self.assertEqual(
+            declared, registered,
+            "EMPYRALIST_MCP_TOOLS has drifted from the real registrations: "
+            f"declared-only={sorted(declared - registered)} "
+            f"registered-only={sorted(registered - declared)}",
+        )
+
+    async def test_every_advertised_tool_is_actually_callable(self):
+        """An advertised name that resolves to nothing is the same class of
+        defect as MAN-205's four: discoverable, then useless."""
+        if mcp_server.empyralist_mcp is None:
+            self.skipTest("mcp SDK not installed")
+        missing = [
+            name for name in mcp_server.EMPYRALIST_MCP_TOOLS
+            if not callable(getattr(mcp_server, name, None))
+        ]
+        self.assertEqual(missing, [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -37,6 +37,14 @@ Read + chat (always live):
 Tasks (always live — see "Write-gate decision" below):
   - ``empyralis_list_my_tasks`` → project_tasks_service.list_my_tasks (assigned to
     this key's external_agent_id, OR unassigned/backlog)
+  - ``empyralis_list_tasks`` → project_tasks_service.list_tasks (the WHOLE
+    board, whoever it is assigned to — list_my_tasks is the narrow slice;
+    an agent that cannot see the board cannot triage it)
+  - ``empyralis_assign_task`` → project_tasks_service.assign_task (agent) /
+    assign_task_to_user (person). THE step that makes filed work happen:
+    ``create_task`` fires no wakeup and no notification, so an unassigned
+    task reaches nobody. Exactly one of agent_id/user_id; agent -> a
+    scheduled wakeup, user -> a notification, and the response says which.
   - ``empyralis_get_task`` → project_tasks_service.get_task
   - ``empyralis_update_task_status`` → project_tasks_service.update_task (status only)
   - ``empyralis_set_task_priority`` → project_tasks_service.update_task (priority only;
@@ -177,6 +185,8 @@ EMPYRALIST_MCP_TOOLS = [
     # see the write-gate rationale in the module docstring)
     "empyralis_create_task",
     "empyralis_list_my_tasks",
+    "empyralis_list_tasks",
+    "empyralis_assign_task",
     "empyralis_get_task",
     "empyralis_update_task_status",
     "empyralis_set_task_priority",
@@ -921,6 +931,146 @@ if empyralist_mcp is not None:
                 "anything specifically assigned to you."
             )
         return result
+
+    @empyralist_mcp.tool(
+        title="List Tasks",
+        annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False),
+    )
+    async def empyralis_list_tasks(
+        project_id: str = "", status: str = "", sort: str = "",
+        top_level_only: bool = False, ctx: Context = None,
+    ) -> Dict[str, Any]:
+        """List the whole board for your workspace — every task, whoever it is
+        assigned to. ``empyralis_list_my_tasks`` is the narrow slice (yours,
+        plus unassigned); this is the board an agent needs to actually TRIAGE
+        it: see what is already in flight, what is blocked, and what nobody
+        has picked up, before filing or claiming anything.
+
+        Optionally filter to one project_id (verified against YOUR workspace
+        before anything is read, so "not your project" and "no tasks" stay
+        different answers), one status (backlog|todo|in_progress|
+        awaiting_input|blocked|in_review|done), or top_level_only=True to
+        hide sub-tasks and see just the parent cards.
+
+        sort='priority' returns it triage-ordered — urgent first, untriaged
+        last. Priority is Linear's scale, where a LOWER number is MORE
+        urgent: 1 = urgent, 4 = low, 0 = none.
+        """
+        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        from server_modules import project_tasks_service as tasks
+        if project_id:
+            from server_modules import projects_repository as _p
+            project = await _p.get_project(
+                tenant_id=tenant, workspace_id=ws, project_id=project_id,
+            )
+            if not isinstance(project, dict):
+                await _ledger_mcp_call(r, "empyralis_list_tasks", False, project_id=project_id)
+                return {
+                    "ok": False,
+                    "error": (
+                        f"Project '{project_id}' was not found in your workspace. "
+                        "Call empyralis_list_projects to see the project_id values you can use."
+                    ),
+                    "tasks": [],
+                }
+        try:
+            rows = await tasks.list_tasks(
+                tenant_id=tenant, workspace_id=ws,
+                project_id=project_id or None,
+                status=status or None,
+                sort=sort or None,
+                top_level_only=bool(top_level_only),
+            )
+        except Exception as exc:  # noqa: BLE001
+            await _ledger_mcp_call(r, "empyralis_list_tasks", False, error=str(exc))
+            return {"ok": False, "error": str(exc), "tasks": []}
+        await _ledger_mcp_call(r, "empyralis_list_tasks", True, task_count=len(rows), project_id=project_id)
+        return {"ok": True, "tasks": rows}
+
+    @empyralist_mcp.tool(
+        title="Assign Task",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
+    )
+    async def empyralis_assign_task(
+        task_id: str, agent_id: str = "", user_id: str = "", ctx: Context = None,
+    ) -> Dict[str, Any]:
+        """Assign a task to a platform agent, or to a person in this workspace.
+
+        This is what makes filed work actually HAPPEN. ``empyralis_create_task``
+        fires nothing at all — no wakeup, no notification — so a task created
+        and left unassigned sits on the board with nobody woken for it.
+        Assignment is the step that reaches someone.
+
+        Pass EXACTLY ONE of ``agent_id`` (a platform agent, from
+        empyralis_list_agents) or ``user_id`` (a person in this workspace).
+        Passing both, or neither, is refused rather than guessed at — an
+        assignment sent to the wrong kind of teammate is worse than one that
+        did not happen.
+
+        The two do genuinely different things downstream, and the response
+        says which happened rather than making you assume:
+          agent_id -> schedules a wakeup, so the agent picks the work up
+          user_id  -> creates a notification; people are not woken by schedulers
+
+        The wakeup can fail on its own (quiet hours, a rate cap) while the
+        assignment itself commits — those are two facts, so both come back:
+        ``wake_request`` when one was scheduled, ``wake_error`` when the
+        assignment stuck but nothing was woken. "Assigned" and "assigned and
+        someone is on it" are not the same claim.
+        """
+        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        clean_agent_id = str(agent_id or "").strip()
+        clean_user_id = str(user_id or "").strip()
+        if bool(clean_agent_id) == bool(clean_user_id):
+            detail = (
+                "Pass exactly one of agent_id or user_id."
+                if clean_agent_id
+                else "Pass agent_id (a platform agent) or user_id (a person in this workspace)."
+            )
+            await _ledger_mcp_call(r, "empyralis_assign_task", False, task_id=task_id)
+            return {"ok": False, "error": detail, "task_id": task_id}
+
+        from server_modules import project_tasks_service as tasks
+        assignee_kind = "agent" if clean_agent_id else "user"
+        try:
+            if clean_agent_id:
+                result = await tasks.assign_task(
+                    tenant_id=tenant, workspace_id=ws, task_id=task_id,
+                    agent_id=clean_agent_id, triggered_by="agent",
+                )
+            else:
+                result = await tasks.assign_task_to_user(
+                    tenant_id=tenant, workspace_id=ws, task_id=task_id,
+                    user_id=clean_user_id, triggered_by="agent",
+                )
+        except Exception as exc:  # noqa: BLE001 — unknown task, or an assignee outside this workspace
+            await _ledger_mcp_call(
+                r, "empyralis_assign_task", False, task_id=task_id, assignee_kind=assignee_kind,
+            )
+            return {"ok": False, "error": str(exc), "task_id": task_id}
+
+        result = result if isinstance(result, dict) else {}
+        wake_error = str(result.get("wake_error") or "").strip()
+        await _ledger_mcp_call(
+            r, "empyralis_assign_task", True,
+            task_id=task_id, assignee_kind=assignee_kind, woken=bool(result.get("wake_request")),
+        )
+        payload: Dict[str, Any] = {
+            "ok": True,
+            "task": result.get("task"),
+            "assignee_kind": assignee_kind,
+            "wake_request": result.get("wake_request"),
+        }
+        if wake_error:
+            # The assignment committed; the wakeup did not. Saying only
+            # "assigned" here would be the same collapse CLAUDE.md's
+            # outcome-honesty rule exists for.
+            payload["wake_error"] = wake_error
+            payload["note"] = (
+                "The task is assigned, but nothing was woken for it "
+                f"({wake_error}). It will be picked up on the next wake."
+            )
+        return payload
 
     @empyralist_mcp.tool(
         title="Get Task",
