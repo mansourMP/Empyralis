@@ -241,6 +241,49 @@ def _resolve_public_base_url() -> str:
     return ""
 
 
+def _public_origin_request() -> Any:
+    """A real ``starlette.requests.Request`` whose origin is this deployment's
+    own public base URL.
+
+    Exists because ``connection_oauth_service.start_oauth`` takes a ``Request``
+    and derives the OAuth callback URL from it (``request_origin`` reads
+    ``request.headers`` then falls back to ``request.base_url``). MCP tool
+    calls have no HTTP request with the right origin to hand it — the live one
+    is mounted under ``/mcp`` — so this constructs one from a genuine ASGI
+    scope.
+
+    Genuine is the point (MAN-205): the previous
+    ``SimpleNamespace(base_url=...)`` satisfied exactly the one attribute its
+    author knew about and raised ``AttributeError`` on the first one they did
+    not, which is why the connector tool never worked. A real ``Request``
+    answers every attribute the callee reaches for, today and after it grows
+    another.
+    """
+    from urllib import parse as _urlparse
+
+    from starlette.requests import Request as _StarletteRequest
+
+    base = _resolve_public_base_url() or "http://localhost:8001"
+    parts = _urlparse.urlsplit(base)
+    scheme = parts.scheme or "http"
+    netloc = parts.netloc or "localhost:8001"
+    return _StarletteRequest(
+        {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": scheme,
+            "path": "/",
+            "raw_path": b"/",
+            "root_path": "",
+            "query_string": b"",
+            "headers": [(b"host", netloc.encode("latin-1", "ignore"))],
+            "server": (parts.hostname or "localhost", parts.port or (443 if scheme == "https" else 80)),
+            "client": None,
+        }
+    )
+
+
 # ── API key resolution ──────────────────────────────────────────────────
 
 
@@ -493,6 +536,48 @@ if empyralist_mcp is not None:
         from server_modules import control_plane_repository as cpr
         return await cpr.resolve_tenant_id_for_workspace(ws, default="default")
 
+    def _mcp_current_user(
+        resolved: Dict[str, Any], ws: str, tenant: str,
+    ) -> Dict[str, Any]:
+        """The acting identity for a service that runs ``auth.enforce_workspace_access``
+        on its ``current_user`` rather than trusting a bare ``workspace_id``.
+
+        MAN-205. Two tools used to hand those services an ad-hoc dict carrying
+        an INVENTED key::
+
+            {"user_id": "external_mcp_client", "email": "", "mcp_workspace_id": ws}
+                                                ^^^^^^^^^^^^^^^^^ read NOWHERE in
+                                                auth.py — grep it: the only two
+                                                occurrences in the repo were the
+                                                two dicts that wrote it.
+
+        So ``allowed_workspace_ids()`` saw a user with no workspace grant at
+        all and returned the EMPTY SET, and every call died 403 before it
+        reached any real logic. The check was never wrong — it was handed an
+        identity it could only reject.
+
+        This grants exactly the workspace the API key already resolved to, at
+        owner role, and nothing else. Deliberately NOT ``is_admin`` /
+        ``auth_admin``: either of those makes ``allowed_workspace_ids`` and
+        ``allowed_tenant_ids`` return ``None`` — i.e. every workspace of every
+        tenant — which would quietly turn a single-workspace bearer key into a
+        cross-tenant one. The real check still runs; it can now evaluate.
+        """
+        return {
+            "user_id": str(resolved.get("external_agent_id") or "").strip() or "external_mcp_client",
+            "email": "",
+            "auth_type": "api_key",
+            "role": "owner",
+            "workspace_access": {
+                ws: {
+                    "workspace_id": ws,
+                    "tenant_id": tenant,
+                    "role": "owner",
+                    "tenant_role": "owner",
+                },
+            },
+        }
+
     # ── Read + chat tools (always live) ──────────────────────────────
 
     @empyralist_mcp.tool(
@@ -573,9 +658,9 @@ if empyralist_mcp is not None:
         ``agent_id`` is a deployed-agent id. Returns ``ok: False`` with a clear
         reason when the agent is not a customer-facing deployed agent.
         """
-        r = await _resolve(ctx); ws = _ws(r)
+        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
         from server_modules import deployed_agent_service
-        current_user = {"user_id": "external_mcp_client", "email": "", "mcp_workspace_id": ws}
+        current_user = _mcp_current_user(r, ws, tenant)
         try:
             payload = await deployed_agent_service.list_deployed_agent_conversations(
                 deployed_agent_id=agent_id, current_user=current_user,
@@ -1525,16 +1610,30 @@ if empyralist_mcp is not None:
         provider: str, ctx: Context = None,
     ) -> Dict[str, Any]:
         """Begin connecting an OAuth connector (e.g. 'gmail', 'github', 'slack').
-        Returns an ``authorization_url`` the human opens to grant access. Requires writes_enabled."""
+        Returns an ``authorization_url`` the human opens to grant access. Requires writes_enabled.
+
+        MAN-205: this used to pass ``SimpleNamespace(base_url=...)`` as the
+        ``request``. ``start_oauth`` -> ``callback_url`` -> ``request_origin``
+        reads ``request.headers`` first, so every call raised
+        ``AttributeError`` before an authorization_url could exist — the tool
+        was advertised and had never once succeeded.
+
+        The replacement is a REAL ``starlette.requests.Request`` built from a
+        real ASGI scope, not a wider stand-in: a stand-in only covers the
+        attributes whoever wrote it happened to think of, which is exactly
+        how this broke. The live MCP request is deliberately NOT reused —
+        this app is mounted at ``/mcp``, so its ``base_url`` carries that
+        root path and the derived callback URL would be
+        ``/mcp/api/connections/oauth/...``, i.e. a 404 the customer only
+        discovers after granting access.
+        """
         r = await _resolve(ctx); _check_write(r); ws = _ws(r)
-        from types import SimpleNamespace
         from server_modules import connection_oauth_service
-        base = _resolve_public_base_url()
-        shim_request = SimpleNamespace(base_url=(base + "/") if base else "http://localhost:8001/")
         try:
             started = connection_oauth_service.start_oauth(
                 provider=str(provider or "").strip().lower(),
-                workspace_id=ws, surface="sage", request=shim_request, user_id="external_mcp_client",
+                workspace_id=ws, surface="sage", request=_public_origin_request(),
+                user_id=str(r.get("external_agent_id") or "").strip() or "external_mcp_client",
             )
         except Exception as exc:  # noqa: BLE001 — e.g. provider not OAuth-configured on this server
             await _ledger_mcp_call(r, "empyralis_connect_connector", False, provider=provider)
@@ -1552,21 +1651,44 @@ if empyralist_mcp is not None:
         agent_id: str, message: str, ctx: Context = None,
     ) -> Dict[str, Any]:
         """Send a test message to a deployed agent and get its reply, without a
-        real customer. ``agent_id`` is a deployed-agent id. Requires writes_enabled."""
-        r = await _resolve(ctx); _check_write(r); ws = _ws(r)
-        from types import SimpleNamespace
+        real customer. ``agent_id`` is a deployed-agent id. Requires writes_enabled.
+
+        MAN-205: this tool could never once have run. ``execute_test_turn``
+        takes ``tenant_id`` as a keyword-only argument with NO default, and
+        this call site never passed it -> ``TypeError`` on every invocation,
+        every time, since the tool was registered. The request was also a
+        ``SimpleNamespace(message, channel)`` while the callee reads
+        ``request.runtime_mode`` and ``request.customer_profile`` — so even
+        with the TypeError fixed it would have died on ``AttributeError``
+        two lines later.
+
+        Both are fixed by building the call the way the REAL producer builds
+        it (``routes_deployed_agents.test_turn_deployed_agent``): the actual
+        ``DeployedAgentTestTurnRequest`` pydantic model rather than a
+        hand-rolled stand-in that cannot notice a field it is missing, and
+        ``result.model_dump()`` rather than an ``isinstance(dict)`` branch
+        that would have quietly wrapped a pydantic object under ``"result"``.
+        """
+        r = await _resolve(ctx); _check_write(r); ws = _ws(r); tenant = await _tenant(ws)
         from server_modules import deployed_agent_test_turn_service
-        current_user = {"user_id": "external_mcp_client", "email": "", "mcp_workspace_id": ws}
-        request = SimpleNamespace(message=message, channel="test")
+        from server_modules.schemas import DeployedAgentTestTurnRequest
+        current_user = _mcp_current_user(r, ws, tenant)
+        request = DeployedAgentTestTurnRequest(
+            workspace_id=ws, message=message, channel="test",
+        )
         try:
             result = await deployed_agent_test_turn_service.execute_test_turn(
-                deployed_agent_id=agent_id, workspace_id=ws, request=request, current_user=current_user,
+                deployed_agent_id=agent_id, workspace_id=ws, tenant_id=tenant,
+                request=request, current_user=current_user,
             )
         except Exception as exc:  # noqa: BLE001 — readiness / not-a-deployed-agent surfaces cleanly
             await _ledger_mcp_call(r, "empyralis_trigger_test_turn", False, agent_id=agent_id)
             return {"ok": False, "error": str(exc), "agent_id": agent_id}
+        payload = result.model_dump() if hasattr(result, "model_dump") else (
+            result if isinstance(result, dict) else {"result": result}
+        )
         await _ledger_mcp_call(r, "empyralis_trigger_test_turn", True, agent_id=agent_id)
-        return {"ok": True, "agent_id": agent_id, **(result if isinstance(result, dict) else {"result": result})}
+        return {"ok": True, "agent_id": agent_id, **payload}
 
 
 # ── Mount + lifespan ─────────────────────────────────────────────────────
