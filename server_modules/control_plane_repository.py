@@ -4523,8 +4523,47 @@ async def ensure_control_plane_schema() -> Any:
                 "collision check instead.",
                 exc,
             )
+        # ── Linear-style per-project task identifiers (`GEN-12`).
+        # migrations/add_task_sequence_numbers.sql's own header claims it is
+        # "Mirrored into CONTROL_PLANE_SCHEMA_SQL ... and its
+        # ensure_control_plane_schema() migration section". It was not — this
+        # block is that mirror, added 2026-08-18 once the claim was checked.
+        # DDL only here; the BACKFILL is Python (see below) because these two
+        # tables are FORCE RLS and a plain pool.execute() sets no scope GUCs,
+        # so a DML backfill written here would silently see zero rows —
+        # exactly the way the migration file's own backfill failed on
+        # production. `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` and
+        # `CREATE ... IF NOT EXISTS` are DDL and are not filtered by RLS.
+        await pool.execute(
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS task_key TEXT"
+        )
+        await pool.execute(
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS task_seq INT NOT NULL DEFAULT 0"
+        )
+        await pool.execute(
+            "ALTER TABLE project_tasks ADD COLUMN IF NOT EXISTS number INT"
+        )
+        await pool.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_projects_task_key "
+            "ON projects (tenant_id, workspace_id, task_key)"
+        )
         # ── Phase 1C: auth-store tables (sessions, devices, policies, etc.) ──
         await pool.execute(AUTH_STORE_SCHEMA_SQL)
+        # The backfill runs AFTER the whole schema is in place, and never
+        # blocks boot: a task without a number renders the honest hex-slice
+        # fallback (task-status.tsx's taskDisplayId), which is strictly better
+        # than a control plane that refuses to start.
+        try:
+            from server_modules import projects_repository as _projects_repository
+
+            await _projects_repository.backfill_task_identifiers(pool)
+        except Exception as exc:  # noqa: BLE001 — never let this crash bootstrap
+            LOGGER.error(
+                "TASK IDENTIFIER BACKFILL FAILED (%s). Tasks whose project has no "
+                "task_key, or which carry no number, keep rendering the hex-slice "
+                "fallback until this succeeds on a later boot.",
+                exc,
+            )
         _SCHEMA_READY = True
     return pool
 

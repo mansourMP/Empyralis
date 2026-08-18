@@ -148,6 +148,206 @@ async def _unique_task_key(pool: Any, tenant_id: str, workspace_id: str, slug: s
     return f"{base_key}{n}"
 
 
+# ── Task identifier backfill (migrations/add_task_sequence_numbers.sql) ─────
+# WHY THIS EXISTS IN PYTHON AT ALL, and it is the whole point of this block:
+# that migration's own backfill ran on production and touched ZERO rows,
+# silently. `projects` and `project_tasks` carry FORCE ROW LEVEL SECURITY
+# (migrations/enable_rls.sql) whose policy is
+# empyralis_rls_scope_match(tenant_id, workspace_id) -- and a psql session has
+# none of `app.current_tenant_id` / `app.current_workspace_id` /
+# `app.rls_bypass` set. DEPLOY-RUNBOOK step 3b requires migrations to be
+# applied as the app's own NON-SUPERUSER role (`empyralis_app`), which is
+# exactly the role FORCE binds. So:
+#
+#   ALTER TABLE / CREATE INDEX   DDL -- not subject to RLS  ─▶ APPLIED
+#   SELECT/UPDATE ... projects   DML -- policy is false     ─▶ 0 rows, no error
+#
+# The migration reported success, the columns and uq_projects_task_key
+# appeared, and every task_key stayed NULL with every task_seq at 0. Measured
+# on production 2026-08-18: 9 of 10 projects task_key IS NULL, 34 tasks, 0
+# numbered. A row-count-free backfill is indistinguishable from a backfill
+# with nothing to do, which is why nobody noticed for five days.
+#
+# THE RULE THIS LEAVES BEHIND: a migration that only ADDS COLUMNS is safe to
+# hand to psql; a migration that BACKFILLS a tenant-scoped table is not, and
+# must either set app.rls_bypass itself or run through code that sets the
+# scope. This function is that code, invoked from
+# control_plane_repository.ensure_control_plane_schema() so every database --
+# production, disposable e2e, a fresh developer box -- heals on the next boot
+# rather than on somebody remembering a psql step.
+#
+# ORDERING: created_at ASC, id ASC. The oldest task in a project becomes
+# GEN-1, which is what a person expects from an issue tracker, and the id
+# tiebreak makes it stable -- two runs over the same data cannot produce a
+# different assignment, so a re-run is a genuine no-op rather than a
+# reshuffle. Identities appear in comments, links and agent memory; a
+# RENUMBERING backfill would be worse than no backfill at all.
+#
+# IDEMPOTENCY is by GUARD, not by a "has this run" flag:
+#   task_key   assigned only WHERE task_key IS NULL
+#   number     assigned only WHERE number IS NULL, offset by that project's
+#              own MAX(number), so an already-numbered task keeps its number
+#              and a half-finished run resumes instead of colliding
+#   task_seq   seeded only WHERE task_seq = 0 -- a ONE-TIME seed. It must
+#              never become a general "resync task_seq to MAX(number)": a
+#              deleted task would make that undercount and the next
+#              allocation would reissue a number that already exists.
+#
+# THE ALLOCATOR RACE IS CLOSED BY A ROW LOCK, not by hoping. Numbering a
+# project and seeding its task_seq happen in ONE transaction that begins by
+# taking `SELECT ... FOR UPDATE` on that project's own row -- the same row
+# project_tasks_service.create_task's `UPDATE projects SET task_seq =
+# task_seq + 1 RETURNING task_seq` locks. A task created mid-backfill blocks
+# until the seed commits and then allocates from the seeded value; without
+# the lock it would allocate 1 while the backfill was assigning 1 to the
+# oldest task.
+async def backfill_task_identifiers(pool: Any) -> Dict[str, int]:
+    """Fill in `projects.task_key`, `project_tasks.number` and the
+    `projects.task_seq` seed for rows that predate their allocation code.
+
+    Returns a count dict; every step is a no-op once applied. Safe to call on
+    every boot and safe to call concurrently with task creation.
+    """
+    stats = {"projects_keyed": 0, "tasks_numbered": 0, "projects_seeded": 0}
+    if pool is None:
+        return stats
+
+    # 1. Which projects still need a key. Cross-tenant, so this ONE read
+    #    genuinely needs the bypass; every WRITE below is scoped to the single
+    #    (tenant, workspace) the row itself names.
+    unkeyed = await control_plane_repository.rls_fetch(
+        pool,
+        """
+        SELECT id, tenant_id, workspace_id, slug
+        FROM projects
+        WHERE task_key IS NULL
+        ORDER BY tenant_id, workspace_id, created_at ASC, id ASC
+        """,
+        bypass_rls=True,
+    )
+    for proj in unkeyed or []:
+        tenant_id = str(proj["tenant_id"] or "")
+        workspace_id = str(proj["workspace_id"] or "")
+        # REUSE, never a second derivation: _unique_task_key is the same
+        # function create_project calls, so a project keyed by this backfill
+        # and a project keyed at creation are shaped identically and dedupe
+        # against each other. It reads the live table under the row's own
+        # scope, so a key assigned earlier in this very loop is visible to the
+        # next iteration.
+        key = await _unique_task_key(pool, tenant_id, workspace_id, str(proj["slug"] or ""))
+        # `AND task_key IS NULL` makes the write itself idempotent, so two
+        # processes booting at once cannot overwrite each other's key.
+        written = await control_plane_repository.rls_execute(
+            pool,
+            "UPDATE projects SET task_key = $1 WHERE id = $2 AND task_key IS NULL",
+            key,
+            str(proj["id"] or ""),
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
+        if str(written or "").strip().endswith(" 1"):
+            stats["projects_keyed"] += 1
+
+    # 2/3. Number the tasks and seed task_seq, one project at a time, each in
+    #      its own locked transaction (see the row-lock note above).
+    projects_with_unnumbered = await control_plane_repository.rls_fetch(
+        pool,
+        """
+        SELECT DISTINCT p.id, p.tenant_id, p.workspace_id
+        FROM projects p
+        JOIN project_tasks t ON t.project_id = p.id
+        WHERE t.number IS NULL
+        ORDER BY 1
+        """,
+        bypass_rls=True,
+    )
+    for proj in projects_with_unnumbered or []:
+        project_id = str(proj["id"] or "")
+        tenant_id = str(proj["tenant_id"] or "")
+        workspace_id = str(proj["workspace_id"] or "")
+        async with pool.acquire() as connection:
+            async with connection.transaction():
+                await control_plane_repository.apply_connection_scope(
+                    connection, tenant_id=tenant_id, workspace_id=workspace_id
+                )
+                locked = await connection.fetchrow(
+                    "SELECT task_seq FROM projects WHERE id = $1 FOR UPDATE",
+                    project_id,
+                )
+                if locked is None:
+                    continue
+                numbered = await connection.fetch(
+                    """
+                    WITH base AS (
+                        SELECT COALESCE(MAX(number), 0) AS mx
+                        FROM project_tasks WHERE project_id = $1
+                    ),
+                    ranked AS (
+                        SELECT id,
+                               ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS rn
+                        FROM project_tasks
+                        WHERE project_id = $1 AND number IS NULL
+                    )
+                    UPDATE project_tasks pt
+                    SET number = ranked.rn + base.mx
+                    FROM ranked, base
+                    WHERE pt.id = ranked.id
+                    RETURNING pt.id
+                    """,
+                    project_id,
+                )
+                stats["tasks_numbered"] += len(numbered or [])
+                # Seed task_seq, RAISE-ONLY. Guarded on `task_seq < MAX(number)`
+                # -- the invariant this restores -- never on `task_seq = 0`.
+                #
+                # `task_seq = 0` is the guard the original migration used, and
+                # it is subtly wrong: a task created by the LIVE allocator
+                # between the deploy and this repair moves task_seq to 1 while
+                # 4 older tasks are still unnumbered. The backfill then numbers
+                # them 2..5 (offset by MAX(number)) and the `= 0` guard SKIPS
+                # the seed, leaving task_seq at 1 -- so the very next
+                # create_task allocates 2 and collides with a live task. Caught
+                # by test_a_task_created_before_the_backfill_keeps_its_number,
+                # not by review.
+                #
+                # Raising is always correct and lowering is never correct:
+                # every number ever issued came out of task_seq, so
+                # task_seq >= MAX(number) is the invariant, and task_seq < mx
+                # means it is already broken. Deleting tasks can only shrink
+                # MAX(number), so this can never walk the counter backwards
+                # into reissuing a number that once existed -- which is the
+                # actual hazard the original "one-time seed" comment was
+                # reaching for. The `< sub.mx` predicate also makes a second
+                # run a true no-op rather than a same-value write, so the
+                # returned counts stay honest.
+                seeded = await connection.execute(
+                    """
+                    UPDATE projects p
+                    SET task_seq = sub.mx
+                    FROM (
+                        SELECT COALESCE(MAX(number), 0) AS mx
+                        FROM project_tasks WHERE project_id = $1
+                    ) sub
+                    WHERE p.id = $1 AND p.task_seq < sub.mx
+                    """,
+                    project_id,
+                )
+                if str(seeded or "").strip().endswith(" 1"):
+                    stats["projects_seeded"] += 1
+
+    if stats["projects_keyed"] or stats["tasks_numbered"] or stats["projects_seeded"]:
+        LOGGER.warning(
+            "TASK IDENTIFIER BACKFILL: assigned %d project task_key(s), numbered "
+            "%d task(s), seeded %d project task_seq counter(s). Tasks now render "
+            "their Linear-style GEN-12 identifier instead of a hex slice of their "
+            "own uuid.",
+            stats["projects_keyed"],
+            stats["tasks_numbered"],
+            stats["projects_seeded"],
+        )
+    return stats
+
+
 async def _unique_slug(pool: Any, tenant_id: str, workspace_id: str, base: str) -> str:
     """Return a slug unique within (tenant, workspace), suffixing -2, -3, ... on clash."""
     rows = await control_plane_repository.rls_fetch(
