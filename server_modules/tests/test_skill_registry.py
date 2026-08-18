@@ -351,7 +351,12 @@ class SkillRegistryTests(unittest.TestCase):
         self.assertEqual(skill_registry.enforcement_tool_name("fleet-list-agents"), "fleet__list_agents")
         self.assertEqual(skill_registry.enforcement_tool_name("fleet-get-agent-activity"), "fleet__get_agent_activity")
         self.assertEqual(skill_registry.enforcement_tool_name("fleet-configure-agent"), "fleet__configure_agent")
-        self.assertEqual(skill_registry.enforcement_tool_name("fleet-message-agent"), "fleet__message_agent")
+        # "fleet-message-agent" is deliberately absent: the whole
+        # agent-to-agent messaging surface was removed (it was advertised on
+        # three surfaces and always returned ok: false -- CLAUDE.md's "No dead
+        # controls"). Its continued absence is asserted in
+        # test_mcp_dead_and_credential_tools_removed.py; there is no mapping
+        # here to check because there is no skill to enforce.
         self.assertEqual(skill_registry.enforcement_tool_name("memory-read"), "memory_read")
         self.assertEqual(skill_registry.enforcement_tool_name("memory-write"), "memory_write")
 

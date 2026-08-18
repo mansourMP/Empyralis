@@ -586,7 +586,31 @@ async def list_task_labels(
     here: project_tasks_service's queries aggregate labels inline via a
     LATERAL join, so a board load is one query rather than one per card.
     This exists for the write paths, which want to hand back the resulting
-    list without re-reading the whole task."""
+    list without re-reading the whole task.
+
+    ATTRIBUTION. Each row carries the LINK's own `added_by`/`added_at`
+    alongside the label's own fields. `attach_label` has always written
+    `project_task_labels.added_by` -- and nothing anywhere read it back, in
+    this module or out of it, which made every caller that bothered to pass
+    an actor (routes_fleet's authenticated human, skills_service's calling
+    agent, the MCP tool's external-agent roster id) write into a column no
+    reader could reach. Written-and-never-read is not a smaller bug than
+    not-written: it looks exactly like working attribution right up to the
+    moment somebody asks who put this chip on this card.
+
+    Deliberately NOT named `created_by`/`created_at`: both keys already
+    exist on this dict and mean the LABEL's own author and birthday (who
+    invented "bug", not who tagged THIS task with it). Reusing either name
+    would silently answer a different question than the caller asked.
+    `added_by` is a bare TEXT column with no FK, so it holds a user id, an
+    agent install id or an `ext_agent_<hex>` roster id equally well -- the
+    caller that wrote it knows which, and the roster/member lookups already
+    resolve names from ids.
+
+    Absent from the board's LATERAL join on purpose: that join exists to
+    keep a board load to one query, and its jsonb_build_object carries only
+    what a chip renders (id/name/color). Attribution is a detail-view
+    question; widening the hot path for it would cost every card."""
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return []
@@ -596,7 +620,8 @@ async def list_task_labels(
         pool,
         """
         SELECT l.id, l.tenant_id, l.workspace_id, l.name, l.color,
-               l.created_by, l.created_at, l.updated_at
+               l.created_by, l.created_at, l.updated_at,
+               tl.added_by, tl.created_at AS added_at
         FROM project_task_labels tl
         JOIN workspace_labels l ON l.id = tl.label_id
         WHERE tl.tenant_id = $1 AND tl.workspace_id = $2 AND tl.task_id = $3
@@ -608,4 +633,13 @@ async def list_task_labels(
         tenant_id=resolved_tenant_id,
         workspace_id=resolved_workspace_id,
     )
-    return [label for label in (_row_to_label(r) for r in rows) if label]
+    attached: List[Dict[str, Any]] = []
+    for row in rows:
+        label = _row_to_label(row)
+        if not label:
+            continue
+        raw = dict(row)
+        label["added_by"] = str(raw.get("added_by") or "").strip() or None
+        label["added_at"] = str(raw.get("added_at") or "") or None
+        attached.append(label)
+    return attached

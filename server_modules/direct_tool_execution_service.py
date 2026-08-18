@@ -321,8 +321,6 @@ def direct_tool_step_payload(
             label = "Reading project activity"
         elif normalized_action == "configure_agent":
             label = "Configuring agent"
-        elif normalized_action == "message_agent":
-            label = "Messaging agent"
         else:
             label = "Fleet operation"
     else:
@@ -546,7 +544,7 @@ def _direct_tool_governance_metadata(
         governance_boundary = "sage_profile"
         risk_level = "moderate" if action_class.endswith("update") else "low"
     elif normalized_connector == "fleet":
-        action_class = "fleet_management" if normalized_action in {"create_agent", "configure_agent", "message_agent"} else "fleet_read"
+        action_class = "fleet_management" if normalized_action in {"create_agent", "configure_agent"} else "fleet_read"
         governance_boundary = "fleet_control"
         risk_level = "high" if action_class == "fleet_management" else "low"
     elif normalized_connector == "memory":
