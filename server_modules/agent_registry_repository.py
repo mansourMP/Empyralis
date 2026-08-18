@@ -961,8 +961,8 @@ async def backfill_master_agent_isolation_defaults(pool: Any) -> Dict[str, int]:
     # below is scoped to the single (tenant, workspace) the row itself
     # names, same split as backfill_task_identifiers /
     # backfill_document_paths. Real per-tenant customer rows, never a
-    # uniform system value, so a blanket bypass_rls=True on the WRITE would
-    # be the wrong shape even though it would "work".
+    # uniform system value, so bypassing RLS on the WRITE too would be the
+    # wrong shape even though it would "work".
     candidates = await control_plane_repository.rls_fetch(
         pool,
         """
