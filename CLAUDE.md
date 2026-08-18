@@ -4027,6 +4027,121 @@ this constraint be checked BEFORE a credential is even entered does not
 exist in the product yet — that is a separate, larger UI gap, flagged here
 rather than built speculatively.
 
+## A human autosave silently destroyed an agent's edit — closed with a precondition (2026-08-18)
+
+**Verdict: documents had NO stale-write precondition anywhere, on any write
+path, and the losing write was recorded in history as the HUMAN's own edit.**
+MAN-115's other three asks (patch-native agent edits, revision history with
+author, diff rendering) all shipped 2026-08-12; this was the one unbuilt
+piece, and it was the one that loses data.
+
+```
+t0  person opens a document.  DocumentDetailView snapshots title+body into a
+    draft.  documents-data.ts's own header asserted a project's documents are
+    "not mutated out from under the reader by an agent" — FALSE the day
+    document__edit shipped, and the false half was load-bearing (it is why
+    the page has never refetched).
+t1  an agent lands a real edit (document__edit / empyralis_edit_document).
+t2  person types one character.  900ms later autosave PATCHes the WHOLE BODY
+    from the t0 draft.
+    ─▶ agent's paragraph GONE, and project_document_revisions shows a clean
+       row attributing the reversion to the human.  Invisible in the audit
+       trail — which is worse than the loss.
+```
+
+Reproduced empirically against real Postgres before fixing (create → agent
+`edit_document_by_replace` → stale whole-body update): `VERDICT: AGENT EDIT
+SILENTLY DESTROYED`, revision log `#3 human / #2 agent / #1 unknown`.
+
+**The token is a CONTENT HASH, and the other two candidates are both wrong
+here.** `updated_at` is a clock value, so a rewrite producing byte-identical
+text would raise a conflict where nothing was lost. `revision_number` lives
+on `project_document_revisions`, whose writes are DELIBERATELY fail-open
+(`_record_document_revision`'s own contract) — a body can change while the
+counter does not, and a precondition that passes on a stale base is worse
+than none. A content hash also matches the founder's own "documents should
+work like git" framing exactly: identical content is not a conflict, and git
+refuses the non-fast-forward push this API used to accept.
+
+`document_state_sha256(title, body)` = `sha256(hex(sha256(title)) ||
+hex(sha256(body)))`. **Both fields, one token** — the human PATCH writes both
+from one draft snapshot, so a body-only hash would let a stale save silently
+revert a rename. **Digests concatenated, never the raw text** — Postgres text
+cannot contain a NUL byte, so no separator is safe, and `title || body` would
+collide `("ab","c")` with `("a","bc")`.
+
+**The compare-and-swap is a predicate on the UPDATE's own WHERE clause**
+(`_DOCUMENT_STATE_SHA256_SQL`), never a read-then-compare in Python — that
+shape races the very write it guards. Python mirrors the SQL and the two are
+proved to agree from DIFFERENT sources: pinned known-answer vectors on one
+side, the live database re-deriving the same token on the other.
+
+**`expected_sha256` is a REQUIRED keyword with NO default on
+`update_document`** — the same "a scope column with a default is a loaded
+gun" posture as `agent_id` on personal-channel inbound writes. An
+unconditional overwrite is something a caller has to TYPE `None` for, and
+every such site is greppable. Guarded by AST assertions
+(`test_document_stale_write_precondition.py`) that the default stays absent,
+that every production call site passes it, and that the comparison stays in
+SQL — a behavioural test catches none of those three.
+
+**Three outcomes, three channels, never collapsed.** `update_document`
+returns a dict (written), returns `None` (not found), or raises
+`DocumentPreconditionFailed` carrying the CURRENT state (refused, nothing
+written). The route answers 409 with a stable `code: "document_conflict"`
+plus that current document — 409 rather than another `{"ok": false}` because
+the client must BRANCH: every other save failure means "try again", this one
+means "stop, a person has to choose." A conflict wearing the same clothes as
+a network blip is one the autosave loop retries straight over the top of.
+
+**`edit_document_by_replace` closes its own read-then-write race with no
+caller change** — it passes the state hash of the document it actually read.
+`skills_service`'s `document__edit` re-implements that read/replace/write
+itself rather than calling it, so it carries its own token (a duplicate
+implementation worth knowing about; not refactored here).
+`empyralis_update_document` takes an OPTIONAL `base_sha256` and stays
+unconditional without one — it is the documented whole-body fallback and a
+model that never read the document has no base to offer. That is a real
+remaining hole, deliberately left: making it required would break the tool
+for every model that forgets the argument.
+
+**The 409 UX is the half that decides whether the fix is real.** A fix whose
+failure mode is "the human loses their paragraph instead of the agent" is the
+same data loss pointed the other way. So on a refusal: autosave STOPS (a
+doomed save must not re-fire on every keystroke), the draft stays exactly as
+typed, and the two ways out are both explicit, both labelled with their real
+consequence, and neither is a default:
+
+```
+Paused — this document changed elsewhere      ← NOT "Couldn't save"
+  Someone else changed this document while you were editing.
+  Your changes are still here and have not been saved yet.
+  [Keep my version]  [Use theirs instead]        See what changed
+   └ saves yours; theirs stays in history        └ - is yours, + is theirs
+                    └ discards what you typed; never saved, cannot be recovered
+```
+
+An identical-content incoming version is NOT a conflict — `planDocumentConflict`
+returns `needsResolution: false` and the client just adopts the new base.
+`document-conflict.ts` is pure + tested for the same reason `channel-doors.ts`
+is. **An automatic three-way merge is deliberately NOT built** — the base is
+recoverable so it is buildable, but a merge that silently picks wrong on
+overlapping edits reintroduces this bug in a form nobody can see. Showing both
+versions and letting a person decide is the honest half; auto-merge is a
+product decision, not a drive-by one.
+
+Verified in a real browser on a disposable stack, not from code: agent edit
+landed underneath an open page, real keystrokes, real 900ms autosave, real
+`PATCH → 409`, banner rendered, "See what changed" showed both sides, "Keep my
+version" saved — and the agent's version survived as revision #2, which is
+exactly what that button's label promises.
+
+**Harness note that cost real time: mouse events do not reach the page in the
+Browser pane** (`left_click` by ref or coordinate leaves `document.activeElement`
+as BODY), while `Tab`, `type` and focus management work fine. A login form
+therefore cannot be submitted by clicking OR by Enter on the focused submit
+button. Drive keyboard-first, and expect to establish the session another way.
+
 ## `workspaces.identity_links` is a DEAD column — do not read it for owner identity (2026-08-18)
 
 **Verdict: the authoritative "is this sender the owner on this channel" store

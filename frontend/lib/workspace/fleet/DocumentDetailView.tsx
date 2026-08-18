@@ -95,7 +95,7 @@
  * flushes any pending autosave).
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { MoreHorizontal, Pencil } from "lucide-react";
 
@@ -103,8 +103,15 @@ import {
   createFleetDocument,
   documentExportFilename,
   duplicateDocumentTitle,
+  DocumentConflictError,
   type FleetDocument,
 } from "./documents-data";
+import {
+  diffDocumentBodies,
+  planDocumentConflict,
+  type DiffLine,
+  type DocumentConflictPlan,
+} from "./document-conflict";
 import { MarkdownLite } from "@/lib/workspace/markdown-lite";
 import { timeAgo } from "./fleet-presentation";
 import { DocumentHistory } from "./DocumentHistory";
@@ -136,7 +143,14 @@ const AUTOSAVE_DEBOUNCE_MS = 900;
 // reads as stuck.
 const SAVED_DISPLAY_MS = 2000;
 
-type SaveStatus = "idle" | "saving" | "saved" | "error";
+// "conflict" is deliberately its OWN status rather than a flavour of
+// "error": a save that failed and a save that was REFUSED because somebody
+// else changed the document are two different facts, and only one of them is
+// fixed by trying again (CLAUDE.md's standing "failed / couldn't confirm /
+// succeeded never share one message" law). Collapsing them would put
+// "Couldn't save — try again" over a document that is perfectly healthy and
+// a change that is safely still on screen.
+type SaveStatus = "idle" | "saving" | "saved" | "error" | "conflict";
 
 export function DocumentDetailView({
   document,
@@ -167,7 +181,12 @@ export function DocumentDetailView({
    *  for the full reasoning: a failed lookup must read as a failed lookup,
    *  never as an anonymous "Someone"). This view never reads it itself. */
   identityLookupFailed?: boolean;
-  onSave: (patch: { title: string; body: string }) => Promise<void>;
+  /** Resolves with the SAVED document, whose `state_sha256` is the
+   *  precondition for the next autosave — without it the second save of a
+   *  session would conflict with the first one's own result. Rejects with
+   *  DocumentConflictError when the write was refused because the document
+   *  moved on. */
+  onSave: (patch: { title: string; body: string; base_sha256?: string }) => Promise<FleetDocument>;
   onDelete: () => Promise<void>;
 }) {
   const router = useRouter();
@@ -217,9 +236,20 @@ export function DocumentDetailView({
   // What the server last confirmed — the autosave no-ops once the draft
   // matches this, so blurring a field that was never touched costs nothing.
   const lastSavedRef = useRef({ title: document.title, body: document.body ?? "" });
+  // THE STALE-WRITE PRECONDITION. The document state this draft was composed
+  // on top of; sent as `base_sha256` on every save so the server can refuse
+  // a write whose base has moved on instead of blindly overwriting an
+  // agent's edit with a body snapshotted when the page opened. Re-seeded
+  // from every successful save's own response — a session's second autosave
+  // would otherwise conflict with what its first one wrote.
+  const baseShaRef = useRef<string | undefined>(document.state_sha256);
 
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [error, setError] = useState<string | null>(null);
+  // The incoming version, held so the person can SEE what they would have
+  // overwritten. Non-null is what stops the autosave loop — see runSave.
+  const [conflict, setConflict] = useState<FleetDocument | null>(null);
+  const [showConflictDiff, setShowConflictDiff] = useState(false);
 
   const savingRef = useRef(false);
   const pendingRef = useRef(false);
@@ -234,8 +264,14 @@ export function DocumentDetailView({
     setDraftBodyState(document.body ?? "");
     draftRef.current = { title: document.title, body: document.body ?? "" };
     lastSavedRef.current = { title: document.title, body: document.body ?? "" };
+    baseShaRef.current = document.state_sha256;
     setStatus("idle");
     setError(null);
+    // A conflict belongs to the document it was raised on. Carrying one
+    // across a navigation would offer someone a choice about a document
+    // they are no longer looking at.
+    setConflict(null);
+    setShowConflictDiff(false);
     // A different document opening mid-edit (task nav arrows have no
     // document-page equivalent today, but Cmd+K / browser back can still
     // swap `document` out without unmounting this view) must not leave a
@@ -276,7 +312,19 @@ export function DocumentDetailView({
     }
   };
 
+  // Non-null while a conflict is waiting on the person. Mirrors the
+  // `conflict` state so the debounce timer and the in-flight retry below
+  // read it without closing over a stale render — the same reason
+  // draftRef/lastSavedRef exist.
+  const conflictRef = useRef(false);
+
   const runSave = useCallback(async () => {
+    // A conflict is unresolved — every save from here would be refused for
+    // the same reason, so stop firing them. Typing stays completely free;
+    // it just stops being autosaved until the person decides. Retrying into
+    // a 409 on every keystroke would turn one honest question into a
+    // stream of failures.
+    if (conflictRef.current) return;
     // A save is already in flight — record that a newer draft exists and
     // let THAT save's own `finally` re-run this once it resolves, rather
     // than firing two overlapping PATCHes that could land out of order.
@@ -294,16 +342,40 @@ export function DocumentDetailView({
     setStatus("saving");
     setError(null);
     try {
-      await onSave({ title, body });
+      const saved = await onSave({ title, body, base_sha256: baseShaRef.current });
       lastSavedRef.current = { title, body };
+      // The state we just wrote becomes the base for the next save.
+      baseShaRef.current = saved.state_sha256;
       setStatus("saved");
       savedFadeRef.current = setTimeout(() => setStatus("idle"), SAVED_DISPLAY_MS);
     } catch (e) {
-      // The draft is untouched here — a failed save never clears or reverts
-      // what was typed (CLAUDE.md-adjacent: never silently lose the user's
-      // text). The error stays up until the next successful save.
-      setError(e instanceof Error ? e.message : "Could not save this document.");
-      setStatus("error");
+      if (e instanceof DocumentConflictError) {
+        // NOTHING was written and NOTHING is discarded. The draft stays
+        // exactly as typed; the incoming version is held so the person can
+        // look at both and choose. An identical-content write is not a
+        // conflict at all (planDocumentConflict decides that) — in that
+        // case just adopt the new base and let the save through.
+        const plan = planDocumentConflict(
+          { title, body },
+          { title: e.current.title, body: e.current.body ?? "" },
+        );
+        baseShaRef.current = e.current.state_sha256;
+        if (!plan.needsResolution) {
+          lastSavedRef.current = { title, body };
+          setStatus("saved");
+          savedFadeRef.current = setTimeout(() => setStatus("idle"), SAVED_DISPLAY_MS);
+        } else {
+          conflictRef.current = true;
+          setConflict(e.current);
+          setStatus("conflict");
+        }
+      } else {
+        // The draft is untouched here — a failed save never clears or reverts
+        // what was typed (CLAUDE.md-adjacent: never silently lose the user's
+        // text). The error stays up until the next successful save.
+        setError(e instanceof Error ? e.message : "Could not save this document.");
+        setStatus("error");
+      }
     } finally {
       savingRef.current = false;
       if (pendingRef.current) {
@@ -312,6 +384,46 @@ export function DocumentDetailView({
       }
     }
   }, [onSave]);
+
+  // ── Resolving a conflict ────────────────────────────────────────────────
+  // Two explicit ways out, neither of them a default, and the product picks
+  // NEITHER on the person's behalf. See document-conflict.ts's header for
+  // why an automatic three-way merge is deliberately not built here.
+  const resolveKeepMine = useCallback(() => {
+    // Rebase onto the state the refusal handed back and save the person's
+    // version. The other version is not destroyed — it is already a
+    // revision, visible in this document's own history.
+    conflictRef.current = false;
+    setConflict(null);
+    setShowConflictDiff(false);
+    setStatus("saving");
+    // lastSavedRef is deliberately NOT touched: it still holds what the
+    // server last confirmed, so runSave's own "nothing changed" early
+    // return cannot swallow this retry.
+    void runSave();
+  }, [runSave]);
+
+  const resolveTakeTheirs = useCallback(() => {
+    // Replaces the draft with the incoming version. This DOES discard what
+    // the person typed — it was never saved, so no revision holds it —
+    // which is exactly why the button says so and why nothing reaches this
+    // path without a click.
+    const incoming = conflict;
+    if (!incoming) return;
+    const title = incoming.title;
+    const body = incoming.body ?? "";
+    setDraftTitle(title);
+    setDraftBody(body);
+    lastSavedRef.current = { title, body };
+    baseShaRef.current = incoming.state_sha256;
+    conflictRef.current = false;
+    setConflict(null);
+    setShowConflictDiff(false);
+    // Idle, not "saved": nothing was written. Saying "Saved" here would be
+    // the same lie in a new costume.
+    setStatus("idle");
+    setError(null);
+  }, [conflict, setDraftTitle, setDraftBody]);
 
   const scheduleSave = useCallback(() => {
     if (timerRef.current) clearTimeout(timerRef.current);
@@ -341,6 +453,35 @@ export function DocumentDetailView({
       clearSavedFade();
     };
   }, [runSave]);
+
+  // Who changed it, in the words a person uses. Resolved off the SAME
+  // agents/members lists DocumentHistory already resolves a revision's
+  // actor from — `updated_by` is an opaque id and must never be shown as
+  // one. An unresolved actor becomes "Someone else" inside
+  // planDocumentConflict, never a guess and never the raw id.
+  const conflictActorName = useMemo(() => {
+    const id = String(conflict?.updated_by || "").trim();
+    if (!id) return null;
+    const agent = agents.find((a) => a.agent_id === id);
+    if (agent?.label) return agent.label;
+    const member = members.find((m) => m.user_id === id);
+    if (member) return member.display_name || member.email || null;
+    return null;
+  }, [conflict?.updated_by, agents, members]);
+
+  const conflictPlan: DocumentConflictPlan | null = useMemo(() => {
+    if (!conflict) return null;
+    return planDocumentConflict(
+      { title: draftTitle.trim() || "Untitled document", body: draftBody },
+      { title: conflict.title, body: conflict.body ?? "" },
+      conflictActorName,
+    );
+  }, [conflict, draftTitle, draftBody, conflictActorName]);
+
+  const conflictDiff = useMemo(() => {
+    if (!conflict || !showConflictDiff) return null;
+    return diffDocumentBodies(draftBody, conflict.body ?? "");
+  }, [conflict, showConflictDiff, draftBody]);
 
   // ── Entering each region's edit mode ────────────────────────────────────
   // Same shape as TaskDetailView's enterTitleEdit/enterDescriptionEdit:
@@ -516,8 +657,79 @@ export function DocumentDetailView({
                 ? "Saved"
                 : status === "error"
                   ? `Couldn't save — ${error || "try again"}`
-                  : `Updated ${timeAgo(document.updated_at)}`}
+                  : status === "conflict"
+                    ? // NOT "Couldn't save". Nothing failed and nothing was
+                      // lost — the write was refused and the banner below
+                      // holds the decision. Telling someone to retry here
+                      // would send them at a save that can only be refused
+                      // again.
+                      "Paused — this document changed elsewhere"
+                    : `Updated ${timeAgo(document.updated_at)}`}
           </div>
+
+          {conflict && conflictPlan?.needsResolution ? (
+            <section className="fleet-doc-conflict" aria-live="polite">
+              <h3 className="fleet-doc-conflict-title">{conflictPlan.headline}</h3>
+              <p className="fleet-doc-conflict-reassurance">{conflictPlan.reassurance}</p>
+              <div className="fleet-doc-conflict-actions">
+                {conflictPlan.actions.map((action) => (
+                  <button
+                    key={action.key}
+                    type="button"
+                    className={`fleet-btn${action.accent ? " fleet-btn--accent-fill" : ""}`}
+                    onClick={action.key === "keep-mine" ? resolveKeepMine : resolveTakeTheirs}
+                  >
+                    {action.label}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  className="fleet-doc-conflict-toggle"
+                  onClick={() => setShowConflictDiff((v) => !v)}
+                  aria-expanded={showConflictDiff}
+                >
+                  {showConflictDiff ? "Hide what changed" : "See what changed"}
+                </button>
+              </div>
+              {/* The consequence rides on each option rather than in a
+                  paragraph above them — a choice between two versions of
+                  your own writing is decided at the button. */}
+              <ul className="fleet-doc-conflict-consequences">
+                {conflictPlan.actions.map((action) => (
+                  <li key={action.key}>
+                    <span className="fleet-doc-conflict-consequence-label">{action.label}</span>
+                    {" — "}
+                    {action.consequence}
+                  </li>
+                ))}
+              </ul>
+              {conflictDiff ? (
+                <>
+                  <pre className="fleet-doc-history-diff fleet-doc-conflict-diff">
+                    {conflictDiff.lines.map((line: DiffLine, i: number) => (
+                      <div
+                        key={i}
+                        className={
+                          line.kind === "add"
+                            ? "fleet-doc-diff-line fleet-doc-diff-line--add"
+                            : line.kind === "remove"
+                              ? "fleet-doc-diff-line fleet-doc-diff-line--remove"
+                              : "fleet-doc-diff-line"
+                        }
+                      >
+                        {line.kind === "add" ? "+ " : line.kind === "remove" ? "- " : "  "}
+                        {line.text}
+                      </div>
+                    ))}
+                  </pre>
+                  <p className="fleet-doc-conflict-legend">
+                    {"- is yours, + is theirs"}
+                    {conflictDiff.truncated ? " · showing the first changes only" : ""}
+                  </p>
+                </>
+              ) : null}
+            </section>
+          ) : null}
 
           {editingBody ? (
             <textarea

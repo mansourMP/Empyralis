@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from server_modules import auth as auth_module
@@ -1381,6 +1381,17 @@ async def fleet_create_document(
 class FleetPatchDocumentRequest(BaseModel):
     title: Optional[str] = None
     body: Optional[str] = None
+    # The stale-write precondition -- the `state_sha256` of the document
+    # state this edit was composed on top of (every body-bearing document
+    # read carries one; see project_documents_repository.
+    # document_state_sha256). Optional on the WIRE and required in spirit:
+    # a client that omits it gets the old unconditional-overwrite behaviour,
+    # which is what an existing integration or a curl call will do, and the
+    # ONE client that matters (the document page's autosave) always sends
+    # it. Making it wire-required would 422 those callers rather than
+    # protect anyone; the honest posture is that an omitted precondition is
+    # an unguarded write and the response says so.
+    base_sha256: Optional[str] = None
 
 
 @router.patch("/api/w/{workspace_id}/fleet/documents/{document_id}")
@@ -1396,7 +1407,30 @@ async def fleet_patch_document(
     document's OWN project via _enforce_document_project_access, mirroring
     fleet_patch_task's _enforce_task_project_access: a member cannot edit a
     document in a project they have no project_memberships row for, just
-    by knowing its document_id."""
+    by knowing its document_id.
+
+    CONCURRENCY. This route sends the WHOLE title and body from a draft the
+    browser snapshotted when the page opened, and the page does not poll --
+    so without a precondition every autosave is a blind full overwrite of
+    whatever an agent may have written in the meantime, recorded in history
+    as if the person had typed the reversion themselves. `base_sha256`
+    closes that: the write lands only if the document is still the state the
+    person was editing.
+
+    THREE OUTCOMES, THREE RESPONSES -- never one shape with a different
+    sentence in it (CLAUDE.md's "failed / couldn't confirm / succeeded are
+    three different facts" law):
+      200 {"ok": true, "document": ...}     saved
+      200 {"ok": false, "error": ...}       ordinary business failure
+      409 {"ok": false, "conflict": true,   REFUSED, nothing written, and
+           "document": <current state>}     the current state is attached so
+                                            the person can be shown what
+                                            they would have overwritten
+    409 is a real HTTP status rather than another {"ok": false} because the
+    client has to BRANCH here: every other failure means "try again", and
+    this one means "stop, a human has to choose". A conflict wearing the
+    same clothes as a network blip is a conflict the client will retry
+    straight over the top of."""
     resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="member")
     tenant_id = await _resolve_tenant(resolved_workspace_id)
     await _enforce_document_project_access(
@@ -1409,16 +1443,43 @@ async def fleet_patch_document(
             tenant_id=tenant_id,
             workspace_id=resolved_workspace_id,
             document_id=document_id,
+            expected_sha256=(str(body.base_sha256 or "").strip() or None),
             title=body.title,
             body=body.body,
             updated_by=str((current_user or {}).get("user_id") or "").strip() or None,
             changed_by_type="human",
         )
-        if document is None:
-            return {"ok": False, "error": "Document not found."}
-        return {"ok": True, "document": document}
+    except documents.DocumentPreconditionFailed as exc:
+        # Deliberately raised OUTSIDE the catch-all below, and deliberately
+        # not folded into it: str(exc) inside a generic {"ok": false,
+        # "error": ...} would reach the browser as an indistinguishable
+        # error string, and the client would show "couldn't save" over a
+        # document that is fine and a change that is safely still on screen.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                # A STABLE CODE, not the generic 409 "conflict" the error
+                # shaper would otherwise derive, and never the prose: this
+                # codebase already lost five weeks to a bucket that matched
+                # on a sentence somebody later reworded. The client branches
+                # on `error.code === "document_conflict"`.
+                "code": "document_conflict",
+                "message": str(exc),
+                "conflict": True,
+                # The current server state, body included, so the person can
+                # be SHOWN the version they would have overwritten. A
+                # conflict message with no way to see the other side is a
+                # dead end, not a choice. Reaches the client under
+                # `error.details.document` (error_response_service.
+                # _http_error_details keeps every key except code/message).
+                "document": exc.current_document,
+            },
+        )
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+    if document is None:
+        return {"ok": False, "error": "Document not found."}
+    return {"ok": True, "document": document}
 
 
 @router.delete("/api/w/{workspace_id}/fleet/documents/{document_id}")

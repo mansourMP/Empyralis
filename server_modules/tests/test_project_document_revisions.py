@@ -215,6 +215,7 @@ class UpdateDocumentRevisionTests(unittest.TestCase):
         with _patched_pool(pool):
             document = _run(documents.update_document(
                 tenant_id="tenant-1", workspace_id="ws-1", document_id="doc-1",
+                expected_sha256=None,
                 body="line one\nline TWO, revised\n",
                 updated_by="agent-1", changed_by_type="agent",
             ))
@@ -236,7 +237,8 @@ class UpdateDocumentRevisionTests(unittest.TestCase):
         pool = _QueuedFakePool(fetchrow_results=[None])
         with _patched_pool(pool):
             document = _run(documents.update_document(
-                tenant_id="tenant-1", workspace_id="ws-1", document_id="doc-missing", body="new body",
+                tenant_id="tenant-1", workspace_id="ws-1", document_id="doc-missing",
+                expected_sha256=None, body="new body",
             ))
         self.assertIsNone(document)
         self.assertEqual(len(pool.execute_calls), 0, "no revision should be written for a no-op update")
@@ -257,6 +259,7 @@ class UpdateDocumentRevisionTests(unittest.TestCase):
         with _patched_pool(pool):
             document = _run(documents.update_document(
                 tenant_id="tenant-1", workspace_id="ws-1", document_id="doc-1",
+                expected_sha256=None,
                 body="new content", updated_by="user-1", changed_by_type="human",
             ))
         # The document write is intact and returned normally -- not None,

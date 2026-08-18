@@ -35,12 +35,28 @@ import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fet
 // a project can hold many documents and a sidebar/list read should never
 // ship every one's full markdown body over the wire.
 //
-// NOT POLLED, unlike useFleetTasks. A project's documents are edited by
-// whoever has the page open, not mutated out from under the reader by an
-// agent working a board the way tasks are — project-members-data.ts's
-// useProjectMembers makes the same "plain fetch + manual refresh" choice for
-// the same reason. Every write below calls back into the caller's own
-// refresh.
+// NOT POLLED, unlike useFleetTasks. Every write below calls back into the
+// caller's own refresh — the same "plain fetch + manual refresh" choice
+// project-members-data.ts's useProjectMembers makes.
+//
+// THIS FILE USED TO JUSTIFY THAT BY CLAIMING a project's documents are
+// "edited by whoever has the page open, not mutated out from under the
+// reader by an agent." THAT WAS FALSE, and the false half was load-bearing:
+// document__edit (skills_service.py) and empyralis_edit_document /
+// empyralis_update_document (mcp_server.py) all mutate these rows, so an
+// agent edit landing while somebody had the page open was silently
+// overwritten by the next autosave — which PATCHes the WHOLE body from a
+// draft snapshotted at page load — and the revision history then recorded
+// the reversion as the HUMAN's own edit.
+//
+// The fix is NOT polling (a refetch landing mid-keystroke fights the
+// in-place editor; see the document page's own note). It is a stale-write
+// PRECONDITION: every body-bearing read carries `state_sha256`, every patch
+// sends it back as `base_sha256`, and the server refuses a write whose base
+// has moved on — HTTP 409 + DocumentConflictError below, resolved by the
+// person rather than by whichever writer happened to be last. Not polling
+// is now a choice this file can defend, instead of one it was getting away
+// with.
 
 import { useCallback, useEffect, useState } from "react";
 
@@ -54,6 +70,13 @@ export type FleetDocument = {
   /** Present on a single-document read (GET .../documents/{id}) and on the
    *  create/patch responses. Absent on a list row — see the file header. */
   body?: string;
+  /** The stale-write precondition token for THIS exact title+body
+   *  (project_documents_repository.document_state_sha256). Present on every
+   *  read that carries a body and absent on a list row, for the same reason
+   *  `body` is: the token covers title AND body, so a bodyless row could
+   *  only ever carry a wrong one. Send it back as `base_sha256` on a patch
+   *  to make that write a compare-and-swap. */
+  state_sha256?: string;
   created_by: string | null;
   updated_by: string | null;
   metadata: Record<string, unknown>;
@@ -71,6 +94,9 @@ function normalizeDocument(raw: any): FleetDocument {
     title: String(raw?.title || ""),
     slug: String(raw?.slug || ""),
     ...(typeof raw?.body === "string" ? { body: raw.body as string } : {}),
+    ...(typeof raw?.state_sha256 === "string" && raw.state_sha256
+      ? { state_sha256: raw.state_sha256 as string }
+      : {}),
     created_by: raw?.created_by ? String(raw.created_by) : null,
     updated_by: raw?.updated_by ? String(raw.updated_by) : null,
     metadata: raw?.metadata && typeof raw.metadata === "object" ? raw.metadata : {},
@@ -101,6 +127,32 @@ function apiErrorMessage(data: unknown, fallback: string): string {
   return fallback;
 }
 
+/** A write that was REFUSED because the document moved on since it was read
+ *  — never a failure to retry, and never a success. A distinct Error
+ *  subclass rather than a message the caller has to pattern-match, because
+ *  the client genuinely has to BRANCH here: every other save failure means
+ *  "try again", and this one means "stop, a person has to choose." A
+ *  conflict wearing the same clothes as a network blip is a conflict the
+ *  autosave loop will retry straight over the top of. */
+export class DocumentConflictError extends Error {
+  /** What is on the server RIGHT NOW, body included — so the person can be
+   *  shown the version they would have overwritten instead of only being
+   *  told one exists. */
+  readonly current: FleetDocument;
+
+  constructor(message: string, current: FleetDocument) {
+    super(message);
+    this.name = "DocumentConflictError";
+    this.current = current;
+  }
+}
+
+/** The stable CODE the backend sends for a refused stale write
+ *  (routes_fleet.fleet_patch_document). Matched on the code, never on the
+ *  prose — this codebase already lost five weeks to an error bucket that
+ *  matched a sentence somebody later reworded. */
+const DOCUMENT_CONFLICT_CODE = "document_conflict";
+
 async function documentsRequest(
   workspaceId: string,
   method: string,
@@ -116,6 +168,24 @@ async function documentsRequest(
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data?.ok === false) {
+    // The conflict branch first: a 409 carries a whole document, and
+    // collapsing it into the generic Error below would leave the caller
+    // with a sentence and nothing to render. Shape is the platform error
+    // envelope every raised HTTPException goes through
+    // (error_response_service): {detail, error:{code, message, details}},
+    // where `details` holds every key of the route's own detail dict
+    // except `code`/`message`.
+    const platformError = (data as { error?: Record<string, unknown> })?.error;
+    if (res.status === 409 && platformError && platformError.code === DOCUMENT_CONFLICT_CODE) {
+      const details = (platformError.details || {}) as Record<string, unknown>;
+      const current = details.document;
+      if (current && typeof current === "object") {
+        throw new DocumentConflictError(
+          apiErrorMessage(data, "This document changed while you were editing."),
+          normalizeDocument(current),
+        );
+      }
+    }
     throw new Error(apiErrorMessage(data, `HTTP ${res.status}`));
   }
   return data;
@@ -177,10 +247,17 @@ export async function createFleetDocument(
   return normalizeDocument(data.document);
 }
 
+/** `base_sha256` is the `state_sha256` of the document state this edit was
+ *  composed on top of. Sending it makes the write a compare-and-swap: it
+ *  lands only if nothing changed underneath, and otherwise throws
+ *  DocumentConflictError carrying what is actually there. Omitting it is an
+ *  UNCONDITIONAL overwrite of whatever an agent may have written in the
+ *  meantime — allowed (the wire field is optional so an existing integration
+ *  keeps working) but never what this app's own document page does. */
 export async function patchFleetDocument(
   workspaceId: string,
   documentId: string,
-  patch: { title?: string; body?: string },
+  patch: { title?: string; body?: string; base_sha256?: string },
 ): Promise<FleetDocument> {
   const data = await documentsRequest(workspaceId, "PATCH", `/${encodeURIComponent(documentId)}`, patch);
   return normalizeDocument(data.document);

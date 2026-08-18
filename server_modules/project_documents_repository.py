@@ -126,6 +126,7 @@ Projects and project_memberships).
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 import logging
 import re
@@ -140,6 +141,104 @@ _DOCUMENT_COLUMNS = (
     "id, tenant_id, workspace_id, project_id, title, slug, body, "
     "created_by, updated_by, metadata, created_at, updated_at"
 )
+
+
+# ── Stale-write precondition: the one thing that makes concurrent human +
+# agent editing on the same document safe (MAN-115's last unbuilt piece).
+#
+# THE BUG THIS EXISTS FOR, stated plainly, because it is the worst class of
+# defect this product can have (CLAUDE.md: documents are the durable asset):
+#
+#   t0  a person opens a document.  The browser snapshots title+body into a
+#       draft and NEVER refetches (documents-data.ts's own file header used
+#       to assert documents are "not mutated out from under the reader by an
+#       agent" -- which was false the day document__edit shipped).
+#   t1  an agent lands a real edit through document__edit / empyralis_edit_
+#       document.  The row now holds the agent's paragraph.
+#   t2  the person types one character.  900ms later autosave PATCHes the
+#       WHOLE BODY from the t0 draft.  The agent's paragraph is gone, and
+#       the revision history records a clean row saying the HUMAN wrote the
+#       reversion -- so the loss is invisible even in the audit trail.
+#
+# The token is a CONTENT HASH of the document state the writer based its
+# write on, not `updated_at` and not the revision counter:
+#   - `updated_at` is a clock value, so an agent write that produced BYTE-
+#     IDENTICAL content still moves it -- a conflict the person would be
+#     asked to resolve where genuinely nothing was lost.
+#   - `revision_number` lives on project_document_revisions, whose writes
+#     are DELIBERATELY fail-open (see _record_document_revision): a body can
+#     change while the counter does not, and a precondition that passes on a
+#     stale base is worse than none at all.
+#   - a content hash matches the founder's own "documents should work like
+#     git" framing exactly: identical content is not a conflict, and git
+#     refuses the non-fast-forward push that this API used to accept.
+#
+# Title and body are BOTH covered by the one token. The human PATCH writes
+# both from a single draft snapshot, so a body-only hash would let a stale
+# save silently revert a rename. The cost is that a concurrent rename makes
+# an agent's body-only edit conflict; that is a cheap re-read for the agent
+# (its tools already tell it to re-read on failure) against a silent loss
+# for the person, which is not a close call.
+#
+# Hashing each field separately and hashing the CONCATENATED digests is not
+# decoration: Postgres text cannot contain a NUL byte, so there is no
+# separator that a title is guaranteed not to contain, and `title || body`
+# would let ("ab", "c") and ("a", "bc") collide into one token.
+_DOCUMENT_STATE_SHA256_SQL = (
+    "encode(sha256(convert_to("
+    "encode(sha256(convert_to(COALESCE(title, ''), 'UTF8')), 'hex') || "
+    "encode(sha256(convert_to(COALESCE(body, ''), 'UTF8')), 'hex')"
+    ", 'UTF8')), 'hex')"
+)
+
+
+def document_state_sha256(title: Any, body: Any) -> str:
+    """The precondition token for one document state -- the Python mirror of
+    `_DOCUMENT_STATE_SHA256_SQL` above, which is the AUTHORITY (the actual
+    compare-and-swap runs inside update_document's UPDATE, in the database,
+    where it is atomic; a Python-side comparison would race the very write
+    it is guarding). Both must agree byte for byte, so they are proved to
+    agree by two independent checks rather than by one file reading itself:
+    test_document_stale_write_precondition.py pins known-answer vectors
+    against this function, and its real-Postgres class re-derives the same
+    token straight out of the database.
+
+    Order of operations: sha256(hex(sha256(title)) || hex(sha256(body))).
+    See the block comment above for why the digests are concatenated rather
+    than the raw text."""
+    title_digest = hashlib.sha256(str(title or "").encode("utf-8")).hexdigest()
+    body_digest = hashlib.sha256(str(body or "").encode("utf-8")).hexdigest()
+    return hashlib.sha256((title_digest + body_digest).encode("utf-8")).hexdigest()
+
+
+class DocumentPreconditionFailed(RuntimeError):
+    """The document changed since the writer read it -- its write was
+    REFUSED and NOTHING was written.
+
+    A distinct exception rather than a `None` return, because "not found",
+    "somebody else changed it" and "saved" are three different facts and
+    must never share one channel (CLAUDE.md's own law, escalated to a
+    standing rule after it hit production three times in one night).
+    update_document keeps returning None for not-found; this is raised, and
+    only this, for a refused stale write.
+
+    Carries the CURRENT state (`current_document`, body included, plus its
+    own `current_sha256`) so a caller can show the person what is actually
+    on the server instead of only telling them that something is -- a
+    conflict message with no way to see the other version is not a choice,
+    it is a dead end."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        current_document: Optional[Dict[str, Any]] = None,
+        expected_sha256: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.current_document = current_document
+        self.expected_sha256 = expected_sha256
+        self.current_sha256 = str((current_document or {}).get("state_sha256") or "")
 
 
 def _new_document_id() -> str:
@@ -391,6 +490,18 @@ def _row_to_document(row: Any, *, include_body: bool = True) -> Optional[Dict[st
     }
     if include_body:
         doc["body"] = str(r.get("body") or "")
+        # The precondition token for THIS state, on every read that carries
+        # a body -- so a writer never has to compute it (or agree with us
+        # about how) to write safely. Deliberately absent from a bodyless
+        # list row: the token covers title AND body, so a row that omitted
+        # the body could only ever carry a token that is wrong, and a wrong
+        # precondition is worse than an absent one.
+        # Hashed off the RAW row values, never off the normalized `doc`
+        # fields above -- `doc["title"]` is .strip()ed for display and the
+        # SQL expression hashes the stored column verbatim, so hashing the
+        # stripped copy would make every precondition fail (silently, and
+        # only for a title that happens to carry whitespace).
+        doc["state_sha256"] = document_state_sha256(r.get("title"), r.get("body"))
     return doc
 
 
@@ -620,6 +731,7 @@ async def update_document(
     tenant_id: str,
     workspace_id: str,
     document_id: str,
+    expected_sha256: Optional[str],
     title: Optional[str] = None,
     body: Optional[str] = None,
     updated_by: Optional[str] = None,
@@ -643,7 +755,38 @@ async def update_document(
     place, rather than three callers each having to remember to call a
     second function. ``changed_by_type``/``changed_by_display_name`` are the
     same optional pair create_document takes, for the same reason (see that
-    function's own docstring)."""
+    function's own docstring).
+
+    ``expected_sha256`` IS THE STALE-WRITE PRECONDITION, and it is a
+    REQUIRED keyword with NO DEFAULT on purpose. It is the same "a scope
+    column with a default is a loaded gun" posture this codebase already
+    took for `agent_id` on the personal-channel inbound writes and for
+    `workspace_ids` on run_state_repository: a defaulted precondition is one
+    the next caller silently omits, and a silently omitted precondition is
+    EXACTLY the bug this parameter exists to close. Pass the
+    ``state_sha256`` of the document state you based your write on. Pass an
+    explicit ``None`` only for a write that genuinely has no base and is
+    meant to land unconditionally -- that is greppable, and it is supposed
+    to be, because every one of them is a place a person's paragraph can
+    still be overwritten.
+
+    The comparison runs INSIDE the UPDATE's own WHERE clause (see
+    _DOCUMENT_STATE_SHA256_SQL), never in Python around it: a read-then-
+    compare-then-write in application code races the very write it is
+    guarding, which is the same accepted race this precondition exists to
+    close for edit_document_by_replace.
+
+    THREE OUTCOMES, THREE CHANNELS -- never collapsed (CLAUDE.md's standing
+    "after an action, the product must tell the person what actually
+    happened" law):
+      * a document dict          the write landed
+      * ``None``                 the document does not resolve in this
+                                 tenant/workspace (not found, or someone
+                                 else's) -- nothing written
+      * ``DocumentPreconditionFailed``  the document is there but has moved
+                                 on since ``expected_sha256`` -- nothing
+                                 written, and the exception carries the
+                                 CURRENT state so the caller can show it"""
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return None
@@ -658,6 +801,14 @@ async def update_document(
     # for a concurrent writer to race between. This is what lets the diff
     # below be computed against the row's real prior state rather than
     # nothing.
+    resolved_document_id = str(document_id or "").strip()
+    resolved_expected_sha256 = str(expected_sha256 or "").strip().lower() or None
+    # `$7::text IS NULL OR ...` reads like the fail-open tenant filter this
+    # codebase already banned (`WHERE ($1 = '' OR tenant_id = $1)`), and the
+    # difference is worth stating: that shape failed open on a FORGOTTEN
+    # argument, because the parameter had a default nobody had to think
+    # about. `expected_sha256` has no default -- an unconditional write is
+    # something a caller had to type `None` to ask for.
     row = await control_plane_repository.rls_fetchrow(
         pool,
         f"""
@@ -671,16 +822,18 @@ async def update_document(
             updated_by = COALESCE($6, updated_by),
             updated_at = NOW()
         WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3
+          AND ($7::text IS NULL OR $7::text = {_DOCUMENT_STATE_SHA256_SQL})
         RETURNING {_DOCUMENT_COLUMNS},
             (SELECT title FROM previous) AS _previous_title,
             (SELECT body FROM previous) AS _previous_body
         """,
         resolved_tenant_id,
         resolved_workspace_id,
-        str(document_id or "").strip(),
+        resolved_document_id,
         None if title is None else str(title).strip(),
         body,
         resolved_updated_by,
+        resolved_expected_sha256,
         tenant_id=resolved_tenant_id,
         workspace_id=resolved_workspace_id,
     )
@@ -693,11 +846,32 @@ async def update_document(
     previous_body = raw_row.get("_previous_body") if raw_row else None
     document = _row_to_document(row)
     if document is None:
-        # Nothing to protect -- the UPDATE matched zero rows (not found, or
-        # a different tenant/workspace's document), so there is no new
-        # state to snapshot. Recording a revision here would fabricate
+        # Nothing to protect -- the UPDATE matched zero rows, so there is no
+        # new state to snapshot. Recording a revision here would fabricate
         # history for an edit that never happened.
-        return None
+        #
+        # But zero rows is now TWO different facts, and telling them apart
+        # is the whole point (see this function's docstring): the document
+        # may not resolve at all, or it may resolve perfectly well and have
+        # moved on since the caller read it. Re-reading costs one round trip
+        # on a path that already failed, and buys the caller the current
+        # state to show the person -- the difference between "someone else
+        # changed this, here is what it says now" and a bare error.
+        if resolved_expected_sha256 is None:
+            return None
+        current = await get_document(
+            tenant_id=resolved_tenant_id,
+            workspace_id=resolved_workspace_id,
+            document_id=resolved_document_id,
+        )
+        if current is None:
+            return None
+        raise DocumentPreconditionFailed(
+            "This document changed since you last read it, so nothing was written. "
+            "Re-read it and reapply your change on top of the current version.",
+            current_document=current,
+            expected_sha256=resolved_expected_sha256,
+        )
     # Same fail-open posture as create_document (see that function's own
     # comment): the document row above already committed, so a revisions
     # write failure is reported on the return value, never allowed to
@@ -790,11 +964,16 @@ async def edit_document_by_replace(
     ARE exceptional -- the document exists, the instruction just cannot be
     applied unambiguously, and fails loudly rather than guessing.
 
-    There is a narrow, accepted race between the read here and the write
-    inside update_document (a concurrent edit could land in between) --
-    the identical race skills_service.py's document__edit tool already
-    carries; re-reading after a failure is the existing mitigation, not a
-    new gap this function introduces."""
+    The read-then-write race this function used to document as "narrow and
+    accepted" IS NOW CLOSED, and no caller had to change to get it: the
+    state hash of the document this function actually read is carried into
+    update_document as the precondition, so a concurrent edit landing in
+    between makes this write fail loudly (DocumentPreconditionFailed) rather
+    than silently applying a replacement computed against text that is no
+    longer there. Re-reading and retrying was already the documented
+    mitigation for a failed edit -- it is now the mitigation for this case
+    too, which is the same instruction the tool descriptions already give
+    the model."""
     document = await get_document(tenant_id=tenant_id, workspace_id=workspace_id, document_id=document_id)
     if document is None:
         return None
@@ -809,6 +988,10 @@ async def edit_document_by_replace(
         tenant_id=tenant_id,
         workspace_id=workspace_id,
         document_id=document_id,
+        # The state this replacement was computed against -- not a caller-
+        # supplied token, so this path is safe whether or not the tool above
+        # it knows preconditions exist.
+        expected_sha256=str(document.get("state_sha256") or "") or None,
         body=new_body,
         updated_by=updated_by,
         changed_by_type=changed_by_type,
