@@ -5196,3 +5196,75 @@ Corollary the founder also raised: **agent creation is too heavy** (project,
 name, model, placement, "tons of things") measured against how effortless
 adding a bot in Telegram is. Reducing that is real work, not polish — but it
 sits behind the reliability contract too.
+
+## The streaming bug CAUSED the durability bug (2026-08-19)
+
+Founder hit this live: sent a long message, navigated to another tab, the
+turn died; came back, re-pasted, navigated again, got a permanent loading
+skeleton; eventually `"No response for a while, so this send was stopped."`
+His reaction, and he was right: *"even if I close it, shouldn't it work
+continuously? it is working on the cloud not on the user interface."*
+
+Two symptoms, ONE causal chain, and the direction is the non-obvious part:
+
+```
+run_claude_agent_sdk_turn  (the PRODUCTION-DEFAULT engine)
+  translate_sdk_message already builds assistant.message.delta /
+  reasoning.summary.delta / tool_progress per chunk — correctly —
+  and then only APPENDS THEM TO A LOCAL LIST returned at the end.
+  It never called _GENERATION_EVENT_SINK, the live-forwarding contextvar
+  the LEGACY engine already uses via wrap_generation_with_sink.
+  (grep before the fix: zero occurrences in claude_agent_sdk_bridge.py)
+        │
+        ▼  so nothing streams, ever, on the engine that actually runs
+build_agent_turn_stream_response
+  await run_in_threadpool(next, producer_iter)   ← blocks for the WHOLE turn
+  services.start_chat_stream_producer(...)       ← the call that spawns the
+        │                                           background thread whose
+        │                                           completion DURABLY persists
+        │                                           the assistant turn
+        ▼
+  a disconnect during that block — tab close, navigation, or the frontend's
+  own 90s watchdog — cancels the coroutine BEFORE durability is established.
+  The turn keeps computing in an orphaned thread (nothing stops a plain
+  threading.Thread) and NOTHING IS LEFT TO PERSIST IT.
+```
+
+So it was never "uvicorn kills the turn" — that was the obvious hypothesis
+and it was wrong. Durability existed; it was simply sequenced behind a peek
+that the streaming defect made infinite.
+
+Fix: `start_chat_stream_producer` runs FIRST, unconditionally, with no
+`await` ahead of it — durability is secured before anything can cancel the
+coroutine. The peek survives only as a bounded 2s best-effort for the
+fast-failing "no provider configured" case and is explicitly UX-only. The
+SDK bridge forwards each translated event to the sink as produced.
+
+`run_service.execute_durable_turn_request` was deliberately NOT adopted for
+web chat: once the existing producer-thread machinery is decoupled from the
+blocking peek it already provides durability, without routing web through
+the heavier durable-run path.
+
+Three rules. **A watchdog that re-arms on every byte is a STREAMING probe,
+not a timeout** — when it fires, the finding is "zero bytes arrived", and
+lengthening it hides exactly the defect it detected (`09fc023a` added that
+watchdog and its honest message; it was the messenger, never the bug).
+**Anything that establishes durability must not sit behind an await that can
+block for the length of the work it is protecting.** And **the two-engine
+seam keeps diverging in ways review misses** — this is the same shape
+CLAUDE.md already records for the credit debit and for tool-result
+classification: identical return contracts, different side effects, three
+separate live defects now.
+
+Proven live against real DeepSeek on a disposable stack, not by code
+reading: 165 SSE events arriving continuously over ~9s (`curl --trace-time`,
+first 18:25:56.625, last 18:26:05.456) instead of one dump at the end; and a
+client `SIGKILL`ed at t+4.014s still had its real reply persisted to thread
+history 13 seconds after the client was dead.
+
+Still open, NOT fixed: time-to-first-token is 10–14s on a cold call with a
+large system prompt (~5977 input tokens) — the 15s idle-keepalive covers it
+and only now gets a chance to run, but the latency itself is untouched. And
+live `tool_progress` streaming is verified by code plus unit tests only —
+the verification prompts never triggered a tool call, so nobody has watched
+a tool step stream in real time.
