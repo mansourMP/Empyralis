@@ -3684,14 +3684,82 @@ def _hardware_action_requires_local_gateway(action_id: Any, capability_id: Any =
     return hardware_runtime_target_resolver.action_requires_local_hardware(capability_id or action_id)
 
 
-def _hardware_action_offline_result(action_id: Any, gateway_id: Any = None) -> str:
+_AGENT_PLACEMENT_STATUS_UNPLACED = "unplaced"
+_AGENT_PLACEMENT_STATUS_REVOKED = "revoked"
+_AGENT_PLACEMENT_STATUS_OFFLINE = "offline"
+
+AGENT_PLACEMENT_REVOKED_ERROR = (
+    "This agent's paired computer was revoked and its pairing cannot come "
+    "back on its own. Open Hardware and place this agent on a different "
+    "computer."
+)
+
+
+def _agent_placement_gateway_status(session_ctx: Dict[str, Any] | None) -> str:
+    """Classifies the agent's OWN explicit placement — never the owner-scoped
+    fallback box — into one of three FACTS a caller whose gateway resolution
+    came back empty needs to tell apart:
+
+      "unplaced" — the agent carries no preferred_gateway_id at all. Nothing
+                    to report as broken; there was never a machine here.
+      "revoked"  — the placed gateway's pairing is gone for good (deleted, or
+                    device_trust_state/status says so). Reconnecting the
+                    computer can never fix this — it needs a NEW pairing, or
+                    the agent needs to be placed on a different machine.
+      "offline"  — the placement is a real, still-valid pairing that simply
+                    isn't live right now. Reconnecting genuinely might help.
+
+    This is read-only and reporting-only: it re-derives the SAME first
+    candidate `_resolve_direct_tool_gateway_id` already tried (session_ctx's
+    own stamped `metadata.gateway_id`), it never re-resolves or substitutes a
+    different box, and it changes no decision that function already made —
+    it only lets a caller say WHY that decision came back empty. Found live
+    2026-08-19: three placed agents in one workspace pointed at gateways
+    whose `status`/`device_trust_state` were `revoked`, and nothing anywhere
+    told anyone — every one of them read as an ordinary, retriable "offline"
+    to both the product and the person, exactly like a machine that had
+    merely gone to sleep.
+    """
+    metadata = _direct_tool_session_metadata(session_ctx)
+    gateway_id = str(metadata.get("gateway_id") or "").strip()
+    if not gateway_id:
+        return _AGENT_PLACEMENT_STATUS_UNPLACED
+    from server_modules import gateway_state_repository
+
+    registration = gateway_state_repository.get_gateway_registration(gateway_id)
+    if not registration:
+        # The paired row is simply gone (deleted/never existed) — permanent,
+        # same bucket as an explicit revocation.
+        return _AGENT_PLACEMENT_STATUS_REVOKED
+    if str(registration.get("device_trust_state") or "").strip().lower() == "revoked":
+        return _AGENT_PLACEMENT_STATUS_REVOKED
+    if str(registration.get("status") or "").strip().lower() != "active":
+        # Any non-active status (today: only "revoked" is written, but a
+        # future status this function doesn't know about is treated the same
+        # conservative way — inactive is inactive, and promising a retry on
+        # a status this code cannot name would be a guess) is permanent from
+        # this seam's point of view: nothing here can make it active again.
+        return _AGENT_PLACEMENT_STATUS_REVOKED
+    return _AGENT_PLACEMENT_STATUS_OFFLINE
+
+
+def _hardware_action_offline_result(
+    action_id: Any, gateway_id: Any = None, *, placement_status: str = ""
+) -> str:
     from server_modules import hardware_runtime_target_resolver
+
+    if placement_status == _AGENT_PLACEMENT_STATUS_REVOKED:
+        reason = "agent_placement_revoked"
+        summary = AGENT_PLACEMENT_REVOKED_ERROR
+    else:
+        reason = "agent_computer_offline"
+        summary = hardware_runtime_target_resolver.AGENT_COMPUTER_OFFLINE_ERROR
 
     return json.dumps(
         {
             "status": "offline",
-            "reason": "agent_computer_offline",
-            "summary": hardware_runtime_target_resolver.AGENT_COMPUTER_OFFLINE_ERROR,
+            "reason": reason,
+            "summary": summary,
             "runtime_target": "user_device_gateway",
             "execution_environment": "local_gateway",
             "runtime_session": {
@@ -3887,6 +3955,7 @@ def _resolve_live_gateway_owned_by(
     *,
     gateway_state_repository: Any,
     gateway_protocol_service: Any,
+    capability_id: str = "",
 ) -> str | None:
     """A live gateway in this workspace that `owner_user_id` OWNS, or None.
 
@@ -3910,10 +3979,28 @@ def _resolve_live_gateway_owned_by(
     has no person whose machine it could borrow, and `""` must never behave
     like a wildcard — the same "a scope column with a default is a loaded
     gun" rule this codebase already applies to agent_id on inbound writes.
+
+    `capability_id`, when given, additionally requires the candidate to
+    DECLARE that capability. Found live 2026-08-19: a founder who owns two
+    boxes in one workspace (his own Mac, which has shell/docker/computer;
+    a production Linux gateway, which structurally never will) could have a
+    turn silently land on the SECOND box the instant the FIRST one's own
+    placement went momentarily unusable (offline, briefly inactive) — this
+    function picked "whichever owned box is live", with zero regard for
+    whether that box could do anything the turn actually needed. The
+    resulting report was a byte-for-byte "gateway_capability_missing" about
+    a machine that was never going to satisfy it, while the real, actionable
+    fact (the agent's OWN placement is momentarily unreachable) never
+    surfaced. Filtering here — not in the caller's PLACEMENT candidate — is
+    deliberate: this is the "reach your own box through an agent you have
+    not explicitly placed" convenience fallback, so it is allowed to keep
+    looking for a box that can actually help; the agent's own explicit
+    placement is never filtered this way; see _resolve_direct_tool_gateway_id.
     """
     clean_owner_id = str(owner_user_id or "").strip()
     if not clean_owner_id:
         return None
+    clean_capability_id = str(capability_id or "").strip()
     for registration in gateway_state_repository.list_workspace_gateway_registrations(
         str(workspace_id or "default").strip() or "default",
         include_revoked=False,
@@ -3925,6 +4012,13 @@ def _resolve_live_gateway_owned_by(
             continue
         if str(registration.get("user_id") or "").strip() != clean_owner_id:
             continue
+        if clean_capability_id:
+            from server_modules import gateway_inventory_service as _gw_inventory
+
+            if not _gw_inventory.registration_has_execution_capability(
+                registration, clean_capability_id
+            ):
+                continue
         if gateway_protocol_service.gateway_connection_is_live(gateway_id):
             return gateway_id
     return None
@@ -3935,6 +4029,7 @@ def _resolve_direct_tool_gateway_id(
     *,
     session_ctx: Dict[str, Any] | None,
     requested_gateway_id: Any = None,
+    capability_id: str = "",
 ) -> str | None:
     """Which machine may this turn's tools execute on? None = no machine.
 
@@ -3942,8 +4037,23 @@ def _resolve_direct_tool_gateway_id(
 
       1. hardware_access == "none"  -> None, always. The agent is cloud-only.
       2. the agent's PLACEMENT       -> that box, if usable + live.
-      3. no placement                -> only a box the ASKING PERSON owns.
+      3. no placement                -> only a box the ASKING PERSON owns
+                                         THAT CAN ACTUALLY DO THIS.
       4. otherwise                   -> None.
+
+    `capability_id` (e.g. "shell.execute") is OPTIONAL and used ONLY in step
+    3 — never to filter the agent's own explicit placement in step 2. Found
+    live 2026-08-19 on a workspace with two boxes owned by the same person
+    (a Mac with shell/docker/computer, a production Linux gateway with
+    neither): the moment the agent's OWN placement went momentarily
+    unreachable, step 3 picked the OTHER owned box purely because it was
+    live, with no regard for whether it could run shell.execute at all —
+    reporting a "gateway_capability_missing" that read as a config problem
+    on the wrong machine, while the real fact (the real placement was
+    briefly unreachable) never surfaced. Step 2 stays capability-blind on
+    purpose: if the box the owner explicitly chose lacks a capability, that
+    is a real, honest fact the readiness check below should report —
+    silently swapping to a different box would hide it instead.
 
     PLACEMENT IS THE CONSENT MOMENT, and that is why no per-person hardware
     permission exists anywhere in this path. A box reaches an agent because
@@ -4062,6 +4172,7 @@ def _resolve_direct_tool_gateway_id(
         caller_user_id,
         gateway_state_repository=gateway_state_repository,
         gateway_protocol_service=gateway_protocol_service,
+        capability_id=capability_id,
     )
     if resolved_gateway_id:
         return resolved_gateway_id
@@ -4441,10 +4552,16 @@ def _execute_hardware_action_tool_call(
     # agent's placement. `payload` here is the tool call's arguments, so the
     # old `payload.get("gateway_id") or _resolve(...)` let a model name any
     # box in the workspace and skip the resolver entirely.
+    from server_modules import hardware_access_policy_service as _hw_policy
+
+    hardware_capability_id = _hw_policy.normalize_hardware_capability_id(
+        action_id, payload.get("capability_id")
+    )
     gateway_id = _resolve_direct_tool_gateway_id(
         workspace_id,
         session_ctx=session_ctx,
         requested_gateway_id=payload.get("gateway_id"),
+        capability_id=hardware_capability_id,
     )
     trace_context = session_ctx.get("trace_context") if isinstance(session_ctx, dict) else None
     trace_id = (
@@ -4471,7 +4588,9 @@ def _execute_hardware_action_tool_call(
         payload.get("capability_id"),
     )
     if local_gateway_required and not gateway_id:
-        return _hardware_action_offline_result(action_id)
+        return _hardware_action_offline_result(
+            action_id, placement_status=_agent_placement_gateway_status(session_ctx)
+        )
     if gateway_id and (
         local_gateway_required
         or normalized_action_id in {
@@ -4590,10 +4709,16 @@ async def _execute_hardware_action_tool_call_async(
     # agent's placement. `payload` here is the tool call's arguments, so the
     # old `payload.get("gateway_id") or _resolve(...)` let a model name any
     # box in the workspace and skip the resolver entirely.
+    from server_modules import hardware_access_policy_service as _hw_policy
+
+    hardware_capability_id = _hw_policy.normalize_hardware_capability_id(
+        action_id, payload.get("capability_id")
+    )
     gateway_id = _resolve_direct_tool_gateway_id(
         workspace_id,
         session_ctx=session_ctx,
         requested_gateway_id=payload.get("gateway_id"),
+        capability_id=hardware_capability_id,
     )
     trace_context = session_ctx.get("trace_context") if isinstance(session_ctx, dict) else None
     trace_id = (
@@ -4620,7 +4745,9 @@ async def _execute_hardware_action_tool_call_async(
         payload.get("capability_id"),
     )
     if local_gateway_required and not gateway_id:
-        return _hardware_action_offline_result(action_id)
+        return _hardware_action_offline_result(
+            action_id, placement_status=_agent_placement_gateway_status(session_ctx)
+        )
     if gateway_id and (
         local_gateway_required
         or normalized_action_id in {
@@ -5367,6 +5494,7 @@ async def execute_single_direct_tool_call_async(
         gateway_id = _resolve_direct_tool_gateway_id(
             workspace_id,
             session_ctx=session_ctx,
+            capability_id=gateway_capability_id,
         )
         if gateway_capability_id and gateway_id:
             # Gateway path: use async to avoid deadlock
@@ -5494,6 +5622,7 @@ async def execute_single_direct_tool_call_async(
     gateway_id = _resolve_direct_tool_gateway_id(
         workspace_id,
         session_ctx=session_ctx,
+        capability_id=gateway_capability_id,
     )
     if not _gateway_skip and gateway_capability_id and gateway_id:
         session_payload = session_ctx if isinstance(session_ctx, dict) else {}
