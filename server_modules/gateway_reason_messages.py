@@ -96,11 +96,59 @@ _BROWSER_CAPABILITIES = {
 # transport was never installed and no amount of reconnecting installs it.
 _OPENCLAW_TRANSPORT_CAPABILITIES = {"openclaw.provision", "openclaw.channel_setup"}
 
+# service_statuses values gateway_inventory_service.SERVICE_STATUSES actually
+# allows (mirrored here as the confirmed-not-ready subset, deliberately
+# EXCLUDING "ready" and "unknown" — see _docker_confirmed_not_ready below).
+_DOCKER_CONFIRMED_NOT_READY_STATUSES = {"offline", "missing", "degraded", "blocked"}
 
-def _capability_missing_message(capability_id: str) -> str:
+
+def _service_statuses(value: object) -> Dict[str, str]:
+    """Normalizes whatever a caller passed as `service_statuses` into a
+    plain lowercased-key/value dict, or {} for anything not shaped like
+    one. Never raises — this only ever feeds a failure-path message."""
+    if not isinstance(value, dict):
+        return {}
+    result: Dict[str, str] = {}
+    for key, item in value.items():
+        key_token = _text(key).lower()
+        if key_token:
+            result[key_token] = _text(item).lower()
+    return result
+
+
+def _docker_confirmed_not_ready(service_statuses: Dict[str, str]) -> bool:
+    """True only when the GATEWAY ITSELF most recently reported Docker as
+    not ready — never inferred from the capability id alone. Proven live on
+    production (MAN-XXX): a gateway whose own reported
+    metadata.capability_readiness.service_statuses.docker was "ready" still
+    hit gateway_capability_missing for shell.execute (a genuinely different
+    cause — see gateway_execution_service.gateway_registration_execution_
+    readiness's own _has_gateway_capability, which is about whether the
+    capability was ever REQUESTED, not about Docker at all), and the
+    founder was told across several days to start a Docker Desktop that was
+    never the problem. "unknown" (the gateway hasn't reported this service
+    at all, or reported a status this module doesn't recognize) is
+    deliberately NOT treated as confirmed-not-ready — an absent signal is
+    not evidence, and guessing from it is exactly the bug this exists to
+    stop. "ready" is the strongest possible signal that Docker is NOT the
+    cause."""
+    return service_statuses.get("docker", "") in _DOCKER_CONFIRMED_NOT_READY_STATUSES
+
+
+def _capability_missing_message(capability_id: str, service_statuses: Optional[Dict[str, str]] = None) -> str:
     normalized = _text(capability_id)
+    statuses = service_statuses or {}
     if normalized in _DOCKER_GATED_CAPABILITIES:
-        return "Docker isn't running on this machine. Start Docker Desktop, then retry."
+        if _docker_confirmed_not_ready(statuses):
+            return "Docker isn't running on this machine. Start Docker Desktop, then retry."
+        # Docker being ready (or simply unreported) means the real cause of
+        # gateway_capability_missing is something else entirely — the
+        # capability was never advertised as requested at all (see
+        # _docker_confirmed_not_ready's docstring). Falling through to the
+        # honest generic message below rather than naming a cause this
+        # function did not verify — a wrong, specific, actionable-sounding
+        # instruction sends the customer on an errand that can never help,
+        # which is worse than an honest "I don't know exactly why."
     if normalized in _SCREEN_RECORDING_CAPABILITIES:
         return (
             "Screen Recording permission isn't granted on this machine. Grant it in "
@@ -132,10 +180,19 @@ def _capability_missing_message(capability_id: str) -> str:
     return "This machine hasn't advertised the capability this action needs. Reconnect the gateway, then retry."
 
 
-def _capability_not_ready_message(capability_id: str) -> str:
+def _capability_not_ready_message(capability_id: str, service_statuses: Optional[Dict[str, str]] = None) -> str:
     normalized = _text(capability_id)
+    statuses = service_statuses or {}
     if normalized in _DOCKER_GATED_CAPABILITIES:
-        return "Docker is starting up on this machine but isn't ready yet. Wait a moment, then retry."
+        if _docker_confirmed_not_ready(statuses):
+            return "Docker is starting up on this machine but isn't ready yet. Wait a moment, then retry."
+        # Same evidence discipline as _capability_missing_message above:
+        # gateway_capability_not_ready means the capability WAS requested
+        # but the gateway hasn't reported it ready yet (see
+        # gateway_execution_service._heartbeat_capability_ready) — that can
+        # be Docker still starting, but only the gateway's own reported
+        # service_statuses.docker actually says so. Falls through to the
+        # honest generic message below otherwise.
     if normalized in _OPENCLAW_TRANSPORT_CAPABILITIES:
         # Distinct from _capability_missing_message above: the box HAS
         # advertised this one, it just isn't finished yet — "wait" is an
@@ -179,7 +236,7 @@ _STATIC_REASON_MESSAGES: Dict[str, str] = {
 
 # Reasons whose message depends on WHICH capability was being requested —
 # see _capability_missing_message / _capability_not_ready_message above.
-_DYNAMIC_REASON_MESSAGE_BUILDERS: Dict[str, Callable[[str], str]] = {
+_DYNAMIC_REASON_MESSAGE_BUILDERS: Dict[str, Callable[[str, Dict[str, str]], str]] = {
     "gateway_capability_missing": _capability_missing_message,
     "gateway_capability_not_ready": _capability_not_ready_message,
 }
@@ -203,10 +260,24 @@ KNOWN_REASON_TOKENS: frozenset[str] = frozenset(_STATIC_REASON_MESSAGES) | froze
 )
 
 
-def gateway_reason_message(reason: object, *, capability_id: object = None) -> str:
+def gateway_reason_message(
+    reason: object, *, capability_id: object = None, service_statuses: object = None,
+) -> str:
     """Translates a gateway/hardware-action reason token into one plain-
     language, actionable sentence — the single boundary where an internal
     reason token becomes user-facing text.
+
+    `service_statuses` is the gateway's own most recently reported
+    metadata.capability_readiness.service_statuses (e.g. {"docker": "ready"}
+    — see gateway_registry_service.capability_service_statuses), passed by
+    a caller who actually looked it up. It is EVIDENCE, not a hint: a
+    capability-specific claim (e.g. "Docker isn't running") is only ever
+    made when this confirms it. Omitting it does not make the message
+    wrong — it makes the message fall back to something honestly generic
+    instead of guessing, which is the whole point (see
+    _docker_confirmed_not_ready's docstring for the live incident this
+    closes: a gateway that had already reported Docker "ready" was still
+    told, across several days, to go start Docker Desktop).
 
     Never raises. An unrecognized or empty token degrades to a safe, still-
     actionable generic message rather than surfacing the raw token or
@@ -221,11 +292,13 @@ def gateway_reason_message(reason: object, *, capability_id: object = None) -> s
         return static_message
     builder = _DYNAMIC_REASON_MESSAGE_BUILDERS.get(normalized_reason)
     if builder:
-        return builder(_text(capability_id))
+        return builder(_text(capability_id), _service_statuses(service_statuses))
     return _FALLBACK_MESSAGE
 
 
-def humanize_if_reason_token(raw_message: object, *, capability_id: object = None) -> str:
+def humanize_if_reason_token(
+    raw_message: object, *, capability_id: object = None, service_statuses: object = None,
+) -> str:
     """Like gateway_reason_message() above, but for a caller that caught an
     exception whose message MIGHT be one of this module's internal snake_case
     tokens, or might already be human prose from a different raise site on
@@ -245,5 +318,5 @@ def humanize_if_reason_token(raw_message: object, *, capability_id: object = Non
     """
     text = _text(raw_message)
     if text in KNOWN_REASON_TOKENS:
-        return gateway_reason_message(text, capability_id=capability_id)
+        return gateway_reason_message(text, capability_id=capability_id, service_statuses=service_statuses)
     return text
