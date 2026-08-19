@@ -2150,6 +2150,19 @@ def iter_openai_compatible_chat_events(
             message = choices[0].get("message") if isinstance(choices[0], dict) else None
             tool_calls = _normalize_openai_function_call(message)
             final_text = _extract_openai_message_text(message)
+            # MAN-308, DSML shape: a provider (deepseek-reasoner observed
+            # live) can also leak a tool call as the literal DSML envelope
+            # in `content` instead of populating structured `tool_calls` —
+            # the identical failure class iter_openai_codex_backend_events
+            # already recovers via extract_dsml_tool_calls_from_text for the
+            # Codex transport. Wired here too, gated on `not tool_calls`
+            # exactly like that call site, and tried BEFORE the JSON-mention
+            # fallback below since a DSML match is a structured, unambiguous
+            # recovery rather than a text scan.
+            if not tool_calls and final_text:
+                final_text, _dsml_tool_calls = extract_dsml_tool_calls_from_text(final_text)
+                if _dsml_tool_calls:
+                    tool_calls = _dsml_tool_calls
             # MAN-308 shape, generalized across the whole DeepSeek path (not
             # a per-model fix): a model can emit a tool call as plain/fenced
             # JSON text in `content` instead of populating the structured
