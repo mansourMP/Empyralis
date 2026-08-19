@@ -141,7 +141,7 @@ class ProjectDocumentsServiceLayerTests(_BridgeAsyncTestCase):
             created_by="user_alpha",
         )
         self.assertEqual(created["title"], "Runbook")
-        self.assertEqual(created["slug"], "runbook")
+        self.assertEqual(created["path"], "runbook.md")
         self.assertEqual(created["body"], "# Deploy steps\n\n1. Build\n2. Ship")
         self.assertEqual(created["created_by"], "user_alpha")
         # updated_by is seeded to the creator on insert -- "who last touched
@@ -156,19 +156,19 @@ class ProjectDocumentsServiceLayerTests(_BridgeAsyncTestCase):
         self.assertEqual(fetched["id"], created["id"])
         self.assertEqual(fetched["body"], created["body"])
 
-        by_slug = await documents.get_document_by_slug(
-            tenant_id=self.tenant_a, workspace_id=self.ws_a, project_id=project_a["id"], slug="runbook",
+        by_path = await documents.get_document_by_path(
+            tenant_id=self.tenant_a, workspace_id=self.ws_a, project_id=project_a["id"], path="runbook.md",
         )
-        self.assertIsNotNone(by_slug)
-        self.assertEqual(by_slug["id"], created["id"])
+        self.assertIsNotNone(by_path)
+        self.assertEqual(by_path["id"], created["id"])
 
-        # A second document with the same title gets a disambiguated slug,
+        # A second document with the same title gets a disambiguated path,
         # not a constraint violation -- mirrors projects_repository's own
-        # _unique_slug suffixing.
+        # _unique_slug suffixing, via this module's own _unique_path.
         second = await documents.create_document(
             tenant_id=self.tenant_a, workspace_id=self.ws_a, project_id=project_a["id"], title="Runbook",
         )
-        self.assertEqual(second["slug"], "runbook-2")
+        self.assertEqual(second["path"], "runbook-2.md")
 
         listed = await documents.list_documents(
             tenant_id=self.tenant_a, workspace_id=self.ws_a, project_id=project_a["id"],
@@ -201,16 +201,16 @@ class ProjectDocumentsServiceLayerTests(_BridgeAsyncTestCase):
         self.assertEqual(updated["updated_by"], "user_beta")
         # Title untouched by a body-only patch.
         self.assertEqual(updated["title"], "Runbook")
-        # Slug never moves on a rename/edit -- it is the document's stable
+        # Path never moves on a rename/edit -- it is the document's stable
         # address.
-        self.assertEqual(updated["slug"], "runbook")
+        self.assertEqual(updated["path"], "runbook.md")
 
         renamed = await documents.update_document(
             tenant_id=self.tenant_a, workspace_id=self.ws_a, document_id=created["id"],
             expected_sha256=updated["state_sha256"], title="Deploy Runbook",
         )
         self.assertEqual(renamed["title"], "Deploy Runbook")
-        self.assertEqual(renamed["slug"], "runbook", "renaming a document must not reslug it")
+        self.assertEqual(renamed["path"], "runbook.md", "renaming a document must not re-path it")
 
         deleted = await documents.delete_document(
             tenant_id=self.tenant_a, workspace_id=self.ws_a, document_id=created["id"],
@@ -287,11 +287,11 @@ class ProjectDocumentsServiceLayerTests(_BridgeAsyncTestCase):
         )
         self.assertIsNotNone(still_there)
 
-    async def test_project_scoped_slug_uniqueness_is_per_project_not_per_workspace(self) -> None:
+    async def test_project_scoped_path_uniqueness_is_per_project_not_per_workspace(self) -> None:
         """Two different PROJECTS in the same workspace may each have a
-        document titled/slugged identically -- the uniqueness boundary is
-        (project_id, slug), not (workspace_id, slug), matching the schema's
-        UNIQUE (project_id, slug) constraint."""
+        document titled/paths identically -- the uniqueness boundary is
+        (project_id, path), not (workspace_id, path), matching the schema's
+        UNIQUE (project_id, path) constraint."""
         from server_modules import projects_repository as repo
         from server_modules import project_documents_repository as documents
 
@@ -304,8 +304,8 @@ class ProjectDocumentsServiceLayerTests(_BridgeAsyncTestCase):
         doc_2 = await documents.create_document(
             tenant_id=self.tenant_a, workspace_id=self.ws_a, project_id=project_2["id"], title="Overview",
         )
-        self.assertEqual(doc_1["slug"], "overview")
-        self.assertEqual(doc_2["slug"], "overview")
+        self.assertEqual(doc_1["path"], "overview.md")
+        self.assertEqual(doc_2["path"], "overview.md")
         self.assertNotEqual(doc_1["id"], doc_2["id"])
 
     async def test_create_requires_title_and_project(self) -> None:
@@ -391,7 +391,7 @@ class ProjectDocumentsRlsIsolationTests(_BridgeAsyncTestCase):
         self.doc_b_id = f"doc_b_{self.tenant_b}"
         await self.admin_conn.execute(
             """
-            INSERT INTO project_documents (id, tenant_id, workspace_id, project_id, title, slug, body)
+            INSERT INTO project_documents (id, tenant_id, workspace_id, project_id, title, path, body)
             VALUES ($1, $2, $3, $4, 'Tenant A doc', 'tenant-a-doc', 'A secret'),
                    ($5, $6, $7, $8, 'Tenant B doc', 'tenant-b-doc', 'B secret')
             """,
