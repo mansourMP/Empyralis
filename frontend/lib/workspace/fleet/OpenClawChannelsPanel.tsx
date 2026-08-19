@@ -173,9 +173,29 @@ export function useOpenClawChannelSetup(gatewayId: string | null, agentId: strin
    *  page: several fired at once are several installer processes on ONE box. */
   const [setupQueue, setSetupQueue] = useState<string[]>([]);
   const runningRef = useRef<string | null>(null);
+  /** The root cause of "every OpenClaw channel shows Unknown despite good
+   *  data": `gatewayId` starts null (the agent record hasn't loaded yet),
+   *  so mount fires the no-gateway `/catalog` call — which carries no
+   *  `observed` key at all — and then flips to the real
+   *  `/gateways/{id}/setup` call the instant `agentGatewayId` resolves.
+   *  Two in-flight requests, no cancellation, and `setData(body)` had no
+   *  guard: whichever RESOLVES LAST wins, regardless of which was
+   *  DISPATCHED last. A `/catalog` response landing after the `/setup`
+   *  response silently overwrites good `reachable`/`observed` data with a
+   *  response that carries neither — `reachable` (below) evaluates false
+   *  FOREVER after that, since nothing re-triggers a fetch, and every row's
+   *  `remediationFor` degrades to `kind: "unknown"` even for a channel
+   *  (Telegram, confirmed live) that is fully installed, credentialed and
+   *  enabled on the box. Same shape, same fix, as the sibling hooks in this
+   *  file family — see requestIdRef in gateway-box-picker.tsx,
+   *  HardwareSection.tsx and fleet-model-config.ts. Only the LATEST
+   *  dispatched call may write state; an earlier one that resolves late is
+   *  discarded rather than trusted. */
+  const requestIdRef = useRef(0);
 
   const load = useCallback(
     async (opts?: { silent?: boolean }): Promise<SetupResponse | null> => {
+      const requestId = ++requestIdRef.current;
       if (!opts?.silent) setLoading(true);
       try {
         // With a gateway bound, join the catalog against this box's live
@@ -187,19 +207,22 @@ export function useOpenClawChannelSetup(gatewayId: string | null, agentId: strin
           ? `/api/personal-channels/openclaw/gateways/${encodeURIComponent(gatewayId)}/setup`
           : "/api/personal-channels/openclaw/catalog";
         const res = await fleetAuthorizedFetch(url, { credentials: "include" });
+        if (requestIdRef.current !== requestId) return null;
         if (!res.ok) {
           setError(`Could not load channels (${res.status}).`);
           return null;
         }
         setError(null);
         const body = (await res.json()) as SetupResponse;
+        if (requestIdRef.current !== requestId) return null;
         setData(body);
         return body;
       } catch {
+        if (requestIdRef.current !== requestId) return null;
         setError("Could not load channels.");
         return null;
       } finally {
-        setLoading(false);
+        if (requestIdRef.current === requestId) setLoading(false);
       }
     },
     [gatewayId],
