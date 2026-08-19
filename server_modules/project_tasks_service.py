@@ -1092,6 +1092,37 @@ async def list_tasks(
     return [t for t in (_row_to_task(r) for r in rows) if t]
 
 
+async def count_tasks_by_project(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+) -> Dict[str, int]:
+    """Return {project_id: task_count} for the whole workspace, one query --
+    same shape as projects_repository.count_agents_by_project, which
+    fleet_projects already composes to put "N agents" on a project row.
+    Sub-tasks count toward their OWN project (a project's total task count,
+    not a board-card count), unlike list_tasks(top_level_only=True)."""
+    pool = await control_plane_repository.ensure_control_plane_schema()
+    if pool is None:
+        return {}
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    rows = await control_plane_repository.rls_fetch(
+        pool,
+        """
+        SELECT project_id, COUNT(*) AS n
+        FROM project_tasks
+        WHERE tenant_id = $1 AND workspace_id = $2 AND project_id IS NOT NULL
+        GROUP BY project_id
+        """,
+        resolved_tenant_id,
+        resolved_workspace_id,
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
+    )
+    return {str(r["project_id"]): int(r["n"]) for r in (rows or [])}
+
+
 async def list_subtasks(
     *,
     tenant_id: str,

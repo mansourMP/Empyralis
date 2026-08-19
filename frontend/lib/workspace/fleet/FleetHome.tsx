@@ -1,15 +1,21 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
 
-import { Bot, Radio, Plug, Cpu } from "lucide-react";
+import { Bot } from "lucide-react";
 
-import { useFleetAgents, useFleetProjects, useWorkspaceActivity, useWorkspaceStatusStrip, type FleetProject } from "./fleet-data";
+import { useFleetAgents, useFleetProjects, useFleetWorkspaceTasks, type FleetAgent, type FleetProject } from "./fleet-data";
+import { useFleetDocumentActivity, type FleetDocumentRevision } from "./documents-data";
+import { useWorkspaceMembers } from "./members-data";
 import { FleetCreateAgentWizard } from "./FleetCreateAgentWizard";
 import { TelegramPairPanel } from "./TelegramPairPanel";
-import { findSageAgent, formatDateTime } from "./fleet-presentation";
+import { findSageAgent, timeAgo } from "./fleet-presentation";
 import { ProjectIcon } from "./fleet-project-identity";
+import { formatProjectWorkSummary } from "./project-work-summary";
+import { buildWorkspaceRecentWork } from "./workspace-recent-work";
+import { resolveRevisionActor, RevisionActorBadge } from "./DocumentHistory";
+import type { FleetTask } from "./fleet-data";
 
 /**
  * The workspace home — finishing project-as-spine (CLAUDE.md, 2026-08-13):
@@ -31,6 +37,31 @@ import { ProjectIcon } from "./fleet-project-identity";
  * (`--content-max-wide`, 1140px) instead — the class that already exists
  * for exactly this shape (ProjectsPage/ProjectDetailPage's own
  * `.fleet-content-main` use it too).
+ *
+ * SECOND PASS, 2026-08-19 — every number left on this page was STILL agent
+ * plumbing after the rewrite above. The founder, looking at the live page:
+ * "I hate this main content page, I don't know what to do." Diagnosis:
+ * project cards read "10 agents" / "1 agent", never a task or a document;
+ * the status strip below them was Channels/Connectors/Computers — agent-
+ * hosting infrastructure, not workspace content; and the activity feed was
+ * the raw event ledger ("Configured", "Created", "<Agent> chat completed
+ * ×4") — a broadcast log with no object. CLAUDE.md's positioning section
+ * is explicit about exactly this: "The WORKSPACE is the product... lead
+ * with what a team owns and does... humans, tasks, and CONTEXT (documents)
+ * in one place." Three changes, same principle applied three times:
+ *
+ *   - Project tiles now show `formatProjectWorkSummary(task_count,
+ *     document_count)` — real work, backend-computed alongside the
+ *     pre-existing agent_count (routes_fleet.fleet_projects), never agent
+ *     headcount.
+ *   - The three infrastructure tiles (Channel/Connector/Computer counts)
+ *     moved to the Hardware page, where agent-hosting status actually
+ *     belongs — see HardwareSection.tsx's own "Infrastructure" strip.
+ *   - The activity feed is rebuilt on `buildWorkspaceRecentWork`
+ *     (workspace-recent-work.ts): real document edits and real task
+ *     completions, both already attributed to a real actor, merged and
+ *     ranked — never the system ledger. Same discipline
+ *     inbox-needs-you.ts already applied to the Inbox.
  */
 export function FleetHome({ workspaceId }: { workspaceId: string }) {
   const { agents, loading, error, refresh } = useFleetAgents(workspaceId);
@@ -46,16 +77,17 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
 
   // Sage/the Operator is never a real, listed agent anywhere in this UI —
   // the same exclusion AgentsList/PrimaryRail/ProjectsPage/the command
-  // palette all already apply — so the per-project counts below match what
-  // clicking into a project actually shows.
+  // palette all already apply. Still needed here only for the empty-state
+  // "Ask AI" gating below (EmptyFleet) — the tiles themselves no longer
+  // show any agent number at all, see the header comment.
   const sageAgent = findSageAgent(agents);
-  const realAgents = sageAgent ? agents.filter((a) => a.agent_id !== sageAgent.agent_id) : agents;
-  const agentCountByProject = new Map<string, number>();
-  for (const a of realAgents) {
-    const pid = (a.project_id || "").trim();
-    if (!pid) continue;
-    agentCountByProject.set(pid, (agentCountByProject.get(pid) || 0) + 1);
-  }
+
+  // Real work, not agent headcount — the founder's own diagnosis of what
+  // this page was missing. Both numbers are backend-computed per project
+  // (routes_fleet.fleet_projects), so this is a plain sum over what's
+  // already fetched, never a second request.
+  const totalTasks = projects.reduce((sum, p) => sum + (p.task_count || 0), 0);
+  const totalDocuments = projects.reduce((sum, p) => sum + (p.document_count || 0), 0);
 
   // ── Loading ──
   if ((loading || projectsLoading) && agents.length === 0 && projects.length === 0) {
@@ -104,7 +136,9 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
               <div>
                 <h1 className="fleet-title">Your workspace</h1>
                 <p className="fleet-subtitle">
-                  {projects.length} {projects.length === 1 ? "project" : "projects"} · {realAgents.length} {realAgents.length === 1 ? "agent" : "agents"}
+                  {projects.length} {projects.length === 1 ? "project" : "projects"}
+                  {" · "}
+                  {formatProjectWorkSummary(totalTasks, totalDocuments)}
                 </p>
               </div>
               {/* Primary action is a project now, not an agent — an agent is
@@ -123,25 +157,17 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
 
             <div className="fleet-home-projects-grid">
               {projects.map((p) => (
-                <WorkspaceProjectTile
-                  key={p.id}
-                  workspaceId={workspaceId}
-                  project={p}
-                  agentCount={agentCountByProject.get(p.id) || 0}
-                />
+                <WorkspaceProjectTile key={p.id} workspaceId={workspaceId} project={p} />
               ))}
             </div>
           </>
         )}
 
-        {/* Workspace status strip — real counts, each jumps to its page.
-            Independent of project/agent count (channels/connectors/hardware
-            can all be set up before either exists), so it renders at every
-            count, unchanged. */}
-        <StatusStrip workspaceId={workspaceId} />
-
-        {/* Recent activity across the whole workspace */}
-        <ActivityFeed workspaceId={workspaceId} />
+        {/* Recent WORK across the whole workspace — documents edited, tasks
+            completed. Independent of project count, same as the old status
+            strip was: it renders whenever there's anything to show,
+            regardless of how many projects exist. */}
+        <RecentWorkFeed workspaceId={workspaceId} agents={agents} />
       </main>
 
       {/* Create-agent wizard — the zero-state's own entry point. Refreshes
@@ -166,11 +192,9 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
 function WorkspaceProjectTile({
   workspaceId,
   project,
-  agentCount,
 }: {
   workspaceId: string;
   project: FleetProject;
-  agentCount: number;
 }) {
   const base = `/w/${encodeURIComponent(workspaceId)}`;
   return (
@@ -182,65 +206,62 @@ function WorkspaceProjectTile({
       {project.description && (
         <span className="fleet-home-project-tile-desc">{project.description}</span>
       )}
+      {/* Real work, not agent headcount — CLAUDE.md's positioning
+          correction, and the founder's own complaint about this exact
+          tile. Both counts are backend-computed alongside the pre-existing
+          agent_count (routes_fleet.fleet_projects). */}
       <span className="fleet-home-project-tile-meta">
-        {agentCount} {agentCount === 1 ? "agent" : "agents"}
+        {formatProjectWorkSummary(project.task_count, project.document_count)}
       </span>
     </Link>
   );
 }
 
-// ── Workspace status strip ──────────────────────────────────────────────────
+// ── Recent work across the workspace ────────────────────────────────────────
+//
+// Replaces the old raw activity ledger (see this file's own 2026-08-19
+// header note). Two already-built, already-attributed sources — the
+// document change feed (useFleetDocumentActivity, workspace-scoped) and
+// completed tasks (useFleetWorkspaceTasks, filtered on completed_at) —
+// merged and ranked by workspace-recent-work.ts's pure
+// buildWorkspaceRecentWork, never a re-derivation of either fetch or a
+// third data source.
 
-function StatusStrip({ workspaceId }: { workspaceId: string }) {
-  const status = useWorkspaceStatusStrip(workspaceId);
-  const base = `/w/${encodeURIComponent(workspaceId)}`;
-
-  if (status.loading) {
-    return (
-      <div className="fleet-status-strip">
-        {[0, 1, 2].map((i) => <div key={i} className="fleet-status-strip-skeleton" />)}
-      </div>
-    );
-  }
-
-  return (
-    <div className="fleet-status-strip">
-      {/* No catalog denominators. "0/76 connectors" told every owner they had
-          76 broken things — the denominator was the CATALOG SIZE, a number
-          that grows when we ship integrations and that no customer chose as a
-          target. "5 channels connected" is a fact about their workspace;
-          "5/12" is homework we assigned them. Computers keeps its fraction
-          because there the total IS theirs (their own paired machines, and
-          offline-vs-online is the fact that matters). */}
-      <a href={`${base}/channels`} className="fleet-status-strip-item">
-        <Radio size={16} strokeWidth={1.75} />
-        <span className="fleet-status-strip-value">{status.channelsConnected}</span>
-        <span className="fleet-status-strip-label">
-          {status.channelsConnected === 1 ? "Channel connected" : "Channels connected"}
-        </span>
-      </a>
-      <a href={`${base}/integrations`} className="fleet-status-strip-item">
-        <Plug size={16} strokeWidth={1.75} />
-        <span className="fleet-status-strip-value">{status.connectorsConnected}</span>
-        <span className="fleet-status-strip-label">
-          {status.connectorsConnected === 1 ? "Connector connected" : "Connectors connected"}
-        </span>
-      </a>
-      <a href={`${base}/hardware`} className="fleet-status-strip-item">
-        <Cpu size={16} strokeWidth={1.75} />
-        <span className="fleet-status-strip-value">{status.hardwareOnline}/{status.hardwareTotal}</span>
-        <span className="fleet-status-strip-label">Computers online</span>
-      </a>
-    </div>
-  );
+/** A completed task, reshaped into the exact FleetDocumentRevision-like
+ *  contract resolveRevisionActor already knows how to read — so a task
+ *  completion and a document edit resolve to an actor through the SAME
+ *  function, and RevisionActorBadge draws both without a second branch.
+ *  Deliberately not a new actor-resolution path: a completion's actor is
+ *  the agent OR the human who moved it into `done`
+ *  (project_tasks_service's `completed_by_agent_id` / `completed_by_
+ *  user_id`, stamped once on the real transition, at most one ever set). */
+function taskCompletionAsRevisionLike(task: FleetTask): FleetDocumentRevision {
+  return {
+    id: `task-completion:${task.id}`,
+    document_id: task.id,
+    project_id: task.project_id ?? null,
+    title: task.title,
+    diff: null,
+    changed_by_type: task.completed_by_agent_id ? "agent" : task.completed_by_user_id ? "human" : "unknown",
+    changed_by_id: task.completed_by_agent_id || task.completed_by_user_id || null,
+    changed_by_display_name: null,
+    revision_number: 0,
+    created_at: task.completed_at ?? null,
+  };
 }
 
-// ── Recent activity across the workspace ────────────────────────────────────
+function RecentWorkFeed({ workspaceId, agents }: { workspaceId: string; agents: FleetAgent[] }) {
+  const { activity: documentActivity, loading: documentsLoading } = useFleetDocumentActivity(workspaceId);
+  const { tasks, loading: tasksLoading } = useFleetWorkspaceTasks(workspaceId);
+  const { members } = useWorkspaceMembers(workspaceId);
+  const base = `/w/${encodeURIComponent(workspaceId)}`;
 
-function ActivityFeed({ workspaceId }: { workspaceId: string }) {
-  const { events, loading } = useWorkspaceActivity(workspaceId, 8);
+  const events = useMemo(
+    () => buildWorkspaceRecentWork(documentActivity, tasks, 8),
+    [documentActivity, tasks],
+  );
 
-  if (loading) {
+  if (documentsLoading || tasksLoading) {
     return null;
   }
 
@@ -248,51 +269,56 @@ function ActivityFeed({ workspaceId }: { workspaceId: string }) {
     return null;
   }
 
-  // Collapse consecutive rows with the same title into one carrying a count.
-  // Eight literal "Agent chat completed" rows in a column (observed on the
-  // founder's own home) is a log file, not a feed — the eighth adds nothing
-  // the first didn't. Consecutive-only on purpose: A,B,A stays three rows,
-  // because the interleaving IS information.
-  const collapsed: Array<{ event: (typeof events)[number]; count: number }> = [];
-  for (const event of events) {
-    const title = event.title || event.action || "Event";
-    const prev = collapsed[collapsed.length - 1];
-    const prevTitle = prev ? prev.event.title || prev.event.action || "Event" : null;
-    if (prev && prevTitle === title && prev.event.status === event.status) {
-      prev.count += 1;
-    } else {
-      collapsed.push({ event, count: 1 });
-    }
-  }
+  const hrefForProject = (projectId: string | null | undefined) => {
+    const id = String(projectId || "").trim();
+    return id ? `${base}/projects/${encodeURIComponent(id)}` : `${base}/projects`;
+  };
 
   return (
     <div className="fleet-home-activity">
       <div className="fleet-detail-section-title">Recent activity</div>
       <div className="fleet-activity">
-        {collapsed.map(({ event, count }) => (
-          <div key={event.id || event.created_at} className="fleet-activity-item">
-            <div className={`fleet-activity-dot${event.status === "logged" ? "" : " is-warn"}`} />
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div className="fleet-activity-title">
-                {event.title || event.action || "Event"}
-                {count > 1 ? ` · ×${count}` : ""}
+        {events.map((event) => {
+          if (event.kind === "document") {
+            const entry = event.item;
+            const actor = resolveRevisionActor(entry, agents, members);
+            const verb = entry.revision_number <= 1 ? "created" : "edited";
+            return (
+              <div key={`doc:${entry.id}`} className="fleet-activity-item">
+                <RevisionActorBadge actor={actor} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div className="fleet-activity-title">
+                    {verb}{" "}
+                    <Link
+                      href={`${base}/projects/${encodeURIComponent(entry.project_id || "")}/documents/${encodeURIComponent(entry.document_id)}`}
+                    >
+                      {entry.document_title || entry.document_path || "a document"}
+                    </Link>
+                  </div>
+                  <div className="fleet-activity-meta">
+                    <span className="fleet-activity-time">{timeAgo(entry.created_at)}</span>
+                  </div>
+                </div>
               </div>
-              {/* `event_class` and `action` are the ledger's OWN identifiers —
-                  "sage_activity", "sage_chat.completed". They were rendered
-                  verbatim under every row, so the workspace home read as a
-                  debug console: eight identical lines of internal event names
-                  under eight identical titles. A professional tool labels; it
-                  does not print its own event taxonomy at the customer. The
-                  title already says what happened, so the only thing left
-                  worth showing is WHEN. */}
-              <div className="fleet-activity-meta">
-                <span className="fleet-activity-time">
-                  {event.created_at ? formatDateTime(event.created_at) : ""}
-                </span>
+            );
+          }
+
+          const task = event.item;
+          const actor = resolveRevisionActor(taskCompletionAsRevisionLike(task), agents, members);
+          return (
+            <div key={`task:${task.id}`} className="fleet-activity-item">
+              <RevisionActorBadge actor={actor} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div className="fleet-activity-title">
+                  completed <Link href={`${hrefForProject(task.project_id)}/tasks/${encodeURIComponent(task.id)}`}>{task.title}</Link>
+                </div>
+                <div className="fleet-activity-meta">
+                  <span className="fleet-activity-time">{timeAgo(task.completed_at || null)}</span>
+                </div>
               </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

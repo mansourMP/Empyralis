@@ -272,7 +272,11 @@ function LoginPageContent() {
               className="app-auth-brand-mark"
             />
             <h1 className="app-auth-title">Log in to Empyralis</h1>
-            <p className="app-auth-subtitle">Your personal control surface for autonomous work.</p>
+            {/* Matches signup/page.tsx's own hero rewrite (CLAUDE.md,
+                "copy that names a SCREEN goes stale... copy that names the
+                WORK does not") — this line was the same stale, agent-first
+                framing on the surface every returning customer sees first. */}
+            <p className="app-auth-subtitle">Your projects, documents, and tasks in one place.</p>
           </div>
           {authRuntimeError ? (
             <AuthErrorNotice title="Auth unavailable" message={authRuntimeError} />

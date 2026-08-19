@@ -79,6 +79,14 @@ export type FleetProject = {
   name: string;
   description?: string;
   agent_count?: number;
+  /** Real work in the project — routes_fleet.fleet_projects computes both
+   *  alongside agent_count, same one-query-per-workspace shape
+   *  (project_tasks_service.count_tasks_by_project /
+   *  project_documents_repository.count_documents_by_project). The
+   *  workspace home leads with these, never agent_count — see
+   *  project-work-summary.ts. */
+  task_count?: number;
+  document_count?: number;
   status?: string;
   is_default?: boolean;
   /** Hidden from every default list — projects_repository.list_projects
