@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import { notFound, redirect } from 'next/navigation';
 
 import { ShellRecoveryActions } from '@/app/(account)/ShellRecoveryActions';
+import { DesktopGatewayPairing } from '@/lib/desktop/desktop-gateway-pairing';
 import { loadAccountShellSessionSafely } from '@/lib/server/load-account-shell-session';
 import { resolvePrimaryReadyWorkspaceId } from '@/lib/shell/workspace-membership-model';
 import {
@@ -73,9 +74,16 @@ export default async function WorkspaceRouteLayout({
   // WorkstationKernelShell) drove only the legacy segments, which are all now
   // 307-redirected to fleet routes, so nothing falls through. Pass null.
   return (
-    <FleetShell
-      workspaceId={resolvedWorkspaceId}
-      shellSlot={null}
+    <>
+      {/*
+        Renders nothing — see desktop-gateway-pairing.tsx's own doc comment.
+        Outside the desktop app (window.empyralisDesktop absent) this is a
+        no-op on every ordinary browser tab.
+      */}
+      <DesktopGatewayPairing workspaceId={resolvedWorkspaceId} />
+      <FleetShell
+        workspaceId={resolvedWorkspaceId}
+        shellSlot={null}
       // ownerDisplayName is a real display name or nothing — it must never
       // fall back to the account email here. bootstrap.account.email is
       // already XOR-obfuscated (see ssr-safe-email.ts); PrimaryRail decodes
@@ -83,11 +91,12 @@ export default async function WorkspaceRouteLayout({
       // as the name fallback there instead. Folding email into ownerName at
       // this server boundary would bake the obfuscated form straight into
       // visible rail text before that decode ever runs.
-      ownerDisplayName={bootstrap.account.displayName || undefined}
-      ownerEmailObfuscated={bootstrap.account.email}
-      ownerRole={bootstrap.membership.role}
-    >
-      {children}
-    </FleetShell>
+        ownerDisplayName={bootstrap.account.displayName || undefined}
+        ownerEmailObfuscated={bootstrap.account.email}
+        ownerRole={bootstrap.membership.role}
+      >
+        {children}
+      </FleetShell>
+    </>
   );
 }

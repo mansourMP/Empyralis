@@ -1,5 +1,19 @@
 name: Release Desktop
 
+# macOS and Linux only — Windows is explicitly out of scope for this app
+# (CLAUDE.md's "Windows is out" entry: "VPS is Linux, fuck Windows we are
+# not going toward that"). Do not add a windows job back.
+#
+# This app is a native host for the real, hosted Empyralis webview plus the
+# `empyralis-gateway` child process it spawns and supervises — it no longer
+# bundles a Python backend or a locally-built Next.js frontend (see
+# src-tauri/src/lib.rs's own top-of-file doc comment for the full shape).
+# So this workflow's job is: build the gateway, fetch the exact pinned
+# portable Node runtime it will run under (built native addons included),
+# bundle both as Tauri RESOURCES (never a Tauri "sidecar" — the gateway is
+# `node dist/index.js`, not a single self-contained executable), then sign
+# and publish the desktop shell around them.
+
 on:
   workflow_dispatch:
 
@@ -20,41 +34,78 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 20
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Node.js (toolchain — compiles the gateway; not what ships)
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Setup Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install frontend dependencies
-        run: npm ci --prefix frontend
-
-      - name: Install PyInstaller
+      - name: Install gateway dependencies and build
+        working-directory: empyralis-gateway
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install pyinstaller
+          npm ci
+          npm run build
 
-      - name: Build Python backend binary
-        run: pyinstaller --onefile --distpath pyinstaller-dist --workpath pyinstaller-build --name empyralis-backend server.py
-
-      - name: Copy backend binary to dist/
+      - name: Resolve pinned portable Node version
+        id: node_pin
         run: |
-          mkdir -p dist
-          TARGET_TRIPLE=$(rustc -vV | sed -n 's/^host: //p')
-          cp pyinstaller-dist/empyralis-backend dist/empyralis-backend
-          cp pyinstaller-dist/empyralis-backend "dist/empyralis-backend-$TARGET_TRIPLE"
-          chmod +x dist/empyralis-backend
-          chmod +x "dist/empyralis-backend-$TARGET_TRIPLE"
+          VERSION="$(node -e "process.stdout.write(require('./empyralis-gateway/dist/update/desktop-node-version.js').DESKTOP_GATEWAY_NODE_VERSION)")"
+          if [ -z "$VERSION" ]; then
+            echo "Could not resolve DESKTOP_GATEWAY_NODE_VERSION from the built gateway artifact." >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Build Next.js frontend
-        run: npm run build --prefix frontend
+      - name: Fetch portable Node runtime (arm64 + x64, both ship — universal-capable bundle)
+        env:
+          NODE_PIN: ${{ steps.node_pin.outputs.version }}
+        run: |
+          set -euo pipefail
+          for ARCH in arm64 x64; do
+            DEST="src-tauri/resources/node-runtime-$ARCH"
+            TARBALL="node-v${NODE_PIN}-darwin-${ARCH}.tar.gz"
+            URL="https://nodejs.org/dist/v${NODE_PIN}/${TARBALL}"
+            echo "Fetching $URL"
+            curl -fsSL -o "/tmp/$TARBALL" "$URL"
+            rm -rf "$DEST"
+            mkdir -p "$DEST"
+            tar -xzf "/tmp/$TARBALL" -C "$DEST" --strip-components=1
+            test -x "$DEST/bin/node"
+          done
+          # This runner is one arch; use its own match to compile the
+          # gateway's native addons (bufferutil, utf-8-validate, sharp)
+          # against the EXACT bundled Node, then bundle the matching arch's
+          # runtime as the one Tauri packages for this build. A universal
+          # (arm64+x64) single bundle is future work — today's macOS
+          # release job runs once per architecture via the matrix below if
+          # ever split; for now this targets the runner's native arch.
+          HOST_ARCH="$(uname -m)"
+          case "$HOST_ARCH" in
+            arm64) echo "resolved_arch=arm64" >> "$GITHUB_ENV" ;;
+            x86_64) echo "resolved_arch=x64" >> "$GITHUB_ENV" ;;
+            *) echo "Unsupported host arch: $HOST_ARCH" >&2; exit 1 ;;
+          esac
+
+      - name: Rebuild gateway native addons under the pinned portable Node
+        working-directory: empyralis-gateway
+        run: |
+          set -euo pipefail
+          export PATH="$GITHUB_WORKSPACE/src-tauri/resources/node-runtime-$resolved_arch/bin:$PATH"
+          node --version
+          rm -rf node_modules
+          npm ci
+          npm run build
+
+      - name: Place bundled resources
+        run: |
+          set -euo pipefail
+          rm -rf src-tauri/resources/node-runtime
+          mv "src-tauri/resources/node-runtime-$resolved_arch" src-tauri/resources/node-runtime
+          rm -rf src-tauri/resources/node-runtime-arm64 src-tauri/resources/node-runtime-x64
+          test -x src-tauri/resources/node-runtime/bin/node
+          test -f empyralis-gateway/dist/index.js
 
       - name: Import Apple signing certificate
         env:
@@ -93,7 +144,7 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           TAURI_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBLIC_KEY }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        run: python scripts/write_tauri_release_config.py --output src-tauri/tauri.release.conf.json
+        run: python3 scripts/write_tauri_release_config.py --output src-tauri/tauri.release.conf.json
 
       - name: Build, sign, notarize, and publish macOS release
         uses: tauri-apps/tauri-action@v1
@@ -120,77 +171,91 @@ jobs:
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: |
-            dist/empyralis-backend*
             src-tauri/target/release/bundle/**/*
 
-  windows:
-    name: Windows signed release
-    runs-on: windows-latest
+  linux:
+    name: Linux signed release
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 20
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Tauri Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            patchelf \
+            file
+
+      - name: Setup Node.js (toolchain — compiles the gateway; not what ships)
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Setup Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install frontend dependencies
-        shell: bash
-        run: npm ci --prefix frontend
-
-      - name: Install PyInstaller
-        shell: bash
+      - name: Install gateway dependencies and build
+        working-directory: empyralis-gateway
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install pyinstaller
+          npm ci
+          npm run build
 
-      - name: Build Python backend binary
-        shell: bash
-        run: pyinstaller --onefile --distpath pyinstaller-dist --workpath pyinstaller-build --name empyralis-backend server.py
-
-      - name: Copy backend binary to dist/
-        shell: bash
+      - name: Resolve pinned portable Node version
+        id: node_pin
         run: |
-          mkdir -p dist
-          TARGET_TRIPLE=$(rustc -vV | sed -n 's/^host: //p')
-          cp pyinstaller-dist/empyralis-backend.exe dist/empyralis-backend.exe
-          cp pyinstaller-dist/empyralis-backend.exe "dist/empyralis-backend-$TARGET_TRIPLE.exe"
+          VERSION="$(node -e "process.stdout.write(require('./empyralis-gateway/dist/update/desktop-node-version.js').DESKTOP_GATEWAY_NODE_VERSION)")"
+          if [ -z "$VERSION" ]; then
+            echo "Could not resolve DESKTOP_GATEWAY_NODE_VERSION from the built gateway artifact." >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Build Next.js frontend
-        shell: bash
-        run: npm run build --prefix frontend
-
-      - name: Import Windows signing certificate
-        shell: pwsh
+      - name: Fetch portable Node runtime for this runner's architecture
         env:
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          NODE_PIN: ${{ steps.node_pin.outputs.version }}
         run: |
-          $certPath = Join-Path $env:RUNNER_TEMP 'empyralis-signing.pfx'
-          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
-          $password = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
-          $cert = Import-PfxCertificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My -Password $password
-          "WINDOWS_CERTIFICATE_THUMBPRINT=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) ARCH=x64 ;;
+            aarch64) ARCH=arm64 ;;
+            *) echo "Unsupported host arch: $(uname -m)" >&2; exit 1 ;;
+          esac
+          echo "resolved_arch=$ARCH" >> "$GITHUB_ENV"
+          TARBALL="node-v${NODE_PIN}-linux-${ARCH}.tar.xz"
+          URL="https://nodejs.org/dist/v${NODE_PIN}/${TARBALL}"
+          echo "Fetching $URL"
+          curl -fsSL -o "/tmp/$TARBALL" "$URL"
+          rm -rf src-tauri/resources/node-runtime
+          mkdir -p src-tauri/resources/node-runtime
+          tar -xJf "/tmp/$TARBALL" -C src-tauri/resources/node-runtime --strip-components=1
+          test -x src-tauri/resources/node-runtime/bin/node
+
+      - name: Rebuild gateway native addons under the pinned portable Node
+        working-directory: empyralis-gateway
+        run: |
+          set -euo pipefail
+          export PATH="$GITHUB_WORKSPACE/src-tauri/resources/node-runtime/bin:$PATH"
+          node --version
+          rm -rf node_modules
+          npm ci
+          npm run build
+
+      - name: Confirm bundled resources are in place
+        run: |
+          test -x src-tauri/resources/node-runtime/bin/node
+          test -f empyralis-gateway/dist/index.js
 
       - name: Generate release-only Tauri config
-        shell: bash
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
           TAURI_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBLIC_KEY }}
-          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ env.WINDOWS_CERTIFICATE_THUMBPRINT }}
-          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
-        run: python scripts/write_tauri_release_config.py --output src-tauri/tauri.release.conf.json
+        run: python3 scripts/write_tauri_release_config.py --output src-tauri/tauri.release.conf.json
 
-      - name: Build, sign, and publish Windows release
+      - name: Build, sign, and publish Linux release
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -207,9 +272,8 @@ jobs:
           updaterJsonPreferNsis: false
           args: --config tauri.release.conf.json
 
-      - name: Attest Windows release provenance
+      - name: Attest Linux release provenance
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: |
-            dist/empyralis-backend*.exe
             src-tauri/target/release/bundle/**/*

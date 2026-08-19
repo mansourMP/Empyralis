@@ -505,3 +505,141 @@ test("createSystemdJobRegistrar runs daemon-reload + enable, never start/restart
   assert.deepEqual(calls[1], { command: "systemctl", args: ["enable", "empyralis-gateway.service"] });
   assert.ok(!calls.some((call) => call.args.includes("start") || call.args.includes("restart")), "must never start/restart (would touch an already-running unit)");
 });
+
+// ---------------------------------------------------------------------------
+// user-scope systemd (desktop app, MAN-356-adjacent): a normal logged-in
+// Linux user has no path to /etc/systemd/system at all — resolveExpected
+// SupervisorUnit must fall back to ~/.config/systemd/user when the caller's
+// environment says so, and every registrar call must carry --user.
+
+test("resolveExpectedSupervisorUnit stays system-scope on linux when EMPYRALIS_GATEWAY_SUPERVISOR_SCOPE is unset (no drift for existing boxes)", () => {
+  const definition = resolveExpectedSupervisorUnit({
+    platform: "linux",
+    env: {},
+    homeDir: "/home/tester",
+    execPath: "/usr/bin/node",
+    entryPath: "/opt/empyralis/agent-computer/current/gateway/dist/index.js",
+    logDir: "/var/log/empyralis",
+  });
+  assert.ok(definition);
+  assert.equal(definition!.unitPath, "/etc/systemd/system/empyralis-gateway.service");
+  assert.equal(definition!.systemdScope, "system");
+  assert.match(definition!.contents, /WantedBy=multi-user\.target/);
+  assert.doesNotMatch(definition!.contents, /WantedBy=default\.target/);
+});
+
+test("resolveExpectedSupervisorUnit switches to a user unit under ~/.config/systemd/user when EMPYRALIS_GATEWAY_SUPERVISOR_SCOPE=user", () => {
+  const definition = resolveExpectedSupervisorUnit({
+    platform: "linux",
+    env: { EMPYRALIS_GATEWAY_SUPERVISOR_SCOPE: "user" },
+    homeDir: "/home/tester",
+    execPath: "/usr/bin/node",
+    entryPath: "/home/tester/.local/share/empyralis/gateway/dist/index.js",
+    logDir: "/home/tester/.local/share/empyralis/logs",
+  });
+  assert.ok(definition);
+  assert.equal(definition!.mode, "systemd");
+  assert.equal(definition!.systemdScope, "user");
+  assert.equal(
+    definition!.unitPath,
+    "/home/tester/.config/systemd/user/empyralis-gateway.service",
+  );
+  // No root, no User=/Group= — a --user manager already runs entirely as
+  // the invoking user, and systemd rejects User= inside one.
+  assert.doesNotMatch(definition!.contents, /^User=/m);
+  assert.doesNotMatch(definition!.contents, /^Group=/m);
+  assert.match(definition!.contents, /WantedBy=default\.target/);
+  assert.doesNotMatch(definition!.contents, /WantedBy=multi-user\.target/);
+});
+
+test("resolveExpectedSupervisorUnit ignores EMPYRALIS_GATEWAY_SUPERVISOR_SCOPE on darwin (launchd has no scope concept)", () => {
+  const definition = resolveExpectedSupervisorUnit({
+    platform: "darwin",
+    env: { EMPYRALIS_GATEWAY_SUPERVISOR_SCOPE: "user" },
+    homeDir: "/Users/tester",
+    execPath: "/usr/local/bin/node",
+    entryPath: "/Users/tester/Library/Application Support/Empyralis/gateway/dist/index.js",
+    logDir: "/Users/tester/Library/Logs/Empyralis",
+  });
+  assert.ok(definition);
+  assert.equal(definition!.mode, "launchd");
+  assert.equal(definition!.systemdScope, undefined);
+});
+
+test("createSystemdJobRegistrar passes --user before every subcommand for a user-scope definition", async () => {
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const registrar = createSystemdJobRegistrar(async (command, args) => {
+    calls.push({ command, args });
+    return { stdout: "", stderr: "" };
+  });
+  const definition: GatewaySupervisorUnitDefinition = {
+    mode: "systemd",
+    unitPath: "/home/tester/.config/systemd/user/empyralis-gateway.service",
+    name: "empyralis-gateway.service",
+    systemdScope: "user",
+    contents: "",
+  };
+  await registrar(definition);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0], { command: "systemctl", args: ["--user", "daemon-reload"] });
+  assert.deepEqual(calls[1], {
+    command: "systemctl",
+    args: ["--user", "enable", "empyralis-gateway.service"],
+  });
+});
+
+test("createSystemdJobRegistrar omits --user for a system-scope (or scope-unset) definition — byte-identical to before", async () => {
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const registrar = createSystemdJobRegistrar(async (command, args) => {
+    calls.push({ command, args });
+    return { stdout: "", stderr: "" };
+  });
+  const definition: GatewaySupervisorUnitDefinition = {
+    mode: "systemd",
+    unitPath: "/etc/systemd/system/empyralis-gateway.service",
+    name: "empyralis-gateway.service",
+    contents: "",
+  };
+  await registrar(definition);
+  assert.deepEqual(calls[0], { command: "systemctl", args: ["daemon-reload"] });
+  assert.deepEqual(calls[1], { command: "systemctl", args: ["enable", "empyralis-gateway.service"] });
+});
+
+test("auditAndRepairGatewaySupervisorInstall installs a user-scope unit end to end with no root required (mocked fs)", async () => {
+  const written = new Map<string, string>();
+  const mkdirCalls: string[] = [];
+  const registerCalls: GatewaySupervisorUnitDefinition[] = [];
+
+  const outcome = await auditAndRepairGatewaySupervisorInstall(
+    {
+      env: { EMPYRALIS_GATEWAY_SUPERVISOR_SCOPE: "user" },
+      platform: "linux",
+      homeDir: "/home/tester",
+      execPath: "/usr/bin/node",
+      entryPath: "/home/tester/.local/share/empyralis/gateway/dist/index.js",
+      logDir: "/home/tester/.local/share/empyralis/logs",
+      readFile: async () => {
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      },
+      writeFile: async (filePath, contents) => {
+        written.set(filePath, contents);
+      },
+      mkdir: async (dirPath) => {
+        mkdirCalls.push(dirPath);
+      },
+      registerJob: async (definition) => {
+        registerCalls.push(definition);
+      },
+    },
+    true,
+  );
+
+  assert.equal(outcome.supported, true);
+  assert.equal(outcome.fileState, "missing");
+  assert.equal(outcome.repair?.action, "wrote_new_unit");
+  assert.equal(outcome.repair?.permissionDenied, false);
+  assert.ok(written.has("/home/tester/.config/systemd/user/empyralis-gateway.service"));
+  assert.ok(mkdirCalls.includes("/home/tester/.config/systemd/user"));
+  assert.equal(registerCalls.length, 1);
+  assert.equal(registerCalls[0].systemdScope, "user");
+});
