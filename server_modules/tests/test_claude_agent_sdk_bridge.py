@@ -1282,6 +1282,90 @@ class ResultMessageErrorCodeTruthfulnessTests(unittest.TestCase):
         self.assertEqual(collected["tool_calls"], [])
 
 
+class RunCostCeilingBudgetHonestyTests(unittest.TestCase):
+    """A per-turn spend ceiling stop must never read like the workspace ran
+    out of money.
+
+    Observed live: the customer's own chat screen showed the workspace's
+    real credit balance ("89 credits") in the sidebar at the exact same
+    moment the agent said "the budget tracker shows $0/$1 remaining ... you
+    may need to top up the balance" — two different facts collapsed into
+    one. The $1 figure is config_defaults_service.default_run_cost_ceiling_
+    usd(), a per-TURN runaway-loop safety cap (claude_agent_sdk's own
+    max_budget_usd, enforced by the SDK and reported back as a ResultMessage
+    with subtype "error_max_budget_usd") — unrelated to
+    GET /api/billing/credits/balance, the actual money the workspace has
+    paid for. Before this fix, translate_sdk_message let the SDK's own
+    (foreign, unreviewed) `result` text stand as the customer-facing reply
+    for this subtype; this locks in that it is overwritten with wording that
+    explicitly distinguishes the two, regardless of what the CLI said.
+    """
+
+    def _translate(self, message, *, ceiling=1.0):
+        return claude_agent_sdk_bridge.translate_sdk_message(
+            message,
+            state=claude_agent_sdk_bridge.TranslationState(run_cost_ceiling_usd=ceiling),
+            trace_context=_trace_context(),
+        )
+
+    def test_budget_ceiling_reply_is_overwritten_with_honest_disambiguating_text(self):
+        # A misleading result text is exactly the shape this bug produced —
+        # some free-form CLI prose mentioning "budget" with no idea our
+        # product has a separate, unaffected credit balance.
+        message = sdk_types.ResultMessage(
+            subtype="error_max_budget_usd",
+            duration_ms=500, duration_api_ms=400, is_error=True,
+            num_turns=3, session_id="sess-budget", result="Budget exceeded.",
+        )
+        events = self._translate(message, ceiling=1.0)
+        final_event = next(e for e in events if e["type"] == "final")
+        reply = final_event["payload"]["reply"]
+
+        self.assertNotEqual(reply, "Budget exceeded.")
+        self.assertIn("ceiling", reply.lower())
+        self.assertIn("per-turn", reply.lower())
+        self.assertIn("$1.00", reply)
+        # The exact confusion the founder hit: this must state plainly that
+        # the workspace's paid balance is a separate, unaffected thing — not
+        # invite a top-up for money that was never actually spent.
+        self.assertIn("credit balance", reply.lower())
+        self.assertIn("unaffected", reply.lower())
+        self.assertEqual(final_event["payload"]["error"], "error_max_budget_usd")
+
+    def test_trace_failed_message_matches_the_same_honest_wording(self):
+        # The Work tab's transparency log must not disagree with what the
+        # customer was told in chat.
+        message = sdk_types.ResultMessage(
+            subtype="error_max_budget_usd",
+            duration_ms=500, duration_api_ms=400, is_error=True,
+            num_turns=1, session_id="sess-budget-2", result="",
+        )
+        events = self._translate(message, ceiling=2.5)
+        data = next(
+            e["payload"]["data"] for e in events
+            if e["type"] == "trace" and e["payload"].get("event_type") == "trace.failed"
+        )
+        self.assertIn("$2.50", data["message"])
+        self.assertIn("credit balance", data["message"].lower())
+
+    def test_missing_ceiling_still_produces_honest_text_without_inventing_a_number(self):
+        # A bare unit test (or a caller that somehow never threaded the
+        # ceiling through) must not fabricate a dollar figure it cannot back.
+        message = sdk_types.ResultMessage(
+            subtype="error_max_budget_usd",
+            duration_ms=500, duration_api_ms=400, is_error=True,
+            num_turns=1, session_id="sess-budget-3", result="whatever the CLI said",
+        )
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            message, state=claude_agent_sdk_bridge.TranslationState(), trace_context=_trace_context(),
+        )
+        final_event = next(e for e in events if e["type"] == "final")
+        reply = final_event["payload"]["reply"]
+        self.assertNotEqual(reply, "whatever the CLI said")
+        self.assertIn("credit balance", reply.lower())
+        self.assertNotRegex(reply, r"\$\d")
+
+
 class SyntheticAssistantMessageTests(unittest.TestCase):
     """API-error prose must never ship as the agent's answer.
 

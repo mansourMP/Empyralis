@@ -54,9 +54,17 @@ const AGENT_DETAIL_RE = /^\/w\/[^/]+\/projects\/([^/]+)\/agents\/([^/]+)\/([^/]+
 // The tabs an agent detail page renders (see FleetAgentDetail.tsx's TABS),
 // minus Hardware — these are the "switch tab" actions offered here. Chat
 // leads, matching FleetAgentDetail's own ordering (the agent's front door).
+//
+// "overview" used to be listed here — a DEAD tab id: Overview was removed
+// outright (FleetAgentDetail.tsx's TABS comment, founder: "remove overview
+// because it's something that we genuinely don't need"), and [tab]/page.tsx
+// coerces any unrecognized tab string straight to "chat". So this entry
+// silently did nothing useful — picking it just bounced back to Chat with
+// no explanation — for as long as it sat here unnoticed. "general" is what
+// Overview's surviving contents (name/persona/schedule) actually moved to.
 const AGENT_TABS: { id: string; label: string; icon: LucideIcon }[] = [
   { id: "chat", label: "Chat", icon: MessageSquare },
-  { id: "overview", label: "Overview", icon: LayoutGrid },
+  { id: "general", label: "General", icon: LayoutGrid },
   { id: "work", label: "Work", icon: Inbox },
   { id: "channels", label: "Channels", icon: Radio },
   { id: "connectors", label: "Connectors", icon: Plug },

@@ -1011,6 +1011,18 @@ class TranslationState:
     # the index, not the block type — that comes from content_block_start.
     stream_message_id: Optional[str] = None
     stream_block_kinds: Dict[int, str] = field(default_factory=dict)
+    # This turn's per-turn spend ceiling (effective_max_budget_usd, the same
+    # value handed to ClaudeAgentOptions.max_budget_usd below) — carried
+    # through so the ResultMessage branch can write an honest, self-
+    # disambiguating stop message when the SDK's own error_max_budget_usd
+    # fires, instead of relying on whatever prose the `claude` CLI itself
+    # emits (foreign, unreviewed by this product, and never told that
+    # "budget" here means a per-turn runaway-loop safety cap rather than the
+    # workspace's paid credit balance). See the ResultMessage branch's own
+    # comment for the incident this closes. None only in a bare unit test
+    # that never sets it — production always does, from run_claude_agent_
+    # sdk_turn's own effective_max_budget_usd.
+    run_cost_ceiling_usd: Optional[float] = None
 
 
 def translate_sdk_message(
@@ -1401,6 +1413,44 @@ def translate_sdk_message(
                 else _PROVIDER_GENERATION_FAILED_CODE
             )
             payload["error"] = error_code
+            if error_code == "error_max_budget_usd":
+                # The SDK stops the query itself on this subtype
+                # (ClaudeAgentOptions.max_budget_usd, set from
+                # state.run_cost_ceiling_usd above) and its own `result`
+                # text is whatever the `claude` CLI chose to say — foreign
+                # prose this product never reviewed, with no reason to know
+                # our billing model draws a line between a per-turn safety
+                # cap and the workspace's paid credit balance. Observed
+                # live: a customer read that line back (persisted thread
+                # history is fed to the next turn as context) and narrated
+                # it as "the budget tracker shows $0/$1 remaining... you may
+                # need to top up the balance" — false; the workspace's real
+                # balance (GET /api/billing/credits/balance) was untouched.
+                # Overwritten here, unconditionally, with the same honest,
+                # self-disambiguating wording direct_chat_generation_
+                # service.py's legacy-engine twin uses for the identical
+                # stop, so both engines say the same true thing regardless
+                # of what the CLI's own text happened to be.
+                ceiling = state.run_cost_ceiling_usd
+                if isinstance(ceiling, (int, float)) and ceiling > 0:
+                    payload["reply"] = (
+                        f"Stopped: this turn reached its own ${ceiling:.2f} per-turn spend ceiling and "
+                        "was halted before making another model call. This ceiling is a per-turn safety "
+                        "limit that resets on your next message — it is separate from your workspace's "
+                        "credit balance, which is unaffected. No top-up is needed; just try again."
+                    )
+                else:
+                    payload["reply"] = (
+                        "Stopped: this turn reached its own per-turn spend ceiling and was halted before "
+                        "making another model call. This ceiling is a per-turn safety limit that resets on "
+                        "your next message — it is separate from your workspace's credit balance, which is "
+                        "unaffected. No top-up is needed; just try again."
+                    )
+                # Keep the trace.failed event (Work tab, below) in sync with
+                # the same honest wording rather than the raw CLI text —
+                # otherwise the customer-facing reply and the transparency
+                # log would disagree about what happened.
+                reply = payload["reply"]
             # api_error_status is the SDK's own honest detail for exactly
             # this case ("HTTP status code of the failing API call when
             # is_error is True and subtype is 'success'"), and its docstring
@@ -2311,7 +2361,7 @@ async def run_claude_agent_sdk_turn(
 
         state = TranslationState(
             known_tool_names=known_tool_names, served_by_anthropic=served_by_anthropic,
-            meta_tools_enabled=meta_tools_enabled,
+            meta_tools_enabled=meta_tools_enabled, run_cost_ceiling_usd=effective_max_budget_usd,
         )
         events: List[Dict[str, Any]] = []
         received_any_message = False
@@ -2339,6 +2389,7 @@ async def run_claude_agent_sdk_turn(
             )
             state = TranslationState(
                 known_tool_names=known_tool_names, served_by_anthropic=served_by_anthropic,
+                run_cost_ceiling_usd=effective_max_budget_usd,
             )
             fallback_prompt = render_prompt(message, prior_messages)
             fallback_options = _build_options(resume="")

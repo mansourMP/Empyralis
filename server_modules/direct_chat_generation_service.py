@@ -1656,20 +1656,44 @@ def stream_provider_backed_direct_chat(
             yield {
                 "type": "final",
                 "payload": {
+                    # MAN-(navigation/budget honesty pass): this text is what
+                    # the customer reads AND what a later turn re-reads as
+                    # its own prior words (thread history is fed back as
+                    # context) — so it has to be self-disambiguating at the
+                    # source, not rely on the model to infer the distinction.
+                    # A prior version said only "reached its $1.00 per-run
+                    # spend ceiling", with no mention of the workspace's
+                    # actual credit balance anywhere nearby; observed live,
+                    # the model read that back on a later turn and told the
+                    # customer "the budget tracker shows $0/$1 remaining...
+                    # you may need to top up the balance" — conflating a
+                    # per-turn runaway-loop safety cap (config_defaults_
+                    # service.default_run_cost_ceiling_usd(), resets every
+                    # turn, unrelated to money the workspace has paid for)
+                    # with the workspace's real credit balance (billing_
+                    # service / GET /api/billing/credits/balance). Naming
+                    # both facts explicitly here — this is a per-turn safety
+                    # limit, and no top-up is implied — closes that gap at
+                    # the one place both engines' stop message originates,
+                    # rather than trying to police every way a model might
+                    # later paraphrase an ambiguous sentence.
                     "reply": (
-                        f"Stopped: this run reached its ${_turn_cost_ceiling_usd:.2f} per-run spend "
+                        f"Stopped: this turn reached its own ${_turn_cost_ceiling_usd:.2f} per-turn spend "
                         f"ceiling (spent ${_turn_accumulated_cost_usd:.2f} across {iteration} model "
-                        "call(s)) and was halted before making another. Nothing after this point ran."
+                        "call(s)) and was halted before making another call. This ceiling is a per-turn "
+                        "safety limit that resets on your next message — it is separate from your "
+                        "workspace's credit balance, which is unaffected. No top-up is needed; just try again."
                     ),
                     "actions": [],
                     "interventions": [
                         build_intervention(
                             _RUN_COST_CEILING_INTERVENTION_KIND,
-                            "Stopped at run cost ceiling",
+                            "Stopped at per-turn spend ceiling",
                             detail=(
-                                f"Spent ${_turn_accumulated_cost_usd:.2f} of a ${_turn_cost_ceiling_usd:.2f} "
-                                "per-run ceiling across this turn's model calls. Execution was halted before "
-                                "the next call rather than allowed to keep spending."
+                                f"Spent ${_turn_accumulated_cost_usd:.2f} of this turn's ${_turn_cost_ceiling_usd:.2f} "
+                                "per-run ceiling on model calls. This ceiling is per-turn and resets on the next "
+                                "message — it is not the workspace's credit balance, which was not touched. "
+                                "Execution was halted before the next call rather than allowed to keep spending."
                             ),
                             severity="warning",
                             status="failed",
