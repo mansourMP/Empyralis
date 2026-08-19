@@ -20,14 +20,10 @@ import {
   Lock,
   MessageSquare,
   MoreHorizontal,
-  PanelRightClose,
-  PanelRightOpen,
   Pencil,
-  Play,
   Plug,
   Radio,
   RefreshCw,
-  Settings,
   Smartphone,
   Sparkles,
   Square,
@@ -77,7 +73,6 @@ import { AgentSigil, StatusChip, StatusDot } from "./fleet-indicators";
 import { PanelSection, PanelRow, FleetRightPanel, type PanelValueTone } from "./FleetRightPanel";
 import type { SageConversation } from "./SageConsolePanels";
 import type { UsageBucket } from "./fleet-sparkline";
-import { HeaderAction } from "./Breadcrumbs";
 import { channelIconSrc } from "./fleet-icons";
 import { ConnectorPicker } from "./ConnectorPicker";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
@@ -135,17 +130,17 @@ function isChannelConnected(
 type TabId = "general" | "work" | "channels" | "connectors" | "hardware" | "model" | "skills" | "memory" | "tools" | "capabilities" | "chat";
 
 // Single source of id/label/icon truth for every one of the eleven
-// sections — both the permanent top strip (two of these, TOP_TAB_IDS below)
-// and the Configure sheet's GroupedRail groups (the other nine,
-// CONFIGURE_GROUPS below) read labels/icons from here so neither surface
-// can drift from the other. Eleven ids remain valid [tab] route segments
-// regardless of which surface renders them (VALID_TABS, [tab]/page.tsx) —
-// moving a tab between the two surfaces is a rendering change, not a
-// routing one. Declared with "chat" first because TOP_TAB_IDS below renders
-// in THIS array's order — chat is the agent's front door (an agent opens to
-// Chat, not a config screen — see [tab]/page.tsx's own "chat" fallback), so
-// it leads the strip. The Configure sheet ignores this order entirely (each
-// group below picks its own members/grouping explicitly by id).
+// sections — Chat and Work are permanent AgentDetailHeader controls (see
+// that component), the other nine live in the Configure sheet's
+// GroupedRail groups (CONFIGURE_GROUPS below), and both read labels/icons
+// from here so neither surface can drift from the other. Eleven ids remain
+// valid [tab] route segments regardless of which surface renders them
+// (VALID_TABS, [tab]/page.tsx) — moving a tab between surfaces is a
+// rendering change, not a routing one. Declared with "chat" first — chat is
+// the agent's front door (an agent opens to Chat, not a config screen — see
+// [tab]/page.tsx's own "chat" fallback). The Configure sheet ignores this
+// order entirely (each group below picks its own members/grouping
+// explicitly by id).
 //
 // "Overview" is GONE, not renamed (founder, 2026-08-13: "remove overview
 // because it's something that we genuinely don't need inside this agent").
@@ -178,16 +173,16 @@ const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
   { id: "memory", label: "Memory", icon: Brain },
 ];
 
-// The two you actually watch day to day — permanent top strip, Chat leading
-// it as the front door. Everything else moved into the Configure sheet,
-// opened by the trigger button next to this strip; nothing was deleted
-// (founder: "the rest must not be deleted" — true of every section except
-// Overview itself, which the founder separately asked removed outright),
-// it just isn't equal-billing top-level nav anymore (UI-CONTRACT: "a
-// surface must earn its place"). Memory joins Configure here too (founder:
-// "Memory moves inside Configure. It stops being a top-level tab.") — see
-// CONFIGURE_GROUPS below for where it landed.
-const TOP_TAB_IDS = new Set<TabId>(["chat", "work"]);
+// Chat and Work are the two you actually watch day to day — both live as
+// permanent AgentDetailHeader controls now (Chat via the identity link,
+// Work as its own header button), not a tab strip. Everything else moved
+// into the Configure sheet, reached from the header's "⋯" menu; nothing was
+// deleted (founder: "the rest must not be deleted" — true of every section
+// except Overview itself, which the founder separately asked removed
+// outright), it just isn't equal-billing top-level nav anymore
+// (UI-CONTRACT: "a surface must earn its place"). Memory joins Configure
+// here too (founder: "Memory moves inside Configure. It stops being a
+// top-level tab.") — see CONFIGURE_GROUPS below for where it landed.
 
 // Configure sheet groups — BRAIN (what it thinks with) / REACH (how it's
 // reached, and what it can reach out to) / COMPUTE (what it runs on).
@@ -266,45 +261,199 @@ function CostPeriodToggle({ period, onChange }: { period: CostPeriod; onChange: 
   );
 }
 
-// ── Agent chat header — the ONE minimal bar Chat renders instead of the
-// breadcrumb + Chat|Work tabs + Configure button that used to sit above it
-// all at once (founder: "main content page must be empty and just super
-// clean... I don't want it to be developer tool"). Telegram's own shape:
-// back, who you're talking to, one overflow control — never zero
-// wayfinding. Back is a real <Link> to the same destination the old
-// breadcrumb's parent crumb pointed at (the project), never router.back().
-// Sigil + StatusDot are the same pair AgentsList/ProjectAgentsRail already
-// use for "who is this and is it up" — no new avatar system invented here.
-// Work and Configure (what the removed tab strip's own Chat|Work tabs and
-// "Configure" button used to reach directly) plus Sessions (the removed
-// strip's own properties/sessions toggle) all move into the single "⋯"
-// menu — nothing deleted, just no longer permanent header real estate.
-// Reuses DocumentDetailView's own "⋯" menu shell (.fleet-list-row-menu-wrap/
+// ── Owner-only stop control, as a hook — extracted from what used to be a
+// standalone `StopAgentControl` component rendered only on Work's header
+// action slot. Now that ONE header (AgentDetailHeader below) is the frame
+// for every tab, the trigger moved into that header's "⋯" menu, but the
+// state machine (busy/error/confirm) and the confirm dialog markup are
+// unchanged from the original — just no longer bound to a single tab's
+// visible toolbar. kill_switch_gate.py enforces this server-side; this is
+// purely the control surface.
+function useAgentStopControl(
+  workspaceId: string,
+  agentId: string,
+  agent: FleetAgent | null,
+  onChanged?: () => void,
+) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const stopped = agent?.stopped;
+
+  const handleStop = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    const result = await stopFleetAgent(workspaceId, agentId);
+    setBusy(false);
+    if (result.ok) {
+      setConfirmOpen(false);
+      onChanged?.();
+    } else {
+      setError(result.error || "Could not stop this agent.");
+    }
+  }, [workspaceId, agentId, onChanged]);
+
+  const handleResume = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    const result = await resumeFleetAgent(workspaceId, agentId);
+    setBusy(false);
+    if (result.ok) onChanged?.();
+    else setError(result.error || "Could not resume this agent.");
+  }, [workspaceId, agentId, onChanged]);
+
+  // Close the confirm dialog on Escape (own the key so it doesn't bubble to
+  // the page's own "Esc goes back" handler).
+  useEffect(() => {
+    if (!confirmOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) {
+        e.stopPropagation();
+        setConfirmOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [confirmOpen, busy]);
+
+  return {
+    stopped,
+    busy,
+    error,
+    confirmOpen,
+    openConfirm: () => { setError(null); setConfirmOpen(true); },
+    closeConfirm: () => { if (!busy) setConfirmOpen(false); },
+    handleStop,
+    handleResume,
+  };
+}
+
+// Stopping is a real, disruptive action (the agent goes dark on every
+// channel until resumed) so it stays gated behind a confirm dialog — a
+// blurred/dimmed backdrop plus a small centered card, Cancel (neutral) +
+// Stop agent (.fleet-btn--danger, solid red). Unchanged markup from the
+// original standalone control, just rendered from the header now.
+function StopAgentConfirmDialog({
+  agentLabel,
+  busy,
+  error,
+  onCancel,
+  onConfirm,
+}: {
+  agentLabel: string;
+  busy: boolean;
+  error: string | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div className="fleet-detail-backdrop" onClick={onCancel}>
+      <div
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="fleet-stop-agent-title"
+        className="fleet-small-dialog"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="fleet-small-dialog-header">
+          <span id="fleet-stop-agent-title" className="fleet-title">Stop agent</span>
+        </div>
+        <div className="fleet-small-dialog-body">
+          <p style={{ margin: 0, fontSize: 13, color: "var(--text-primary)", lineHeight: 1.5 }}>
+            Are you sure you want to stop <strong>{agentLabel}</strong>?
+            It stops responding on every channel until you resume it.
+          </p>
+          {error && (
+            <p style={{ margin: 0, fontSize: 12, color: "var(--offline-text)" }}>{error}</p>
+          )}
+        </div>
+        <div className="fleet-small-dialog-footer">
+          <button type="button" className="fleet-btn" onClick={onCancel} disabled={busy}>
+            Cancel
+          </button>
+          <button type="button" className="fleet-btn fleet-btn--danger" onClick={onConfirm} disabled={busy}>
+            {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : <Square size={14} strokeWidth={1.75} />}
+            {busy ? "Stopping…" : "Stop agent"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Agent detail header — the ONE minimal bar every tab renders, instead of
+// a breadcrumb + Chat|Work tabs + Configure button + a duplicate "Chat with
+// this agent" button all visible above the content at once (founder: "main
+// content page must be empty and just super clean... I don't want it to be
+// developer tool", said while looking at the Work tab specifically —
+// applied here to every sub-surface, not just Chat, so switching tabs
+// changes the CONTENT, never the chrome). Telegram's own shape: back, who
+// you're talking to, one overflow control — never zero wayfinding. Back is
+// always a real <Link> to the project (the same destination the old
+// breadcrumb's parent crumb pointed at), never router.back() and never a
+// second, tab-dependent destination — CLAUDE.md's "only ONE surface may be
+// the picker at a time" extends here to "only one back path", so every tab
+// shares the identical backHref rather than each inventing its own idea of
+// "up". Sigil + StatusDot are the same pair AgentsList/ProjectAgentsRail
+// already use for "who is this and is it up".
+//
+// The identity block doubles as the way back to Chat from any other tab —
+// the same "tap the contact name to return to the conversation" affordance
+// every chat app uses — so a dedicated "Chat with this agent" button never
+// existed here in the first place rather than being deleted and replaced.
+//
+// Work is a PERSISTENT, visible header control, not a menu item — founder
+// correction, same day: the target user runs agents on behalf of OTHER
+// businesses, and for that person "chat with my own agent" is the least
+// important thing on this screen (the composer's own copy says so —
+// "Your owner test chat... not what a real customer would see"). What that
+// person actually does all day is watch what their agents did for other
+// people across every channel and step in when needed, i.e. Work — so it
+// gets the same permanent-header weight as identity/back, always present
+// regardless of which tab is open, marked current (not hidden) while
+// already on it. Everything genuinely secondary — Sessions, Configure,
+// Stop/Resume (danger-styled, separated by a divider, a real but
+// occasionally-needed control that must never sit beside the primary
+// action people came here for) — stays in the "⋯" menu. Reuses
+// DocumentDetailView's own "⋯" menu shell (.fleet-list-row-menu-wrap/
 // .fleet-list-row-menu/-item, defined once in fleet-theme.css) rather than
 // inventing a fourth dropdown implementation.
-function AgentChatHeader({
+function AgentDetailHeader({
+  workspaceId,
   agentId,
+  agent,
   agentLabel,
   statusTone,
   statusLabel,
+  activeTab,
+  sheetOpen,
   backHref,
   backLabel,
+  chatHref,
   workHref,
   configureHref,
   onOpenSessions,
+  onAgentChanged,
 }: {
+  workspaceId: string;
   agentId: string;
+  agent: FleetAgent | null;
   agentLabel: string;
   statusTone: AgentStatusTone;
   statusLabel: string;
+  activeTab: TabId;
+  sheetOpen: boolean;
   backHref: string;
   backLabel: string;
+  chatHref: string;
   workHref: string;
   configureHref: string;
   onOpenSessions: () => void;
+  onAgentChanged?: () => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const stopControl = useAgentStopControl(workspaceId, agentId, agent, onAgentChanged);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -328,11 +477,8 @@ function AgentChatHeader({
     };
   }, [menuOpen]);
 
-  return (
-    <div className="fleet-chat-header">
-      <Link href={backHref} className="fleet-icon-btn fleet-chat-header-back" aria-label={`Back to ${backLabel}`}>
-        <ArrowLeft size={16} strokeWidth={1.75} />
-      </Link>
+  const identityInner = (
+    <>
       <span className="fleet-chat-header-avatar">
         <AgentSigil seed={agentId} size={26} />
       </span>
@@ -343,6 +489,42 @@ function AgentChatHeader({
           {statusLabel}
         </span>
       </span>
+    </>
+  );
+
+  return (
+    <div className="fleet-chat-header">
+      <Link href={backHref} className="fleet-icon-btn fleet-chat-header-back" aria-label={`Back to ${backLabel}`}>
+        <ArrowLeft size={16} strokeWidth={1.75} />
+      </Link>
+      {/* On Chat itself there's nowhere for the identity to lead — it's
+          already the destination — so it stays static. Everywhere else it's
+          a real link back to Chat (see the block comment above). */}
+      {activeTab === "chat" ? (
+        <span className="fleet-chat-header-identity-wrap">{identityInner}</span>
+      ) : (
+        <Link
+          href={chatHref}
+          replace
+          className="fleet-chat-header-identity-wrap fleet-chat-header-identity-wrap--link"
+          aria-label={`Open chat with ${agentLabel}`}
+        >
+          {identityInner}
+        </Link>
+      )}
+      {/* Persistent, always-visible — not a menu item. See the block
+          comment above for why Work outranks Chat/Sessions/Configure for
+          this product's actual user. Current (not hidden) while already on
+          Work, matching how the identity link behaves on Chat. */}
+      <Link
+        href={workHref}
+        replace
+        className={`fleet-btn fleet-chat-header-work${activeTab === "work" ? " is-active" : ""}`}
+        aria-current={activeTab === "work" ? "page" : undefined}
+      >
+        <Inbox size={14} strokeWidth={1.75} />
+        <span className="fleet-btn-label">Work</span>
+      </Link>
       <div className="fleet-list-row-menu-wrap fleet-chat-header-menu" ref={menuRef}>
         <button
           type="button"
@@ -356,15 +538,6 @@ function AgentChatHeader({
         </button>
         {menuOpen ? (
           <div className="fleet-list-row-menu" role="menu">
-            <Link
-              href={workHref}
-              replace
-              role="menuitem"
-              className="fleet-list-row-menu-item"
-              onClick={() => setMenuOpen(false)}
-            >
-              Work
-            </Link>
             <button
               type="button"
               role="menuitem"
@@ -376,18 +549,61 @@ function AgentChatHeader({
             >
               Sessions
             </button>
-            <Link
-              href={configureHref}
-              replace
-              role="menuitem"
-              className="fleet-list-row-menu-item"
-              onClick={() => setMenuOpen(false)}
-            >
-              Configure
-            </Link>
+            {!sheetOpen && (
+              <Link
+                href={configureHref}
+                replace
+                role="menuitem"
+                className="fleet-list-row-menu-item"
+                onClick={() => setMenuOpen(false)}
+              >
+                Configure
+              </Link>
+            )}
+            <div className="fleet-list-row-menu-divider" />
+            {stopControl.stopped?.active ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="fleet-list-row-menu-item"
+                disabled={stopControl.busy}
+                onClick={() => {
+                  setMenuOpen(false);
+                  stopControl.handleResume();
+                }}
+              >
+                <span>Resume agent</span>
+                {stopControl.stopped.stopped_by_label && (
+                  <span style={{ display: "block", fontSize: 11, color: "var(--text-muted)" }}>
+                    Stopped by {stopControl.stopped.stopped_by_label}
+                  </span>
+                )}
+              </button>
+            ) : (
+              <button
+                type="button"
+                role="menuitem"
+                className="fleet-list-row-menu-item fleet-list-row-menu-item--danger"
+                onClick={() => {
+                  setMenuOpen(false);
+                  stopControl.openConfirm();
+                }}
+              >
+                Stop agent
+              </button>
+            )}
           </div>
         ) : null}
       </div>
+      {stopControl.confirmOpen && (
+        <StopAgentConfirmDialog
+          agentLabel={agentLabel}
+          busy={stopControl.busy}
+          error={stopControl.error}
+          onCancel={stopControl.closeConfirm}
+          onConfirm={stopControl.handleStop}
+        />
+      )}
     </div>
   );
 }
@@ -507,7 +723,7 @@ export function FleetAgentDetail({
   agent: FleetAgent | null;
   /** The URL's own projectId segment — available on first paint,
    *  independent of the agents fetch. Used to build the chat header's back
-   *  link (AgentChatHeader below), same "resolved from the route, never
+   *  link (AgentDetailHeader below), same "resolved from the route, never
    *  from a still-loading fetch" contract projectName already follows. */
   projectId: string;
   /** Resolved project display name — passed by the routed page (from the URL's
@@ -755,51 +971,21 @@ export function FleetAgentDetail({
     [router],
   );
 
-  // Land keyboard/SR focus somewhere deliberate on mount rather than leaving
-  // it on <body> — the active tab pill, since it's already the natural next
-  // stop for arrow/tab navigation. Only on first mount, not on every tab
-  // switch (activeTab already tracks the URL; native click/router
-  // navigation already handles focus for those). Now a <Link> (real anchor),
-  // not a <button> — same "primary navigation is real links" move as the
-  // Configure sheet's GroupedRail items, so the ref target is an anchor.
-  const activeTabRef = useRef<HTMLAnchorElement | null>(null);
-  // DELIBERATELY NO focus() ON MOUNT (2026-08-13). This used to call
-  // activeTabRef.current?.focus() so SPA navigation had a sensible landing
-  // spot instead of <body>. The cost was invisible to whoever wrote it and
-  // very visible to the founder: PROGRAMMATIC focus still satisfies
-  // :focus-visible — the browser cannot tell it apart from keyboard focus —
-  // so globals.css's `:focus-visible { box-shadow: var(--app-shadow-focus) }`
-  // drew a 2px accent ring around the active tab pill on EVERY page load, for
-  // every mouse user, and it stayed there until they happened to click
-  // something else. His words: "I always have this purple thing on the ui."
-  //
-  // Removing it rather than suppressing the ring, because the ring is right:
-  // it is the only thing telling a keyboard user where they are, and killing
-  // the indicator to hide an unwanted trigger trades a visual annoyance for
-  // an accessibility regression.
-  //
-  // The SPA focus-management this was reaching for is genuinely worth having
-  // — but it belongs on the page's own HEADING, not on an interactive
-  // control, which is exactly what TaskDetailView and DocumentDetailView
-  // already do (`headingRef` on an `<h2 tabIndex={-1}>`). A heading focused
-  // programmatically announces the new page without rendering as a focused
-  // button. Breadcrumbs.tsx owns the <h1> here, so wiring that is its job,
-  // not a second heading invented in this file — see the MAN-145 title-dedup
-  // note further down for why a second one must not be added.
-  // Whichever tab is active always scrolls fully into view within the
-  // horizontal strip — not just on first mount. Without this, following a
-  // direct link into a tab past the fold (e.g. Hardware) left the highlight
-  // correct but invisible until the user found the strip scrollable; this
-  // keeps "the highlighted tab" and "the tab you can see" the same claim on
-  // every navigation, mouse or keyboard.
-  useEffect(() => {
-    activeTabRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
-  }, [activeTab]);
+  // The old top tab strip's own focus-ring/scroll-into-view plumbing
+  // (activeTabRef) is gone with the strip itself — AgentDetailHeader has no
+  // equivalent "which pill is active" control to manage focus for; its Work
+  // button and back link are ordinary links, and DELIBERATELY get no
+  // mount-time focus() call for the same :focus-visible reason this file
+  // used to document at length here (founder: "I always have this purple
+  // thing on the ui" — programmatic focus satisfies :focus-visible exactly
+  // like a real keypress, so calling it on mount drew a permanent ring for
+  // every mouse user). The SPA-landing-spot need that focus call was
+  // reaching for belongs on the page's own HEADING instead — TaskDetailView/
+  // DocumentDetailView's `headingRef` + `tabIndex={-1}` pattern —  which is
+  // Breadcrumbs.tsx's job when this route grows one, not this file's.
 
   // Configure sheet's own mount focus — the cold-load-into-a-grouped-tab
-  // case (/agents/{id}/tools) never assigns activeTabRef above (none of the
-  // two top tabs is active), so without this, focus would fall through to
-  // <body> instead of landing somewhere deliberate inside the sheet.
+  // case (/agents/{id}/tools) needs somewhere deliberate to land focus,
   const sheetRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (sheetOpen) sheetRef.current?.focus();
@@ -1022,110 +1208,32 @@ export function FleetAgentDetail({
       <Suspense fallback={null}>
         <ChatThreadSearchParamBridge onChange={onThreadParamChange} />
       </Suspense>
-      {/* Chat gets ONE minimal Telegram-style bar (AgentChatHeader below) —
-          not this tab strip, not the breadcrumb topbar above it (suppressed
-          for this exact route by FleetContentFrame). Founder: "main content
-          page must be empty and just super clean... I don't want it to be
-          developer tool" — naming the breadcrumb, the Chat|Work tabs, and a
-          separate Configure button as the three things visible at once
-          above an otherwise-empty chat. Work (and the nine Configure
-          sections reached from it) keep this tab strip exactly as it was;
-          nothing here changed for them. */}
-      {activeTab === "chat" ? (
-        <AgentChatHeader
-          agentId={agentId}
-          agentLabel={agent?.label || "Unnamed agent"}
-          statusTone={status.tone}
-          statusLabel={status.label}
-          backHref={`/w/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(projectId)}`}
-          backLabel={projectName || "Project"}
-          workHref={tabHref("work")}
-          configureHref={tabHref(sheetOpen ? activeTab : CONFIGURE_GROUPS[0].tabs[0])}
-          onOpenSessions={() => setPropertiesOpen(true)}
-        />
-      ) : (
-        // Tabs live at the TOP, under the breadcrumb — one navigation only.
-        // Sessions opens as a floating overlay (FleetRightPanel) via the
-        // toggle below — the SAME pattern the project/agents LIST pages use
-        // for their own Properties toggle (FleetToolbar's panelOpen), not a
-        // second implementation. This used to be a permanent collapsible
-        // RIGHT RAIL, a real flex sibling that reserved width whenever
-        // expanded — the founder's direction was explicit that the panel
-        // "must not be something that is merged on the user interface, it
-        // just should be something that appears just as a node", matching
-        // the reference already shipped on the project detail page.
-        <div className="fleet-detail-tabbar">
-          {/* Wrap is the non-scrolling fade anchor — .fleet-detail-toptabs
-              itself is the horizontal scroller (overflow-x:auto). The old
-              fade lived on .fleet-detail-tabbar::after (the WHOLE bar,
-              properties-toggle icon included), so on a real 375px phone it
-              sat on top of that icon button instead of the actual cut-off
-              edge of Hardware/Memory — the tester saw no fade at all where
-              the tabs cut off, which read as "no scroll affordance". Anchoring
-              it to this wrap instead puts it exactly at the scroller's own
-              right edge, before the toggle button starts. */}
-          <div className="fleet-detail-toptabs-wrap">
-            <nav className="fleet-detail-toptabs" aria-label="Agent sections">
-              {/* The two you actually watch day to day — TOP_TAB_IDS. Real
-                  <Link>s (not onClick buttons) with `replace` so cmd-click/
-                  middle-click open a new tab while ordinary clicks keep the
-                  existing no-history-entry-per-tab behavior (router.replace,
-                  same as onTabChange always did). */}
-              {TABS.filter((tab) => TOP_TAB_IDS.has(tab.id)).map((tab) => {
-                const Icon = tab.icon;
-                const isActive = activeTab === tab.id;
-                return (
-                  <Link
-                    key={tab.id}
-                    href={tabHref(tab.id)}
-                    replace
-                    ref={isActive ? activeTabRef : undefined}
-                    className={`fleet-detail-toptab${isActive ? " is-active" : ""}`}
-                    aria-current={isActive ? "page" : undefined}
-                  >
-                    <Icon size={15} strokeWidth={1.75} />
-                    <span>{tab.label}</span>
-                  </Link>
-                );
-              })}
-            </nav>
-          </div>
-          {/* Opens the Configure sheet (below) on the other nine sections —
-              General, Model, Capabilities, Skills, Memory, Channels,
-              Connectors, Tools, Hardware — grouped Brain/Reach/Compute via
-              the same GroupedRail Settings uses. Real link: closed, it goes
-              to the first Brain item (General); already open, it points at
-              whatever section is active, so a second click/cmd-click is a
-              same-URL no-op rather than a jump back to General. */}
-          <Link
-            href={tabHref(sheetOpen ? activeTab : CONFIGURE_GROUPS[0].tabs[0])}
-            replace
-            className="fleet-btn agent-configure-trigger"
-            aria-haspopup="dialog"
-            aria-expanded={sheetOpen}
-          >
-            <Settings size={14} strokeWidth={1.75} />
-            <span className="fleet-btn-label">Configure</span>
-          </Link>
-          {/* Same is-active/aria-pressed idiom as FleetToolbar's own list-page
-              Properties toggle — a neutral filled state while open, never an
-              accent (this is a view toggle, not a primary action). Labelled
-              "Sessions" now, not "Properties" — Properties is still the top
-              region of what opens, but Sessions is the headline reason to
-              open it (Part 2: "instead of this right panel we must have
-              sessions"). */}
-          <button
-            type="button"
-            className={`fleet-icon-btn fleet-detail-properties-toggle${propertiesOpen ? " is-active" : ""}`}
-            onClick={() => setPropertiesOpen((v) => !v)}
-            aria-label="Sessions"
-            aria-pressed={propertiesOpen}
-            title="Sessions"
-          >
-            {propertiesOpen ? <PanelRightClose size={16} strokeWidth={1.75} /> : <PanelRightOpen size={16} strokeWidth={1.75} />}
-          </button>
-        </div>
-      )}
+      {/* ONE header, every tab — not a breadcrumb, not a Chat|Work tab
+          strip, not a separate Configure button, and not a second "Chat
+          with this agent" control. The shell's own breadcrumb topbar is
+          suppressed for every route under an agent's detail surface (see
+          FleetContentFrame.tsx's AGENT_DETAIL_ROUTE), so this is the page's
+          only header, not a second one stacked above an emptied-out first.
+          See AgentDetailHeader's own block comment for why Work is a
+          persistent header control while Sessions/Configure/Stop live in
+          the "⋯" menu. */}
+      <AgentDetailHeader
+        workspaceId={workspaceId}
+        agentId={agentId}
+        agent={agent}
+        agentLabel={agent?.label || "Unnamed agent"}
+        statusTone={status.tone}
+        statusLabel={status.label}
+        activeTab={activeTab}
+        sheetOpen={sheetOpen}
+        backHref={`/w/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(projectId)}`}
+        backLabel={projectName || "Project"}
+        chatHref={tabHref("chat")}
+        workHref={tabHref("work")}
+        configureHref={tabHref(sheetOpen ? activeTab : CONFIGURE_GROUPS[0].tabs[0])}
+        onOpenSessions={() => setPropertiesOpen(true)}
+        onAgentChanged={onRenamed}
+      />
 
       {/* The relative anchor the Sessions overlay below floats against —
           .fleet-detail-body is this container's only normal-flow child and
@@ -1251,41 +1359,14 @@ export function FleetAgentDetail({
     </div>
   ) : null;
 
+  // No HeaderAction portal here anymore — that slot lives in the shell's
+  // breadcrumb topbar (FleetContentFrame.tsx), which is now suppressed for
+  // every route under an agent's detail surface (AGENT_DETAIL_ROUTE). Both
+  // controls that used to portal into it (Stop agent, "Chat with this
+  // agent") moved into AgentDetailHeader itself — Stop into the "⋯" menu,
+  // Chat via the identity link — so there is nothing left to portal.
   return (
     <>
-      {activeTab === "work" && (
-        <HeaderAction>
-          {/* Wrapped (not just two bare portaled children) so the mobile
-              overlap fix below can scope its icon-only collapse to exactly
-              these two controls — .fleet-topbar-action is a shared portal
-              slot every fleet page reuses (e.g. AgentsList's "+ New agent"),
-              so a bare `.fleet-topbar-action .fleet-btn` rule would have
-              iconified those too. See UI-CONTRACT §4 + fleet-theme.css's
-              .fleet-detail-header-actions block for why this exists at all:
-              two full-label buttons here left the mobile breadcrumb only
-              ~33px wide, so its non-shrinking back-link overflowed straight
-              under "Stop agent" — cutting "‹ Drift" to "‹ Dri" on every tab. */}
-          <div className="fleet-detail-header-actions">
-            <StopAgentControl workspaceId={workspaceId} agentId={agentId} agent={agent} onChanged={onRenamed} />
-            {/* The one accent-carrying control on Work — nothing else in
-                that view claims it: StopAgentControl (above) is
-                plain .fleet-btn (its own confirm dialog is the one place
-                that gets a color, and it's --danger, a different hue for a
-                different signal), and WorkTab's own rows use "accent" only
-                as a neutral status tone, never a button. --accent-fill
-                (solid violet, matching "New agent"/"New project") rather
-                than the quiet --accent hairline: this is the single primary
-                action of the page — the thing every other row and panel
-                exists to lead to — so it gets the same weight those other
-                top-line creation/connection CTAs get, not the softer
-                treatment reserved for routine actions like Save/Invite. */}
-            <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => onChat(agentId)}>
-              <MessageSquare size={14} strokeWidth={1.75} />
-              <span className="fleet-btn-label">Chat with this agent</span>
-            </button>
-          </div>
-        </HeaderAction>
-      )}
       <div
         className="fleet-detail fleet-detail--page"
         aria-label={`${agent?.label || "Agent"} details`}
@@ -1295,133 +1376,6 @@ export function FleetAgentDetail({
       </div>
       {configureSheet}
     </>
-  );
-}
-
-// Owner-only stop control — the header-level "Stop agent" button, and once
-// stopped, an honest chip naming who stopped it (never a bare "Stopped").
-// kill_switch_gate.py enforces this on the backend before any turn runs;
-// this is purely the control surface.
-//
-// Stopping is a real, disruptive action (the agent goes dark on every
-// channel until resumed) so it's gated behind a confirm dialog — a blurred/
-// dimmed backdrop (.fleet-detail-backdrop, the same primitive the channel-
-// connect banner below uses) plus a small centered card (.fleet-small-dialog),
-// Cancel (neutral) + Stop agent (.fleet-btn--danger, solid red). Resume is
-// affirmative, not destructive — it stays a plain one-click button, no confirm.
-function StopAgentControl({
-  workspaceId, agentId, agent, onChanged,
-}: { workspaceId: string; agentId: string; agent: FleetAgent | null; onChanged?: () => void }) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  const stopped = agent?.stopped;
-
-  async function handleStop() {
-    setBusy(true);
-    setError(null);
-    const result = await stopFleetAgent(workspaceId, agentId);
-    setBusy(false);
-    if (result.ok) {
-      setConfirmOpen(false);
-      onChanged?.();
-    } else {
-      setError(result.error || "Could not stop this agent.");
-    }
-  }
-
-  async function handleResume() {
-    setBusy(true);
-    setError(null);
-    const result = await resumeFleetAgent(workspaceId, agentId);
-    setBusy(false);
-    if (result.ok) onChanged?.();
-    else setError(result.error || "Could not resume this agent.");
-  }
-
-  // Close the confirm dialog on Escape (own the key so it doesn't bubble to
-  // the page's own "Esc goes back" handler — same reasoning as the channel
-  // banner below).
-  useEffect(() => {
-    if (!confirmOpen) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) {
-        e.stopPropagation();
-        setConfirmOpen(false);
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [confirmOpen, busy]);
-
-  if (stopped?.active) {
-    return (
-      <div className="fleet-stop-control">
-        <span className="fleet-stop-chip" title={stopped.reason || undefined}>
-          <Square size={12} strokeWidth={2} />
-          <span className="fleet-btn-label">Stopped by {stopped.stopped_by_label || "an owner"}</span>
-        </span>
-        <button type="button" className="fleet-btn" disabled={busy} onClick={handleResume} aria-label="Resume agent" title="Resume agent">
-          {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : <Play size={14} strokeWidth={1.75} />}
-          <span className="fleet-btn-label">Resume</span>
-        </button>
-        {error && <span className="fleet-stop-error">{error}</span>}
-      </div>
-    );
-  }
-
-  return (
-    <div className="fleet-stop-control">
-      <button
-        type="button"
-        className="fleet-btn"
-        disabled={busy}
-        onClick={() => { setError(null); setConfirmOpen(true); }}
-        aria-label="Stop agent"
-        title="Stop agent"
-      >
-        <Square size={14} strokeWidth={1.75} />
-        <span className="fleet-btn-label">Stop agent</span>
-      </button>
-      {error && !confirmOpen && <span className="fleet-stop-error">{error}</span>}
-
-      {confirmOpen && (
-        <div
-          className="fleet-detail-backdrop"
-          onClick={() => { if (!busy) setConfirmOpen(false); }}
-        >
-          <div
-            role="alertdialog"
-            aria-modal="true"
-            aria-labelledby="fleet-stop-agent-title"
-            className="fleet-small-dialog"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="fleet-small-dialog-header">
-              <span id="fleet-stop-agent-title" className="fleet-title">Stop agent</span>
-            </div>
-            <div className="fleet-small-dialog-body">
-              <p style={{ margin: 0, fontSize: 13, color: "var(--text-primary)", lineHeight: 1.5 }}>
-                Are you sure you want to stop <strong>{agent?.label || "this agent"}</strong>?
-                It stops responding on every channel until you resume it.
-              </p>
-              {error && (
-                <p style={{ margin: 0, fontSize: 12, color: "var(--offline-text)" }}>{error}</p>
-              )}
-            </div>
-            <div className="fleet-small-dialog-footer">
-              <button type="button" className="fleet-btn" onClick={() => setConfirmOpen(false)} disabled={busy}>
-                Cancel
-              </button>
-              <button type="button" className="fleet-btn fleet-btn--danger" onClick={handleStop} disabled={busy}>
-                {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : <Square size={14} strokeWidth={1.75} />}
-                {busy ? "Stopping…" : "Stop agent"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
   );
 }
 

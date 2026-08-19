@@ -144,27 +144,10 @@
   gap: 8px;
 }
 
-/* The agent-detail page's own two header actions (Stop/Resume + Chat),
-   wrapped so the mobile icon-only collapse below (UI Contract §4 fix) can
-   target JUST these two controls — .fleet-topbar-action is a shared portal
-   slot every fleet page reuses (e.g. AgentsList's "+ New agent"), so
-   scoping the collapse to the slot itself would have iconified those other
-   pages' buttons too. Plain flex row on desktop/tablet, identical to how
-   these two rendered as bare portal children before this wrapper existed. */
-.fleet-detail-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-/* Owner stop control — the header-level "Stop agent" button / "Stopped by
-   X" chip, portaled into .fleet-topbar-action alongside "Chat with this
-   agent". */
-.fleet-stop-control {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
+/* "Stopped by X" chip — also used standalone by EmergencyStopSection.tsx.
+   The agent-detail page's own Stop/Resume control lives in
+   AgentDetailHeader's "⋯" menu now (a plain menu item + confirm dialog,
+   not this chip) — see that component and StopAgentConfirmDialog. */
 .fleet-stop-chip {
   display: inline-flex;
   align-items: center;
@@ -178,11 +161,6 @@
   font-size: 13px;
   font-weight: var(--weight-medium);
   white-space: nowrap;
-}
-.fleet-stop-error {
-  font-size: 12px;
-  color: var(--offline-text);
-  max-width: 220px;
 }
 .fleet-shell-scroll {
   flex: 1;
@@ -3911,19 +3889,20 @@ a.fleet-breadcrumb:hover {
   animation: fleet-modal-in var(--dur-2) var(--ease-out);
 }
 
-/* ── Agent detail: tabs on TOP, one navigation (contract: never a right-panel
-   tab list). Below the tab bar sits the tab content, full width, with the
+/* ── Agent detail: ONE header (AgentDetailHeader below) on every tab —
+   never a right-panel tab list, never a second breadcrumb stacked above
+   it. Below the header sits the tab content, full width, with the
    Properties panel floating over it as a closed-by-default overlay (see
    .fleet-detail-columns below). ───────────────────────────────────────── */
 
-/* ── Chat's own minimal header (2026-08-16) — Telegram's shape: back, who
-   you're talking to, one overflow control. Replaces .fleet-detail-tabbar
-   (below) ONLY on the Chat tab; Work and the Configure sheet keep that bar
-   unchanged. Same flex-shrink:0/non-scrolling contract as .fleet-detail-
-   tabbar, so it never scrolls away with the transcript beneath it. The
-   global breadcrumb topbar is suppressed for this one route in
-   FleetContentFrame.tsx, so this is the page's only header, not a second
-   one stacked under an emptied-out first. */
+/* ── The agent detail header (2026-08-19, generalized from a Chat-only bar
+   introduced 2026-08-16) — Telegram's shape: back, who you're talking to,
+   one overflow control, never zero wayfinding. Same flex-shrink:0/non-
+   scrolling contract on every tab, so it never scrolls away with the
+   content beneath it. The global breadcrumb topbar is suppressed for
+   every route under an agent's detail surface in FleetContentFrame.tsx
+   (AGENT_DETAIL_ROUTE), so this is the page's only header on every tab,
+   not a second one stacked under an emptied-out first. */
 .fleet-chat-header {
   display: flex;
   align-items: center;
@@ -3932,6 +3911,29 @@ a.fleet-breadcrumb:hover {
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-card);
+}
+/* Groups the avatar + name/status pair so both can share one back-to-Chat
+   <Link> on every non-Chat tab (the "tap the contact to return to the
+   conversation" affordance — see AgentDetailHeader's own comment) without
+   disturbing .fleet-chat-header's own gap between back-link / this group /
+   the "⋯" menu. On Chat itself this renders as a plain non-interactive
+   <span> instead (nowhere to link to — you're already there), so the
+   --link modifier only ever applies where it's a real destination. */
+.fleet-chat-header-identity-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.fleet-chat-header-identity-wrap--link {
+  text-decoration: none;
+  color: inherit;
+  border-radius: var(--radius-control);
+  margin: -4px -6px;
+  padding: 4px 6px;
+}
+.fleet-chat-header-identity-wrap--link:hover {
+  background: var(--bg-card-hover);
 }
 .fleet-chat-header-avatar {
   display: inline-flex;
@@ -3965,78 +3967,27 @@ a.fleet-breadcrumb:hover {
   font-size: 12px;
   color: var(--text-secondary);
 }
-.fleet-chat-header-menu {
+/* Work — a persistent header control (not a menu item), so it carries the
+   margin-left:auto that pushes it plus the "⋯" menu right after it to the
+   far edge; .fleet-chat-header-menu no longer needs its own auto-margin
+   since it directly follows this in DOM order. Sized down from .fleet-btn's
+   default padding to fit this compact header row; "current" (not hidden)
+   while already on Work gets the same quiet is-active fill GroupedRail's
+   own active row uses — never an accent fill, which stays reserved for
+   Chat's send button, the one primary action in this frame. */
+.fleet-chat-header-work {
   margin-left: auto;
-}
-
-.fleet-detail-tabbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-card);
-}
-
-/* Non-scrolling fade anchor — see the fade rule itself (mobile block below)
-   for why this wrap exists instead of putting ::after directly on
-   .fleet-detail-tabbar: that anchored the fade to the WHOLE bar's right
-   edge, which is the properties-toggle icon, not the scroller's own cut-off
-   edge. This wrap is the scroller's non-scrolling frame, so a fade anchored
-   to ITS edges stays visually fixed at the true cut-off point while the
-   tabs scroll underneath. */
-.fleet-detail-toptabs-wrap {
-  position: relative;
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-}
-
-.fleet-detail-toptabs {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  width: 100%;
-  min-width: 0;
-  overflow-x: auto;
-  scrollbar-width: none;
-  -webkit-overflow-scrolling: touch;
-  scroll-snap-type: x proximity;
-  touch-action: pan-x;
-}
-.fleet-detail-toptabs::-webkit-scrollbar { display: none; }
-
-.fleet-detail-toptab {
-  scroll-snap-align: start;
-  /* Explicit native-chrome reset (same fix as .fleet-badge--action above) —
-     a bare <button> keeps `appearance: auto` unless told otherwise, and
-     Safari's heuristic for suppressing the native pushbutton bevel is far
-     less aggressive than Chromium's: border:0/background:transparent alone
-     flattens it in Chrome but can still leave a raised/gradient "3-D" pill
-     in Safari. appearance:none plus explicit box-shadow/outline:none makes
-     this control flat on every engine, not just the one this was tested in. */
-  -webkit-appearance: none;
-  appearance: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  height: 32px;
-  padding: 0 11px;
-  border: none;
-  border-radius: var(--radius-control);
-  background: transparent;
-  box-shadow: none;
-  outline: none;
-  color: var(--text-secondary);
-  font-family: inherit;
+  padding: 5px 10px;
   font-size: 13px;
-  font-weight: 400;
-  white-space: nowrap;
-  cursor: pointer;
 }
-.fleet-detail-toptab:hover { background: var(--rail-active); color: var(--text-primary); }
-.fleet-detail-toptab.is-active { background: var(--rail-active); color: var(--text-primary); font-weight: 500; }
+.fleet-chat-header-work.is-active {
+  background: var(--rail-active);
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+.fleet-chat-header-menu {
+  margin-left: 0;
+}
 
 /* The relative anchor the Properties overlay floats against — same contract
    as the list pages' .fleet-content-with-panel (see that rule's own comment
@@ -4052,16 +4003,6 @@ a.fleet-breadcrumb:hover {
   flex: 1;
   min-height: 0;
   overflow: hidden;
-}
-
-/* Properties overlay toggle — lives in the tab bar (right-aligned), the
-   SAME is-active/aria-pressed idiom as FleetToolbar's own list-page
-   Properties toggle (.fleet-icon-btn.is-active above). Opens/closes the
-   floating Properties card for every tab, at every width — never a
-   permanent column. */
-.fleet-detail-properties-toggle {
-  margin-left: auto;
-  flex-shrink: 0;
 }
 
 /* Compound on purpose. The base `.fleet-detail-close` below declares
@@ -8563,73 +8504,20 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   }
 }
 
-/* ── Agent detail (<=768px) — Truth Map mobile pass, 2026-07-11 ────────────
-   .fleet-detail-toptabs already has overflow-x:auto (container-scoped
-   scroll, no page-level fallback needed) — this just adds the fade
-   affordance and widens the touch targets to match. Properties is a
-   floating overlay at every width (see .fleet-detail-columns/.fleet-detail-
-   properties-toggle above), so there is no permanent column to stack or
-   collapse here — .fleet-detail-body just keeps its own desktop scroll
-   behavior, same as the list pages' .fleet-content-main. */
+/* ── Agent detail (<=768px) — Truth Map mobile pass, 2026-07-11. The old
+   tab-strip-specific fade/touch-target rules that used to live here
+   (.fleet-detail-toptabs-wrap fade, .fleet-detail-header-actions icon-only
+   collapse) are gone with the strip and the breadcrumb-topbar action slot
+   both — AgentDetailHeader is one flex row (back, identity, Work, "⋯")
+   that already fits a 375px viewport without a mobile-specific override;
+   .fleet-detail-body just keeps its own desktop scroll behavior, same as
+   the list pages' .fleet-content-main. */
 @media (max-width: 768px) {
   .fleet-detail-body {
     padding: 16px;
   }
   .fleet-detail-body > * {
     max-width: 100%;
-  }
-
-  /* Blocker: "Stop agent" + "Chat with this agent" together ran ~295px wide
-     — on a 375px phone that alone forced the breadcrumb's flex:1/min-width:0
-     column down to ~33px, and its non-shrinking back-link (see
-     .fleet-breadcrumb-mobile-back above) overflowed straight underneath
-     them, cutting "‹ Drift" to "‹ Dri" on every tab. Collapsing both to
-     icon-only (34px square, UI Contract §2) here — labels still exist in
-     the DOM/aria for a11y (aria-label/title), just visually hidden — frees
-     enough width that the breadcrumb never has to fight for room again. */
-  .fleet-detail-header-actions .fleet-btn-label {
-    display: none;
-  }
-  .fleet-detail-header-actions .fleet-btn,
-  .fleet-detail-header-actions .fleet-stop-chip {
-    width: 34px;
-    padding: 0;
-    justify-content: center;
-  }
-
-  .fleet-detail-tabbar {
-    padding-right: 0;
-  }
-  /* Static fade cue rather than a scroll-position-tracked one — sufficient
-     at "nothing broken" fidelity and needs no JS. Anchored to the WRAP
-     (.fleet-detail-toptabs-wrap, a non-scrolling frame — see its own comment
-     above), not .fleet-detail-tabbar itself: the bar's right edge is the
-     properties-toggle icon button, a fixed control that sits AFTER this
-     scroller, so a fade anchored there used to sit on top of that icon
-     instead of the tab strip's real cut-off edge — invisible where it
-     actually needed to read as "more tabs this way". Both edges fade (not
-     just trailing) since the strip scrolls in either direction once past
-     the first screenful. */
-  .fleet-detail-toptabs-wrap::before,
-  .fleet-detail-toptabs-wrap::after {
-    content: "";
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    width: 24px;
-    pointer-events: none;
-    z-index: 1;
-  }
-  .fleet-detail-toptabs-wrap::before {
-    left: 0;
-    background: linear-gradient(to left, transparent, var(--bg-card));
-  }
-  .fleet-detail-toptabs-wrap::after {
-    right: 0;
-    background: linear-gradient(to right, transparent, var(--bg-card));
-  }
-  .fleet-detail-toptab {
-    height: 44px;
   }
 
   /* Work tab: two read-only panes (conversation list + selected transcript),
@@ -9017,12 +8905,11 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
    viewport, so
    whichever ones don't fit need SOME cue that there's more to the right —
    otherwise a column with no cards in it (Blocked, say, at zero tasks) is
-   indistinguishable from a column that doesn't exist. Same pattern and same
-   reasoning as .fleet-detail-toptabs-wrap's mobile fade elsewhere in this
-   file: a static cue, not scroll-position-tracked, sufficient at "nothing
-   silently missing" fidelity and needs no JS. Only the trailing edge fades —
-   a leading-edge fade too (like the toptabs case) would falsely suggest more
-   content to the LEFT of Backlog, which never exists. */
+   indistinguishable from a column that doesn't exist. A static cue, not
+   scroll-position-tracked, sufficient at "nothing silently missing"
+   fidelity and needs no JS. Only the trailing edge fades — a leading-edge
+   fade too would falsely suggest more content to the LEFT of Backlog,
+   which never exists. */
 .fleet-content-main--board::after {
   content: "";
   position: absolute;

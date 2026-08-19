@@ -135,14 +135,3 @@
   max-width: var(--content-max);
   margin-inline: auto;
 }
-
-/* Trigger button in the top-tab strip — plain .fleet-btn plus a quiet
-   "this is currently open" state, same neutral-wash language as every
-   other active-state in this file (.fleet-detail-toptab.is-active,
-   .grouped-rail-item.is-active) — never --accent, which stays reserved for
-   the single primary action per view. */
-.agent-configure-trigger[aria-expanded="true"] {
-  background: var(--rail-active);
-  border-color: var(--border-strong);
-  color: var(--text-primary);
-}
