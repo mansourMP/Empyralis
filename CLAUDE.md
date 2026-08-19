@@ -601,6 +601,31 @@ row. **"Built, tested, and never wired" has a schema-shaped variant** — when
 you find a migration, grep for the code that writes the columns before
 assuming the feature exists.
 
+**The silent-zero-rows shape above is now a structural guard, not just a
+warning in this file.** `server_modules/tests/test_rls_dml_drift.py`
+(2026-08-18) scans `CONTROL_PLANE_SCHEMA_SQL` plus the rest of
+`ensure_control_plane_schema()`'s body in `control_plane_repository.py`
+(the boot-schema surface DEPLOY-RUNBOOK.md step 3b runs as the
+non-superuser `empyralis_app` role) and every `migrations/*.sql` file, for
+any line starting `UPDATE `/`INSERT INTO`/`DELETE FROM` against a table
+carrying FORCE ROW LEVEL SECURITY — parsed independently from
+`migrations/enable_rls.sql`, never from either scanned source. Building it
+turned up a fourth live instance (`project_tasks` status-vocabulary DO
+block, same file) and five historical migration-file offenders; the
+fourth is fixed (`SET LOCAL app.rls_bypass = 'on'`, same pattern as the
+already-fixed `add_task_sequence_numbers.sql`), two are self-detecting
+(a later `CREATE UNIQUE INDEX` would fail loudly on any real duplicate),
+one is a byte-for-byte twin of instance 2's own verdict, and two
+(`stage_4b_agent_isolation.sql`'s `hardware_access`/`subagents_enabled`
+backfill, `unify_fleet_tool_toggle_ids.sql`'s key-rename backfill) are
+flagged, not fixed — one-time historical migrations this pass had no
+production access to verify, spun off as a separate task. Instance 2
+(`workspace_agent_installs` label dedupe) stays in the allowlist exactly as
+before, unfixed pending the same product decision. Three canaries (empty
+`enable_rls.sql` parse, missing boot-schema block, empty `migrations/`
+directory) each raise loudly rather than let the scan enforce nothing —
+verified live by breaking each on purpose and watching it fail.
+
 **A capability branch is a live-path branch, and the OWNER can be the one
 locked out.** The sharpest instance so far, 2026-08-12. `DocumentDetailView`
 rendered `canWrite ? <textarea> : <MarkdownLite>` — so a document's own
@@ -908,6 +933,28 @@ charge just as happily as by a correct one, so
 that the debit primitive has exactly one call site and that the two seam
 call sites are mutually exclusive by control flow — behavioural tests can
 only cover the engines that exist today.
+
+**The billing half of that gap is fixed. A SIBLING gap at the same seam is
+not, and is why the legacy engine still cannot be deleted.** Found the same
+day (2026-08-09, `investigate/single-turn-engine`, folded in here rather
+than kept as its own branch): `direct_chat_generation_service.py`'s
+`persist_direct_chat_memory_best_effort`/`persist_direct_chat_transcript_
+best_effort` — fact extraction, the daily-log summary, the session
+transcript — are called only from that module, never from
+`sage_agent_runtime_service.py`. Grepped as of 2026-08-19: still zero call
+sites for either function outside `direct_chat_generation_service.py`. So a
+turn on the SDK engine (the production default) writes thread history via
+`thread_service.record_user_turn`/`record_assistant_turn` — which DOES run
+on both engines, do not mistake it for the memory pipeline — but never runs
+the memory pipeline itself. "Empyralis is the owned-context layer" is not
+yet true on the engine that actually runs. Also still open, same grep pass:
+`reasoning_effort` has zero references in `openai_compat_adapter.py`, so it
+is silently dropped for every adapter-routed provider (OpenAI/Gemini/xAI) on
+the SDK engine — the Fleet Model tab's reasoning-effort picker is a dead
+control for those agents; the legacy engine honours it natively. Move both
+onto the shared post-loop path before ever deleting legacy —
+`EMPYRALIS_FORCE_LEGACY_ENGINE` (MAN-312) and the per-agent legacy pin exist
+precisely because legacy is still the only engine that carries these two.
 
 **Stale string matching.** An error bucket matched `"ai limit"`; the message
 was reworded to `"AI usage limit reached"` and users got a generic "Something
@@ -1495,6 +1542,62 @@ that pass only because the developer's real vault key file exists — on a
 clean box they hit `runtime_kernel_unavailable`. Left out of the determinism
 fix deliberately so a pollution fix does not arrive disguised as a stability
 one; it needs its own change and its own full-suite measurement.
+
+**`setup_kind="oauth_or_app_install"` means TWO doors, and treating it as
+one suppressed a channel that works.** Found and fixed 2026-08-19, folded in
+from `feat/channel-connect-ux` (branch deleted — its own UI component,
+`ChannelGroupPolicyPanel.tsx`, was superseded by the later card-grid/doors
+rewrite documented elsewhere in this file, but this backend finding was
+still real and undocumented anywhere). `connection_catalog_service.
+_oauth_setup_unconfigured` gated EVERY connection carrying that setup_kind
+on `oauth_connection_configured()`, i.e. on a deployment-level OAuth
+client_id/secret being set — correct for a connection whose only real door
+IS OAuth, wrong for one that also has a genuine non-OAuth door. `discord_bot`
+is exactly that case: its real setup path (`FleetAgentDetail.tsx`'s
+`byo_bot` flow, a pasted bot token) needs no OAuth app at all, and Discord is
+not one of the self-configuring dynamic-client-registration providers — so
+on any deployment without `DISCORD_CLIENT_ID`/`DISCORD_CLIENT_SECRET` set,
+`setup_available` was forced `False` and the UI told the customer OAuth
+credentials were missing, for a door that was never going to use them.
+`github` carries the identical `setup_kind` label but has NO app_install
+path actually wired anywhere in this codebase (grepped: zero `GITHUB_APP_*`
+references) — OAuth is genuinely its only door today, so it must stay
+gated, which is why the fix is a per-connection exemption
+(`_OAUTH_OR_APP_INSTALL_WITH_NO_OAUTH_ALTERNATE_DOOR = {"discord_bot"}`),
+never a blanket removal of `oauth_or_app_install` from the gated set — that
+would have traded one silent-unavailability bug for a silent
+looks-available-but-isn't one on GitHub. Verified red-before/green-after
+with two new tests in `test_connection_catalog_service.py`.
+
+Same pass, still open, NOT fixed (a display gap, not a suppression bug):
+`routes_fleet.fleet_agent_channels` computed `health_status`/`display_state`/
+`last_error` via `connection_catalog_service.status_items()` but never
+forwarded them to the frontend — so even a channel correctly reported as
+unavailable gave the customer no reason why. Now forwarded as
+`healthStatus`/`displayState`/`lastError` (purely additive fields; no
+existing consumer read the missing ones, so nothing regressed by adding
+them) — a frontend consumer showing the reason on the channel card is a
+separate, unbuilt follow-up.
+
+Also still open, unverified against the box mechanism (recorded, not
+independently re-derived this pass): a gateway-published health snapshot
+(`personal_channel_health` in registration metadata, written BY the box)
+goes stale the moment the gateway itself goes offline and keeps asserting
+whatever it last said — any reader must check the gateway is online FIRST
+or it can paint "Connected" over a machine that's down. Same class of
+dishonesty CLAUDE.md's outcome-honesty law names elsewhere, just pointed at
+a channel pill instead of a mutation result.
+
+Same source branch, one more worth keeping so nobody "fixes" it back:
+**Apple licenses no Messages icon to third parties, so `imessage.svg` being a
+neutral monogram (not Apple's speech-bubble mark) is deliberate, not a
+missing asset.** Their guidelines forbid using any Apple-owned icon without
+an express written trademark licence and forbid anything "confusingly
+similar" — their only published Messages brand assets belong to the separate
+Apple Messages for Business programme, which this product's personal-account
+iMessage bridge is not. Confirmed still true on main: `frontend/public/
+brand-assets/channels/imessage.svg` is a plain green rounded-square glyph,
+not Apple's bubble.
 
 **Branches whose work gets redone on main.** Nine branches were found with
 real commits, all superseded by the same fixes re-implemented directly on
@@ -2832,6 +2935,28 @@ runtime now refuses to boot a dev/test/local process without it
 set it by copying a value you found somewhere; if you don't know what it
 should be, ask rather than guess.
 
+**On a truly empty database, `migrations/*.sql` alone will not bootstrap —
+most base tables don't come from there.** `users`, `tenants`, `projects`,
+`workspace_agent_installs`, and more are created lazily by
+`_ensure_*_tables()` helpers scattered across `server_modules/*.py`
+(`control_plane_repository.py`, `auth.py`, ...) the first time request-path
+code touches them — not by anything under `migrations/`, which is mostly
+ALTERs and RLS policies layered on top of tables it assumes already exist.
+So on a brand-new database, `migrations/enable_rls.sql` (and everything
+alphabetically after it that calls the `empyralis_rls_scope_match()`
+function it defines) fails outright, and everything before it that touches
+`tenants`/`projects`/etc. fails too, because nothing has created them yet.
+The working order is: **boot once (it will crash in
+`preflight._check_postgres`, typically "workspace_agent_installs is missing
+stage_4b columns" — that's expected, its job here is only to run enough
+request-path code to lazily create the base tables) → apply
+`migrations/*.sql` in two passes (the second pass picks up
+everything that needed `enable_rls.sql`'s function and failed the first
+time purely on ordering) → boot again, which should now pass preflight
+cleanly.** `fix_rls_function_ownership.sql` will keep failing locally
+regardless — it needs the `empyralis_app` role, which only exists in
+production — and that's fine to ignore for a disposable local stack.
+
 **A test may never reach a live LLM provider.** Enforced in
 `server_modules/tests/conftest.py`, sibling to the `DATABASE_URL` guard and
 added for the same reason: a credentialed developer's `pytest` run was making
@@ -2960,10 +3085,46 @@ tab, read the console.
   Moved out 2026-08-12. Never leave a backup in `sites-enabled/`; the real
   entries there are symlinks into `sites-available/`, so anything that is a
   plain file is a mistake.
-- Agent worktrees accumulate and nothing prunes them. 177 of them (plus an
-  11GB `.git`) filled the disk to 100% mid-session on 2026-08-07 and killed
-  several running agents. Prune merged ones periodically; never force-remove
-  one with uncommitted work.
+- **Agent worktrees accumulate and nothing prunes them — and a prose warning
+  saying so does not fix it.** 177 of them (plus an 11GB `.git`) filled the
+  disk to 100% mid-session on 2026-08-07 and killed several running agents.
+  This exact paragraph existed as a warning from that day forward, and it
+  happened again anyway, worse: 2026-08-19, **121 worktrees, 421 stale
+  branches, 9.2G of `.git`** — a founder's own direct question ("why did we
+  build things that never shipped") turned out to be partly this: not lost
+  work (every one of the 421 branches had ZERO commits not already on
+  `main` — verified, not assumed), but git hygiene debt nobody was forced
+  to look at. A reminder an agent has to remember mid-task is not a fix.
+
+  The fix is now structural, not a promise: `scripts/prune-merged-
+  worktrees.sh` (`--dry-run` first) actually removes what is safe —
+  a worktree only qualifies if its branch has **zero** commits not on
+  `main` (`git rev-list --count main..<branch>` == 0) **and** no real
+  uncommitted changes (build artifacts/lockfiles/`next-env.d.ts` are
+  ignored as noise; anything else uncommitted is left alone and reported,
+  never discarded) — and it only ever touches paths matching this repo's
+  own worktree conventions, so a worktree belonging to a DIFFERENT tool
+  registered in this repo's own `git worktree list` (a real Codex session
+  was found there, `~/.codex/worktrees/...`) is skipped unconditionally,
+  no exception list needed. Branch deletion goes through `git branch -d`
+  (never `-D`), which is itself a second, independent refusal on anything
+  not fully merged. Proven correct with three real test cases before
+  trusting it: a merged-clean worktree gets removed, one with a real
+  uncommitted file is skipped, one with a real unmerged commit is skipped
+  — red-before-green, not just read and assumed safe.
+
+  `server_modules/tests/test_worktree_branch_sprawl_guard.py` is the other
+  half — a structural tripwire (worktree count > 20, non-main branches >
+  30) that fails LOUDLY inside the ordinary `pytest` run every agent
+  already executes, rather than requiring anyone to remember to check.
+  Thresholds are deliberately generous — a heavy multi-agent day can
+  legitimately run 15-20 worktrees at once, and the check only ever reads
+  state at test time, so it can never block real work mid-task — the
+  point is catching OVERNIGHT accumulation (merged worktrees nobody
+  deleted), the exact shape that reached 121 unnoticed. Carries the same
+  canary discipline as `test_rls_dml_drift.py`: if `git worktree list`/
+  `git branch` cannot even be read, that is its own reported failure,
+  never a silent green.
 
 **Never test against the founder's Claude subscription. Not once, not "just
 one call".** Founder's instruction, 2026-08-11, given while planning
@@ -4509,6 +4670,39 @@ it once (`EMPYRALIS_GATEWAY_LAUNCH_PROBE=1` prints the entrypoint and exits
 0 without starting anything) — an unproven launcher is reported
 `unverified` and its `ExecStart` is never handed out.
 
+**THE UNIT FILE IS NOT THE CONFIGURATION — the first version of that
+classifier read `/etc/systemd/system/<unit>` and therefore condemned the one
+box that had already been repaired.** Found on production minutes after the
+drop-in repair landed:
+
+```
+systemctl show   ExecStart=/var/lib/empyralis-gw/state/launch/run-gateway
+(EFFECTIVE)      Restart=always                                ← REPAIRED
+base unit FILE   ExecStart=/usr/bin/node /opt/…/dist/index.js
+(what we read)   Restart=on-failure                            ← stale, forever
+…service.d/empyralis-updatable.conf   exists, wins in systemd, never read
+reported: not_updatable, 2 blockers        reality: fully updatable
+```
+
+A drop-in IS the documented repair (§3a), so the file can never see the fix
+it is being asked to confirm — every operator who followed our instructions
+was told they had failed. Now `systemctl show <unit> --property=ExecStart …`
+(the only source that merges drop-ins) and `launchctl print <domain>/<label>`
+(the only source that reflects the job as LOADED, not as last written to
+disk — launchd has no drop-ins, but a plist edited after bootstrap is
+equally not what starts next). Three things that only measuring reveals:
+`ExecStart` comes back STRUCTURED (`{ path=… ; argv[]=… ; pid=… }`), so
+argv[] is taken up to the next ` ; ` or systemd's runtime status lands in the
+command an operator is shown; **`systemctl show` EXITS 0 FOR A UNIT IT HAS
+NEVER HEARD OF** and prints `Restart=no`, so a missing ExecStart — not the
+exit code — is what means "no such unit" (trusting that `Restart=no` invents
+a blocker); and the FILE fallback, when systemd cannot be asked at all, may
+no longer produce `not_updatable` — blockers it alone finds resolve to
+`"unknown"`, because the thing that would clear them is exactly the thing it
+cannot see. `configSource` says which source answered. The launchd fallback
+is NOT downgraded that way, deliberately: with no layering mechanism, a
+plist that reads as broken is one somebody edited to be broken.
+
 Refusal reaches the screen as its own state: the Hardware page rendered
 "Up to date" for EVERY refusal, including this one, because
 `gateway_update_refusal_code` shipped with the fingerprint and nothing ever
@@ -4527,6 +4721,87 @@ contains zero `.ts` files. The guard CLAUDE.md cites as banning raw
 `gateway-launch-path-wiring.test.ts` avoids the same trap with an explicit
 src-tree resolver plus a canary assertion; copy that shape, and give every
 source-scanning test a canary.
+
+## A migration's BACKFILL cannot run under RLS, and it says nothing (2026-08-18)
+
+**Verdict: `GEN-12` task identifiers were absent from every task on
+production not because the code was missing — it shipped 2026-08-13 and is
+correct — but because the migration's backfill was silently filtered to zero
+rows by our own row-level security. Exit 0, columns created, index created,
+nothing written.**
+
+```
+projects / project_tasks   FORCE ROW LEVEL SECURITY,
+                           policy empyralis_rls_scope_match(tenant_id, workspace_id)
+DEPLOY-RUNBOOK step 3b     apply migrations as `empyralis_app` — NON-superuser,
+                           so FORCE binds it — and psql sets none of
+                           app.current_tenant_id / app.current_workspace_id /
+                           app.rls_bypass
+
+  ALTER TABLE / CREATE INDEX   DDL, RLS does not apply   ─▶ APPLIED
+  SELECT / UPDATE ... projects DML, policy is FALSE      ─▶ 0 rows, no error
+```
+
+Reproduced exactly on a disposable database with a `NOSUPERUSER NOBYPASSRLS`
+role owning the tables (production's configuration): the pre-fix migration
+printed `BEGIN / DO / COMMIT`, created both columns AND `uq_projects_task_key`,
+and left `task_key` NULL / `task_seq` 0 / `number` NULL. Production, five days
+later: 9 of 10 projects unkeyed, 34 tasks, 0 numbered.
+
+**THE RULE: a migration that only ADDS COLUMNS is safe to hand to psql; a
+migration that BACKFILLS a tenant-scoped table is not.** The two runbook rules
+already in this file compose into a trap — "apply migrations as the app's own
+role" (correct, ownership) plus "every scoped table is FORCE RLS" (correct,
+isolation) means every DML statement in every migration against those 40+
+tables silently addresses the empty set. Nothing reports a row count, so a
+backfill that did nothing is indistinguishable from one with nothing to do.
+Grep any migration you are about to apply for `UPDATE`/`INSERT`/`SELECT`
+against a scoped table before trusting its exit code.
+
+The backfill now lives in `projects_repository.backfill_task_identifiers()`,
+called from `ensure_control_plane_schema()` — so every database heals on its
+next boot instead of on somebody remembering a psql step, and it REUSES
+`_unique_task_key` (the same function `create_project` calls) rather than the
+second SQL transcription of the same slug→key derivation the migration
+carried. The migration file is now DDL only, carries `SET LOCAL
+app.rls_bypass = 'on'`, and `test_task_identifier_backfill.py` bans DML from
+returning to it — structurally, because the broken version passes every
+behavioural test not run as the app role.
+
+**A `task_seq = 0` seed guard is WRONG and the original migration had it.**
+Caught by a test, not by review. A task created by the live allocator between
+the deploy and the repair moves `task_seq` to 1 while older tasks are still
+unnumbered; the backfill numbers them 2..N (offset by `MAX(number)`), the
+`= 0` guard SKIPS the seed, and the next `create_task` allocates 2 — colliding
+with a live task. The correct predicate is `task_seq < MAX(number)`: raising is
+always right (every number issued came out of `task_seq`, so `task_seq >=
+MAX(number)` is the invariant), lowering is never right, and deleting tasks can
+only shrink `MAX(number)` so it can never walk the counter backwards into
+reissuing a live number — which is the hazard the original "one-time seed"
+comment was actually reaching for.
+
+Two more things worth not re-deriving. **Ordering is `created_at ASC, id ASC`**
+— oldest task is GEN-1, and the id tiebreak is what makes a re-run a genuine
+no-op rather than a reshuffle; identities appear in comments, links and agent
+memory, so a RENUMBERING backfill is worse than no backfill. And **the
+concurrent-allocation race is closed with a row lock**, not hope: numbering and
+seeding one project happen in a transaction that opens with `SELECT ... FOR
+UPDATE` on that project's row — the same row `create_task`'s `UPDATE projects
+SET task_seq = task_seq + 1` locks — so a task created mid-backfill blocks
+until the seed commits.
+
+**The display path needed no fix.** `taskDisplayId` already composed
+`project_task_key` + `number` with an honest hex-slice fallback, and is already
+the call at all four render sites. Proven end-to-end against real Postgres:
+real service → `project_task_key='GEN', number=1` → `GEN-1`.
+
+**Flagged, deliberately NOT fixed: `ensure_control_plane_schema` has a SECOND
+instance of this bug.** Its `workspace_agent_installs` label-dedupe `DO $$`
+block runs through a plain `pool.execute()`, which sets no scope GUCs, against
+a table that is also FORCE RLS — so it too addresses zero rows on every boot.
+Fixing it is one line, and I did not, because the fix's visible effect is
+RENAMING the founder's own duplicate-labelled agents the next time the backend
+restarts. That is his call, not a side effect of a task-numbering ticket.
 
 ## The MCP surface advertised more than it could do (2026-08-18, MAN-205/207)
 
@@ -4781,10 +5056,29 @@ back to choose an agent (`agent_sessions.master_agent_install_id` is
 write-only — `get_agent_session` has zero callers). Adding a gate there would
 have been a control that enforces nothing.
 
-**Still open, flagged not fixed.** `routes_fleet._enforce_agent_project_access`
-keeps its fail-open shape, so a member can still reach a PROJECT-LESS agent
-through the fleet DETAIL routes (read/configure, not execute) — same root
-cause, wider blast radius, and it needs its own measured change rather than a
-drive-by. And Sage's own `hardware_access` is never stamped (its turn resolves
+**FIXED 2026-08-19: `routes_fleet._enforce_agent_project_access`'s fail-open
+shape is closed.** It used to be `if not project_id: return`, unconditional —
+so a member could reach a PROJECT-LESS agent through every fleet DETAIL route
+(activity, memory, channels, connectors, tools, capabilities, usage) with no
+project membership at all. Confirmed live on production (read-only query, no
+writes): of 16 project-less `workspace_agent_installs` rows, 15 are
+`agent_kind='master'` (correctly exempt, MAN-201) and **one is a real, enabled
+specialist** (`ainstall_c8ec63b5f3474296`, label "Ftc") that was fully
+reachable by any member of its workspace. Fixed by extracting the turn path's
+own grant rule into `agent_reachability_service.enforce_resolved_agent_access`
+and `lookup_agent_install_bundle`, shared by both callers now instead of two
+independently-drifting opinions: `agent_kind == "master"` always exempt,
+project-having agent gated by that project's ACL (unchanged), project-less
+specialist now workspace-OWNER-only. The one deliberate remaining difference
+from `enforce_agent_reachable`: an agent that cannot be resolved AT ALL
+(doesn't exist, or the lookup failed) still falls through here rather than
+404ing — this seam guards fleet DETAIL reads, where the service call right
+after it already degrades safely on its own, and 404ing here as well as on
+the turn path would make "does this id exist" answerable two different ways.
+Red-before-green: `test_fleet_agent_project_access_fail_open.py`'s regression
+test fails on the pre-fix code (no exception — the live bug) and passes after.
+Blast radius measured, not assumed: exactly one agent's behavior changes.
+
+And Sage's own `hardware_access` is never stamped (its turn resolves
 no specialist context), so setting Sage to "Cloud only" does not yet disable
 its tools; it still cannot borrow, because step 3 gates on ownership.

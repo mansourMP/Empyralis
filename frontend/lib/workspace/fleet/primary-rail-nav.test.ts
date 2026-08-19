@@ -4,9 +4,10 @@
  * agent-count-shape.test.ts already applies.
  *
  * Three things this file is here to hold still (see primary-rail-nav.ts's
- * own header for the reasoning): the rail's flat shape is WORK ONLY — Inbox,
- * My work, Projects; nothing that left the rail stopped being reachable
- * (Settings has the account menu and its own rail space); and the keyboard
+ * own header for the reasoning): the rail's flat shape is Inbox, My work,
+ * Projects, Agents, Context; nothing that left the rail stopped being
+ * reachable (Settings has the account menu and its own rail space;
+ * Conversations still has its own live, unlinked route); and the keyboard
  * shortcuts reference can never again advertise a chord that is not bound
  * (it derives from this same list).
  *
@@ -32,6 +33,10 @@ const keys = RAIL_ITEMS.map((i) => i.key);
 assert(keys.includes("inbox"), "Inbox is a rail destination");
 assert(keys.includes("my-work"), "My work is a rail destination — 'what is assigned to me, across every project'");
 assert(keys.includes("projects"), "Projects is a rail destination — the spine");
+// Context aggregates workspace DATA (documents), like Projects — never
+// agents — so it does not reach past the project boundary the
+// project-as-spine rule is about. See primary-rail-nav.ts's header.
+assert(keys.includes("context"), "Context is a rail destination — every document in the workspace, one tree");
 
 // The rail holds WORK only (founder, 2026-08-16). Settings had two doors —
 // a rail row and an account-menu row — and the rail one didn't earn its
@@ -40,11 +45,12 @@ assert(keys.includes("projects"), "Projects is a rail destination — the spine"
 // (primary-rail-space.ts), so nothing became unreachable.
 assert(!keys.includes("settings"), "Settings is NOT a rail destination — the account menu is its door");
 
-// Project-as-spine still holds: neither of these comes back as a TOP-LEVEL
-// row. Both used to aggregate across every project's agents, which is the
-// boundary "an agent belongs to its project and works only there" says a nav
-// surface must not reach past. Their ROUTES are still live and unlinked.
-assert(!keys.includes("agents"), "Agents is NOT a rail destination — it lives inside its project");
+// Agents CAME BACK 2026-08-19 — a founder reversal (see primary-rail-nav.ts's
+// own history for the exact words). Conversations, unaffected by that
+// reversal, stays off the rail — it still aggregates across every project's
+// agents, the boundary "an agent belongs to its project" is about; its
+// route is still live and unlinked.
+assert(keys.includes("agents"), "Agents is a rail destination again — the founder moved it back onto the rail");
 assert(!keys.includes("conversations"), "Conversations is NOT a rail destination");
 
 // Deliberate omission, recorded so it is never re-derived as an oversight:
@@ -52,28 +58,38 @@ assert(!keys.includes("conversations"), "Conversations is NOT a rail destination
 // unused top-level surface is what "a surface must earn its place" is about.
 assert(!keys.includes("activity"), "Activity is deliberately NOT a rail destination");
 
-assert(keys.length === 3, `exactly three destinations, got ${keys.length} (${keys.join(", ")})`);
+assert(keys.length === 5, `exactly five destinations, got ${keys.length} (${keys.join(", ")})`);
 
 // Order is the reading order of the founder's own approved sketch: what
-// needs me, then what is mine, then where the work lives.
+// needs me, then what is mine, then where the work lives and who does it.
 assert(RAIL_ITEMS[0]?.key === "inbox", "Inbox is the first rail row");
 assert(RAIL_ITEMS[1]?.key === "my-work", "My work is the second rail row");
 assert(RAIL_ITEMS[2]?.key === "projects", "Projects is the third rail row");
+assert(RAIL_ITEMS[3]?.key === "agents", "Agents is the fourth rail row");
+assert(RAIL_ITEMS[4]?.key === "context", "Context is the fifth rail row");
 
 // ── Aggregation tagging ───────────────────────────────────────────────────
 assert(RAIL_ITEMS.find((i) => i.key === "inbox")?.aggregatesAgents === true, "Inbox is tagged as an agent-aggregating surface");
+assert(
+  RAIL_ITEMS.find((i) => i.key === "agents")?.aggregatesAgents === true,
+  "Agents is tagged as an agent-aggregating surface too — a picker with nothing in it hides itself",
+);
 assert(!RAIL_ITEMS.find((i) => i.key === "projects")?.aggregatesAgents, "Projects is never tagged as agent-aggregating");
 assert(
   !RAIL_ITEMS.find((i) => i.key === "my-work")?.aggregatesAgents,
   "My work aggregates TASKS, not agents — a task assigned to a person exists with zero agents, so hiding it there would hide real work",
+);
+assert(
+  !RAIL_ITEMS.find((i) => i.key === "context")?.aggregatesAgents,
+  "Context aggregates DOCUMENTS, not agents — a workspace's documents exist with zero agents, so hiding it there would hide real context",
 );
 
 // visibleRailItems composes the SAME array — hiding aggregations at zero
 // agents must not invent a second list that could drift from RAIL_ITEMS.
 const hidden = visibleRailItems(true);
 assert(
-  hidden.map((i) => i.key).join(",") === "my-work,projects",
-  `at zero agents only Inbox hides, got ${hidden.map((i) => i.key).join(",")}`,
+  hidden.map((i) => i.key).join(",") === "my-work,projects,context",
+  `at zero agents both Inbox and Agents hide, got ${hidden.map((i) => i.key).join(",")}`,
 );
 const shown = visibleRailItems(false);
 assert(shown.length === RAIL_ITEMS.length, "with agents present, every rail item is visible");

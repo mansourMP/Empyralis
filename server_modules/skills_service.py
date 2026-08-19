@@ -1683,8 +1683,8 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             connector_id="document",
             action_id="read",
             description=(
-                "Read one document's full markdown body, by slug or id -- must belong "
-                "to your own project. Provide whichever you have; slug is what "
+                "Read one document's full markdown body, by path or id -- must belong "
+                "to your own project. Provide whichever you have; path is what "
                 "document__list returns and is the more common case. Read the current "
                 "body before calling document__edit, since old_string must match the "
                 "text EXACTLY as it stands right now."
@@ -1692,8 +1692,8 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             parameters={
                 "type": "object",
                 "properties": {
-                    "slug": {"type": "string", "description": "The document's slug (from document__list)."},
-                    "id": {"type": "string", "description": "The document's id, if you already have it instead of a slug."},
+                    "path": {"type": "string", "description": "The document's path, e.g. specs/api/auth.md (from document__list)."},
+                    "id": {"type": "string", "description": "The document's id, if you already have it instead of a path."},
                 },
                 "required": [],
             },
@@ -1718,7 +1718,7 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             parameters={
                 "type": "object",
                 "properties": {
-                    "slug": {"type": "string", "description": "The document's slug (from document__list)."},
+                    "path": {"type": "string", "description": "The document's path, e.g. specs/api/auth.md (from document__list)."},
                     "old_string": {
                         "type": "string",
                         "description": (
@@ -1728,7 +1728,7 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                     },
                     "new_string": {"type": "string", "description": "The text to replace it with."},
                 },
-                "required": ["slug", "old_string", "new_string"],
+                "required": ["path", "old_string", "new_string"],
             },
         ),
         ToolDescriptor(
@@ -6794,29 +6794,62 @@ def execute_single_direct_tool_call(
         # in) via project_tasks_service.agent_project_id, and reject anything
         # that resolves to a different project rather than silently 404ing,
         # so a denial reads as "not visible to this agent" instead of leaking
-        # whether some other project's slug/id happens to exist.
+        # whether some other project's path/id happens to exist.
         from server_modules import project_documents_repository as _documents
         from server_modules import project_tasks_service as _project_tasks
+
+        from server_modules import agent_document_scope_service as _doc_scope
 
         _caller_agent_id = _agent_install_id_from_direct_tool_context(session_ctx)
         _caller_tenant_id = _tenant_id_from_direct_tool_context(session_ctx)
         if not _caller_agent_id:
             raise RuntimeError(f"Tool 'document__{action_id}' requires a resolvable agent identity.")
-        _caller_project_id = callbacks.run_async_tool_call(
-            _project_tasks.agent_project_id(
-                tenant_id=_caller_tenant_id, workspace_id=workspace_id, agent_id=_caller_agent_id,
+        # ONE resolution, both answers -- see agent_document_scope_service.
+        # READ SCOPE vs WRITE SCOPE are deliberately different, and the
+        # asymmetry is the point of "connected by default":
+        #
+        #   reads (list/read)  -> every project in reach. An agent with no
+        #     project of its own -- the workspace-level Operator, which
+        #     carries no project_id and therefore could not read a single
+        #     document on any turn, in any workspace, until now -- inherits
+        #     the ASKING PERSON'S own reach and nothing wider.
+        #   writes (write/edit) -> the agent's OWN project, unchanged. The
+        #     widening is read-only on purpose: a read can be scoped to a
+        #     set, but a write has to land in exactly one project, and
+        #     choosing one out of several on the agent's behalf is a guess
+        #     about intent.
+        _scope = callbacks.run_async_tool_call(
+            _doc_scope.resolve_agent_document_project_scope(
+                tenant_id=_caller_tenant_id,
+                workspace_id=workspace_id,
+                agent_install_id=_caller_agent_id,
+                user_id=_resolve_session_user_id(session_ctx),
             )
         )
-        if not _caller_project_id:
+        _caller_project_scope = list(_scope.project_ids)
+        _caller_project_id = _scope.own_project_id
+        if action_id in ("write", "edit"):
+            if not _caller_project_id:
+                raise RuntimeError(
+                    f"Tool 'document__{action_id}' is unavailable: this agent has no project of "
+                    "its own, so there is no single place to write. Ask a project's own agent."
+                )
+        elif not _caller_project_scope:
             raise RuntimeError(
-                f"Tool 'document__{action_id}' is unavailable: this agent has no project, so it has no documents."
+                f"Tool 'document__{action_id}' is unavailable: no project's documents are in "
+                "reach for this turn."
             )
 
         def _document_summary(document: Dict[str, Any]) -> Dict[str, Any]:
             return {
                 "id": document.get("id"),
                 "title": document.get("title"),
-                "slug": document.get("slug"),
+                "path": document.get("path"),
+                # Carried so a multi-project list (the Operator's) is
+                # disambiguable at all -- a path is unique per project, not
+                # per workspace, so a bare path list would be a set of
+                # names the model cannot always act on.
+                "project_id": document.get("project_id"),
                 "created_at": document.get("created_at"),
                 "updated_at": document.get("updated_at"),
                 "updated_by": document.get("updated_by"),
@@ -6827,7 +6860,7 @@ def execute_single_direct_tool_call(
                 _documents.list_documents(
                     tenant_id=_caller_tenant_id,
                     workspace_id=workspace_id,
-                    project_id=_caller_project_id,
+                    project_ids=_caller_project_scope,
                     include_body=False,
                 )
             )
@@ -6836,10 +6869,10 @@ def execute_single_direct_tool_call(
             )
 
         if action_id == "read":
-            slug = str(argument_payload.get("slug") or "").strip()
+            path = str(argument_payload.get("path") or "").strip()
             document_ref = str(argument_payload.get("id") or "").strip()
-            if not slug and not document_ref:
-                raise RuntimeError("Tool 'document__read' requires slug or id.")
+            if not path and not document_ref:
+                raise RuntimeError("Tool 'document__read' requires path or id.")
             if document_ref:
                 document = callbacks.run_async_tool_call(
                     _documents.get_document(
@@ -6847,28 +6880,47 @@ def execute_single_direct_tool_call(
                     )
                 )
                 if document is None:
-                    raise RuntimeError(f"Document '{document_ref}' not found in your project.")
-                if str(document.get("project_id") or "") != _caller_project_id:
-                    raise RuntimeError(f"Document '{document_ref}' belongs to a different project — not visible to this agent.")
+                    raise RuntimeError(f"Document '{document_ref}' not found.")
+                if str(document.get("project_id") or "") not in _caller_project_scope:
+                    raise RuntimeError(f"Document '{document_ref}' belongs to a project that is not in reach for this turn.")
             else:
-                document = callbacks.run_async_tool_call(
-                    _documents.get_document_by_slug(
-                        tenant_id=_caller_tenant_id,
-                        workspace_id=workspace_id,
-                        project_id=_caller_project_id,
-                        slug=slug,
+                # One path can exist in several of the projects in reach
+                # (UNIQUE is per project). Collect every hit rather than
+                # taking the first: silently picking one would answer a
+                # different question than the model asked, and this
+                # codebase's own record of "silent misrouting beats loud
+                # failure, and that is a bug" is what makes guessing the
+                # wrong call. The scope is one project for a specialist, so
+                # this loop is a single query in the ordinary case.
+                _hits = []
+                for _scope_project_id in _caller_project_scope:
+                    _hit = callbacks.run_async_tool_call(
+                        _documents.get_document_by_path(
+                            tenant_id=_caller_tenant_id,
+                            workspace_id=workspace_id,
+                            project_id=_scope_project_id,
+                            path=path,
+                        )
                     )
-                )
-                if document is None:
-                    raise RuntimeError(f"No document with slug '{slug}' in your project. Use document__list to see what exists.")
+                    if _hit is not None:
+                        _hits.append(_hit)
+                if not _hits:
+                    raise RuntimeError(f"No document at path '{path}' in reach. Use document__list to see what exists.")
+                if len(_hits) > 1:
+                    _where = ", ".join(str(h.get("project_id") or "?") for h in _hits)
+                    raise RuntimeError(
+                        f"'{path}' exists in more than one project in reach ({_where}). "
+                        "Read it by id instead -- document__list returns one per document."
+                    )
+                document = _hits[0]
             return json.dumps({"ok": True, "document": document}, ensure_ascii=False)
 
         if action_id == "edit":
-            slug = str(argument_payload.get("slug") or "").strip()
+            path = str(argument_payload.get("path") or "").strip()
             old_string = argument_payload.get("old_string")
             new_string = argument_payload.get("new_string")
-            if not slug:
-                raise RuntimeError("Tool 'document__edit' requires slug.")
+            if not path:
+                raise RuntimeError("Tool 'document__edit' requires path.")
             if not isinstance(old_string, str) or old_string == "":
                 raise RuntimeError("Tool 'document__edit' requires a non-empty old_string.")
             if not isinstance(new_string, str):
@@ -6878,15 +6930,15 @@ def execute_single_direct_tool_call(
                     "Tool 'document__edit' requires old_string and new_string to differ — there is nothing to change."
                 )
             document = callbacks.run_async_tool_call(
-                _documents.get_document_by_slug(
+                _documents.get_document_by_path(
                     tenant_id=_caller_tenant_id,
                     workspace_id=workspace_id,
                     project_id=_caller_project_id,
-                    slug=slug,
+                    path=path,
                 )
             )
             if document is None:
-                raise RuntimeError(f"No document with slug '{slug}' in your project. Use document__list to see what exists.")
+                raise RuntimeError(f"No document at path '{path}' in your project. Use document__list to see what exists.")
             body = str(document.get("body") or "")
             occurrences = body.count(old_string)
             # The core guarantee this tool exists for: never guess, never
@@ -6896,12 +6948,12 @@ def execute_single_direct_tool_call(
             # knows to re-read or narrow old_string rather than retry blind.
             if occurrences == 0:
                 raise RuntimeError(
-                    f"old_string not found in document '{slug}'. No changes were made. Re-read the document with "
+                    f"old_string not found in document '{path}'. No changes were made. Re-read the document with "
                     "document__read — the text may not match exactly, or may have changed since you last saw it."
                 )
             if occurrences > 1:
                 raise RuntimeError(
-                    f"old_string appears {occurrences} times in document '{slug}' — it must match exactly once. "
+                    f"old_string appears {occurrences} times in document '{path}' — it must match exactly once. "
                     "No changes were made. Include more surrounding context (e.g. a nearby heading or line) so the "
                     "match is unique."
                 )
@@ -6929,7 +6981,7 @@ def execute_single_direct_tool_call(
                 )
             )
             if updated is None:
-                raise RuntimeError(f"Document '{slug}' could not be updated — it may have just been deleted.")
+                raise RuntimeError(f"Document '{path}' could not be updated — it may have just been deleted.")
             return json.dumps({"ok": True, "document": _document_summary(updated)}, ensure_ascii=False)
 
         if action_id == "write":
@@ -6937,27 +6989,27 @@ def execute_single_direct_tool_call(
             body = argument_payload.get("body")
             if not title:
                 raise RuntimeError("Tool 'document__write' requires a title.")
-            # CREATE ONLY: check the slug this title would produce BEFORE
+            # CREATE ONLY: check the path this title would produce BEFORE
             # inserting, and fail loudly if it is already taken, rather than
-            # letting create_document's own _unique_slug silently disambiguate
-            # into 'title-2' -- see project_documents_repository.slugify_
+            # letting create_document's own _unique_path silently disambiguate
+            # into 'title-2.md' -- see project_documents_repository.default_path_for_
             # title's own docstring for why that default is wrong for an
             # agent tool. (A concurrent create landing between this check and
             # the INSERT below is a benign, narrow race: worst case it lands
-            # on an auto-suffixed slug instead of erroring — it can never
+            # on an auto-suffixed path instead of erroring — it can never
             # overwrite the other write.)
-            candidate_slug = _documents.slugify_title(title)
+            candidate_path = _documents.default_path_for_title(title)
             existing = callbacks.run_async_tool_call(
-                _documents.get_document_by_slug(
+                _documents.get_document_by_path(
                     tenant_id=_caller_tenant_id,
                     workspace_id=workspace_id,
                     project_id=_caller_project_id,
-                    slug=candidate_slug,
+                    path=candidate_path,
                 )
             )
             if existing is not None:
                 raise RuntimeError(
-                    f"A document already exists at slug '{candidate_slug}' (title: '{existing.get('title')}'). "
+                    f"A document already exists at path '{candidate_path}' (title: '{existing.get('title')}'). "
                     "document__write only creates new documents — use document__edit to change the existing one."
                 )
             try:
@@ -6968,7 +7020,7 @@ def execute_single_direct_tool_call(
                         project_id=_caller_project_id,
                         title=title,
                         body=str(body or ""),
-                        slug=candidate_slug,
+                        path=candidate_path,
                         created_by=_caller_agent_id,
                         changed_by_type="agent",
                     )

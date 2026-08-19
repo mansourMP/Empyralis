@@ -880,18 +880,60 @@ CREATE TABLE IF NOT EXISTS project_documents (
     workspace_id TEXT NOT NULL,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     title TEXT NOT NULL,
-    slug TEXT NOT NULL,
+    path TEXT NOT NULL,
     body TEXT NOT NULL DEFAULT '',
     created_by TEXT NULL,
     updated_by TEXT NULL,
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (project_id, slug)
+    UNIQUE (project_id, path)
 );
 
 CREATE INDEX IF NOT EXISTS idx_project_documents_project
     ON project_documents(tenant_id, workspace_id, project_id, title);
+
+-- Documents are GitHub-shaped: `path` (with slashes) replaced `slug`. A
+-- database created before migrations/add_document_paths.sql still has the
+-- old column, and CREATE TABLE IF NOT EXISTS above is a no-op on it -- so
+-- the rename has to happen here too or an existing box would boot with a
+-- schema the repository no longer speaks. Guarded both ways so re-running
+-- it (every boot) is a no-op. See that migration for why this is a rename
+-- rather than a second column, and why there are no folder rows.
+--
+-- DDL ONLY BELOW -- NO DML, and that is deliberate, not an oversight. This
+-- block used to also append '.md' to a bare (dot-less, slash-less) path
+-- right here, in the same statement as the rename. It never touched a row.
+-- `project_documents` is FORCE ROW LEVEL SECURITY (migrations/
+-- enable_rls.sql) behind empyralis_rls_scope_match(tenant_id, workspace_id),
+-- and DEPLOY-RUNBOOK step 3b applies both this file and the migration as
+-- the app's own NON-SUPERUSER role (`empyralis_app`), which FORCE binds. A
+-- plain pool.execute() carrying no `app.tenant_id`/`app.workspace_id` GUCs
+-- therefore ran the UPDATE against a policy that evaluates false for every
+-- row -- 0 rows touched, exit 0, no error anywhere. Reproduced exactly on a
+-- disposable NOSUPERUSER NOBYPASSRLS-owned table: the rename applied (DDL
+-- is not subject to RLS) and the append silently did not (DML is). WORSE
+-- than an ordinary silent backfill: renaming the column makes `path` exist,
+-- so the `NOT EXISTS (... 'path')` guard around this whole block is false
+-- on every later boot -- the block never runs again, and a database that
+-- missed its one shot could never self-heal here. The backfill now lives in
+-- project_documents_repository.backfill_document_paths(), called below,
+-- decoupled from this one-shot rename guard on purpose (its own guard is
+-- the ROW's shape -- no dot, no slash -- so it runs, and can heal, on
+-- every boot). See projects_repository.backfill_task_identifiers for the
+-- identical trap on a different table, fixed the identical way.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'project_documents' AND column_name = 'slug'
+    ) AND NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'project_documents' AND column_name = 'path'
+    ) THEN
+        ALTER TABLE project_documents RENAME COLUMN slug TO path;
+    END IF;
+END $$;
 
 -- Project document revisions (feat/document-mcp-tools-and-revisions): the
 -- durable-history table project_documents' own comment above predicted --
@@ -4147,6 +4189,7 @@ async def ensure_control_plane_schema() -> Any:
         try:
             await pool.execute(
                 """
+                SET LOCAL app.rls_bypass = 'on';
                 DO $$
                 DECLARE
                     existing_constraint RECORD;
@@ -4163,6 +4206,20 @@ async def ensure_control_plane_schema() -> Any:
                             existing_constraint.conname
                         );
                     END LOOP;
+                    -- Belt and braces, same reasoning as
+                    -- migrations/add_task_sequence_numbers.sql's own SET LOCAL:
+                    -- project_tasks carries FORCE ROW LEVEL SECURITY and this
+                    -- runs as empyralis_app with no app.current_tenant_id /
+                    -- app.current_workspace_id GUC set, so without the bypass
+                    -- above this UPDATE matches ZERO rows on every boot,
+                    -- silently, exit 0 -- found 2026-08-18 while building
+                    -- server_modules/tests/test_rls_dml_drift.py. The value
+                    -- written ('todo') is a uniform vocabulary rename, not
+                    -- tenant-specific data, so a blanket bypass is safe here
+                    -- (contrast projects_repository.backfill_task_identifiers,
+                    -- which writes a per-project derived value and therefore
+                    -- scopes each write with rls_execute(tenant_id=...,
+                    -- workspace_id=...) instead of bypassing).
                     UPDATE project_tasks SET status = 'todo' WHERE status = 'open';
                     ALTER TABLE project_tasks ALTER COLUMN status SET DEFAULT 'todo';
                     ALTER TABLE project_tasks
@@ -4523,8 +4580,85 @@ async def ensure_control_plane_schema() -> Any:
                 "collision check instead.",
                 exc,
             )
+        # ── Linear-style per-project task identifiers (`GEN-12`).
+        # migrations/add_task_sequence_numbers.sql's own header claims it is
+        # "Mirrored into CONTROL_PLANE_SCHEMA_SQL ... and its
+        # ensure_control_plane_schema() migration section". It was not — this
+        # block is that mirror, added 2026-08-18 once the claim was checked.
+        # DDL only here; the BACKFILL is Python (see below) because these two
+        # tables are FORCE RLS and a plain pool.execute() sets no scope GUCs,
+        # so a DML backfill written here would silently see zero rows —
+        # exactly the way the migration file's own backfill failed on
+        # production. `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` and
+        # `CREATE ... IF NOT EXISTS` are DDL and are not filtered by RLS.
+        await pool.execute(
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS task_key TEXT"
+        )
+        await pool.execute(
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS task_seq INT NOT NULL DEFAULT 0"
+        )
+        await pool.execute(
+            "ALTER TABLE project_tasks ADD COLUMN IF NOT EXISTS number INT"
+        )
+        await pool.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_projects_task_key "
+            "ON projects (tenant_id, workspace_id, task_key)"
+        )
         # ── Phase 1C: auth-store tables (sessions, devices, policies, etc.) ──
         await pool.execute(AUTH_STORE_SCHEMA_SQL)
+        # The backfill runs AFTER the whole schema is in place, and never
+        # blocks boot: a task without a number renders the honest hex-slice
+        # fallback (task-status.tsx's taskDisplayId), which is strictly better
+        # than a control plane that refuses to start.
+        try:
+            from server_modules import projects_repository as _projects_repository
+
+            await _projects_repository.backfill_task_identifiers(pool)
+        except Exception as exc:  # noqa: BLE001 — never let this crash bootstrap
+            LOGGER.error(
+                "TASK IDENTIFIER BACKFILL FAILED (%s). Tasks whose project has no "
+                "task_key, or which carry no number, keep rendering the hex-slice "
+                "fallback until this succeeds on a later boot.",
+                exc,
+            )
+        # The document-path backfill runs AFTER the whole schema is in
+        # place, and never blocks boot: a document without its `.md`
+        # extension still renders and edits fine (path is just a string),
+        # so a control plane that fails to append it is strictly better
+        # than one that refuses to start. See the comment above the
+        # `project_documents` slug->path DO $$ block for the RLS trap this
+        # repairs.
+        try:
+            from server_modules import project_documents_repository as _project_documents_repository
+
+            await _project_documents_repository.backfill_document_paths(pool)
+        except Exception as exc:  # noqa: BLE001 — never let this crash bootstrap
+            LOGGER.error(
+                "DOCUMENT PATH BACKFILL FAILED (%s). Documents whose path "
+                "predates migrations/add_document_paths.sql keep their bare "
+                "(extensionless) name until this succeeds on a later boot.",
+                exc,
+            )
+        # The master-agent isolation backfill runs AFTER the whole schema is
+        # in place, and never blocks boot: an agent whose hardware_access
+        # is still 'none' just keeps having no hardware/subagent access
+        # until this succeeds on a later boot, which is strictly better
+        # than a control plane that refuses to start. See
+        # migrations/stage_4b_agent_isolation.sql and
+        # agent_registry_repository.backfill_master_agent_isolation_defaults
+        # for the RLS trap this repairs.
+        try:
+            from server_modules import agent_registry_repository as _agent_registry_repository
+
+            await _agent_registry_repository.backfill_master_agent_isolation_defaults(pool)
+        except Exception as exc:  # noqa: BLE001 — never let this crash bootstrap
+            LOGGER.error(
+                "MASTER AGENT ISOLATION BACKFILL FAILED (%s). Master (Sage/"
+                "Operator) installs whose hardware_access/subagents_enabled "
+                "predate migrations/stage_4b_agent_isolation.sql keep "
+                "'none'/FALSE until this succeeds on a later boot.",
+                exc,
+            )
         _SCHEMA_READY = True
     return pool
 

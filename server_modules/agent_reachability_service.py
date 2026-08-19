@@ -21,8 +21,9 @@ re-run after it to prove the refusal.
 
 WHY THIS IS NOT `routes_fleet._enforce_agent_project_access`
 ------------------------------------------------------------
-That helper FAILS OPEN by its own docstring — `if not project_id: return`. And
-`project_id` is nullable *by schema*:
+That helper USED TO fail open by its own docstring — `if not project_id: return`,
+unconditionally, for ANY project-less agent. And `project_id` is nullable *by
+schema*:
 
     workspace_agent_installs.project_id TEXT
         REFERENCES projects(id) ON DELETE SET NULL     <- control_plane_repository
@@ -30,16 +31,22 @@ That helper FAILS OPEN by its own docstring — `if not project_id: return`. And
 So deleting a project silently NULLs its agents' `project_id`, and pre-migration
 installs were never backfilled at all (`fleet-data.ts` documents project-less
 agents in the wild and fabricates a default project id so the URL does not 404).
-A reachability gate derived from that predicate is partially vacuous TODAY and
-becomes entirely vacuous the moment agents stop carrying a project — it would
-still be there, still read like a gate, and enforce nothing. That is the worst
-available outcome for a security seam, so this function fails CLOSED instead:
-an absent or unresolvable grant REFUSES.
+That predicate was not merely theoretical: a real, enabled production specialist
+(not the workspace master) was project-less, reachable by every member of its
+workspace through every fleet DETAIL route with no project membership at all —
+fixed 2026-08-19, in the same change that added the docstring you're reading now.
 
-The two helpers are therefore deliberately NOT merged. `_enforce_agent_project_
-access` guards fleet DETAIL reads, where a missing agent simply falls through to
-the service call's own not-found; this one answers "may this principal reach this
-agent at all", where "I could not establish a grant" must mean no.
+Both helpers now share ONE decision, `enforce_resolved_agent_access` below, for
+an already-resolved bundle — so there is exactly one opinion of "who may reach
+this agent" rather than two that can drift. They differ only in the OTHER case:
+what happens when the bundle cannot be resolved at all (the agent genuinely does
+not exist, or the lookup itself failed). `_enforce_agent_project_access` still
+returns there on purpose — it guards fleet DETAIL reads, where a missing agent
+should fall through to the service call's own not-found result rather than a 404
+from this seam, which would make "does this id exist" answerable two different
+ways depending on which helper ran first. This function refuses instead, because
+it is the ONLY gate on the turn-execution path: "I could not establish a grant"
+must mean no here, with nothing downstream to fall back on.
 
 WHERE THE GRANT COMES FROM, AND THE ONE PLACE TO CHANGE IT
 -----------------------------------------------------------
@@ -164,49 +171,66 @@ def _refuse() -> HTTPException:
     return HTTPException(status_code=404, detail="Agent not found.")
 
 
-async def enforce_agent_reachable(
-    current_user: Optional[Dict[str, Any]],
-    resolved_workspace_id: str,
-    tenant_id: str,
-    agent_id: str,
-    *,
-    minimum_role: str = "viewer",
-) -> None:
-    """Raise unless `current_user` may reach `agent_id`. FAILS CLOSED.
+async def lookup_agent_install_bundle(
+    agent_id: str, *, tenant_id: str, workspace_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Resolve an agent's install bundle, tenant+workspace scoped.
 
-    Every exit that is not an explicit grant raises. In particular there is no
-    `if not <something>: return` anywhere below — that shape is precisely what
-    made the fleet-routes predicate unusable here.
+    Returns `None` for three distinct situations a caller must treat
+    identically as "no grant could be established" — the agent does not
+    exist, it exists in a DIFFERENT workspace (the lookup is tenant+workspace
+    scoped, so a foreign install lands here too), or the lookup itself raised
+    (logged, never re-raised here — the caller decides what "unresolvable"
+    means for its own posture).
+
+    Shared by `enforce_agent_reachable` below (which fails CLOSED on `None`)
+    and `routes_fleet._enforce_agent_project_access` (which fails OPEN on
+    `None`, deliberately — that helper guards fleet DETAIL reads, where a
+    truly nonexistent agent should fall through to the underlying service
+    call's own not-found result rather than a 404 from this seam, which would
+    turn "does this id exist" into an oracle two different ways depending on
+    which helper answered first). One resolution, two postures.
     """
     from server_modules import agent_registry_repository as registry
-    from server_modules import auth as auth_module
 
     clean_agent_id = _text(agent_id)
     if not clean_agent_id:
-        # Nothing named. The caller's workspace membership (already enforced by
-        # the route's own dependency) is the whole gate for a workspace turn.
-        return
-
+        return None
     try:
         bundle = await registry.get_workspace_agent_install_bundle(
             clean_agent_id,
             tenant_id=_text(tenant_id) or None,
-            workspace_id=_text(resolved_workspace_id) or None,
+            workspace_id=_text(workspace_id) or None,
         )
     except Exception:
-        # An unreadable install is an unestablished grant. Refusing is the only
-        # honest answer; a control-plane blip must never widen access.
         logger.exception(
-            "agent reachability: install lookup failed for agent=%s workspace=%s — refusing",
-            clean_agent_id, resolved_workspace_id,
+            "agent reachability: install lookup failed for agent=%s workspace=%s",
+            clean_agent_id, workspace_id,
         )
-        raise _refuse()
+        return None
+    return bundle if isinstance(bundle, dict) and bundle else None
 
-    if not isinstance(bundle, dict) or not bundle:
-        # Either the agent does not exist, or it exists in another workspace —
-        # the lookup is tenant+workspace scoped, so both land here, and both are
-        # correctly "not reachable by you".
-        raise _refuse()
+
+async def enforce_resolved_agent_access(
+    current_user: Optional[Dict[str, Any]],
+    resolved_workspace_id: str,
+    bundle: Mapping[str, Any],
+    *,
+    minimum_role: str = "viewer",
+) -> None:
+    """The ONE decision of who may reach an agent whose bundle is already
+    resolved. Shared by both callers of `lookup_agent_install_bundle` so
+    there is exactly one opinion of this rule rather than two that can drift:
+
+        agent_kind == "master"   ALWAYS allowed  (workspace-scoped; MAN-201)
+        project_id present       the project's own ACL decides
+        project_id absent        workspace OWNER only — never a member
+
+    Every exit that is not an explicit grant raises. In particular there is
+    no `if not <something>: return` anywhere below — that shape is precisely
+    what made the fleet-routes predicate unusable as a reachability gate.
+    """
+    from server_modules import auth as auth_module
 
     if _agent_kind_of(bundle) == MASTER_AGENT_KIND:
         # MAN-201: the workspace-scoped agent (Sage / the Operator) is reachable
@@ -238,6 +262,40 @@ async def enforce_agent_reachable(
     if auth_module.RBAC_ROLE_ORDER[actual_role] >= auth_module.RBAC_ROLE_ORDER["owner"]:
         return
     raise _refuse()
+
+
+async def enforce_agent_reachable(
+    current_user: Optional[Dict[str, Any]],
+    resolved_workspace_id: str,
+    tenant_id: str,
+    agent_id: str,
+    *,
+    minimum_role: str = "viewer",
+) -> None:
+    """Raise unless `current_user` may reach `agent_id`. FAILS CLOSED.
+
+    Every exit that is not an explicit grant raises. In particular there is no
+    `if not <something>: return` anywhere below — that shape is precisely what
+    made the fleet-routes predicate unusable here.
+    """
+    clean_agent_id = _text(agent_id)
+    if not clean_agent_id:
+        # Nothing named. The caller's workspace membership (already enforced by
+        # the route's own dependency) is the whole gate for a workspace turn.
+        return
+
+    bundle = await lookup_agent_install_bundle(
+        clean_agent_id, tenant_id=tenant_id, workspace_id=resolved_workspace_id,
+    )
+    if bundle is None:
+        # Either the agent does not exist, it exists in another workspace, or
+        # the lookup itself failed — all three are an unestablished grant, and
+        # a control-plane blip must never widen access.
+        raise _refuse()
+
+    await enforce_resolved_agent_access(
+        current_user, resolved_workspace_id, bundle, minimum_role=minimum_role,
+    )
 
 
 async def enforce_turn_agent_reachability(turn_request: Any, current_user: Any) -> None:

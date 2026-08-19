@@ -1,6 +1,5 @@
 /**
- * A project page's tab bar — exactly Tasks · Documents · Agents, nothing
- * else. Pure data in its own module (no React, no next/navigation) so a
+ * A project page's tab bar — exactly Tasks · Documents, nothing else. Pure data in its own module (no React, no next/navigation) so a
  * plain test can import the REAL list the page renders
  * (project-views.test.ts), same discipline as primary-rail-nav.ts.
  *
@@ -16,11 +15,26 @@
  * directly-typed URL; it simply is not offered anywhere.
  */
 
-export const PROJECT_TAB_VIEWS = ["tasks", "documents", "agents"] as const;
+/**
+ * AGENTS IS DELIBERATELY NOT A TAB EITHER (founder, 2026-08-19). Agents
+ * became a TOP-LEVEL surface the day before -- pressing "Agents" in the
+ * primary rail swaps the rail into the workspace-wide agent list, because
+ * "agents should be just open, not inside this specific project". Leaving
+ * an Agents tab on the project page contradicts exactly the move that was
+ * just made: it re-cages inside one project the thing that was deliberately
+ * lifted out of projects, and gives two different answers to "where do I
+ * find my agents". His own words when asking for this removal: "we already
+ * changed the direction to make it generally better".
+ *
+ * Same treatment as People above -- the /agents ROUTE under a project stays
+ * live and unlinked (deleting it strands bookmarks, and making it a redirect
+ * target risks the "a redirect runs ahead of the router" trap CLAUDE.md
+ * records). It simply is not offered in the tab bar any more.
+ */
+export const PROJECT_TAB_VIEWS = ["tasks", "documents"] as const;
 export type ProjectTabView = (typeof PROJECT_TAB_VIEWS)[number];
 
 export const PROJECT_TAB_LABEL: Record<ProjectTabView, string> = {
   tasks: "Tasks",
   documents: "Documents",
-  agents: "Agents",
 };

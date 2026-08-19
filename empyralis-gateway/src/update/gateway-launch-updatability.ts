@@ -2,6 +2,7 @@ import { promises as fsp } from "fs";
 import os from "os";
 import path from "path";
 
+import { execFileWithTimeout } from "../shell/exec-file-with-timeout";
 import { currentReleaseEntrypoint } from "./gateway-launch-path";
 import { resolveGatewayReleaseLayout } from "./gateway-release-layout";
 import { detectGatewaySupervisor, type GatewaySupervisorMode } from "./gateway-restart-handoff";
@@ -43,6 +44,34 @@ import { detectGatewaySupervisor, type GatewaySupervisorMode } from "./gateway-r
  * the fleet-wide restart loop gateway_build_identity_service.py exists to
  * prevent, arriving one poll earlier.
  *
+ * THE UNIT FILE IS NOT THE CONFIGURATION, AND READING IT CONDEMNED THE ONE
+ * BOX THAT HAD ALREADY BEEN REPAIRED. The first version of this module
+ * parsed `/etc/systemd/system/<unit>` directly. systemd merges drop-ins
+ * (`<unit>.d/*.conf`) over that file, and a drop-in is EXACTLY the repair
+ * docs/DEPLOY-RUNBOOK.md tells an operator to apply — the only one that does
+ * not mean editing a unit the installer owns. Measured on production minutes
+ * after that repair landed:
+ *
+ *     systemctl show      ExecStart=/var/lib/empyralis-gw/state/launch/run-gateway
+ *     (EFFECTIVE)         Restart=always                        ← REPAIRED
+ *
+ *     the base unit FILE  ExecStart=/usr/bin/node /opt/…/dist/index.js
+ *     (what we read)      Restart=on-failure                    ← stale, forever
+ *
+ *     …service.d/empyralis-updatable.conf   exists, wins in systemd, unread
+ *
+ *     reported: not_updatable, 2 blockers        reality: fully updatable
+ *
+ * So a correctly repaired box reported itself permanently broken on the
+ * Hardware page — telling every customer who followed our own written
+ * instructions that the fix had not worked. That is worse than the bug it
+ * was reporting. The effective configuration is therefore asked OF SYSTEMD
+ * (`systemctl show`), the only source that includes drop-ins, and of launchd
+ * (`launchctl print`), the only source that reflects the job as actually
+ * LOADED rather than as last written to disk. The unit/plist FILE survives
+ * only as a fallback, and a fallback answer is MARKED as one
+ * (`configSource`) instead of being passed off as the effective truth.
+ *
  * WHY THE ANSWER IS NOT "is my own entrypoint inside the layout". A freshly
  * installed box has never self-updated, so no `gateway-releases/current`
  * exists yet and it is running out of the installer's root-owned tree — an
@@ -51,13 +80,26 @@ import { detectGatewaySupervisor, type GatewaySupervisorMode } from "./gateway-r
  * would condemn most of the fleet. The launcher is the thing being judged.
  *
  * FAIL-SAFE DIRECTION, and it is the whole safety argument: every failure to
- * read, find, parse or classify anything resolves to `"unknown"`, never to
- * `"not_updatable"`. A wrong "unknown" costs a signal; a wrong
- * "not_updatable" takes updates away from a healthy box. Nothing here
- * writes, execs, or mutates a single byte.
+ * read, run, find, parse or classify anything resolves to `"unknown"`, never
+ * to `"not_updatable"`. A wrong "unknown" costs a signal; a wrong
+ * "not_updatable" takes updates away from a healthy box. That now extends to
+ * the fallback itself: when systemd could not be asked and the base FILE
+ * alone would produce blockers, the answer is `"unknown"` — because a
+ * drop-in nobody could see is precisely the thing that would clear them.
+ * Nothing here writes or mutates a single byte; the only commands it ever
+ * runs are read-only queries of the supervisor's own state.
  */
 
 export type GatewayLaunchUpdatabilityStatus = "updatable" | "not_updatable" | "unknown";
+
+/** Which source the answer came from. A file-derived answer is never
+ *  presented as if the supervisor had been asked — that conflation is the
+ *  whole bug this field exists to make visible. */
+export type GatewayLaunchConfigSource =
+  | "systemd-effective"
+  | "systemd-unit-file"
+  | "launchd-effective"
+  | "launchd-plist-file";
 
 /** Stable codes. Never matched on prose anywhere — this codebase has been
  *  bitten by string matching before (an error bucket matched "ai limit"
@@ -88,7 +130,29 @@ export interface GatewayLaunchUpdatability {
   /** Why the answer is "unknown" — set only for that status, so "we could
    *  not tell" is never read as "nothing is wrong". */
   unknownReason: string | null;
+  /** Where `launchCommand` and the restart policy actually came from. Null
+   *  when neither source could be reached at all. */
+  configSource: GatewayLaunchConfigSource | null;
+  /** Files layered over the base unit (systemd drop-ins). Empty on launchd,
+   *  which has no equivalent mechanism. An operator looking at a
+   *  base-file-vs-reality disagreement needs to be told these exist. */
+  overridePaths: string[];
 }
+
+/** Shape of a read-only supervisor query. Deliberately not the raw
+ *  `execFileWithTimeout` result: nothing here needs signals or kill
+ *  semantics, and a narrow type keeps a test's stub honest. */
+export interface GatewayLaunchQueryResult {
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+}
+
+export type GatewayLaunchCommandRunner = (
+  command: string,
+  args: string[],
+) => Promise<GatewayLaunchQueryResult>;
 
 export interface ClassifyGatewayLaunchUpdatabilityOptions {
   env?: NodeJS.ProcessEnv;
@@ -100,6 +164,12 @@ export interface ClassifyGatewayLaunchUpdatabilityOptions {
   /** Injectable IO. Both must reject/throw rather than lie; every throw is
    *  caught and becomes "unknown". */
   readFile?: (filePath: string) => Promise<string>;
+  /** Injectable read-only supervisor query. Must never reject — the default
+   *  never does. Absent in a test means the file fallback is exercised. */
+  runCommand?: GatewayLaunchCommandRunner;
+  /** launchd's domain for a per-user agent is `gui/<uid>`; injectable so a
+   *  test does not depend on the uid it happens to run as. */
+  uid?: number | null;
   supervisorMode?: GatewaySupervisorMode;
 }
 
@@ -121,9 +191,26 @@ const SYSTEMD_RESTARTS_ON_CLEAN_EXIT = new Set(["always", "on-success"]);
  *  script. Keeps this from reading /usr/bin/node looking for a path. */
 const MAX_LAUNCHER_BYTES = 256 * 1024;
 
+/** Both queries are local, answered from the supervisor's own in-memory
+ *  state, and used at connect time. A wedged one must never hold the boot
+ *  path, so the deadline is the caller's, per shell/exec-file-with-timeout. */
+const SUPERVISOR_QUERY_TIMEOUT_MS = 5_000;
+
 async function defaultReadFile(filePath: string): Promise<string> {
   return fsp.readFile(filePath, "utf-8");
 }
+
+const defaultRunCommand: GatewayLaunchCommandRunner = async (command, args) => {
+  const result = await execFileWithTimeout(command, args, SUPERVISOR_QUERY_TIMEOUT_MS);
+  return {
+    // A spawn failure (ENOENT: no systemctl on PATH) is a failure to ASK,
+    // never an answer — surfaced as a non-zero code so the caller falls back.
+    exitCode: result.error && typeof result.error.code === "string" ? null : result.exitCode,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    timedOut: result.timedOut,
+  };
+};
 
 function unknown(
   reason: string,
@@ -138,6 +225,8 @@ function unknown(
     expectedEntrypoint: partial.expectedEntrypoint ?? null,
     blockers: [],
     unknownReason: reason,
+    configSource: partial.configSource ?? null,
+    overridePaths: partial.overridePaths ?? [],
   };
 }
 
@@ -170,9 +259,86 @@ export function parseSystemdUnitFromCgroup(cgroupContents: string): string | nul
   return matches[matches.length - 1];
 }
 
-/** First `ExecStart=` of a systemd unit, with systemd's own optional prefix
- *  characters stripped (`-` ignore-failure, `@` argv[0] override, `+`/`!`/
- *  `!!` privilege modifiers) and line continuations joined. */
+/** `systemctl show`'s output: one `Key=Value` per line, a key repeated once
+ *  per value when it has several (a unit may declare several ExecStart=).
+ *
+ *  Values are kept verbatim — no trimming of the value side. systemd emits
+ *  no leading whitespace, and trimming would quietly rewrite a path that
+ *  legitimately ends in a space. */
+export function parseSystemctlShowProperties(stdout: string): Map<string, string[]> {
+  const properties = new Map<string, string[]>();
+  for (const rawLine of String(stdout || "").split(/\r?\n/)) {
+    const separator = rawLine.indexOf("=");
+    if (separator <= 0) {
+      continue;
+    }
+    const key = rawLine.slice(0, separator).trim();
+    if (!key) {
+      continue;
+    }
+    const value = rawLine.slice(separator + 1);
+    const existing = properties.get(key);
+    if (existing) {
+      existing.push(value);
+    } else {
+      properties.set(key, [value]);
+    }
+  }
+  return properties;
+}
+
+/**
+ * One `ExecStart=` value as `systemctl show` renders it — a STRUCTURE, not
+ * the line from the unit file:
+ *
+ *   ExecStart={ path=/x/run-gateway ; argv[]=/x/run-gateway ; ignore_errors=no ;
+ *               start_time=[…] ; pid=2338249 ; code=(null) ; status=0/0 }
+ *
+ * `argv[]` is the command as it will actually be executed and is what an
+ * operator recognises; `path` is the binary alone and is the fallback for a
+ * shape that omits argv. Fields are ` ; `-separated, so the value is taken
+ * up to the next separator rather than to the end of the line — reading to
+ * the closing brace would drag systemd's whole runtime status (pid, exit
+ * code) into the command an operator is told they are running.
+ *
+ * A value that is NOT in the structured form is returned as-is, so an older
+ * systemd that prints a bare command still parses.
+ */
+export function parseSystemdExecStartProperty(value: string): string | null {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return null;
+  }
+  if (!raw.startsWith("{")) {
+    return raw;
+  }
+  const body = raw.replace(/^\{\s*/, "").replace(/\s*\}$/, "");
+  const fields = body.split(/\s;\s/);
+  let programPath: string | null = null;
+  for (const field of fields) {
+    const trimmed = field.trim();
+    if (trimmed.startsWith("argv[]=")) {
+      const argv = trimmed.slice("argv[]=".length).trim();
+      if (argv) {
+        return argv;
+      }
+    }
+    if (trimmed.startsWith("path=")) {
+      const candidate = trimmed.slice("path=".length).trim();
+      if (candidate) {
+        programPath = candidate;
+      }
+    }
+  }
+  return programPath;
+}
+
+/** First `ExecStart=` of a systemd unit FILE, with systemd's own optional
+ *  prefix characters stripped (`-` ignore-failure, `@` argv[0] override,
+ *  `+`/`!`/`!!` privilege modifiers) and line continuations joined.
+ *
+ *  Only the fallback path uses this. The effective answer comes from
+ *  `systemctl show`, because this function cannot see a drop-in. */
 export function parseSystemdExecStart(unitContents: string): string | null {
   const joined = String(unitContents || "").replace(/[ \t]*\\\r?\n[ \t]*/g, " ");
   for (const rawLine of joined.split(/\r?\n/)) {
@@ -189,8 +355,9 @@ export function parseSystemdExecStart(unitContents: string): string | null {
   return null;
 }
 
-/** systemd's effective `Restart=` for this unit — `null` when the unit does
- *  not say, which is itself the answer (`Restart=no` is the default). */
+/** systemd's `Restart=` as written in a unit FILE — `null` when the file
+ *  does not say, which is itself the answer (`Restart=no` is the default).
+ *  Same drop-in blindness as the function above; fallback only. */
 export function parseSystemdRestartPolicy(unitContents: string): string | null {
   let found: string | null = null;
   for (const rawLine of String(unitContents || "").split(/\r?\n/)) {
@@ -227,6 +394,72 @@ export function parseLaunchdProgramArguments(plistContents: string): string[] {
 export function parseLaunchdKeepAlive(plistContents: string): boolean {
   const match = String(plistContents || "").match(/<key>\s*KeepAlive\s*<\/key>\s*<(true|false)\s*\/>/i);
   return Boolean(match && match[1].toLowerCase() === "true");
+}
+
+/**
+ * `launchctl print`'s command, which is the job AS LOADED:
+ *
+ *   program = /usr/local/bin/node
+ *   arguments = {
+ *     /usr/local/bin/node
+ *     /Users/x/gateway/dist/index.js
+ *   }
+ *
+ * `arguments` wins when present because a plist's ProgramArguments is what
+ * a gateway plist actually carries; `program` alone is the shape launchd
+ * reports for a job declared with `Program` and no argument vector.
+ */
+export function parseLaunchctlPrintCommand(printOutput: string): string | null {
+  const source = String(printOutput || "");
+  const argumentsMatch = source.match(/^[ \t]*arguments[ \t]*=[ \t]*\{([\s\S]*?)^[ \t]*\}/m);
+  if (argumentsMatch) {
+    const values = argumentsMatch[1]
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    if (values.length > 0) {
+      return values.join(" ");
+    }
+  }
+  const programMatch = source.match(/^[ \t]*program[ \t]*=[ \t]*(.+)$/m);
+  if (programMatch) {
+    const program = programMatch[1].trim();
+    if (program) {
+      return program;
+    }
+  }
+  return null;
+}
+
+/** The plist `launchctl` says this job was loaded FROM, so an operator is
+ *  pointed at the file that is actually in force rather than at whichever
+ *  of the three search locations happened to exist. */
+export function parseLaunchctlPrintPlistPath(printOutput: string): string | null {
+  const match = String(printOutput || "").match(/^[ \t]*path[ \t]*=[ \t]*(.+)$/m);
+  const value = match ? match[1].trim() : "";
+  return value || null;
+}
+
+/**
+ * Whether the LOADED job carries KeepAlive, read off `launchctl print`'s
+ * `properties = a | b | c` line.
+ *
+ * POSITIVE-ONLY, deliberately. This token's presence is not documented by
+ * Apple and could not be verified against a KeepAlive job without loading
+ * one onto a machine this work is not allowed to modify — so its ABSENCE is
+ * treated as "said nothing", and the plist file still decides. A parser
+ * whose false negative manufactures a blocker would be condemning healthy
+ * boxes on a guess, which is the exact direction this module forbids.
+ */
+export function parseLaunchctlPrintKeepAlive(printOutput: string): boolean {
+  const match = String(printOutput || "").match(/^[ \t]*properties[ \t]*=[ \t]*(.+)$/m);
+  if (!match) {
+    return false;
+  }
+  return match[1]
+    .split("|")
+    .map((token) => token.trim().toLowerCase())
+    .includes("keepalive");
 }
 
 async function readIfExists(
@@ -298,11 +531,125 @@ async function classifyLaunchCommand(params: {
   };
 }
 
+interface EffectiveSystemdConfig {
+  launchCommand: string;
+  restart: string | null;
+  fragmentPath: string | null;
+  overridePaths: string[];
+}
+
+/**
+ * Ask systemd — not the filesystem — what this unit runs.
+ *
+ * Returns null on every way of not getting an answer, which the caller
+ * turns into the marked file fallback. `systemctl show` EXITS 0 FOR A UNIT
+ * IT HAS NEVER HEARD OF (measured on production, systemd 255: it printed
+ * `Restart=no` and no ExecStart line at all), so a missing ExecStart — not
+ * the exit code — is what distinguishes "no such unit" from an answer. That
+ * matters: taking the printed `Restart=no` at face value would invent a
+ * restart blocker for a unit that does not exist.
+ */
+async function querySystemdEffectiveConfig(params: {
+  run: GatewayLaunchCommandRunner;
+  unitName: string;
+}): Promise<EffectiveSystemdConfig | null> {
+  let result: GatewayLaunchQueryResult;
+  try {
+    result = await params.run("systemctl", [
+      "show",
+      params.unitName,
+      "--property=ExecStart",
+      "--property=Restart",
+      "--property=FragmentPath",
+      "--property=DropInPaths",
+      "--no-pager",
+    ]);
+  } catch {
+    return null;
+  }
+  if (result.timedOut || result.exitCode !== 0) {
+    return null;
+  }
+  const properties = parseSystemctlShowProperties(result.stdout);
+  const execStartValues = properties.get("ExecStart") ?? [];
+  let launchCommand: string | null = null;
+  for (const value of execStartValues) {
+    launchCommand = parseSystemdExecStartProperty(value);
+    if (launchCommand) {
+      break;
+    }
+  }
+  if (!launchCommand) {
+    return null;
+  }
+  const restartValues = properties.get("Restart") ?? [];
+  const restart = (restartValues[restartValues.length - 1] || "").trim().toLowerCase() || null;
+  const fragmentPath = (properties.get("FragmentPath")?.[0] || "").trim() || null;
+  const overridePaths = (properties.get("DropInPaths")?.[0] || "")
+    .trim()
+    .split(/\s+/)
+    .filter((entry) => entry.length > 0);
+  return { launchCommand, restart, fragmentPath, overridePaths };
+}
+
+interface EffectiveLaunchdConfig {
+  launchCommand: string;
+  keepAlive: boolean;
+  plistPath: string | null;
+}
+
+/**
+ * Ask launchd what the LOADED job runs.
+ *
+ * launchd has no drop-in mechanism, so this is not the same bug systemd
+ * had — but it is the same CLASS. launchd holds the job as it was
+ * bootstrapped; editing the plist on disk changes nothing until the job is
+ * booted out and back in. A plist edited to point somewhere worse, on a
+ * still-loaded job, would make the file say "stuck" about a launcher that
+ * is fine — the same false condemnation, arriving through staleness instead
+ * of through layering. So the loaded job decides, and the file is the
+ * fallback.
+ */
+async function queryLaunchdEffectiveConfig(params: {
+  run: GatewayLaunchCommandRunner;
+  label: string;
+  uid: number | null;
+}): Promise<EffectiveLaunchdConfig | null> {
+  const domains: string[] = [];
+  if (params.uid !== null && Number.isFinite(params.uid)) {
+    domains.push(`gui/${params.uid}/${params.label}`);
+  }
+  domains.push(`system/${params.label}`);
+  for (const domain of domains) {
+    let result: GatewayLaunchQueryResult;
+    try {
+      result = await params.run("launchctl", ["print", domain]);
+    } catch {
+      continue;
+    }
+    if (result.timedOut || result.exitCode !== 0) {
+      continue;
+    }
+    const launchCommand = parseLaunchctlPrintCommand(result.stdout);
+    if (!launchCommand) {
+      continue;
+    }
+    return {
+      launchCommand,
+      keepAlive: parseLaunchctlPrintKeepAlive(result.stdout),
+      plistPath: parseLaunchctlPrintPlistPath(result.stdout),
+    };
+  }
+  return null;
+}
+
 /**
  * Answer, for the supervisor unit that will start the NEXT gateway process,
  * whether a self-update on this box could ever take effect.
  *
- * Never throws. Never writes. Never execs.
+ * Never throws. Never writes. The only subprocesses it starts are
+ * `systemctl show` and `launchctl print`, both read-only queries of the
+ * supervisor's own state, both under the caller's own deadline.
  */
 export async function classifyGatewayLaunchUpdatability(
   opts: ClassifyGatewayLaunchUpdatabilityOptions = {},
@@ -310,6 +657,7 @@ export async function classifyGatewayLaunchUpdatability(
   const env = opts.env ?? process.env;
   const platform = opts.platform ?? process.platform;
   const readFile = opts.readFile ?? defaultReadFile;
+  const runCommand = opts.runCommand ?? defaultRunCommand;
   const supervisor = opts.supervisorMode ?? detectGatewaySupervisor(env, platform);
 
   try {
@@ -327,8 +675,9 @@ export async function classifyGatewayLaunchUpdatability(
     const expectedEntrypoint = currentReleaseEntrypoint(layout);
 
     let unitPath: string | null = null;
-    let unitContents: string | null = null;
     let launchCommand: string | null = null;
+    let configSource: GatewayLaunchConfigSource | null = null;
+    let overridePaths: string[] = [];
     const blockers: GatewayLaunchBlocker[] = [];
 
     if (supervisor === "systemd") {
@@ -340,28 +689,48 @@ export async function classifyGatewayLaunchUpdatability(
           expectedEntrypoint,
         });
       }
-      for (const dir of SYSTEMD_UNIT_SEARCH_DIRS) {
-        const candidate = path.join(dir, unitName);
-        const contents = await readIfExists(readFile, candidate);
-        if (contents !== null) {
-          unitPath = candidate;
-          unitContents = contents;
-          break;
+
+      const effective = await querySystemdEffectiveConfig({ run: runCommand, unitName });
+      let restart: string | null = null;
+      if (effective) {
+        configSource = "systemd-effective";
+        launchCommand = effective.launchCommand;
+        restart = effective.restart;
+        overridePaths = effective.overridePaths;
+        unitPath = effective.fragmentPath;
+      }
+
+      if (!effective) {
+        // systemd could not be asked. The base file is all that is left, and
+        // it is exactly the source that cannot see the documented repair.
+        configSource = "systemd-unit-file";
+        let unitContents: string | null = null;
+        for (const dir of SYSTEMD_UNIT_SEARCH_DIRS) {
+          const candidate = path.join(dir, unitName);
+          const contents = await readIfExists(readFile, candidate);
+          if (contents !== null) {
+            unitPath = candidate;
+            unitContents = contents;
+            break;
+          }
         }
+        if (unitContents === null) {
+          return unknown(`Could not read the service definition ${unitName} on this computer.`, supervisor, {
+            expectedEntrypoint,
+            configSource,
+          });
+        }
+        launchCommand = parseSystemdExecStart(unitContents);
+        restart = parseSystemdRestartPolicy(unitContents);
       }
-      if (unitContents === null) {
-        return unknown(`Could not read the service definition ${unitName} on this computer.`, supervisor, {
-          expectedEntrypoint,
-        });
-      }
-      launchCommand = parseSystemdExecStart(unitContents);
+
       if (!launchCommand) {
-        return unknown(`The service definition at ${unitPath} does not say what it starts.`, supervisor, {
-          unitPath,
-          expectedEntrypoint,
-        });
+        return unknown(
+          `The service definition${unitPath ? ` at ${unitPath}` : ""} does not say what it starts.`,
+          supervisor,
+          { unitPath, expectedEntrypoint, configSource, overridePaths },
+        );
       }
-      const restart = parseSystemdRestartPolicy(unitContents);
       if (!restart || !SYSTEMD_RESTARTS_ON_CLEAN_EXIT.has(restart)) {
         blockers.push({
           code: LAUNCH_CODE_NO_RESTART_ON_CLEAN_EXIT,
@@ -381,33 +750,75 @@ export async function classifyGatewayLaunchUpdatability(
         });
       }
       const homeDir = String(opts.homeDir || "").trim() || os.homedir();
+      const uid =
+        opts.uid !== undefined
+          ? opts.uid
+          : typeof process.getuid === "function"
+            ? process.getuid()
+            : null;
+
+      const effective = await queryLaunchdEffectiveConfig({ run: runCommand, label, uid });
+      let keepAlive = false;
+      if (effective) {
+        configSource = "launchd-effective";
+        launchCommand = effective.launchCommand;
+        unitPath = effective.plistPath;
+        // Positive-only union: launchctl's own token when it says so, and
+        // otherwise the plist launchd itself named as this job's source.
+        // See parseLaunchctlPrintKeepAlive for why absence decides nothing.
+        keepAlive = effective.keepAlive;
+      }
+
       const candidates = [
+        ...(effective?.plistPath ? [effective.plistPath] : []),
         path.join(homeDir, "Library", "LaunchAgents", `${label}.plist`),
         path.join("/Library/LaunchDaemons", `${label}.plist`),
         path.join("/Library/LaunchAgents", `${label}.plist`),
       ];
-      for (const candidate of candidates) {
-        const contents = await readIfExists(readFile, candidate);
-        if (contents !== null) {
-          unitPath = candidate;
-          unitContents = contents;
-          break;
+
+      if (effective && !keepAlive) {
+        // The plist launchd itself named, then the standard locations. Any
+        // one of them saying KeepAlive is enough, because the launchctl
+        // token is positive-only and its silence means nothing.
+        for (const candidate of candidates) {
+          const plist = await readIfExists(readFile, candidate);
+          if (plist !== null) {
+            keepAlive = parseLaunchdKeepAlive(plist);
+            break;
+          }
         }
       }
-      if (unitContents === null) {
-        return unknown(`Could not read the login item ${label} on this computer.`, supervisor, {
-          expectedEntrypoint,
-        });
+
+      if (!effective) {
+        configSource = "launchd-plist-file";
+        let plistContents: string | null = null;
+        for (const candidate of candidates) {
+          const contents = await readIfExists(readFile, candidate);
+          if (contents !== null) {
+            unitPath = candidate;
+            plistContents = contents;
+            break;
+          }
+        }
+        if (plistContents === null) {
+          return unknown(`Could not read the login item ${label} on this computer.`, supervisor, {
+            expectedEntrypoint,
+            configSource,
+          });
+        }
+        const programArguments = parseLaunchdProgramArguments(plistContents);
+        launchCommand = programArguments.length > 0 ? programArguments.join(" ") : null;
+        keepAlive = parseLaunchdKeepAlive(plistContents);
       }
-      const programArguments = parseLaunchdProgramArguments(unitContents);
-      if (programArguments.length === 0) {
-        return unknown(`The login item at ${unitPath} does not say what it starts.`, supervisor, {
-          unitPath,
-          expectedEntrypoint,
-        });
+
+      if (!launchCommand) {
+        return unknown(
+          `The login item${unitPath ? ` at ${unitPath}` : ""} does not say what it starts.`,
+          supervisor,
+          { unitPath, expectedEntrypoint, configSource },
+        );
       }
-      launchCommand = programArguments.join(" ");
-      if (!parseLaunchdKeepAlive(unitContents)) {
+      if (!keepAlive) {
         blockers.push({
           code: LAUNCH_CODE_NO_RESTART_ON_CLEAN_EXIT,
           detail:
@@ -428,6 +839,27 @@ export async function classifyGatewayLaunchUpdatability(
       blockers.push(pathBlocker);
     }
 
+    // THE ONE PLACE A FALLBACK ANSWER IS DOWNGRADED. A base unit file cannot
+    // see the drop-in that is our own documented repair, so blockers derived
+    // from it alone are exactly the false condemnation this module exists to
+    // stop shipping. "Could not confirm" is the honest answer; only an
+    // explicit "not_updatable" ever takes an update away from a box.
+    //
+    // The launchd fallback is deliberately NOT downgraded the same way:
+    // launchd has no layering mechanism, so nothing can be sitting on top of
+    // a plist silently correcting it. Its file answer can only be stale, and
+    // a stale plist that reads as broken is a plist someone edited to be
+    // broken — a fact worth reporting, not an invisible repair.
+    if (configSource === "systemd-unit-file" && blockers.length > 0) {
+      return unknown(
+        "Could not ask this computer's service manager what it actually runs, and its base " +
+          "service file alone cannot show later corrections, so this could not be confirmed " +
+          "either way.",
+        supervisor,
+        { unitPath, launchCommand, expectedEntrypoint, configSource, overridePaths },
+      );
+    }
+
     return {
       status: blockers.length > 0 ? "not_updatable" : "updatable",
       supervisor,
@@ -436,6 +868,8 @@ export async function classifyGatewayLaunchUpdatability(
       expectedEntrypoint,
       blockers,
       unknownReason: null,
+      configSource,
+      overridePaths,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

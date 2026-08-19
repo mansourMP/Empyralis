@@ -834,6 +834,24 @@ async def ensure_bot_username_cached() -> str:
 # --- Webhook handling ---
 
 def verify_webhook_signature(header_signature: str, body_bytes: bytes) -> bool:
+    """Telegram's `secret_token` webhook auth is a SHARED SECRET, never an
+    HMAC — per Telegram's own Bot API docs, whatever string you pass as
+    `secret_token` to `setWebhook` is echoed back VERBATIM in the
+    `X-Telegram-Bot-Api-Secret-Token` header on every subsequent update, and
+    the receiver's whole job is a constant-time equality check against that
+    same string. There is no body-signing scheme here at all — that is the
+    GitHub-webhook (`X-Hub-Signature`) pattern, a different mechanism this
+    function was previously confusing it with.
+
+    Found 2026-08-19 tracing a live 403 on every real inbound message: the
+    prior implementation computed `hmac.new(secret, body_bytes,
+    sha256).hexdigest()` and compared THAT to the header — a value Telegram
+    never sends and had no way to produce, so this check could not pass for
+    ANY correctly-configured secret, on any message, ever. `body_bytes` is
+    no longer read at all; kept as a parameter so the call site (which
+    reads the raw body before parsing JSON, for exactly this check) needs
+    no change.
+    """
     secret = _webhook_secret()
     if not secret:
         # Fail closed: without a configured secret the webhook cannot be
@@ -843,12 +861,7 @@ def verify_webhook_signature(header_signature: str, body_bytes: bytes) -> bool:
         return False
     if not header_signature:
         return False
-    computed = hmac.new(
-        secret.encode("utf-8"),
-        body_bytes,
-        hashlib.sha256,
-    ).hexdigest()
-    return hmac.compare_digest(computed, header_signature)
+    return hmac.compare_digest(header_signature.encode("utf-8"), secret.encode("utf-8"))
 
 
 def parse_telegram_update(body: dict) -> Optional[Dict[str, Any]]:

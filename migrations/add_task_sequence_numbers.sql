@@ -1,8 +1,9 @@
 -- Per-project, human-readable task identifiers -- Linear's `MAN-149` shape,
 -- replacing the 6-char hex slice of the task's own uuid that
 -- frontend/lib/workspace/fleet/task-status.tsx's taskShortId rendered as a
--- confessed placeholder ("until the backend has a real per-project sequence
--- number"). This migration builds that sequence number.
+-- confessed placeholder. This migration builds the SCHEMA for that sequence
+-- number. It does NOT backfill -- see the block below, which is the whole
+-- reason this file was rewritten on 2026-08-18.
 --
 -- THREE COLUMNS:
 --   projects.task_key    TEXT  -- a short uppercase key derived from the
@@ -11,193 +12,97 @@
 --                                 workspace_id). Two projects whose slugs
 --                                 reduce to the same 3 letters ("General
 --                                 Ops" and "General" both give GEN) do not
---                                 collide -- the later one (by created_at)
---                                 gets GEN2, then GEN3, ... deterministically.
---                                 NULLable in the schema on purpose (every
---                                 row is backfilled below, and every future
---                                 INSERT assigns one -- see
---                                 projects_repository.create_project) rather
---                                 than NOT NULL, matching this migration's
---                                 own brief.
+--                                 collide -- the later one gets GEN2, then
+--                                 GEN3, ... deterministically. NULLable on
+--                                 purpose: a project with no key renders no
+--                                 identifier at all, never a wrong one.
 --   projects.task_seq    INT   -- the allocation counter, NOT NULL DEFAULT 0.
 --                                 Only ever increases -- see the allocation
---                                 note below for why it must never be
---                                 recomputed from MAX(number) after this
---                                 migration's one-time seed.
+--                                 note below.
 --   project_tasks.number INT   -- the allocated number for this task, e.g.
 --                                 12 for the 12th task ever created in its
 --                                 project. Combined with the OWNING
 --                                 project's task_key, this is `GEN-12`.
 --                                 NULLable: a task somehow missing one
---                                 renders no identifier at all (see
+--                                 renders no identifier (see
 --                                 task-status.taskDisplayId), never a
---                                 fallback.
+--                                 fabricated fallback.
+--
+-- ══ WHY THE BACKFILL IS NOT IN THIS FILE ANY MORE ══════════════════════════
+--
+-- It used to be, and it ran on production, and it touched ZERO rows without
+-- reporting anything. `projects` and `project_tasks` carry FORCE ROW LEVEL
+-- SECURITY (migrations/enable_rls.sql), whose policy is
+-- empyralis_rls_scope_match(tenant_id, workspace_id). A psql session sets
+-- none of `app.current_tenant_id` / `app.current_workspace_id` /
+-- `app.rls_bypass`, and docs/DEPLOY-RUNBOOK.md step 3b requires migrations to
+-- be applied as the app's own NON-SUPERUSER role (`empyralis_app`) -- which is
+-- exactly the role FORCE binds. So:
+--
+--     ALTER TABLE / CREATE INDEX   DDL, not subject to RLS   -> APPLIED
+--     SELECT / UPDATE ... projects DML, policy returns false -> 0 rows, no error
+--
+-- The migration exited 0, the columns and uq_projects_task_key appeared, and
+-- every task_key stayed NULL with every task_seq at 0. Measured on production
+-- 2026-08-18, five days later: 9 of 10 projects with task_key IS NULL, 34
+-- tasks, 0 numbered. A backfill that reports no row count is indistinguishable
+-- from a backfill with nothing left to do, which is why nobody noticed.
+--
+-- THE RULE: a migration that only ADDS COLUMNS is safe to hand to psql; a
+-- migration that BACKFILLS a tenant-scoped table is not. The backfill now
+-- lives in projects_repository.backfill_task_identifiers(), called from
+-- control_plane_repository.ensure_control_plane_schema() -- which sets the
+-- RLS scope per row, REUSES _unique_task_key (the same function
+-- create_project calls, rather than a second SQL transcription of the same
+-- derivation that could drift from it), and heals every database on its next
+-- boot instead of on somebody remembering a psql step. Do not reintroduce a
+-- DML backfill here.
 --
 -- ALLOCATION IS RACE-FREE BY CONSTRUCTION, NOT BY THIS MIGRATION.
 -- project_tasks_service.create_task allocates a number with:
 --
 --   UPDATE projects SET task_seq = task_seq + 1
---   WHERE id = $1 AND tenant_id = $2 AND workspace_id = $3
---   RETURNING task_seq
+--   WHERE id = $1 RETURNING task_seq
 --
--- run on the SAME connection, inside the SAME transaction, as the
--- project_tasks INSERT that consumes the returned value -- never
--- SELECT MAX(number)+1, which two concurrent task creations (agents create
--- tasks concurrently in this product) would both read before either writes,
--- handing out the same number twice. If the INSERT fails and the
--- transaction rolls back, the UPDATE rolls back with it -- task_seq only
--- ever advances alongside a task that actually landed, so it is safe to
--- treat as "how many tasks have ever existed in this project" forever
--- after this migration seeds it once. NEVER re-derive task_seq from
--- MAX(project_tasks.number) after today: a deleted task would make that
--- computation UNDERCOUNT and the next allocation would reissue a number
--- that already exists (or once existed) on another task.
+-- Postgres serializes concurrent UPDATEs to the same row, so two tasks
+-- created in the same project at the same instant still get distinct numbers
+-- -- never SELECT MAX(number)+1, which both would read before either wrote.
+-- NEVER re-derive task_seq from MAX(project_tasks.number) as an ongoing
+-- resync: a deleted task would make that computation UNDERCOUNT and the next
+-- allocation would reissue a number that already exists (or once existed) on
+-- another task. The Python backfill's seed is guarded to `task_seq = 0` and
+-- uses GREATEST for exactly this reason.
 --
--- BACKFILL, in three steps below, all deterministic and safe to re-run --
--- every step is guarded to touch only rows that still need it, so
--- re-running this file, or ensure_control_plane_schema's mirrored self-heal
--- block on every process boot, is a no-op once applied:
---   1. task_key for every existing project, from its slug, oldest-created
---      first per (tenant_id, workspace_id) so an earlier "General" claims
---      the bare GEN and a later, differently-named project that also
---      reduces to GEN gets GEN2.
---   2. project_tasks.number, per project, ordered by created_at (stable --
---      re-running never reshuffles an already-numbered task, and ties are
---      broken by id so the order cannot change between runs on the same
---      data).
---   3. projects.task_seq, seeded to each project's own max backfilled
---      number (0 for a project with no tasks) -- exactly once; see the
---      allocation note above for why this must not happen again after
---      today.
---
--- NO NEW TABLES. Both target tables (projects, project_tasks) already carry
--- no RLS policy (see migrations/enable_rls.sql, which this migration does
--- NOT touch) -- every query scopes explicitly by (tenant_id, workspace_id)
--- in projects_repository.py / project_tasks_service.py, and that remains
--- true for every column added here.
---
--- PRODUCTION ROWS ARE SAFE where this ever reaches production: purely
--- additive (three new columns, one new index), and the backfill loops only
--- ever fill in a NULL, never touch an already-set value.
+-- NO NEW TABLES, so this does not touch migrations/enable_rls.sql and does not
+-- trigger preflight._check_rls_coverage's table-name two-part dance -- both
+-- target tables already exist, already carry RLS, and already appear in that
+-- migration. Purely additive: three columns and one index.
 --
 -- Mirrored into server_modules/control_plane_repository.py's
--- CONTROL_PLANE_SCHEMA_SQL (new-database DDL) and its
--- ensure_control_plane_schema() migration section (existing-database
--- self-heal), following the same "standalone migration file + mirror"
--- convention as migrations/add_task_priority.sql and
--- migrations/add_task_parent.sql.
+-- ensure_control_plane_schema() migration section, so a database that never
+-- has this file applied by hand still gets the columns on boot. That claim
+-- was FALSE until 2026-08-18 (nothing in control_plane_repository.py
+-- mentioned task_key at all); it is true now, and there is a test asserting
+-- it stays true.
 
 BEGIN;
 
-DO $$
-DECLARE
-    proj RECORD;
-    cleaned TEXT;
-    base_key TEXT;
-    candidate TEXT;
-    suffix INT;
-BEGIN
-    IF to_regclass('public.projects') IS NULL THEN
-        RAISE NOTICE 'projects does not exist yet; nothing to migrate.';
-        RETURN;
-    END IF;
+-- Belt and braces: if a future edit ever does add DML here, or if this file is
+-- re-run on a database whose columns are already present, the bypass makes the
+-- session's reads honest rather than silently empty. It is transaction-local
+-- (SET LOCAL) and dies with the COMMIT below.
+SET LOCAL app.rls_bypass = 'on';
 
-    -- 1. projects.task_key / task_seq columns. NOT NULL DEFAULT 0 on
-    --    task_seq is a catalog-only change on Postgres 11+, so this is fast
-    --    even on a large table.
-    ALTER TABLE projects ADD COLUMN IF NOT EXISTS task_key TEXT;
-    ALTER TABLE projects ADD COLUMN IF NOT EXISTS task_seq INT NOT NULL DEFAULT 0;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS task_key TEXT;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS task_seq INT NOT NULL DEFAULT 0;
 
-    -- 2. Backfill task_key, oldest project first per (tenant_id,
-    --    workspace_id) so an earlier "General" claims the bare GEN and a
-    --    later project that reduces to the same 3 letters (e.g. "General
-    --    Ops") gets GEN2, GEN3, ... Guarded to task_key IS NULL, so a
-    --    second run of this file touches nothing.
-    FOR proj IN
-        SELECT id, tenant_id, workspace_id, slug
-        FROM projects
-        WHERE task_key IS NULL
-        ORDER BY tenant_id, workspace_id, created_at ASC, id ASC
-    LOOP
-        cleaned := upper(regexp_replace(coalesce(proj.slug, ''), '[^a-zA-Z0-9]', '', 'g'));
-        base_key := substr(cleaned, 1, 3);
-        IF base_key = '' THEN
-            base_key := 'TSK';
-        END IF;
+-- Uniqueness enforced at the storage layer, so a future write (a bug, a raw
+-- SQL path) can never assign the same key twice in one workspace. Postgres
+-- allows any number of NULLs in a unique index, so this is satisfiable while
+-- projects are still awaiting their key.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_projects_task_key
+    ON projects (tenant_id, workspace_id, task_key);
 
-        candidate := base_key;
-        suffix := 2;
-        WHILE EXISTS (
-            SELECT 1 FROM projects
-            WHERE tenant_id = proj.tenant_id
-              AND workspace_id = proj.workspace_id
-              AND task_key = candidate
-        ) LOOP
-            candidate := base_key || suffix::text;
-            suffix := suffix + 1;
-        END LOOP;
-
-        UPDATE projects SET task_key = candidate WHERE id = proj.id;
-    END LOOP;
-
-    -- 3. Uniqueness, enforced at the storage layer. By construction step 2
-    --    above never assigns a colliding key, so this cannot fail against
-    --    today's data -- it exists so a FUTURE write (a bug, a raw SQL
-    --    path) can never assign the same key twice in one workspace.
-    CREATE UNIQUE INDEX IF NOT EXISTS uq_projects_task_key
-        ON projects (tenant_id, workspace_id, task_key);
-
-    IF to_regclass('public.project_tasks') IS NULL THEN
-        RAISE NOTICE 'project_tasks does not exist yet; number/task_seq backfill skipped.';
-        RETURN;
-    END IF;
-
-    -- 4. project_tasks.number column.
-    ALTER TABLE project_tasks ADD COLUMN IF NOT EXISTS number INT;
-
-    -- 5. Backfill number, per project, oldest task first -- stable, so
-    --    identifiers never shuffle on a re-run. Guarded to number IS NULL
-    --    and offset by whatever a project already has backfilled, so this
-    --    is a no-op the second time and cannot renumber an already-numbered
-    --    task.
-    WITH bases AS (
-        SELECT project_id, COALESCE(MAX(number), 0) AS base
-        FROM project_tasks
-        GROUP BY project_id
-    ),
-    numbered AS (
-        SELECT id, project_id,
-               ROW_NUMBER() OVER (
-                   PARTITION BY project_id ORDER BY created_at ASC, id ASC
-               ) AS rn
-        FROM project_tasks
-        WHERE number IS NULL
-    )
-    UPDATE project_tasks pt
-    SET number = numbered.rn + COALESCE(bases.base, 0)
-    FROM numbered
-    LEFT JOIN bases ON bases.project_id = numbered.project_id
-    WHERE pt.id = numbered.id;
-
-    -- 6. Seed task_seq to each project's own max backfilled number.
-    --    Guarded to task_seq = 0 (its untouched default): this is a
-    --    ONE-TIME seed, and must never become a general "resync task_seq to
-    --    MAX(number)" -- see the allocation note above for why (a deleted
-    --    task would make that computation undercount and the next
-    --    allocation would reissue a number that already exists, or once
-    --    existed, on another task). Once task_seq leaves 0, this WHERE
-    --    clause never touches that project again.
-    UPDATE projects p
-    SET task_seq = sub.mx
-    FROM (
-        SELECT project_id, MAX(number) AS mx
-        FROM project_tasks
-        GROUP BY project_id
-    ) sub
-    WHERE p.id = sub.project_id
-      AND p.task_seq = 0
-      AND sub.mx > 0;
-END
-$$;
+ALTER TABLE project_tasks ADD COLUMN IF NOT EXISTS number INT;
 
 COMMIT;

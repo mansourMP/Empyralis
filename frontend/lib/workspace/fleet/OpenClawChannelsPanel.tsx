@@ -163,10 +163,159 @@ export function StateChip({ ok, on, off }: { ok: boolean; on: string; off: strin
 const SETUP_VERIFY_POLL_MS = 3_000;
 const SETUP_VERIFY_TIMEOUT_MS = 120_000;
 
+/** THE ROOT CAUSE, and the fix, in one place.
+ *
+ *  This hook used to hold its `data`/`loading`/`error` as PER-INSTANCE
+ *  `useState`, fetched from a `load()` that ran once per mount via
+ *  `useEffect(() => { void load(); }, [load])`. That looked safe in
+ *  isolation -- a single mount only ever fires it twice (gatewayId starts
+ *  null while the agent record loads, so `/catalog` goes out first, then
+ *  `/gateways/{id}/setup` once the real id resolves) -- and a `requestIdRef`
+ *  guard (2026-08-19, MAN-*) closed the resulting race: only the LATEST
+ *  dispatched call may write state, so a `/catalog` response landing after
+ *  the real `/setup` response can no longer silently overwrite good
+ *  `observed` data with a response that carries none.
+ *
+ *  That guard is necessary but not sufficient. Verified live in production
+ *  (the founder's own network trace, three of THIS same pair in one page
+ *  load, two of the three `/setup` calls never completing inside the
+ *  observation window): something can make `load()` fire MORE than twice
+ *  for the identical resource. The requestId guard's own invariant --
+ *  "only the latest dispatched call may write" -- turns that into a WORSE
+ *  failure than the one it fixed: if the LATEST of three overlapping calls
+ *  is the one that stalls, NOTHING is ever again allowed to write, even
+ *  though an EARLIER call already came back with perfectly good data.
+ *  `loading` never clears; the spinner is honest about "nothing confirmed
+ *  yet" but never resolves either way. A ordering-based guard cannot be
+ *  made safe against an unbounded number of overlapping callers -- it can
+ *  only pick which one wins, and the wrong one can always be picked when
+ *  the count is not fixed at two.
+ *
+ *  The actual fix is the one `useGatewayPersonalChannelSurfaces` (this
+ *  file's own sibling, `personal-channel-pairing.ts`) already uses for the
+ *  identical shape of bug, documented there as: "click a first-party
+ *  channel card... every mount of this hook started its OWN fetch... state
+ *  is a property of the GATEWAY, not of whoever happens to be rendering, so
+ *  it lives in one store keyed by gateway id." Applied here: ONE fetch per
+ *  (gatewayId, whether it's bound at all) key, SHARED across every mount
+ *  and every overlapping call, not one independent fetch per invocation.
+ *
+ *      BEFORE                              AFTER
+ *      each load() call:                   each load() call:
+ *        own fetch, own timing               refreshOpenClawSetup(key)
+ *        "latest requestId wins"               already in flight for this
+ *        (can starve on a hung call)            key? RIDE that promise.
+ *                                               nothing in flight? start
+ *                                               ONE fetch, publish to every
+ *                                               subscriber when it settles
+ *                                               (success OR failure).
+ *
+ *  Structural, not ordering-based: a `/catalog` response and a `/setup`
+ *  response are now different STORE KEYS ("catalog" vs "gw:<id>") with
+ *  their own independent snapshots -- there is no longer a single shared
+ *  `data` variable for the two to race over at all, regardless of how many
+ *  times or in what order either fires. And within one key, single-flight
+ *  means there is never more than one outstanding request to referee: the
+ *  question "which of several overlapping calls gets to write" cannot arise
+ *  because there is only ever at most one call. `loading` follows the same
+ *  rule the surfaces store already established -- true only while nothing
+ *  at all is known about this key yet, so a background refresh of an
+ *  already-populated key never re-shows a spinner over good data, and a
+ *  failure keeps the last-known snapshot rather than flashing empty or
+ *  hanging forever (the `finally` that clears `inflight` always runs, so
+ *  the NEXT caller can always start a fresh request once the current one
+ *  settles either way). */
+type OpenClawSetupSnapshot = { data: SetupResponse | null; loading: boolean; error: string | null };
+
+type OpenClawSetupEntry = {
+  snapshot: OpenClawSetupSnapshot;
+  listeners: Set<(snapshot: OpenClawSetupSnapshot) => void>;
+  inflight: Promise<SetupResponse | null> | null;
+};
+
+const openClawSetupStore = new Map<string, OpenClawSetupEntry>();
+
+function openClawSetupKey(gatewayId: string | null): string {
+  return gatewayId ? `gw:${gatewayId}` : "catalog";
+}
+
+function openClawSetupUrl(gatewayId: string | null): string {
+  return gatewayId
+    ? `/api/personal-channels/openclaw/gateways/${encodeURIComponent(gatewayId)}/setup`
+    : "/api/personal-channels/openclaw/catalog";
+}
+
+function openClawSetupEntry(key: string): OpenClawSetupEntry {
+  let entry = openClawSetupStore.get(key);
+  if (!entry) {
+    entry = { snapshot: { data: null, loading: true, error: null }, listeners: new Set(), inflight: null };
+    openClawSetupStore.set(key, entry);
+  }
+  return entry;
+}
+
+function publishOpenClawSetup(entry: OpenClawSetupEntry, snapshot: OpenClawSetupSnapshot): void {
+  entry.snapshot = snapshot;
+  for (const listener of entry.listeners) listener(snapshot);
+}
+
+/** Single-flight per key: a second (or third, or Nth) caller during an
+ *  in-flight read for the SAME key rides on that one request rather than
+ *  starting another -- see the hook's own doc comment above for why this,
+ *  not a request-ordering guard, is what actually closes the bug. */
+function refreshOpenClawSetup(gatewayId: string | null): Promise<SetupResponse | null> {
+  const key = openClawSetupKey(gatewayId);
+  const entry = openClawSetupEntry(key);
+  if (entry.inflight) return entry.inflight;
+  const url = openClawSetupUrl(gatewayId);
+  if (entry.snapshot.data === null) {
+    publishOpenClawSetup(entry, { ...entry.snapshot, loading: true });
+  }
+  const run = (async (): Promise<SetupResponse | null> => {
+    try {
+      const res = await fleetAuthorizedFetch(url, { credentials: "include" });
+      if (!res.ok) {
+        publishOpenClawSetup(entry, {
+          data: entry.snapshot.data,
+          loading: false,
+          error: `Could not load channels (${res.status}).`,
+        });
+        return null;
+      }
+      const body = (await res.json()) as SetupResponse;
+      publishOpenClawSetup(entry, { data: body, loading: false, error: null });
+      return body;
+    } catch {
+      publishOpenClawSetup(entry, {
+        data: entry.snapshot.data,
+        loading: false,
+        error: "Could not load channels.",
+      });
+      return null;
+    } finally {
+      // Runs whichever way the request settled, which is what guarantees
+      // the NEXT call for this key can always start fresh -- there is no
+      // state in which a stuck request permanently blocks every future
+      // refresh, only the CURRENT one until it settles.
+      entry.inflight = null;
+    }
+  })();
+  entry.inflight = run;
+  return run;
+}
+
+function readOpenClawSetup(gatewayId: string | null): OpenClawSetupSnapshot {
+  return openClawSetupEntry(openClawSetupKey(gatewayId)).snapshot;
+}
+
 export function useOpenClawChannelSetup(gatewayId: string | null, agentId: string) {
-  const [data, setData] = useState<SetupResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  // Seeded SYNCHRONOUSLY from whatever this key's store entry already
+  // holds, so a second mount for a gatewayId that is already known (a
+  // remount, a second component reading the same gateway) renders real
+  // state on first paint instead of a fresh spinner -- same guarantee
+  // useGatewayPersonalChannelSurfaces already makes for the first-party
+  // grid.
+  const [snapshot, setSnapshot] = useState<OpenClawSetupSnapshot>(() => readOpenClawSetup(gatewayId));
   const [busy, setBusy] = useState<string | null>(null);
   /** `[active, ...waiting]`. See `requestSetup` — installs are serialized for
    *  the same reason `useInstallQueue` serializes CLI installs on the Hardware
@@ -174,40 +323,31 @@ export function useOpenClawChannelSetup(gatewayId: string | null, agentId: strin
   const [setupQueue, setSetupQueue] = useState<string[]>([]);
   const runningRef = useRef<string | null>(null);
 
+  useEffect(() => {
+    setSnapshot(readOpenClawSetup(gatewayId));
+    const key = openClawSetupKey(gatewayId);
+    const entry = openClawSetupEntry(key);
+    entry.listeners.add(setSnapshot);
+    void refreshOpenClawSetup(gatewayId);
+    return () => {
+      entry.listeners.delete(setSnapshot);
+    };
+  }, [gatewayId]);
+
+  // Kept as a function (rather than inlining refreshOpenClawSetup at every
+  // call site) so provision()/the verify-poll loop below and the returned
+  // `refresh` keep their existing call shape. `opts` is accepted and
+  // ignored -- the "silent" distinction it used to make (skip the loading
+  // spinner for a background refresh) is now automatic: `loading` is only
+  // ever true while this key has never resolved once, per
+  // refreshOpenClawSetup's own rule, so a background refresh of an
+  // already-populated key never re-shows a spinner regardless of caller.
   const load = useCallback(
-    async (opts?: { silent?: boolean }): Promise<SetupResponse | null> => {
-      if (!opts?.silent) setLoading(true);
-      try {
-        // With a gateway bound, join the catalog against this box's live
-        // state. With none, the catalog alone — no `observed` key at all,
-        // which is exactly what makes `reachable` (below) false and every
-        // row's remediation `needs_hardware` rather than a stale/invented
-        // "not installed" read from a device that was never asked.
-        const url = gatewayId
-          ? `/api/personal-channels/openclaw/gateways/${encodeURIComponent(gatewayId)}/setup`
-          : "/api/personal-channels/openclaw/catalog";
-        const res = await fleetAuthorizedFetch(url, { credentials: "include" });
-        if (!res.ok) {
-          setError(`Could not load channels (${res.status}).`);
-          return null;
-        }
-        setError(null);
-        const body = (await res.json()) as SetupResponse;
-        setData(body);
-        return body;
-      } catch {
-        setError("Could not load channels.");
-        return null;
-      } finally {
-        setLoading(false);
-      }
-    },
+    (_opts?: { silent?: boolean }): Promise<SetupResponse | null> => refreshOpenClawSetup(gatewayId),
     [gatewayId],
   );
 
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const { data, loading, error } = snapshot;
 
   /** The `doctor --fix` equivalent: provisioning. It installs the plugins it
    *  was asked for and re-asserts policy — and it HIDES NOTHING, because every
@@ -228,13 +368,27 @@ export function useOpenClawChannelSetup(gatewayId: string | null, agentId: strin
         );
         const body = await res.json().catch(() => ({}));
         if (!res.ok) {
-          setError(getErrorMessage(body, `Setup failed (${res.status}).`));
+          publishOpenClawSetup(openClawSetupEntry(openClawSetupKey(gatewayId)), {
+            data: readOpenClawSetup(gatewayId).data,
+            loading: false,
+            error: getErrorMessage(body, `Setup failed (${res.status}).`),
+          });
         } else {
           const refusal = body?.openclaw_provisioning?.refusal;
-          setError(refusal ? `${refusal.code}: ${refusal.detail}` : null);
+          if (refusal) {
+            publishOpenClawSetup(openClawSetupEntry(openClawSetupKey(gatewayId)), {
+              data: readOpenClawSetup(gatewayId).data,
+              loading: false,
+              error: `${refusal.code}: ${refusal.detail}`,
+            });
+          }
         }
       } catch {
-        setError("Could not reach this computer.");
+        publishOpenClawSetup(openClawSetupEntry(openClawSetupKey(gatewayId)), {
+          data: readOpenClawSetup(gatewayId).data,
+          loading: false,
+          error: "Could not reach this computer.",
+        });
       } finally {
         setBusy(null);
         await load({ silent: true });
@@ -267,6 +421,9 @@ export function useOpenClawChannelSetup(gatewayId: string | null, agentId: strin
         // same fact as the box reporting the channel installed, so this keeps
         // reading the device's own state until it catches up (or gives up
         // loudly) — the pattern CliSetupControl uses for exactly this reason.
+        // Each poll iteration goes through the same single-flighted
+        // refreshOpenClawSetup as everything else, so a fast poll loop here
+        // can never itself become the source of overlapping requests.
         const startedAt = Date.now();
         while (!cancelled && Date.now() - startedAt < SETUP_VERIFY_TIMEOUT_MS) {
           const body = await load({ silent: true });

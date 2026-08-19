@@ -23,15 +23,24 @@ import {
 import { logout } from "@/lib/auth/auth-client";
 import { useAccountShell } from "@/lib/shell/account-shell-context";
 import { useRevealedEmail } from "@/lib/shell/use-revealed-email";
-import { getInboxLastSeenAt, useFleetAgents, useFleetProjects, useFleetWorkspace, useFleetWorkspaceTasks, useWorkspaceActivity } from "./fleet-data";
+import { getInboxLastSeenAt, resolveAgentProjectId, useFleetAgents, useFleetNotifications, useFleetProjects, useFleetWorkspace, useFleetWorkspaceTasks, useWorkspaceActivity } from "./fleet-data";
 import { deriveStatus, findSageAgent } from "./fleet-presentation";
 import { ProjectIcon } from "./fleet-project-identity";
 import { planAgentCountShape } from "./agent-count-shape";
+import { isMyStuckTask } from "./inbox-needs-you";
 import { myWorkBadgeCount } from "./my-work";
 import { useOwnAccountId } from "./members-data";
 import { visibleRailItems } from "./primary-rail-nav";
-import { projectAgentsSpaceLinks, railSpaceFromPathname, settingsSpaceLinks, spaceBackHref, type RailSpaceLink } from "./primary-rail-space";
+import {
+  projectAgentsSpaceLinks,
+  railSpaceFromPathname,
+  settingsSpaceLinks,
+  spaceBackHref,
+  workspaceAgentsSpaceLinks,
+  type RailSpaceLink,
+} from "./primary-rail-space";
 import { projectAgentsSpaceIsActive } from "./project-agents-rail-shape";
+import { workspaceAgentsSpaceIsActive } from "./workspace-agents-rail-shape";
 import { activeProjectIdFromPathname } from "./primary-rail-project-mode";
 import { AgentSigil, StatusDot } from "./fleet-indicators";
 import { rememberLastViewedAgent } from "./AgentsList";
@@ -95,17 +104,25 @@ const money = (n: number) => (n === 0 ? "—" : `$${n.toFixed(4)}`);
  * the account menu instead — it's a look-up-occasionally screen, not a nav
  * destination. Keyboard: `j`/`k` move a highlight, Enter opens it; `g` then
  * a section key jumps directly (g i inbox, g m my work, g p projects,
- * g s settings) — the Linear muscle-memory model, and it covers the pinned
- * footer row too so pinning is a position, not a demotion.
+ * g a agents, g c context) — the Linear muscle-memory model, and it covers
+ * the pinned footer row too so pinning is a position, not a demotion.
  *
- * Conversations and Agents are GONE from this rail (see primary-rail-nav.ts),
- * not merely folded into the Projects sub-list — both used to aggregate
- * across every project's agents, which is exactly the boundary "an agent
+ * Conversations is GONE from this rail (see primary-rail-nav.ts) — it still
+ * aggregates across every project's agents, exactly the boundary "an agent
  * belongs to its project and works only there" says a nav surface must not
- * reach past. Agents are entities that live INSIDE the project that owns
- * them, reached by opening that project's own Agents tab — where, at 2+
- * agents, this rail morphs into the project-agents space and lists them
- * itself (primary-rail-space.ts, gated by project-agents-rail-shape.ts).
+ * reach past.
+ *
+ * Agents CAME BACK 2026-08-19 — a founder reversal on this one point (see
+ * primary-rail-nav.ts's own history for the exact words), not a re-opening
+ * of that boundary. It is a top-level row again, but it does not aggregate
+ * into the content area the way the pre-2026-08-13 shape did: pressing it
+ * morphs THIS rail into the workspace-agents space — every real agent,
+ * across every project — the same mechanism Settings already uses
+ * (primary-rail-space.ts, gated by workspace-agents-rail-shape.ts). A
+ * project's own Agents tab is untouched and still opens the older,
+ * project-scoped twin of this same mechanism (project-agents) — the two
+ * are independent, see primary-rail-space.ts's header for why they stay
+ * that way rather than merging.
  *
  * COUNTS ARE NON-ZERO ONLY. Inbox and My work each show a number when they
  * have one and nothing when they don't — a zero badge is noise, and it is
@@ -260,26 +277,49 @@ export function PrimaryRail({
   }, [workspaceId]);
 
   const INBOX_BADGE_LIMIT = 100;
-  // Backend-computed, not client-filtered: a genuine count of what's new
-  // since the last visit, not the fetch page size dressed up as one (U3-H —
-  // this used to read a suspicious, round "50" for a never-visited reader
-  // with any real backlog, since the old version just returned however many
-  // of the newest N events happened to be unseen).
-  const { events: inboxNewEvents } = useWorkspaceActivity(workspaceId, INBOX_BADGE_LIMIT, lastSeenAt);
-  const inboxUnreadCount = inboxNewEvents.length;
-  const inboxUnreadLabel = inboxUnreadCount >= INBOX_BADGE_LIMIT ? `${INBOX_BADGE_LIMIT}+` : String(inboxUnreadCount);
+  // The Inbox badge is now the SAME "needs you" question the page itself
+  // answers (inbox-needs-you.ts) — not the raw ledger. Three terms, summed:
+  //
+  //   unread notifications   real per-user rows (task_notification_
+  //                          service.py), already unread-only by the
+  //                          hook's own default.
+  //   my stuck tasks         assigned to me, sitting in blocked/
+  //                          awaiting_input right now — the exact 17-day-
+  //                          old-task shape the old ledger badge never
+  //                          caught, since it only ever counted ledger rows.
+  //   unseen blocked runs    activity_ledger's `blocked_action` class
+  //                          (run_failed/machine_revoked/machine_
+  //                          enrollment_failed), newer than the last visit
+  //                          — server-filtered by BOTH event_class and
+  //                          since_created_at at once (independent AND'd
+  //                          filters, see runtime_events_api.py), so this
+  //                          reuses the exact "what's new since I last
+  //                          looked" semantics the old badge already had,
+  //                          just scoped to the subset that actually needs
+  //                          attention instead of every ledger row.
+  const { events: unseenBlockedRuns } = useWorkspaceActivity(workspaceId, INBOX_BADGE_LIMIT, lastSeenAt, "blocked_action");
+  const { notifications: unreadNotifications } = useFleetNotifications(workspaceId, true, INBOX_BADGE_LIMIT);
 
   // My work's count — the SAME function the page itself partitions with
   // (my-work.ts), against the SAME workspace-wide fetch, so the badge and
   // the page can never disagree about what "mine" means. Both readers share
   // one polled resource (useFleetWorkspaceTasks' cache key), so having the
   // rail show a number costs no extra request while the page is open.
+  // Also the source for the Inbox badge's "stuck" half, via
+  // inbox-needs-you.ts's own isMyStuckTask — same list, two different
+  // pure-module readings, never two fetches.
   const { tasks: workspaceTasks } = useFleetWorkspaceTasks(workspaceId);
   const myAccountId = useOwnAccountId();
   const myWorkCount = useMemo(
     () => myWorkBadgeCount(workspaceTasks, myAccountId),
     [workspaceTasks, myAccountId],
   );
+  const myStuckTaskCount = useMemo(
+    () => workspaceTasks.filter((t) => isMyStuckTask(t, myAccountId)).length,
+    [workspaceTasks, myAccountId],
+  );
+  const inboxUnreadCount = unreadNotifications.length + myStuckTaskCount + unseenBlockedRuns.length;
+  const inboxUnreadLabel = inboxUnreadCount >= INBOX_BADGE_LIMIT ? `${INBOX_BADGE_LIMIT}+` : String(inboxUnreadCount);
 
   // Sage is the Operator, not a listed worker — the same exclusion every
   // other agent surface (AgentsList, command palette, Projects table) makes.
@@ -324,14 +364,32 @@ export function PrimaryRail({
         : [],
     [space, allAgents],
   );
+  // The workspace-agents space lists EVERY real agent in the workspace —
+  // `agents` (declared above: allAgents with Sage/the Operator already
+  // filtered out, the same exclusion every other agent surface here makes)
+  // is exactly that list. Each row needs a resolved project id to build its
+  // href (resolveAgentProjectId — the same fallback every other agent link
+  // in this app already goes through), so that resolution happens here, not
+  // inside primary-rail-space.ts, which stays free of fleet-data.
+  const spaceWorkspaceAgents = useMemo(
+    () =>
+      space?.kind === "workspace-agents"
+        ? agents.map((a) => ({ agent_id: a.agent_id, label: a.label, project_id: resolveAgentProjectId(a.project_id, projects) }))
+        : [],
+    [space, agents, projects],
+  );
   // Whether the agents space actually morphs the rail is the SAME predicate
-  // ProjectDetailPage calls to decide whether to hide its own Tasks/
-  // Documents/Agents tab strip (project-agents-rail-shape.ts's
-  // projectAgentsSpaceIsActive) — never a second rule, and never two rules
-  // that happen to agree today. Below the gate the rail simply stays flat.
+  // ProjectDetailPage (project-agents) / the workspace Agents page
+  // (workspace-agents) calls to decide whether to hide its own picking
+  // surface — never a second rule, and never two rules that happen to
+  // agree today. Below the gate the rail simply stays flat.
   const effectiveSpace =
     space?.kind === "project-agents"
       ? projectAgentsSpaceIsActive(true, spaceProjectAgents.length)
+        ? space
+        : null
+      : space?.kind === "workspace-agents"
+      ? workspaceAgentsSpaceIsActive(true, agents.length)
         ? space
         : null
       : space;
@@ -351,8 +409,9 @@ export function PrimaryRail({
   const spaceLinks: RailSpaceLink[] | null = useMemo(() => {
     if (!effectiveSpace) return null;
     if (effectiveSpace.kind === "settings") return settingsSpaceLinks(effectiveSpace);
+    if (effectiveSpace.kind === "workspace-agents") return workspaceAgentsSpaceLinks(effectiveSpace, spaceWorkspaceAgents);
     return projectAgentsSpaceLinks(effectiveSpace, spaceProjectAgents);
-  }, [effectiveSpace, spaceProjectAgents]);
+  }, [effectiveSpace, spaceProjectAgents, spaceWorkspaceAgents]);
   const spaceBack = effectiveSpace ? spaceBackHref(effectiveSpace, lastOutsideSpaceRef.current) : null;
   const spaceProject =
     effectiveSpace?.kind === "project-agents"
@@ -361,6 +420,8 @@ export function PrimaryRail({
   const spaceTitle = effectiveSpace
     ? effectiveSpace.kind === "settings"
       ? "Settings"
+      : effectiveSpace.kind === "workspace-agents"
+      ? "Agents"
       : spaceProject?.name || "Agents"
     : null;
 
@@ -582,7 +643,15 @@ export function PrimaryRail({
             </span>
             {!effectiveCollapsed && <span className="fleet-rail-item-label">Back</span>}
           </Link>
-          {!effectiveCollapsed && spaceTitle && (
+          {/* The heading is DELIBERATELY absent for the workspace-agents
+              space (founder, 2026-08-19: "i dont want this in this left rail
+              after i open this agents"). The rail rows ARE the agents, and a
+              grey "AGENTS" label above a list of agents restates what the
+              list already says. `spaceTitle` still feeds the <nav>'s
+              aria-label above, so a screen reader keeps the name it needs —
+              removing the visible heading must not remove the accessible
+              one. */}
+          {!effectiveCollapsed && spaceTitle && effectiveSpace.kind !== "workspace-agents" && (
             <div className="fleet-rail-space-title">{spaceTitle}</div>
           )}
           {spaceLinks.map((link) => {
@@ -590,9 +659,15 @@ export function PrimaryRail({
             // An agent row carries the agent's own identity (sigil + live
             // status dot) instead of a generic icon — the same rendering
             // the old in-content list used, now living where picking lives.
+            // workspace-agents looks the row up in the full, already
+            // Sage-excluded `agents` list (not spaceWorkspaceAgents, which
+            // only carries the fields workspaceAgentsSpaceLinks needs to
+            // build an href — AgentSigil/StatusDot need the real record).
             const agent =
               effectiveSpace.kind === "project-agents"
                 ? spaceProjectAgents.find((a) => a.agent_id === link.key)
+                : effectiveSpace.kind === "workspace-agents"
+                ? agents.find((a) => a.agent_id === link.key)
                 : undefined;
             return (
               <Link
@@ -623,6 +698,33 @@ export function PrimaryRail({
               </Link>
             );
           })}
+          {/* "+ New agent", at the FOOT of the agent list (founder,
+              2026-08-19: "i do not have any button to create an agent and
+              + agent should be at the bottom of this left rail"). Deliberately
+              identical in shape and reasoning to "+ New project" below: a real
+              <Link>, never a button that opens a dialog straight from the rail,
+              so `?new=1` hands off to the ONE create-agent wizard the agents
+              page already owns (the same URL the command palette's own "New
+              agent" uses) instead of standing up a second composer -- and being
+              an <a> means cmd-click opens it in a new tab like any other
+              navigation. Neutral, never accent-filled: the agents page's own
+              "+ New agent" header action is that view's one accent action, and
+              two filled buttons in one view is a bug. Only in the
+              workspace-agents space: the project-agents space is scoped to one
+              project, and Settings has nothing to create. */}
+          {effectiveSpace.kind === "workspace-agents" && (
+            <Link
+              href={`${hrefFor("agents")}?new=1`}
+              className="fleet-rail-item fleet-rail-item--new"
+              title={effectiveCollapsed ? "New agent" : undefined}
+              aria-label="New agent"
+            >
+              <span className="fleet-rail-item-icon">
+                <Plus size={RAIL_ICON} strokeWidth={2} aria-hidden="true" />
+              </span>
+              {!effectiveCollapsed && <span className="fleet-rail-item-label">New agent</span>}
+            </Link>
+          )}
         </nav>
       ) : (
       <nav className="fleet-rail-nav">

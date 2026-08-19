@@ -48,6 +48,7 @@ import {
   type PassiveInventorySnapshot,
 } from "../health/service-inventory";
 import { collectResourceMetrics } from "../health/resource-metrics";
+import { ensureDockerReady, type DockerAutostartOutcome } from "../shell/docker-autostart";
 
 /**
  * MAN-309: how much slack a single heartbeat ack gets over the negotiated
@@ -211,6 +212,17 @@ export class GatewayWsClient {
     // Injectable for tests, same spirit as cli-login-session.ts's spawnImpl —
     // defaults to the real `ws` package so production code needs no override.
     private readonly webSocketImpl: typeof WebSocket = WebSocket,
+    // Injectable for tests, same trailing-optional-with-a-real-default shape
+    // as webSocketImpl just above. Defaults to the real ensureDockerReady()
+    // (shell/docker-autostart.ts), which can genuinely launch Docker Desktop
+    // on whatever machine is running this process. A test that exercises
+    // sendHeartbeat()/refreshPassiveInventorySnapshot() with "shell.execute"
+    // or "filesystem.read_write" in requestedCapabilities MUST override this
+    // with a fake — see capability-reevaluation.test.ts's buildClient() —
+    // never rely on the real Docker probe happening to already be "ready" on
+    // whatever box runs the suite. CLAUDE.md is explicit that this codebase
+    // must never touch the founder's own Docker state as a test side effect.
+    private readonly dockerAutostart: () => Promise<DockerAutostartOutcome> = ensureDockerReady,
   ) {
     this.reconnect = new ReconnectBackoff({
       minDelayMs: this.config.reconnectMinDelayMs,
@@ -662,6 +674,33 @@ export class GatewayWsClient {
     })
       .then((snapshot) => {
         this.passiveInventorySnapshot = applyLocalRunnerReadiness(snapshot, localRunnerReady);
+        // Docker being down is exactly the state that takes away the one
+        // lever (shell.execute) an agent would otherwise use to fix it —
+        // see docker-autostart.ts's own header. Kicked off here so a cold
+        // box (Docker Desktop never auto-launched at login) starts
+        // recovering on its own, before any agent ever tries a shell
+        // command, rather than only reactively at tool-invoke time.
+        //
+        // Deliberately fire-and-forget (`void`, not `await`): the whole
+        // point of the comment above this method is that sendHeartbeat()
+        // must never block on Docker Desktop coming up. Shares docker-
+        // autostart.ts's own module-level single-flight/cooldown state with
+        // shell/runtime.ts's blocking, tool-invoke-time attempt, so this can
+        // never spawn a second concurrent start command and never fires
+        // more than once per cooldown window regardless of how many
+        // heartbeat ticks land while Docker is still down. Only attempted
+        // when this gateway actually requested the shell_sandbox
+        // capabilities — no reason to pop open Docker Desktop on a box that
+        // never asked to run shell commands at all. ensureDockerReady()
+        // never rejects (every failure is a returned outcome, not a throw);
+        // the .catch is a defensive backstop so a defect there can never
+        // surface as an unhandled rejection on the heartbeat path.
+        if (
+          snapshot.capability_readiness.service_statuses.docker !== "ready"
+          && (requestedCapabilities.includes("shell.execute") || requestedCapabilities.includes("filesystem.read_write"))
+        ) {
+          void this.dockerAutostart().catch(() => undefined);
+        }
       })
       .catch(async (error) => {
         await this.journal.append("system", "gateway.inventory.refresh_failed", {

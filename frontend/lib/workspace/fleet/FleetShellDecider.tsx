@@ -31,8 +31,12 @@ import { RAIL_ITEMS } from "./primary-rail-nav";
 const NON_RAIL_SHELL_SEGMENTS = [
   // Reachable and live, deliberately unlinked from the rail (project-as-spine
   // nav) — several next.config LEGACY_REDIRECTS still point AT /agents.
+  // "agents" itself is NOT here any more (2026-08-19): it came back onto
+  // the rail (see primary-rail-nav.ts's history), so it's now derived from
+  // RAIL_ITEMS below like every other rail destination — hand-listing it
+  // here too would trip primary-rail-nav.test.ts's own "one source per
+  // segment" drift guard.
   "conversations",
-  "agents",
   "fleet",
   // Reached from Settings / the account menu rather than the rail.
   "hardware",

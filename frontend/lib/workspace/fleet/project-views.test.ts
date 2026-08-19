@@ -21,8 +21,8 @@ function assert(condition: boolean, label: string): void {
 }
 
 assert(
-  PROJECT_TAB_VIEWS.join(",") === "tasks,documents,agents",
-  `the tab bar is exactly Tasks · Documents · Agents, in that order — got ${PROJECT_TAB_VIEWS.join(",")}`,
+  PROJECT_TAB_VIEWS.join(",") === "tasks,documents",
+  `the tab bar is exactly Tasks · Documents, in that order — got ${PROJECT_TAB_VIEWS.join(",")}`,
 );
 
 // People is not a tab: the header's member avatars + "+" are the people
@@ -31,9 +31,17 @@ assert(
 assert(!(PROJECT_TAB_VIEWS as readonly string[]).includes("people"), "People is NOT a tab");
 
 assert(
-  PROJECT_TAB_VIEWS.map((v) => PROJECT_TAB_LABEL[v]).join(",") === "Tasks,Documents,Agents",
+  PROJECT_TAB_VIEWS.map((v) => PROJECT_TAB_LABEL[v]).join(",") === "Tasks,Documents",
   "labels are the plain human words",
 );
+
+// Agents is NOT a tab (founder, 2026-08-19). Agents became a top-level rail
+// surface the day before -- re-offering them inside one project re-cages the
+// thing that was deliberately lifted out, and gives two answers to "where do
+// I find my agents". Asserted as its own negative, exactly like People
+// below, so a future edit that quietly re-adds the tab fails here rather
+// than shipping. The per-project /agents ROUTE stays live and unlinked.
+assert(!(PROJECT_TAB_VIEWS as readonly string[]).includes("agents"), "Agents is NOT a tab");
 
 // Wired, not just built: the page must render its strip FROM this module,
 // or the set here asserts nothing about what a customer sees.
