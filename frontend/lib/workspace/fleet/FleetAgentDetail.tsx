@@ -1149,9 +1149,36 @@ export function FleetAgentDetail({
   // founder's own account while diagnosing a wedged send. Clicking twice
   // before navigating reuses one id, which lands on the same empty thread —
   // exactly what a person expects two "New chat" clicks to mean.
+  //
+  // `newAgentThreadId` is Date.now()+Math.random() — genuinely fresh on
+  // every call, which is exactly why seeding the memo directly with it was
+  // wrong: a Client Component's render function runs once on the SERVER
+  // and once again on the CLIENT during hydration, two separate JS
+  // executions sharing no state, so the memo minted a DIFFERENT id each
+  // time and React threw a hydration-mismatch console error on every load
+  // (server href vs. client's first-render href disagreeing on the
+  // trailing thread-id token). This is still a real, cmd-clickable
+  // `<Link>` (this app's own "primary navigation is real links" rule) —
+  // never a button — because the href always resolves to a real, valid
+  // thread URL. What changes is WHEN the genuinely-random id is minted:
+  // `useState`'s initializer seeds a deterministic placeholder
+  // (`defaultAgentThreadId`, plain string interpolation, identical on
+  // server and first client render — nothing to disagree on at hydration
+  // time), and the effect below swaps in the real, never-reused id right
+  // after mount, client-side only. Effects fire synchronously right after
+  // the commit, well before any human has a chance to click, so in
+  // practice the href a person actually sees and clicks is always the
+  // fresh one. Re-fires only when `agentId` itself changes (this
+  // component is not remounted on an in-place agent switch), never on the
+  // poll-driven re-renders that produced the prefetch-spam bug above —
+  // `freshThreadId` is state, not a value recomputed every render.
+  const [freshThreadId, setFreshThreadId] = useState(() => defaultAgentThreadId(agentId));
+  useEffect(() => {
+    setFreshThreadId(newAgentThreadId(agentId));
+  }, [agentId]);
   const nextNewThreadHref = useMemo(
-    () => threadHref(newAgentThreadId(agentId)),
-    [agentId, threadHref],
+    () => threadHref(freshThreadId),
+    [freshThreadId, threadHref],
   );
 
   const sessionsContent = (
