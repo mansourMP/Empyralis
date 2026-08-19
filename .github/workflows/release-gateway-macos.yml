@@ -1,0 +1,416 @@
+name: Release Gateway (macOS)
+
+# The macOS sibling of release-gateway-linux.yml. Builds the prebuilt,
+# self-contained Agent Computer gateway artifact that
+# scripts/install-agent-computer-macos.sh downloads on a fresh Mac
+# (install-agent-computer-macos.sh's install_release_artifacts(), which asks
+# for empyralis-gateway-darwin-<arch>.tar.gz FIRST and only falls back to the
+# Linux tarball when no darwin build is published) and that
+# gateway_self_update_service.resolve_latest_gateway_version() already
+# builds a URL for today, keyed off registration["platform"] (e.g.
+# "darwin-arm64") — this workflow is what makes that URL ever resolve to a
+# real object instead of a 404.
+#
+# WHY NO macos-latest RUNNER: verified before writing this file, not assumed.
+# The gateway's only dependencies are @whiskeysockets/baileys, pino, telegram
+# and ws (empyralis-gateway/package.json). Across the whole dependency tree
+# (package-lock.json) exactly ONE package family is platform-gated via npm's
+# os/cpu optionalDependencies mechanism: sharp (@img/sharp-<platform>-<arch>,
+# a baileys OPTIONAL peer — baileys does not even list it directly, "sharp":
+# "*" is declared inside baileys' own optionalDependencies, and every
+# consumer of it degrades gracefully when it is absent). bufferutil and
+# utf-8-validate (the two ws-native packages) use prebuildify: a single npm
+# install bundles darwin-arm64 AND darwin-x64 AND linux-x64 prebuilt
+# binaries together inside node_modules/<pkg>/prebuilds/ regardless of which
+# platform ran `npm install` — confirmed directly by inspecting a real local
+# install's node_modules/bufferutil/prebuilds/ and node_modules/utf-8-
+# validate/prebuilds/, both of which already contain darwin-arm64 and
+# darwin-x64 directories. whatsapp-rust-bridge (a baileys transitive dep) is
+# Rust compiled to WebAssembly, not a native binary — dist/index.js embeds
+# the .wasm and runs identically on every OS/arch Node.js runs on; confirmed
+# by reading its package.json (no install script, no os/cpu gate) and its
+# published dist/ output. So the ONLY reason to cross-package rather than
+# cross-compile is selecting the right sharp optionalDependency, which
+# `npm ci --os=darwin --cpu=<arch>` does correctly on ANY host OS — the exact
+# mechanism this repo's own Linux workflow already relies on to cross-package
+# its arm64 tarball on an x64 runner. install-agent-computer-macos.sh's own
+# header comment independently corroborates this: it already ships a
+# documented fallback path that downloads the LINUX tarball onto a real Mac
+# when no darwin build exists, and states it was verified running that exact
+# archive's dist/index.js on macOS, booting and staying up with channels
+# enabled — i.e. a Linux-built artifact already runs on a Mac today. A real
+# darwin build fixes the one thing that fallback cannot (a working sharp for
+# richer media handling); it does not fix a "the gateway won't run" problem,
+# because there wasn't one.
+#
+# Archive layout is IDENTICAL to the Linux artifact's, on purpose — the same
+# two structural consumers this workflow's own completeness-verification
+# step below re-derives requirements from:
+#   - scripts/install-agent-computer-macos.sh (fresh macOS installs, prefers
+#     empyralis-gateway-darwin-<arch>.tar.gz over the Linux fallback)
+#   - empyralis-gateway/src/update/gateway-artifact-installer.ts (self-update
+#     on ANY platform, including a Mac that already has the gateway running)
+# => the archive ROOT holds dist/, node_modules/, package.json,
+# openclaw-bridge-plugin/. No wrapper directory. Both consumers create the
+# `empyralis-gateway/` level themselves — same convention as Linux.
+#
+# openclaw-bridge-plugin/ matters MORE here than on Linux, not less: the
+# macOS installer's own header explains that a Mac has no systemd-unit step
+# at all — "on macOS the gateway installs its own LaunchAgent perfectly well
+# without root, so the installer has nothing to do" for the channel
+# transport. That means the gateway's OWN boot pass (ensureProvisionedAtBoot)
+# is the only thing that ever provisions OpenClaw on a Mac, and it needs this
+# directory present exactly as much as the Linux box's boot pass does.
+#
+# Publish target: the SAME agent-computer/<version>/ folder the Linux
+# tarball already publishes into — read directly off
+# resolve_latest_gateway_version() (server_modules/gateway_self_update_
+# service.py), which builds
+# "{base_url}/{version}/empyralis-gateway-{platform}-{arch}.tar.gz" for
+# EVERY platform off one shared base_url, and off install-agent-computer-
+# macos.sh's own ARTIFACT_BASE_URL, which is
+# ".../releases/agent-computer/${AGENT_COMPUTER_VERSION}" — the identical
+# root the Linux installer defaults to. A separate macos-<arch>/latest/
+# prefix would not be a parallel path, it would be an UNREACHABLE one: two
+# already-shipped consumers ask for this exact folder, and neither has a
+# macOS-specific base URL to override with.
+#
+# Credentials: same repo secrets as the Linux workflow (R2_ACCESS_KEY_ID /
+# R2_SECRET_ACCESS_KEY), scoped to the same bucket.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          Version label for the artifact. The installer defaults to "latest"
+          (install-agent-computer-macos.sh's AGENT_COMPUTER_VERSION), so a
+          build intended for new/updating Macs must ultimately be reachable
+          at .../releases/agent-computer/latest/. Use a distinct label (e.g.
+          a throwaway string) to publish a verification build that does not
+          touch what any real Mac currently downloads.
+        required: true
+        default: latest
+  # AUTOMATIC PUBLISH, same reasoning and same trigger shape as release-
+  # gateway-linux.yml's own `push:` block (2026-08-13 gateway-artifact-
+  # staleness incident, and CLAUDE.md's "a compiled artifact is a live-path
+  # risk grep can't see"): a macOS build step that only a human remembers to
+  # run is the exact defect this repo has already been bitten by once. A
+  # merge now publishes itself on this platform too; workflow_dispatch stays
+  # available for a deliberate pinned-version release.
+  push:
+    branches: [main]
+    paths:
+      - "empyralis-gateway/**"
+      - ".github/workflows/release-gateway-macos.yml"
+
+permissions:
+  contents: read
+  attestations: write
+  id-token: write
+
+concurrency:
+  group: gateway-macos-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gateway:
+    name: Gateway darwin-${{ matrix.arch }} tarball
+    # Cross-packaged on a Linux runner, deliberately — see the header
+    # comment above for why this is correct rather than a shortcut. No step
+    # in this job compiles or links native code: `npm run build` is `tsc`
+    # (pure JS output, platform-independent), and the one platform-gated
+    # native dependency (sharp) is npm-selected by --os/--cpu, never
+    # compiled from source, on either runner type.
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || 'latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            npm_cpu: x64
+          - arch: arm64
+            npm_cpu: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Same reasoning as the Linux workflow's identical step: the compiled
+      # output and installed native prebuilds should match a Node 20 build,
+      # since that is the gateway's own `engines: >=20` floor and what
+      # install-agent-computer-macos.sh's run-gateway launcher execs on a
+      # fresh Mac (the transport's newer Node >=22.19 requirement is a
+      # SEPARATE runtime the installer downloads for OpenClaw itself, per
+      # this repo's own "OpenClaw needs a NEWER Node than the gateway"
+      # entry — not something this build step needs to satisfy).
+      - name: Install build dependencies
+        run: npm ci --no-audit --no-fund
+        working-directory: empyralis-gateway
+
+      - name: Compile TypeScript
+        run: npm run build
+        working-directory: empyralis-gateway
+
+      - name: Stage compiled output
+        run: mv empyralis-gateway/dist "$RUNNER_TEMP/dist"
+
+      # The cross-package step: --os=darwin --cpu=${{ matrix.npm_cpu }}
+      # makes npm resolve the darwin sharp optionalDependencies
+      # (@img/sharp-darwin-<arch>) instead of the runner's own linux-x64
+      # ones, on this Linux runner, with no compilation involved (see the
+      # header comment). Deliberately no --libc flag: that axis only exists
+      # to distinguish glibc/musl on Linux, sharp's darwin packages declare
+      # no libc field at all, and passing one npm cannot use for this target
+      # would do nothing but invite confusion later.
+      - name: Install production dependencies for darwin-${{ matrix.arch }}
+        run: npm ci --omit=dev --os=darwin --cpu=${{ matrix.npm_cpu }} --no-audit --no-fund
+        working-directory: empyralis-gateway
+
+      # Identical assembly to the Linux workflow's own step — same
+      # exclusions, same three files asserted present, same reasoning
+      # (see release-gateway-linux.yml for the long-form comment on why raw
+      # .ts ships here rather than a build step).
+      - name: Assemble artifact tree
+        run: |
+          set -euo pipefail
+          STAGE="$RUNNER_TEMP/gateway-stage"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          mv "$RUNNER_TEMP/dist" "$STAGE/dist"
+          cp -R empyralis-gateway/node_modules "$STAGE/node_modules"
+          cp empyralis-gateway/package.json "$STAGE/package.json"
+
+          mkdir -p "$STAGE/openclaw-bridge-plugin"
+          rsync -a \
+            --exclude 'src/__tests__' \
+            --exclude 'verify' \
+            --exclude 'node_modules' \
+            --exclude 'package-lock.json' \
+            --exclude 'tsconfig.json' \
+            empyralis-gateway/openclaw-bridge-plugin/ "$STAGE/openclaw-bridge-plugin/"
+
+          test -f "$STAGE/dist/index.js"
+          test -f "$STAGE/openclaw-bridge-plugin/index.ts"
+          test -f "$STAGE/openclaw-bridge-plugin/openclaw.plugin.json"
+
+      - name: Create tarball and checksum
+        run: |
+          set -euo pipefail
+          STAGE="$RUNNER_TEMP/gateway-stage"
+          OUT="$RUNNER_TEMP/out"
+          mkdir -p "$OUT"
+          TARBALL="empyralis-gateway-darwin-${{ matrix.arch }}.tar.gz"
+          tar -czf "$OUT/$TARBALL" -C "$STAGE" dist node_modules package.json openclaw-bridge-plugin
+          ( cd "$OUT" && sha256sum "$TARBALL" > "$TARBALL.sha256" )
+          ls -l "$OUT"
+          echo "GATEWAY_TARBALL=$TARBALL" >> "$GITHUB_ENV"
+
+      # Same mechanism as the Linux workflow's identical step (see that
+      # file's long-form comment on why this is a content fingerprint and
+      # not the .sha256 sidecar). Note this is expected to come out
+      # BYTE-IDENTICAL to the Linux build's fingerprint for the same commit:
+      # the fingerprint only hashes dist/**/*.{js,json}, dist/ is plain tsc
+      # output with no platform branching, and node_modules is explicitly
+      # excluded — so the darwin and linux tarballs for one commit carry the
+      # same dist/ and therefore the same fingerprint. That is correct, not
+      # a bug: EMPYRALIS_GATEWAY_LATEST_BUILD_FINGERPRINT is a single global
+      # value, not platform-scoped, precisely because what it identifies
+      # (the compiled behaviour) does not vary by platform.
+      - name: Compute published build fingerprint
+        run: |
+          set -euo pipefail
+          STAGE="$RUNNER_TEMP/gateway-stage"
+          OUT="$RUNNER_TEMP/out"
+          FINGERPRINT="$(node -e '
+            const { computeGatewayBuildFingerprint } =
+              require(process.env.STAGE + "/dist/update/gateway-build-fingerprint");
+            computeGatewayBuildFingerprint(process.env.STAGE + "/dist").then((r) => {
+              if (!r.fingerprint) {
+                console.error("could not fingerprint the staged build: " + r.reason);
+                process.exit(1);
+              }
+              process.stdout.write(r.fingerprint);
+            });
+          ')"
+          echo "$FINGERPRINT" > "$OUT/$GATEWAY_TARBALL.fingerprint"
+          echo "published build fingerprint: $FINGERPRINT"
+        env:
+          STAGE: ${{ runner.temp }}/gateway-stage
+
+      # COMPLETENESS GATE — the macOS equivalent of the Linux workflow's
+      # "Verify archive matches what the installer expects" step, carrying
+      # the SAME discipline: the expected set is DERIVED from the real
+      # consumer script by grepping its own literal paths, never hand-typed
+      # here, with canaries that fail loudly if the grep itself stops
+      # matching rather than silently passing an empty check. See
+      # release-gateway-linux.yml for the long-form reasoning; this step
+      # exists because a weaker macOS check would reproduce the exact
+      # "dist/index.js present, a whole feature directory silently absent"
+      # shape that incident was about, just on the platform nobody was
+      # watching yet.
+      #
+      # Derived from scripts/install-agent-computer-macos.sh rather than a
+      # copy of the Linux installer's own required-paths list: the two
+      # scripts genuinely need different things by design (the macOS
+      # installer never touches openclaw-install-plan-cli.js, because a Mac
+      # has no systemd unit to write — see this workflow's header comment).
+      # Copying the Linux list would assert a requirement macOS doesn't
+      # have, or miss the specific file install-agent-computer-macos.sh's
+      # own resolve_pinned_node_version() reads to find out which Node the
+      # transport needs.
+      - name: Verify archive matches what the macOS installer expects
+        run: |
+          set -euo pipefail
+          VERIFY="$RUNNER_TEMP/verify"
+          rm -rf "$VERIFY"
+          mkdir -p "$VERIFY/empyralis-gateway"
+          tar -xzf "$RUNNER_TEMP/out/$GATEWAY_TARBALL" -C "$VERIFY/empyralis-gateway"
+          test -f "$VERIFY/empyralis-gateway/dist/index.js" \
+            || { echo "archive is missing dist/index.js at the installer-expected path" >&2; exit 1; }
+          test -f "$VERIFY/empyralis-gateway/package.json"
+          test -d "$VERIFY/empyralis-gateway/node_modules"
+
+          mapfile -t REQUIRED_PATHS < <(
+            grep -oE 'gateway/dist/[A-Za-z0-9/_.-]+\.(js|json)' scripts/install-agent-computer-macos.sh \
+              | sed 's#^gateway/##' \
+              | sort -u
+          )
+
+          if [[ "${#REQUIRED_PATHS[@]}" -eq 0 ]]; then
+            echo "derived zero required paths from scripts/install-agent-computer-macos.sh — the extraction pattern in this workflow no longer matches that script; fix the grep in release-gateway-macos.yml before trusting this gate" >&2
+            exit 1
+          fi
+          if ! printf '%s\n' "${REQUIRED_PATHS[@]}" | grep -qx 'dist/openclaw/provisioning/openclaw-version.js'; then
+            echo "derived required-paths list no longer includes dist/openclaw/provisioning/openclaw-version.js — the grep pattern in release-gateway-macos.yml drifted from install-agent-computer-macos.sh's own style; fix it before trusting this gate" >&2
+            exit 1
+          fi
+
+          missing=0
+          for rel in "${REQUIRED_PATHS[@]}"; do
+            if [[ ! -f "$VERIFY/empyralis-gateway/$rel" ]]; then
+              echo "MISSING: $rel" >&2
+              missing=1
+            fi
+          done
+          if [[ "$missing" -eq 1 ]]; then
+            echo >&2
+            echo "archive is missing one or more files scripts/install-agent-computer-macos.sh requires by path — resolve_pinned_node_version() (install-agent-computer-macos.sh) needs dist/openclaw/provisioning/openclaw-version.js to know which Node this build needs. This is the same shape as the 2026-08-13 gateway-artifact-staleness incident on the Linux artifact (dist/index.js present, a whole feature directory absent) — refusing to publish a darwin tarball a Mac cannot fully install from." >&2
+            exit 1
+          fi
+
+          # SECOND completeness check, sourced independently from the
+          # runtime's own TypeScript rather than from either installer
+          # script — same reasoning as the Linux workflow's identical
+          # second check, and just as necessary here: a Mac's own boot pass
+          # (ensureProvisionedAtBoot) is the ONLY thing that ever provisions
+          # the channel transport on macOS (no systemd-unit installer step
+          # exists to also catch this), so a missing bridge plugin directory
+          # is silent in exactly the same way, on the platform where it is
+          # the sole install path.
+          RUNTIME_SRC="empyralis-gateway/src/openclaw/provisioning/openclaw-provisioning-runtime.ts"
+          BRIDGE_PLUGIN_DIR_NAME="$(grep -oE 'path\.resolve\(path\.dirname\(entryPath\), "\.\.", "[A-Za-z0-9_-]+"\)' "$RUNTIME_SRC" \
+            | grep -oE '"[A-Za-z0-9_-]+"\)$' | tr -d '")')"
+
+          if [[ -z "${BRIDGE_PLUGIN_DIR_NAME}" ]]; then
+            echo "could not derive the bridge plugin directory name from ${RUNTIME_SRC}'s defaultBridgePluginPath() — that function's shape changed and this grep no longer matches it; fix the grep in release-gateway-macos.yml before trusting this gate" >&2
+            exit 1
+          fi
+          if [[ "${BRIDGE_PLUGIN_DIR_NAME}" != "openclaw-bridge-plugin" ]]; then
+            echo "derived bridge plugin directory name is '${BRIDGE_PLUGIN_DIR_NAME}', expected 'openclaw-bridge-plugin' — either the runtime source changed the directory name (update the packing/tar steps above to match) or this grep drifted; fix before trusting this gate" >&2
+            exit 1
+          fi
+
+          BRIDGE_PLUGIN_DIR="$VERIFY/empyralis-gateway/${BRIDGE_PLUGIN_DIR_NAME}"
+          if [[ ! -d "${BRIDGE_PLUGIN_DIR}" ]]; then
+            echo "archive is missing ${BRIDGE_PLUGIN_DIR_NAME}/ — defaultBridgePluginPath() resolves the OpenClaw channel-transport plugin here, relative to the package root, and this Mac's own boot pass would come up with a working gateway and NO channel transport (OpenClaw refuses with 'plugin path not found', logged, never failing the install)." >&2
+            exit 1
+          fi
+          if [[ -z "$(find "${BRIDGE_PLUGIN_DIR}" -type f -print -quit)" ]]; then
+            echo "${BRIDGE_PLUGIN_DIR_NAME}/ exists in the archive but is empty" >&2
+            exit 1
+          fi
+
+          PLUGIN_MANIFEST="${BRIDGE_PLUGIN_DIR}/openclaw.plugin.json"
+          test -f "${PLUGIN_MANIFEST}" \
+            || { echo "MISSING: ${BRIDGE_PLUGIN_DIR_NAME}/openclaw.plugin.json (OpenClaw's plugin loader reads this for id/name/description)" >&2; exit 1; }
+
+          PLUGIN_PACKAGE_JSON="${BRIDGE_PLUGIN_DIR}/package.json"
+          test -f "${PLUGIN_PACKAGE_JSON}" \
+            || { echo "MISSING: ${BRIDGE_PLUGIN_DIR_NAME}/package.json (declares this plugin's entry path under .openclaw.extensions)" >&2; exit 1; }
+
+          PLUGIN_ENTRY_REL="$(jq -r '.openclaw.extensions[0] // empty' "${PLUGIN_PACKAGE_JSON}")"
+          if [[ -z "${PLUGIN_ENTRY_REL}" ]]; then
+            echo "${BRIDGE_PLUGIN_DIR_NAME}/package.json has no .openclaw.extensions[0] — cannot determine what OpenClaw would try to load; fix the plugin's package.json or this check" >&2
+            exit 1
+          fi
+          PLUGIN_ENTRY_REL="${PLUGIN_ENTRY_REL#./}"
+          test -f "${BRIDGE_PLUGIN_DIR}/${PLUGIN_ENTRY_REL}" \
+            || { echo "MISSING: ${BRIDGE_PLUGIN_DIR_NAME}/${PLUGIN_ENTRY_REL} — declared as this plugin's own entry point in package.json's .openclaw.extensions, but absent from the packed archive" >&2; exit 1; }
+
+          # THIRD check, macOS-specific and with no Linux analog: the
+          # sharp optionalDependency this whole cross-package step exists to
+          # select correctly. Not a hard failure — sharp is an OPTIONAL
+          # baileys peer and every consumer already degrades gracefully
+          # without it (see this workflow's header comment) — but a silent
+          # absence here would mean the --os=darwin flag stopped working
+          # and nobody would know until someone compared media features by
+          # hand. Advisory, loud, non-blocking.
+          SHARP_DARWIN_DIR="$VERIFY/empyralis-gateway/node_modules/@img/sharp-darwin-${{ matrix.arch }}"
+          if [[ ! -d "${SHARP_DARWIN_DIR}" ]]; then
+            echo "WARNING: node_modules/@img/sharp-darwin-${{ matrix.arch }} is absent from this archive — the --os=darwin --cpu=${{ matrix.arch }} cross-package selection did not pull the darwin sharp binary. Media features will silently degrade on this platform (sharp is an optional baileys peer, so the gateway still boots), but this defeats the point of building a real darwin artifact rather than shipping the Linux fallback. Investigate before treating this build as better than the fallback." >&2
+          else
+            echo "sharp darwin-${{ matrix.arch }} binary present: $(ls "${SHARP_DARWIN_DIR}")"
+          fi
+
+      - name: Attest gateway artifact provenance
+        uses: actions/attest-build-provenance@v2
+        continue-on-error: true
+        with:
+          subject-path: ${{ runner.temp }}/out/${{ env.GATEWAY_TARBALL }}
+
+      - name: Upload gateway artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: empyralis-gateway-darwin-${{ matrix.arch }}-${{ env.RELEASE_VERSION }}
+          path: ${{ runner.temp }}/out/*
+          if-no-files-found: error
+          retention-days: 30
+
+      # Same bucket, same folder as the Linux tarball — see header comment
+      # for why this is the correct target rather than a macOS-specific
+      # prefix. Filenames differ (darwin vs linux) so the two platforms'
+      # objects never collide inside one version folder.
+      - name: Publish to Cloudflare R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          set -euo pipefail
+          ENDPOINT="https://76e485cbfb611ff8caa5c1d2afa71890.r2.cloudflarestorage.com"
+          BUCKET="empyralis-agent-computer-releases"
+          DEST="s3://${BUCKET}/agent-computer/${RELEASE_VERSION}/"
+          aws s3 cp "$RUNNER_TEMP/out/$GATEWAY_TARBALL" "$DEST" --endpoint-url "$ENDPOINT"
+          aws s3 cp "$RUNNER_TEMP/out/$GATEWAY_TARBALL.sha256" "$DEST" --endpoint-url "$ENDPOINT"
+          aws s3 cp "$RUNNER_TEMP/out/$GATEWAY_TARBALL.fingerprint" "$DEST" --endpoint-url "$ENDPOINT"
+
+      # NOTE: there is deliberately no "publish installer script to R2" step
+      # here, unlike the Linux workflow's own trailing step. That step exists
+      # on Linux because empyralis.ai/install/agent-computer.sh used to be
+      # served from a hand-updated Cloudflare Worker copy that drifted ~50
+      # days behind the repo (MAN-121/MAN-122) — publishing the script to R2
+      # and having the Worker fetch it from there was the fix. The macOS
+      # installer never had that problem: frontend/app/api/hardware/
+      # bootstrap/install-macos.sh/route.ts proxies straight to the control
+      # plane's own routes_gateway.get_agent_computer_macos_bootstrap_
+      # installer(), which reads scripts/install-agent-computer-macos.sh off
+      # disk on every request — no cache, no embedded copy, no drift
+      # possible. Adding an R2 publish step here would be a second, unused
+      # copy of the script sitting in the bucket, not a fix for anything.
