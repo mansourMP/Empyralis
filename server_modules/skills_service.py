@@ -4323,10 +4323,32 @@ async def _execute_direct_tool_via_gateway_async(
 
 
 def _format_hardware_action_result(payload: Dict[str, Any]) -> str:
-    from server_modules import gateway_reason_messages
+    from server_modules import gateway_reason_messages, gateway_registry_service, gateway_state_repository
 
     runtime_session = payload.get("runtime_session") if isinstance(payload.get("runtime_session"), dict) else {}
     reason = str(payload.get("reason") or "").strip() or None
+    # Same evidence gate gateway_adapter.py's own emit_tool_result call
+    # site uses (see gateway_reason_messages._docker_confirmed_not_ready):
+    # without a real registration lookup here, a Docker-gated capability_
+    # missing/not_ready reason would default to the honest generic message
+    # rather than guessing — this makes it match the specific, actionable
+    # sentence whenever the gateway's own last-reported status actually
+    # confirms Docker is the cause. This is the JSON string a model reads
+    # DIRECTLY as its tool result on BOTH engines (build_sdk_tools's
+    # _handler calls the same generation_services.execute_single_direct_
+    # tool_call this function's caller does), so a wrong diagnosis here is
+    # not just a trace-view cosmetic — the model can relay it verbatim to
+    # the person. Never raises: a missing/unreachable registration
+    # degrades to {} (no evidence), the same safe default as no gateway_id
+    # at all.
+    gateway_id = str(runtime_session.get("gateway_id") or "").strip()
+    service_statuses: Dict[str, str] = {}
+    if gateway_id:
+        try:
+            registration = gateway_state_repository.get_gateway_registration(gateway_id)
+            service_statuses = gateway_registry_service.capability_service_statuses(registration)
+        except Exception:
+            service_statuses = {}
     summary = {
         "status": str(payload.get("status") or "").strip(),
         "reason": reason,
@@ -4338,7 +4360,9 @@ def _format_hardware_action_result(payload: Dict[str, Any]) -> str:
         # gateway_reason_messages.py's module doc comment (MAN-295).
         "message": (
             gateway_reason_messages.gateway_reason_message(
-                reason, capability_id=runtime_session.get("capability_id"),
+                reason,
+                capability_id=runtime_session.get("capability_id"),
+                service_statuses=service_statuses,
             )
             if reason
             else None

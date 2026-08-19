@@ -25,6 +25,7 @@ provably untouched when the flag is off.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import unittest
 from types import SimpleNamespace
@@ -967,6 +968,43 @@ class TranslateUserMessageToolResultTests(unittest.TestCase):
         plan_event = next(p for p in trace_events if p["event_type"] == "plan.item.updated")
         self.assertEqual(plan_event["data"]["status"], "failed")
 
+    def test_structured_failure_content_is_classified_failed_even_when_sdk_is_error_false(self):
+        # Defense-in-depth companion to BuildSdkToolsTests.test_handler_
+        # marks_structured_offline_result_as_error above: even if some
+        # future producer of a ToolResultBlock reports is_error=False on a
+        # result whose OWN JSON content says otherwise (exactly what
+        # happened live for hardware__action before that fix), the
+        # translation layer must not take the SDK's is_error flag as the
+        # only signal. Real Vale transcript shape: the underlying gateway
+        # was offline, the tool result was structured failure JSON, and
+        # is_error was (pre-fix) False.
+        state = claude_agent_sdk_bridge.TranslationState()
+        trace_context = _trace_context()
+        started_message = sdk_types.AssistantMessage(
+            content=[sdk_types.ToolUseBlock(id="toolu_hw", name="hardware__action", input={"command": "uname -a"})],
+            model="claude-sonnet-4-5",
+        )
+        claude_agent_sdk_bridge.translate_sdk_message(started_message, state=state, trace_context=trace_context)
+        offline_payload = '{"status": "offline", "reason": "gateway_capability_missing", "message": "Docker isn\'t running."}'
+        result_message = sdk_types.UserMessage(
+            content=[sdk_types.ToolResultBlock(
+                tool_use_id="toolu_hw",
+                content=[{"type": "text", "text": offline_payload}],
+                is_error=False,
+            )],
+        )
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            result_message, state=state, trace_context=trace_context,
+        )
+        trace_events = [e["payload"] for e in events if e.get("type") == "trace"]
+        result_event = next(p for p in trace_events if p["event_type"] == "tool.result")
+        self.assertEqual(
+            result_event["data"]["status"], "failed",
+            f"structured offline content was not classified as a failure: {result_event['data']}",
+        )
+        plan_event = next(p for p in trace_events if p["event_type"] == "plan.item.updated")
+        self.assertEqual(plan_event["data"]["status"], "failed")
+
     def test_tool_result_status_classification_agrees_with_collector(self):
         # tool_result_status.classify_tool_result is the SAME structural
         # verdict sage_agent_runtime_service._collect_sage_operator_loop_v3_
@@ -1602,6 +1640,74 @@ class BuildSdkToolsTests(unittest.TestCase):
         self.assertEqual(kwargs["tool_call"], {"name": "web__search", "arguments": {"query": "empyralis"}})
         self.assertEqual(kwargs["workspace_id"], "ws-1")
         self.assertEqual(kwargs["credentials"], {"api_key": "sk-x"})
+
+    def test_handler_marks_structured_offline_result_as_error(self):
+        # Root cause of a real production incident (agent "Vale"): a
+        # hardware__action call whose underlying gateway was offline
+        # returns a WELL-FORMED, non-protocol-error tool result — the
+        # executor doesn't raise, nothing times out — so the ONLY signal
+        # that anything went wrong is inside the JSON string itself
+        # ({"status": "offline", "reason": "gateway_capability_missing",
+        # ...}, exactly the shape skills_service._format_hardware_action_
+        # result produces). Before this fix, the handler returned that
+        # string as a plain success (no "is_error" key at all), which the
+        # SDK reports as ToolResultBlock(is_error=False) — a structured
+        # failure indistinguishable, at the protocol level, from a real
+        # success. tool_result_status.classify_tool_result is the SAME
+        # structural verdict the legacy engine's own tool.result emission
+        # already applies (direct_chat_generation_service.py); this pins
+        # that the SDK bridge now applies it too, closing the parity gap
+        # this module's own header comment claims already exists
+        # ("tool_result_status classification all run exactly where they
+        # do today" — GREP claude_agent_sdk_bridge.py:30, and it was false
+        # for this exact path until this fix).
+        tool_defs = [{"name": "hardware__action", "description": "d", "parameters": {"type": "object", "properties": {}}}]
+        generation_services = MagicMock()
+        offline_payload = json.dumps({
+            "status": "offline",
+            "reason": "gateway_capability_missing",
+            "message": 'This machine hasn\'t advertised "shell.execute" yet.',
+        })
+        generation_services.execute_single_direct_tool_call = MagicMock(return_value=offline_payload)
+        sdk_tools = claude_agent_sdk_bridge.build_sdk_tools(
+            tool_defs=tool_defs,
+            generation_services=generation_services,
+            workspace_id="ws-1",
+            thread_id="th-1",
+            provider="anthropic",
+            model="claude-sonnet-4-5",
+            credentials={},
+            reasoning_effort="",
+            session_ctx={},
+        )
+        handler = sdk_tools[0].handler
+        result = asyncio.run(handler({"command": "uname -a"}))
+        self.assertTrue(result.get("is_error"), f"structured offline result was not classified as an error: {result}")
+        self.assertIn("gateway_capability_missing", result["content"][0]["text"])
+
+    def test_handler_leaves_a_genuine_success_unmarked(self):
+        # Companion negative case: a normal, successful structured result
+        # (a "completed" hardware status, or plain prose) must NOT be
+        # marked is_error — this is the false-positive trap
+        # tool_result_status.py's own docstring warns against.
+        tool_defs = [{"name": "hardware__action", "description": "d", "parameters": {"type": "object", "properties": {}}}]
+        generation_services = MagicMock()
+        ok_payload = '{"status": "completed", "result": {"exit_code": 0, "command": "uname -a"}}'
+        generation_services.execute_single_direct_tool_call = MagicMock(return_value=ok_payload)
+        sdk_tools = claude_agent_sdk_bridge.build_sdk_tools(
+            tool_defs=tool_defs,
+            generation_services=generation_services,
+            workspace_id="ws-1",
+            thread_id="th-1",
+            provider="anthropic",
+            model="claude-sonnet-4-5",
+            credentials={},
+            reasoning_effort="",
+            session_ctx={},
+        )
+        handler = sdk_tools[0].handler
+        result = asyncio.run(handler({"command": "uname -a"}))
+        self.assertNotIn("is_error", result)
 
     def test_handler_surfaces_governance_exception_as_tool_error_not_a_crash(self):
         tool_defs = [{"name": "fleet__create_agent", "description": "d", "parameters": {"type": "object", "properties": {}}}]

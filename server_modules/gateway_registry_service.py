@@ -297,6 +297,36 @@ def _hardware_execution_readiness_summary(metadata: Dict[str, Any]) -> Dict[str,
     }
 
 
+def capability_service_statuses(registration: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """Best-effort extraction of the gateway's own most recently reported
+    per-service readiness (service_statuses.docker, etc.) from the LIVE
+    capability_readiness gateway_registration_public_payload() folds in —
+    same MAN-313 live-merge this function reuses rather than duplicates.
+    Used by gateway_reason_messages.py's capability-missing/-not-ready
+    message builders so they can tell an ACTUALLY CONFIRMED cause (the
+    gateway itself reported Docker as not ready) from a guess keyed only on
+    which capability was requested — see that module's
+    _docker_confirmed_not_ready for the live incident this closes. Never
+    raises and never returns anything but a plain str-keyed dict — this
+    only ever feeds a human-facing failure message, so a lookup failure
+    here must degrade to "no evidence" (empty dict), not blow up a caller
+    that is already on a failure path."""
+    if not isinstance(registration, dict) or not registration:
+        return {}
+    try:
+        payload = gateway_registration_public_payload(registration)
+    except Exception:
+        return {}
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        return {}
+    readiness = metadata.get("capability_readiness")
+    if not isinstance(readiness, dict):
+        return {}
+    statuses = readiness.get("service_statuses")
+    return statuses if isinstance(statuses, dict) else {}
+
+
 def gateway_registration_public_payload(registration: Dict[str, Any]) -> Dict[str, Any]:
     # Lazy import to break a module-load cycle: gateway_self_update_service pulls
     # in gateway_execution_service -> gateway_protocol_service, and protocol reads

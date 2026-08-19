@@ -372,12 +372,22 @@ async def execute_gateway_action(
             reason=reason,
             extra_metadata={"gateway_id": gateway_token, "device_id": device_token, "offline_reason": reason},
         )
+        # Evidence for gateway_reason_message's Docker-message gate — see
+        # gateway_reason_messages._docker_confirmed_not_ready. Without this,
+        # gateway_capability_missing/gateway_capability_not_ready fall back
+        # to an honest generic message rather than guessing Docker is the
+        # cause; WITH it, a genuinely Docker-caused failure still gets the
+        # specific, actionable sentence. Never raises — degrades to {} on
+        # any lookup failure (gateway_registry_service.capability_service_
+        # statuses's own contract), which is exactly the "no evidence"
+        # case gateway_reason_message already handles safely.
+        service_statuses = gateway_registry_service.capability_service_statuses(registration)
         await hardware_result_correlator_service.emit_tool_result(
             trace_context,
             tool_call_id=tool_call_id,
             status="offline",
             summary=gateway_reason_messages.gateway_reason_message(
-                reason, capability_id=capability_id,
+                reason, capability_id=capability_id, service_statuses=service_statuses,
             ),
             capability_id=capability_id,
             arguments=arguments,

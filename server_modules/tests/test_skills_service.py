@@ -2215,5 +2215,72 @@ class SubagentSpawnDispatchTests(unittest.TestCase):
         bridge_mock.assert_not_called()
 
 
+class FormatHardwareActionResultDockerEvidenceTests(unittest.TestCase):
+    """_format_hardware_action_result's "message" field is the JSON tool
+    result text a model reads DIRECTLY on both engines (build_sdk_tools's
+    _handler and direct_chat_generation_service's tool loop both call
+    execute_single_direct_tool_call, whose hardware branch returns this
+    string unchanged). CORRECTED CONTRACT: same evidence gate as
+    gateway_reason_messages.py's GatewayReasonMessagesTests — a real,
+    live-proven bug (Docker named as the cause of gateway_capability_
+    missing regardless of whether the gateway's own reported status agreed)
+    must not be reintroduced at this second call site."""
+
+    @staticmethod
+    def _payload(gateway_id: str = "gw-css-2") -> dict:
+        return {
+            "status": "offline",
+            "reason": "gateway_capability_missing",
+            "runtime_session": {
+                "capability_id": "shell.execute",
+                "gateway_id": gateway_id,
+                "state": "offline",
+            },
+        }
+
+    def test_never_blames_docker_when_the_registration_cannot_be_resolved(self) -> None:
+        # No mocking of gateway_state_repository at all — a gateway id that
+        # resolves to nothing real (the common case in this unit test
+        # environment). Must degrade to the honest generic message, never
+        # guess Docker.
+        result_json = skills_service._format_hardware_action_result(
+            self._payload(gateway_id="gw-does-not-exist"),
+        )
+        result = json.loads(result_json)
+        self.assertNotIn("Docker", result["message"])
+
+    def test_names_docker_when_the_gateways_own_status_confirms_it(self) -> None:
+        with patch(
+            "server_modules.gateway_registry_service.capability_service_statuses",
+            return_value={"docker": "offline"},
+        ):
+            result_json = skills_service._format_hardware_action_result(self._payload())
+        result = json.loads(result_json)
+        self.assertEqual(
+            result["message"],
+            "Docker isn't running on this machine. Start Docker Desktop, then retry.",
+        )
+
+    def test_never_blames_docker_when_the_gateway_reports_it_ready(self) -> None:
+        # The exact live-proven false positive, at this call site too: the
+        # gateway's own most recent report says Docker IS ready.
+        with patch(
+            "server_modules.gateway_registry_service.capability_service_statuses",
+            return_value={"docker": "ready"},
+        ):
+            result_json = skills_service._format_hardware_action_result(self._payload())
+        result = json.loads(result_json)
+        self.assertNotIn("Docker", result["message"])
+
+    def test_a_lookup_exception_degrades_to_no_evidence_rather_than_raising(self) -> None:
+        with patch(
+            "server_modules.gateway_state_repository.get_gateway_registration",
+            side_effect=RuntimeError("boom"),
+        ):
+            result_json = skills_service._format_hardware_action_result(self._payload())
+        result = json.loads(result_json)
+        self.assertNotIn("Docker", result["message"])
+
+
 if __name__ == "__main__":
     unittest.main()

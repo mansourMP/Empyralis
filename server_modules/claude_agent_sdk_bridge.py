@@ -136,6 +136,7 @@ from server_modules import direct_tool_execution_service
 from server_modules import openai_compat_adapter
 from server_modules import provider_profiles
 from server_modules import secret_redaction_service
+from server_modules import tool_result_status
 
 LOGGER = logging.getLogger(__name__)
 
@@ -1265,6 +1266,22 @@ def translate_sdk_message(
                 connector_id, action_id, tool_input, result_text=result_text,
             )
             is_error = bool(getattr(block, "is_error", False) or False)
+            if not is_error:
+                # Defense-in-depth, not the primary fix (that is
+                # build_sdk_tools's _handler, which now classifies the
+                # result BEFORE handing it to the SDK, so is_error should
+                # already be correct by the time it reaches here). This is
+                # the ONE place tool_honesty_guard's fabrication-after-
+                # failure check reads its "did a tool actually fail this
+                # turn" signal from (via sage_agent_runtime_service's
+                # tool.result -> tool_calls collector), so it must be right
+                # even if a future producer of a ToolResultBlock sets
+                # is_error incompletely — the SDK's own is_error flag only
+                # ever reflects a PROTOCOL-level failure (a timeout, a
+                # raised exception), never a well-formed response whose OWN
+                # content reports a failure. Never narrows a True is_error
+                # back to False — only ever promotes False to True.
+                is_error = tool_result_status.classify_tool_result(result_text).failed
             result_summary = str(trace_meta.get("result_summary") or result_text or "").strip()
             result_data = {
                 # "failed"/"ok" — the exact two tokens tool_result_status.
@@ -1600,7 +1617,40 @@ def build_sdk_tools(
                         "content": [{"type": "text", "text": str(exc) or "Tool call failed."}],
                         "is_error": True,
                     }
-                return {"content": [{"type": "text", "text": str(result_text or "")}]}
+                # execute_single_direct_tool_call returning NORMALLY (no
+                # timeout, no raised exception) only proves the CALL
+                # mechanics worked — it says nothing about whether the tool
+                # ITSELF succeeded. A hardware__action call against an
+                # offline/capability-missing gateway returns a perfectly
+                # well-formed string ({"status": "offline", "reason":
+                # "gateway_capability_missing", ...} — see
+                # skills_service._format_hardware_action_result), and the
+                # same is true of a filesystem {"status":"error"}, a
+                # subagent {"ok":false}, and every other structured-failure
+                # shape tool_result_status.py's own docstring enumerates.
+                # Without this check the SDK only ever saw those as
+                # ordinary successes (no "is_error" key at all), which is
+                # what let a real production reply ("Here's the real proof
+                # — I ran commands on your machine just now") fabricate a
+                # live command transcript for a gateway that had never
+                # connected: the trace read as a SUCCESS, so
+                # tool_honesty_guard's fabrication-after-failure check
+                # (direction #3, tool_honesty_guard.py) never even
+                # considered the reply, because as far as it could tell
+                # nothing had failed this turn. classify_tool_result is the
+                # SAME structural verdict the legacy engine's own
+                # tool.result emission already applies
+                # (direct_chat_generation_service.py) — this closes the gap
+                # this module's own header comment already claimed was
+                # closed ("tool_result_status classification all run
+                # exactly where they do today").
+                text_result = str(result_text or "")
+                if tool_result_status.classify_tool_result(text_result).failed:
+                    return {
+                        "content": [{"type": "text", "text": text_result}],
+                        "is_error": True,
+                    }
+                return {"content": [{"type": "text", "text": text_result}]}
 
             return _handler
 

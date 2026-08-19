@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -594,65 +595,93 @@ class HardwareGatewayAdapterTests(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    def test_execute_gateway_action_names_docker_when_shell_capability_missing(self) -> None:
-        # Same MAN-295 fix, the other call site: a not-ready-for-execution
-        # gateway (registration usable, but the capability readiness check
-        # fails) must name Docker specifically for a shell.execute /
-        # filesystem.read_write capability — the exact example the brief
-        # calls out — not the old generic "Gateway is not ready for this
-        # hardware action."
-        async def run_test() -> None:
-            runtime_session = {"session_id": "session-1", "state": "ready"}
-            emit_result_mock = AsyncMock()
-            with (
-                patch(
-                    "server_modules.hardware_runtime_adapters.gateway_adapter.find_gateway_registration",
-                    return_value=_registration(),
-                ),
-                patch(
-                    "server_modules.hardware_runtime_adapters.gateway_adapter.registration_is_usable",
-                    return_value=(True, ""),
-                ),
-                patch(
-                    "server_modules.hardware_runtime_adapters.gateway_adapter.gateway_execution_service.gateway_registration_execution_readiness",
-                    return_value=(False, "gateway_capability_missing"),
-                ),
-                patch(
-                    "server_modules.hardware_runtime_adapters.gateway_adapter.hardware_runtime_session_service.update_runtime_session",
-                    side_effect=lambda session, **kwargs: {**session, **({"state": kwargs["state"]} if "state" in kwargs else {})},
-                ),
-                patch(
-                    "server_modules.hardware_runtime_adapters.gateway_adapter.hardware_result_correlator_service.emit_tool_result",
-                    emit_result_mock,
-                ),
-            ):
-                result = await gateway_adapter.execute_gateway_action(
-                    tenant_id="tenant-1",
-                    workspace_id="ws-1",
-                    user_id="user-1",
-                    gateway_id="gw-1",
-                    device_id="device-1",
-                    action_id="shell.execute",
-                    capability_id="shell.execute",
-                    arguments={"command": "echo ok"},
-                    runtime_session=runtime_session,
-                    run_id="run-1",
-                    trace_id="trace-1",
-                    thread_id=None,
-                    request_id="req-1",
-                    trace_context=None,
-                    require_approval=None,
-                    runtime_access_mode="guarded",
-                    timeout_seconds=None,
-                    tool_call_id="tool-1",
-                )
-
-            self.assertEqual(result["status"], "offline")
-            self.assertEqual(result["reason"], "gateway_capability_missing")
-            emitted_summary = emit_result_mock.await_args.kwargs["summary"]
-            self.assertEqual(
-                emitted_summary,
-                "Docker isn't running on this machine. Start Docker Desktop, then retry.",
+    async def _run_capability_missing(self, *, registration, service_statuses_patch=None):
+        runtime_session = {"session_id": "session-1", "state": "ready"}
+        emit_result_mock = AsyncMock()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch(
+                "server_modules.hardware_runtime_adapters.gateway_adapter.find_gateway_registration",
+                return_value=registration,
+            ))
+            stack.enter_context(patch(
+                "server_modules.hardware_runtime_adapters.gateway_adapter.registration_is_usable",
+                return_value=(True, ""),
+            ))
+            stack.enter_context(patch(
+                "server_modules.hardware_runtime_adapters.gateway_adapter.gateway_execution_service.gateway_registration_execution_readiness",
+                return_value=(False, "gateway_capability_missing"),
+            ))
+            stack.enter_context(patch(
+                "server_modules.hardware_runtime_adapters.gateway_adapter.hardware_runtime_session_service.update_runtime_session",
+                side_effect=lambda session, **kwargs: {**session, **({"state": kwargs["state"]} if "state" in kwargs else {})},
+            ))
+            stack.enter_context(patch(
+                "server_modules.hardware_runtime_adapters.gateway_adapter.hardware_result_correlator_service.emit_tool_result",
+                emit_result_mock,
+            ))
+            if service_statuses_patch is not None:
+                stack.enter_context(patch(
+                    "server_modules.hardware_runtime_adapters.gateway_adapter.gateway_registry_service.capability_service_statuses",
+                    return_value=service_statuses_patch,
+                ))
+            await gateway_adapter.execute_gateway_action(
+                tenant_id="tenant-1",
+                workspace_id="ws-1",
+                user_id="user-1",
+                gateway_id="gw-1",
+                device_id="device-1",
+                action_id="shell.execute",
+                capability_id="shell.execute",
+                arguments={"command": "echo ok"},
+                runtime_session=runtime_session,
+                run_id="run-1",
+                trace_id="trace-1",
+                thread_id=None,
+                request_id="req-1",
+                trace_context=None,
+                require_approval=None,
+                runtime_access_mode="guarded",
+                timeout_seconds=None,
+                tool_call_id="tool-1",
             )
+        return emit_result_mock.await_args.kwargs["summary"]
 
-        asyncio.run(run_test())
+    def test_execute_gateway_action_never_blames_docker_without_confirming_evidence(self) -> None:
+        # CORRECTED CONTRACT (this test used to assert the opposite and
+        # encoded a real, live-proven bug — see gateway_reason_messages.py's
+        # GatewayReasonMessagesTests for the full incident writeup). A
+        # not-ready-for-execution gateway with gateway_capability_missing
+        # for shell.execute must NOT be told "Docker isn't running" unless
+        # the gateway's own reported service_statuses actually confirms it
+        # — capability_service_statuses is real code here, unmocked,
+        # exercised against a registration with no capability_readiness at
+        # all (the common real-world case: MAN-313's "requested but never
+        # ready" cause has nothing to do with Docker).
+        summary = asyncio.run(self._run_capability_missing(registration=_registration()))
+        self.assertNotIn("Docker", summary)
+        self.assertNotIn("Gateway is not ready for this hardware action.", summary)
+
+    def test_execute_gateway_action_names_docker_when_the_gateway_itself_confirms_it(self) -> None:
+        # The positive case: when capability_service_statuses (real
+        # extraction, mocked here only to control its RETURN VALUE rather
+        # than build a live gateway_sessions row) reports Docker as
+        # genuinely not ready, the specific, actionable Docker sentence is
+        # correct and still used.
+        summary = asyncio.run(self._run_capability_missing(
+            registration=_registration(),
+            service_statuses_patch={"docker": "offline"},
+        ))
+        self.assertEqual(
+            summary,
+            "Docker isn't running on this machine. Start Docker Desktop, then retry.",
+        )
+
+    def test_execute_gateway_action_never_blames_docker_when_the_gateway_reports_it_ready(self) -> None:
+        # The exact live-proven false positive: the gateway's own most
+        # recent report says Docker IS ready, so the message must not
+        # contradict it.
+        summary = asyncio.run(self._run_capability_missing(
+            registration=_registration(),
+            service_statuses_patch={"docker": "ready"},
+        ))
+        self.assertNotIn("Docker", summary)

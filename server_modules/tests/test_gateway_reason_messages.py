@@ -6,16 +6,77 @@ from server_modules import gateway_reason_messages
 
 
 class GatewayReasonMessagesTests(unittest.TestCase):
-    def test_docker_gated_capability_missing_names_docker_specifically(self) -> None:
+    # CORRECTED CONTRACT — the assertion this test used to make
+    # (gateway_capability_missing for shell.execute ALWAYS names Docker,
+    # unconditionally) encoded a real, live-proven bug and must never be
+    # restored. Production: agent "Vale" was placed on gateway
+    # gateway_a1c6b043 ("Mansur's Mac"), active, verified, heartbeating,
+    # advertising shell.execute among 42 capabilities, with its OWN
+    # reported metadata.capability_readiness.service_statuses.docker ==
+    # "ready" — and this function still told the founder, across several
+    # days, to go start Docker Desktop. It could never have helped, because
+    # Docker was never the problem: gateway_capability_missing means the
+    # capability was never REQUESTED at all (see gateway_execution_service.
+    # _has_gateway_capability), a cause entirely independent of Docker's
+    # own readiness. A confidently wrong, specific instruction is worse
+    # than an honest "I don't know exactly why" — CLAUDE.md's outcome-
+    # honesty law, applied to a diagnostic message rather than a mutation
+    # result. The corrected contract: the Docker sentence is EVIDENCE-
+    # GATED on the gateway's own reported service_statuses, never guessed
+    # from the capability id alone.
+    def test_capability_missing_without_evidence_never_blames_docker(self) -> None:
+        # No service_statuses passed at all — the common case for most
+        # callers today. Must NOT claim Docker is the cause; must still be
+        # actionable.
         message = gateway_reason_messages.gateway_reason_message(
             "gateway_capability_missing", capability_id="shell.execute",
         )
+        self.assertNotIn("Docker", message)
+        self.assertNotIn("Start Docker Desktop", message)
+        self.assertTrue(message)
+
+    def test_capability_missing_with_docker_reported_ready_never_blames_docker(self) -> None:
+        # The exact live-proven false-positive: the gateway's own most
+        # recent heartbeat says Docker IS ready. The message must not
+        # contradict evidence the platform itself already has.
+        message = gateway_reason_messages.gateway_reason_message(
+            "gateway_capability_missing",
+            capability_id="shell.execute",
+            service_statuses={"docker": "ready"},
+        )
+        self.assertNotIn("Docker", message)
+        self.assertNotIn("Start Docker Desktop", message)
+
+    def test_capability_missing_with_docker_confirmed_offline_names_it_specifically(self) -> None:
+        # The positive case: when the gateway's own reported status
+        # actually confirms Docker is the cause, the specific, actionable
+        # sentence is correct and should still be used.
+        message = gateway_reason_messages.gateway_reason_message(
+            "gateway_capability_missing",
+            capability_id="shell.execute",
+            service_statuses={"docker": "offline"},
+        )
         self.assertEqual(message, "Docker isn't running on this machine. Start Docker Desktop, then retry.")
 
+        for capability_id in ("shell.execute", "filesystem.read_write"):
+            with self.subTest(capability_id=capability_id):
+                message = gateway_reason_messages.gateway_reason_message(
+                    "gateway_capability_missing",
+                    capability_id=capability_id,
+                    service_statuses={"docker": "missing"},
+                )
+                self.assertIn("Docker", message)
+
+    def test_capability_missing_with_docker_status_unknown_never_blames_docker(self) -> None:
+        # "unknown" is not evidence of anything — the gateway hasn't
+        # reported a usable status for this service. Treated the same as
+        # no evidence at all, never as a positive signal either way.
         message = gateway_reason_messages.gateway_reason_message(
-            "gateway_capability_missing", capability_id="filesystem.read_write",
+            "gateway_capability_missing",
+            capability_id="shell.execute",
+            service_statuses={"docker": "unknown"},
         )
-        self.assertIn("Docker", message)
+        self.assertNotIn("Docker", message)
 
     def test_capability_missing_distinguishes_screen_recording_from_accessibility(self) -> None:
         screen_message = gateway_reason_messages.gateway_reason_message(
@@ -40,12 +101,30 @@ class GatewayReasonMessagesTests(unittest.TestCase):
         self.assertTrue(message)
         self.assertIn("Reconnect", message)
 
-    def test_capability_not_ready_names_docker_starting_up(self) -> None:
+    def test_capability_not_ready_without_evidence_never_blames_docker(self) -> None:
+        # Same evidence discipline as gateway_capability_missing above.
         message = gateway_reason_messages.gateway_reason_message(
             "gateway_capability_not_ready", capability_id="shell.execute",
         )
+        self.assertNotIn("Docker", message)
+        self.assertTrue(message)
+
+    def test_capability_not_ready_with_docker_confirmed_starting_names_it(self) -> None:
+        message = gateway_reason_messages.gateway_reason_message(
+            "gateway_capability_not_ready",
+            capability_id="shell.execute",
+            service_statuses={"docker": "degraded"},
+        )
         self.assertIn("Docker", message)
         self.assertIn("starting up", message)
+
+    def test_capability_not_ready_with_docker_reported_ready_never_blames_docker(self) -> None:
+        message = gateway_reason_messages.gateway_reason_message(
+            "gateway_capability_not_ready",
+            capability_id="shell.execute",
+            service_statuses={"docker": "ready"},
+        )
+        self.assertNotIn("Docker", message)
 
     def test_every_documented_reason_token_gets_a_distinct_actionable_message(self) -> None:
         # The exact token list called out in MAN-295's brief — every one of
