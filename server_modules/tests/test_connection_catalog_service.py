@@ -132,3 +132,40 @@ class TestPersonalChannelPillAgentScoping:
 
         assert connected_view["status"] == "connected"
         assert idle_view["status"] == "code_required", "agent_idle's own mid-pairing status must not be masked by agent_connected's"
+
+
+def test_oauth_setup_unconfigured_never_suppresses_discords_bot_token_door(monkeypatch) -> None:
+    """discord_bot's setup_kind is "oauth_or_app_install" -- TWO doors, and
+    its real one (FleetAgentDetail.tsx's byo_bot flow, a pasted bot token)
+    needs no deployment-level OAuth app. Before this fix,
+    _oauth_setup_unconfigured gated every oauth_or_app_install connection on
+    connection_oauth_service.oauth_connection_configured("discord_bot"),
+    which is False on any deployment without DISCORD_CLIENT_ID/SECRET set
+    (discord is not in the self-configuring dynamic-client-registration
+    list) -- suppressing setup_available even though the bot-token door
+    works with no such config."""
+    for name in ("DISCORD_CLIENT_ID", "DISCORD_CLIENT_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+
+    from server_modules.connection_oauth_service import oauth_connection_configured
+
+    assert oauth_connection_configured("discord_bot") is False, (
+        "test premise: discord's OAuth app must be unconfigured for this to prove anything"
+    )
+    assert service._oauth_setup_unconfigured({"setup_kind": "oauth_or_app_install", "id": "discord_bot"}) is False
+
+
+def test_oauth_setup_unconfigured_still_gates_github_which_has_no_real_alternate_door(monkeypatch) -> None:
+    """github carries the identical setup_kind label but this codebase has
+    no GitHub App install flow wired anywhere -- OAuth is its only real
+    door today, so it must stay gated on it being configured, unlike
+    discord_bot above."""
+    for name in ("GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+
+    from server_modules.connection_oauth_service import oauth_connection_configured
+
+    assert oauth_connection_configured("github") is False, (
+        "test premise: github's OAuth app must be unconfigured for this to prove anything"
+    )
+    assert service._oauth_setup_unconfigured({"setup_kind": "oauth_or_app_install", "id": "github"}) is True
