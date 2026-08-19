@@ -474,10 +474,15 @@ async def execute_direct_chat_turn_request(
             # states (no provider configured, auth failed, etc.) behind a
             # generic message. Route through the same classifier the
             # Telegram/Discord channel dispatcher uses so the reply is
-            # honest and actionable instead.
+            # honest and actionable instead. is_web=True: this is the web
+            # chat's own streaming error path (verified live 2026-08-19 via
+            # a fresh signup's "Ask AI" panel) — it must get the plain-text
+            # web-voice variant, not channel voice with a trailing arrow
+            # this surface renders as dead text (see classify_error's own
+            # is_web docstring).
             from server_modules.sage_command_dispatcher import classify_error as _classify_stream_error
             _raw_err = str(error_container['error'])
-            _classified = _classify_stream_error(_raw_err, raw_error=_raw_err)
+            _classified = _classify_stream_error(_raw_err, raw_error=_raw_err, is_web=True)
             yield {
                 "type": "final",
                 "payload": {

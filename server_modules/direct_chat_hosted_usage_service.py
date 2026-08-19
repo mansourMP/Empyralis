@@ -14,6 +14,7 @@ from server_modules import (
     usage_accounting_service,
 )
 from server_modules.direct_tool_config_service import run_async_tool_call
+from server_modules.platform_event import AI_LIMIT_REACHED_WEB
 
 
 _STATE_HOME = Path(
@@ -194,9 +195,16 @@ def reserve_direct_chat_hosted_usage_best_effort(
             # balance, block the call BEFORE the LLM is invoked.
             if available <= 0 or available - active_total - amount_usd < 0:
                 connection.commit()
-                raise RuntimeError(
-                    "AI usage limit reached. Open AI & Setup →"
-                )
+                # The canonical constant, not a hand-retyped copy — this was
+                # the THIRD independent hardcoded copy of the same sentence
+                # found 2026-08-19 (alongside entitlements_service.py and
+                # sage_command_dispatcher.py's own SAGE_AI_LIMIT_MESSAGE),
+                # which is exactly what test_credit_exhaustion_message_is_
+                # present's own comment warns a hand-typed copy causes: this
+                # one kept the pre-rewording "Open AI & Setup →" text (a
+                # dead click affordance on this plain-text surface) after
+                # the canonical message dropped it.
+                raise RuntimeError(AI_LIMIT_REACHED_WEB.detail)
             if active_total + amount_usd > max_active_usd:
                 connection.commit()
                 raise RuntimeError("Hosted AI preflight reservation cap exceeded.")

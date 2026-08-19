@@ -126,8 +126,6 @@ const MUTATION_NAME_PATTERN =
 const ALLOWLIST: Record<string, string> = {
   "app/signup/page.tsx":
     "MAN (fix/signup-false-failure-report, a separate in-flight branch): handleSubmit's `await signup(...)` + `await awaitBrowserAuthReady(...)` share one catch and report 'Signup failed.' even when the account was created. Known, tracked, being fixed on its own branch per the founder's explicit instruction not to touch this file from this change — do not remove this entry without confirming that branch merged AND the shape actually changed (this test will tell you: it goes stale-red if the violation disappears while still listed, see the stale-entry check below... except this scanner does not enforce staleness on purpose, see its own comment below).",
-  "lib/workspace/fleet/FleetCreateAgentWizard.tsx":
-    "Two real hits. (1) submitPlacement's tail `await patchAgent(...); await hydrateCreatedAgent(...)` — hydrateCreatedAgent's OWN body is a self-contained try/catch that never rethrows (comment: 'Best-effort — ChannelsTab tolerates a null agent'), so the outer catch here can only ever fire from patchAgent, and 'Could not save placement.' stays accurate; this scanner can't see across a function boundary to know that. (2) submitBrain's BYOK branch — `POST /credentials/vault` then `POST /providers/profiles` then patchAgent: FIXED to be idempotent (pendingByokCredentialId reuses the credential a prior failed attempt already created, instead of minting a new one every retry) and to say so when only the profile step fails ('Your API key was saved, but could not be assigned to this agent yet'), rather than the old flat 'Could not save the provider.' Still flagged here because the try body still awaits 2+ distinct calls with a single catch — the fix is in the WORDING and the retry behaviour, not in giving the catch a second distinguishing signal this scanner can detect.",
   "app/(account)/w/[workspaceId]/projects/[projectId]/page.tsx":
     "handleAssign's `assignFleetTask` / `assignFleetTaskToUser` are mutually EXCLUSIVE if/else branches (agent vs human assignee) — exactly one ever runs per call, never both in sequence — so whichever one throws IS the accurate cause and 'Could not assign this task.' is not a collapse of two different facts. This scanner's 'awaits 2+ distinct calls' heuristic can't see that they're alternatives rather than sequential steps.",
   "app/(account)/w/[workspaceId]/projects/[projectId]/tasks/[taskId]/page.tsx":
@@ -555,15 +553,19 @@ function main(): void {
   // else's in-flight branch — auto-removing it the moment the shape changes
   // would silently stop covering that file the next time someone edits it,
   // before the other branch's fix has actually landed on this one. The other
-  // three (FleetCreateAgentWizard.tsx, and the two assignFleetTask/
-  // assignFleetTaskToUser mutually-exclusive-branch entries) are REASONED
-  // FALSE POSITIVES of this scanner's own heuristic — cross-function
-  // reasoning and if/else-branch exclusivity it structurally cannot see —
-  // not bugs expected to be fixed away, so there is no "stale" state for
-  // them to reach. Prefer fixing entries off this list to adding new ones;
-  // when a real fix lands (signup) or the code changes shape enough that the
-  // reasoning no longer applies (the other three), remove the entry and let
-  // this test's own green run be the proof.
+  // three (the assignFleetTask/assignFleetTaskToUser mutually-exclusive-
+  // branch entries — projects/[projectId], tasks/[taskId], my-work) are
+  // REASONED FALSE POSITIVES of this scanner's own heuristic — if/else-branch
+  // exclusivity it structurally cannot see — not bugs expected to be fixed
+  // away, so there is no "stale" state for them to reach. (A fourth entry of
+  // this second kind, FleetCreateAgentWizard.tsx's cross-function-reasoning
+  // false positive, was removed 2026-08-19 when that whole file was deleted
+  // — the zero-decision agent create that replaced it, agent-quick-create.ts,
+  // has no multi-step try/catch of this shape at all.) Prefer fixing entries
+  // off this list to adding new ones; when a real fix lands (signup) or the
+  // code changes shape enough that the reasoning no longer applies (the
+  // other three), remove the entry and let this test's own green run be the
+  // proof.
 
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed > 0) {

@@ -640,10 +640,24 @@ class HardStopMessageTests(unittest.TestCase):
         self.assertIn("ai-runtime", _SAGE_AI_SETUP_PATH)
 
     def test_ai_needs_attention_message_is_present(self):
-        """The AI needs attention message must exist."""
+        """The AI needs attention message must exist and be actionable.
+
+        Was a prose match on "Setup" -- the literal page name in the OLD
+        copy ("Open AI & Setup"), which has not existed as a real page in
+        this app for some time (CLAUDE.md's "copy that names a screen goes
+        stale" failure mode). Reworded 2026-08-19 to name the agent's own
+        Model settings instead and to drop the trailing "→", which this
+        surface renders as plain text with no click target (CLAUDE.md's "No
+        dead controls" law). Asserted by IDENTITY against platform_event
+        now, matching test_credit_exhaustion_message_is_present's own
+        established pattern in this same class -- it survives rewording.
+        """
+        from server_modules import platform_event
+
+        self.assertEqual(SAGE_AI_NEEDS_ATTENTION_MESSAGE, platform_event.AUTH_FAILED_WEB.detail)
         self.assertIn("needs attention", SAGE_AI_NEEDS_ATTENTION_MESSAGE.lower())
         self.assertIn("AI", SAGE_AI_NEEDS_ATTENTION_MESSAGE)
-        self.assertIn("Setup", SAGE_AI_NEEDS_ATTENTION_MESSAGE)
+        self.assertFalse(SAGE_AI_NEEDS_ATTENTION_MESSAGE.rstrip().endswith("→"))
 
     def test_sage_command_dispatcher_has_exhaustion_messages(self):
         """The command dispatcher must export error classification messages."""

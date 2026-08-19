@@ -79,6 +79,7 @@ def classify_error(
     *,
     raw_error: str = "",
     is_platform_credits: bool = True,
+    is_web: bool = False,
 ) -> str:
     """Map an error string to the appropriate user-facing reply constant.
 
@@ -96,6 +97,18 @@ def classify_error(
     opt in explicitly by passing is_platform_credits=False. It only affects
     buckets where the user-facing action genuinely differs by ownership
     (payment required, auth failed); other buckets are ownership-neutral.
+
+    *is_web* selects the plain-text web-chat variant (SAGE_*_MESSAGE) over
+    the channel-voice variant (SAGE_*_REPLY) for the three buckets that have
+    one (AI limit, no provider, auth failed) — defaults to False so every
+    existing caller (Telegram/WhatsApp/etc, which never passed this) keeps
+    its exact prior behavior. Found live 2026-08-19: the web "Ask AI" chat
+    (direct_chat_service.py's streaming error path) was rendering
+    SAGE_NO_PROVIDER_REPLY's "Connect one →" — a trailing arrow with no
+    click target on that surface (CLAUDE.md's "No dead controls" law) —
+    while SAGE_NO_PROVIDER_MESSAGE, built for exactly this case, had zero
+    callers anywhere. Buckets 2/3/6/7 have no web-specific text and are
+    unaffected by this flag.
 
     Seven specific buckets, checked in order:
 
@@ -130,7 +143,7 @@ def classify_error(
         if any(kw in msg for kw in (
             "reached your ai limit", "ai limit", "cap_reached",
         )):
-            base = SAGE_AI_LIMIT_REPLY
+            base = SAGE_AI_LIMIT_MESSAGE if is_web else SAGE_AI_LIMIT_REPLY
         # 2) Provider-side payment/balance required (e.g. HTTP 402) — the
         #    key authenticates fine, the account behind it is empty. Must be
         #    checked before the auth bucket: "provider_generation_failed"
@@ -161,16 +174,20 @@ def classify_error(
             "no_ai_provider",
             "provider_not_configured",
         )):
-            base = SAGE_NO_PROVIDER_REPLY
+            base = SAGE_NO_PROVIDER_MESSAGE if is_web else SAGE_NO_PROVIDER_REPLY
         # 5) Auth / key failed
         elif any(kw in msg for kw in (
             "provider_generation_failed", "401", "403", "auth", "api key",
             "invalid key", "unauthorized",
         )):
             base = (
-                SAGE_AI_NEEDS_ATTENTION_PLATFORM_REPLY
-                if is_platform_credits
-                else SAGE_AI_NEEDS_ATTENTION_REPLY
+                SAGE_AI_NEEDS_ATTENTION_MESSAGE
+                if is_web
+                else (
+                    SAGE_AI_NEEDS_ATTENTION_PLATFORM_REPLY
+                    if is_platform_credits
+                    else SAGE_AI_NEEDS_ATTENTION_REPLY
+                )
             )
         # 6) Provider unreachable
         elif any(kw in msg for kw in (

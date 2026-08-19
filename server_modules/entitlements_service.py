@@ -11,6 +11,7 @@ from server_modules import control_plane_repository
 from server_modules import deployed_agent_runtime_contract_service
 from server_modules import run_state_repository
 from server_modules.direct_tool_config_service import run_async_tool_call
+from server_modules.platform_event import AI_LIMIT_REACHED_WEB
 
 
 DEFAULT_PLAN_ID = "free"
@@ -632,7 +633,14 @@ def hosted_sage_ai_access_state(
         # If the user had a credit balance that is now depleted, give a
         # friendlier message directing them to add their own key.
         if credit_balance_credits <= 0 and remaining_usd <= 0:
-            message = "AI usage limit reached. Open AI & Setup →"
+            # The canonical constant, not a hand-retyped copy of it —
+            # HardStopMessageTests.test_entitlement_exhaustion_message_is_friendly
+            # asserts this by identity precisely because this literal used
+            # to drift from platform_event.AI_LIMIT_REACHED_WEB: rewording
+            # the shared message (2026-08-19, dropping a "→" this surface
+            # renders as a dead click affordance) fixed sage_command_
+            # dispatcher's copy and silently left this one behind.
+            message = AI_LIMIT_REACHED_WEB.detail
         else:
             message = "Hosted AI monthly cap is reached for this workspace."
         return {

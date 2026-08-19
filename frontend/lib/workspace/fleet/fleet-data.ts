@@ -220,6 +220,31 @@ export function refreshFleetProjects(workspaceId: string): void {
   refreshSharedResources(`fleet-projects:${workspaceId}:`);
 }
 
+/** Force-refetch the workspace's agent list, AWAITABLY — unlike
+ *  refreshFleetProjects (fire-and-forget), a caller here needs the promise:
+ *  found live 2026-08-19 creating an agent and navigating straight into its
+ *  Chat. useFleetAgents shares ONE cache entry per workspace
+ *  (useSharedPolledResource keyed by `fleet-agents:{workspaceId}`) across
+ *  every simultaneously-mounted subscriber — PrimaryRail, SageLauncher and
+ *  the command palette are ALWAYS mounted, so that entry's `subscribers`
+ *  count never drops to zero across a client-side navigation, and
+ *  useSharedPolledResource only fetches on its OWN mount (subscribers.size
+ *  going 0 -> 1) or its 30s poll tick. A freshly created agent is therefore
+ *  invisible to the very next page — which subscribes to that SAME shared
+ *  entry — until up to 30s later: FleetAgentDetail.tsx's header falls back
+ *  to "Unnamed agent" (`agent?.label || "Unnamed agent"`) because
+ *  `agent` is undefined in the stale, pre-creation list, not because
+ *  anything failed. Awaiting this before navigating means the cache is
+ *  already warm with the new agent by the time the destination page's own
+ *  useFleetAgents instance subscribes and reads it, rather than racing a
+ *  fetch that starts after the page has already rendered its first (wrong)
+ *  paint. */
+export function refreshFleetAgents(workspaceId: string): Promise<void> {
+  const entry = sharedResourceCache.get(`fleet-agents:${workspaceId}`);
+  if (!entry || !entry.fetcher) return Promise.resolve();
+  return runSharedFetch(entry, entry.fetcher, true);
+}
+
 function runSharedFetch<T>(entry: SharedEntry<T>, fetcher: () => Promise<T>, force: boolean): Promise<void> {
   if (entry.inFlight && !force) return entry.inFlight;
   entry.loading = true;
