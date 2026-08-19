@@ -7,6 +7,7 @@ import type { GatewayRequestEnvelope, GatewayToolInvokePayload } from "../protoc
 import { collectPassiveInventorySnapshot } from "../health/service-inventory";
 import { checkFilesystemPathPolicy, checkShellCommandPolicy } from "./command-policy";
 import { buildDockerRunArgs, DEFAULT_SANDBOX_IMAGE, DOCKER_WORKSPACE_PATH, spawnDockerRun } from "./docker-sandbox";
+import { describeDockerAutostartOutcome, ensureDockerReady, type DockerAutostartOutcome } from "./docker-autostart";
 
 const SHELL_EXECUTE_CAPABILITY = "shell.execute";
 const FILESYSTEM_READ_WRITE_CAPABILITY = "filesystem.read_write";
@@ -33,8 +34,22 @@ export interface GatewayShellRuntimeConfig {
   dockerImage?: string;
   memoryMb?: number;
   cpus?: number;
-  /** Injectable for tests. Defaults to a real, cached `docker info` probe. */
+  /** Injectable for tests. Defaults to a real, cached `docker info` probe.
+   *  Answers only "is Docker ready right now" — never attempts to start
+   *  anything; see dockerAutostart below for that. */
   dockerReadyCheck?: () => Promise<boolean>;
+  /**
+   * Injectable for tests. Consulted only when dockerReadyCheck() above
+   * reports not-ready, before this capability gives up. Defaults to the
+   * real ensureDockerReady() (./docker-autostart.ts), which attempts to
+   * start Docker — Docker Desktop on macOS, the docker service on Linux —
+   * bounded, cooldown-gated, and single-flighted with every other caller in
+   * this process (including the heartbeat's own background attempt in
+   * cloud/ws-client.ts). Never falls back to unsandboxed host execution;
+   * see resolveExecutionMode/runOnHost for why full_access is a completely
+   * separate, separately-authorized path.
+   */
+  dockerAutostart?: () => Promise<DockerAutostartOutcome>;
 }
 
 function requireObject(value: unknown, message: string): Record<string, unknown> {
@@ -110,10 +125,15 @@ export function resolveExecutionMode(
  *  in turns a dead end ("neither is available", no hint which of
  *  full_access's two required keys is missing) into an actionable message,
  *  without any change to how the two keys are resolved. */
-function unavailableExecutionModeMessage(capabilityId: string, decision: ExecutionModeDecision): string {
+function unavailableExecutionModeMessage(
+  capabilityId: string,
+  decision: ExecutionModeDecision,
+  dockerDetail?: string,
+): string {
+  const dockerClause = dockerDetail ?? "Docker is not ready here.";
   return (
     `${capabilityId} requires Docker (sandbox mode) or an explicitly enabled and authorized ` +
-    `full_access mode — neither is available on this Gateway right now. Docker is not ready here, ` +
+    `full_access mode — neither is available on this Gateway right now. ${dockerClause} ` +
     `and full_access is not active because: ${decision.reason}.`
   );
 }
@@ -125,9 +145,31 @@ async function isDockerReady(): Promise<boolean> {
 
 export class GatewayShellRuntime {
   private readonly dockerReadyCheck: () => Promise<boolean>;
+  private readonly dockerAutostart: () => Promise<DockerAutostartOutcome>;
 
   constructor(private readonly config: GatewayShellRuntimeConfig) {
     this.dockerReadyCheck = config.dockerReadyCheck ?? isDockerReady;
+    this.dockerAutostart = config.dockerAutostart ?? (() => ensureDockerReady());
+  }
+
+  /**
+   * Is Docker usable for this call — and if not, was starting it able to
+   * fix that. Never throws; never falls back to unsandboxed execution. The
+   * founder's own framing is the reason this exists: "while a user is
+   * running this thing they won't have any agents to keep everything
+   * fixed" — so before refusing sandbox mode entirely, the gateway gets one
+   * bounded, self-contained attempt to fix the one thing that's actually
+   * broken.
+   */
+  private async ensureDockerAvailable(): Promise<{ ready: true } | { ready: false; detail: string }> {
+    if (await this.dockerReadyCheck()) {
+      return { ready: true };
+    }
+    const outcome = await this.dockerAutostart();
+    if (outcome.kind === "already_ready" || outcome.kind === "started") {
+      return { ready: true };
+    }
+    return { ready: false, detail: describeDockerAutostartOutcome(outcome) };
   }
 
   requestedCapabilities(): string[] {
@@ -181,9 +223,9 @@ export class GatewayShellRuntime {
     }
 
     if (decision.mode === "sandbox") {
-      const ready = await this.dockerReadyCheck();
-      if (!ready) {
-        throw new Error(unavailableExecutionModeMessage(SHELL_EXECUTE_CAPABILITY, decision));
+      const availability = await this.ensureDockerAvailable();
+      if (!availability.ready) {
+        throw new Error(unavailableExecutionModeMessage(SHELL_EXECUTE_CAPABILITY, decision, availability.detail));
       }
       const containerName = `empyralis-shell-${crypto.randomUUID()}`;
       const args = buildDockerRunArgs({
@@ -254,9 +296,9 @@ export class GatewayShellRuntime {
     }
 
     if (decision.mode === "sandbox") {
-      const ready = await this.dockerReadyCheck();
-      if (!ready) {
-        throw new Error(unavailableExecutionModeMessage(FILESYSTEM_READ_WRITE_CAPABILITY, decision));
+      const availability = await this.ensureDockerAvailable();
+      if (!availability.ready) {
+        throw new Error(unavailableExecutionModeMessage(FILESYSTEM_READ_WRITE_CAPABILITY, decision, availability.detail));
       }
       const containerName = `empyralis-fs-${crypto.randomUUID()}`;
       const innerArgs = filesystemInnerArgs(mode, relativePath);
