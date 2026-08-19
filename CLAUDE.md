@@ -3085,10 +3085,46 @@ tab, read the console.
   Moved out 2026-08-12. Never leave a backup in `sites-enabled/`; the real
   entries there are symlinks into `sites-available/`, so anything that is a
   plain file is a mistake.
-- Agent worktrees accumulate and nothing prunes them. 177 of them (plus an
-  11GB `.git`) filled the disk to 100% mid-session on 2026-08-07 and killed
-  several running agents. Prune merged ones periodically; never force-remove
-  one with uncommitted work.
+- **Agent worktrees accumulate and nothing prunes them — and a prose warning
+  saying so does not fix it.** 177 of them (plus an 11GB `.git`) filled the
+  disk to 100% mid-session on 2026-08-07 and killed several running agents.
+  This exact paragraph existed as a warning from that day forward, and it
+  happened again anyway, worse: 2026-08-19, **121 worktrees, 421 stale
+  branches, 9.2G of `.git`** — a founder's own direct question ("why did we
+  build things that never shipped") turned out to be partly this: not lost
+  work (every one of the 421 branches had ZERO commits not already on
+  `main` — verified, not assumed), but git hygiene debt nobody was forced
+  to look at. A reminder an agent has to remember mid-task is not a fix.
+
+  The fix is now structural, not a promise: `scripts/prune-merged-
+  worktrees.sh` (`--dry-run` first) actually removes what is safe —
+  a worktree only qualifies if its branch has **zero** commits not on
+  `main` (`git rev-list --count main..<branch>` == 0) **and** no real
+  uncommitted changes (build artifacts/lockfiles/`next-env.d.ts` are
+  ignored as noise; anything else uncommitted is left alone and reported,
+  never discarded) — and it only ever touches paths matching this repo's
+  own worktree conventions, so a worktree belonging to a DIFFERENT tool
+  registered in this repo's own `git worktree list` (a real Codex session
+  was found there, `~/.codex/worktrees/...`) is skipped unconditionally,
+  no exception list needed. Branch deletion goes through `git branch -d`
+  (never `-D`), which is itself a second, independent refusal on anything
+  not fully merged. Proven correct with three real test cases before
+  trusting it: a merged-clean worktree gets removed, one with a real
+  uncommitted file is skipped, one with a real unmerged commit is skipped
+  — red-before-green, not just read and assumed safe.
+
+  `server_modules/tests/test_worktree_branch_sprawl_guard.py` is the other
+  half — a structural tripwire (worktree count > 20, non-main branches >
+  30) that fails LOUDLY inside the ordinary `pytest` run every agent
+  already executes, rather than requiring anyone to remember to check.
+  Thresholds are deliberately generous — a heavy multi-agent day can
+  legitimately run 15-20 worktrees at once, and the check only ever reads
+  state at test time, so it can never block real work mid-task — the
+  point is catching OVERNIGHT accumulation (merged worktrees nobody
+  deleted), the exact shape that reached 121 unnoticed. Carries the same
+  canary discipline as `test_rls_dml_drift.py`: if `git worktree list`/
+  `git branch` cannot even be read, that is its own reported failure,
+  never a silent green.
 
 **Never test against the founder's Claude subscription. Not once, not "just
 one call".** Founder's instruction, 2026-08-11, given while planning
