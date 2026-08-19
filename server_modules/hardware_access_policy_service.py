@@ -173,7 +173,22 @@ def default_guarded_action_requires_approval(
     normalized_action = _text(action_id).lower().replace("__", ".")
     normalized_capability = canonical_capability_id(capability_id)
     if normalized_capability == "shell.execute":
-        return shell_command_requires_guarded_approval(arguments.get("command") or arguments.get("script"))
+        if shell_command_requires_guarded_approval(arguments.get("command") or arguments.get("script")):
+            return True
+        # Batch dispatch (a `commands` array instead of a single `command`
+        # — see skills_service.py's shell__exec tool descriptor and
+        # GatewayShellRuntime.executeShellBatch): approval must be required
+        # if ANY command in the batch would have required it on its own.
+        # Checking only `arguments.get("command")` here would silently
+        # never trip for a batch call, since that key is deliberately
+        # absent on one (see _gateway_arguments_for_direct_local_tool).
+        raw_commands = arguments.get("commands")
+        if isinstance(raw_commands, list):
+            for entry in raw_commands:
+                entry_command = entry if isinstance(entry, str) else (entry.get("command") if isinstance(entry, dict) else None)
+                if shell_command_requires_guarded_approval(entry_command):
+                    return True
+        return False
     if normalized_capability == "filesystem.read":
         return False
     if normalized_capability == "filesystem.write":

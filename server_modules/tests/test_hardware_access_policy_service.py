@@ -51,6 +51,48 @@ class HardwareAccessPolicyServiceTests(unittest.TestCase):
             )
         )
 
+    def test_default_guarded_requires_approval_when_any_batch_command_is_risky(self) -> None:
+        # A batch call carries `commands`, never a top-level `command` (see
+        # skills_service._gateway_arguments_for_direct_local_tool) — this
+        # must not silently skip the approval gate just because that one
+        # key is absent.
+        self.assertTrue(
+            policy.hardware_action_requires_software_approval(
+                runtime_access_mode="default_guarded",
+                capability_id="shell.execute",
+                action_id="shell.execute",
+                arguments={"commands": ["echo fine", "rm -rf /tmp/demo", "echo also fine"]},
+                require_approval=None,
+            )
+        )
+
+    def test_default_guarded_requires_approval_when_a_risky_batch_command_is_an_object(self) -> None:
+        self.assertTrue(
+            policy.hardware_action_requires_software_approval(
+                runtime_access_mode="default_guarded",
+                capability_id="shell.execute",
+                action_id="shell.execute",
+                arguments={
+                    "commands": [
+                        {"command": "echo fine"},
+                        {"command": "rm -rf /tmp/demo", "timeout_seconds": 10},
+                    ]
+                },
+                require_approval=None,
+            )
+        )
+
+    def test_default_guarded_allows_a_batch_of_only_safe_commands(self) -> None:
+        self.assertFalse(
+            policy.hardware_action_requires_software_approval(
+                runtime_access_mode="default_guarded",
+                capability_id="shell.execute",
+                action_id="shell.execute",
+                arguments={"commands": ["echo one", "echo two", {"command": "echo three"}]},
+                require_approval=None,
+            )
+        )
+
     def test_full_access_skips_empyralis_action_approval(self) -> None:
         self.assertFalse(
             policy.hardware_action_requires_software_approval(
