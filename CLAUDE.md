@@ -934,6 +934,28 @@ that the debit primitive has exactly one call site and that the two seam
 call sites are mutually exclusive by control flow — behavioural tests can
 only cover the engines that exist today.
 
+**The billing half of that gap is fixed. A SIBLING gap at the same seam is
+not, and is why the legacy engine still cannot be deleted.** Found the same
+day (2026-08-09, `investigate/single-turn-engine`, folded in here rather
+than kept as its own branch): `direct_chat_generation_service.py`'s
+`persist_direct_chat_memory_best_effort`/`persist_direct_chat_transcript_
+best_effort` — fact extraction, the daily-log summary, the session
+transcript — are called only from that module, never from
+`sage_agent_runtime_service.py`. Grepped as of 2026-08-19: still zero call
+sites for either function outside `direct_chat_generation_service.py`. So a
+turn on the SDK engine (the production default) writes thread history via
+`thread_service.record_user_turn`/`record_assistant_turn` — which DOES run
+on both engines, do not mistake it for the memory pipeline — but never runs
+the memory pipeline itself. "Empyralis is the owned-context layer" is not
+yet true on the engine that actually runs. Also still open, same grep pass:
+`reasoning_effort` has zero references in `openai_compat_adapter.py`, so it
+is silently dropped for every adapter-routed provider (OpenAI/Gemini/xAI) on
+the SDK engine — the Fleet Model tab's reasoning-effort picker is a dead
+control for those agents; the legacy engine honours it natively. Move both
+onto the shared post-loop path before ever deleting legacy —
+`EMPYRALIS_FORCE_LEGACY_ENGINE` (MAN-312) and the per-agent legacy pin exist
+precisely because legacy is still the only engine that carries these two.
+
 **Stale string matching.** An error bucket matched `"ai limit"`; the message
 was reworded to `"AI usage limit reached"` and users got a generic "Something
 went wrong" for five weeks. Match on stable codes, never on prose.
