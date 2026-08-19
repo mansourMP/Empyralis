@@ -523,6 +523,52 @@ a full-page tab and didn't fit the sheet's ~500px pane. Scoped a narrower
 override to `.agent-configure-content` only; the full-page Inbox/Work/Memory
 tabs, which the 320px width is correct for, are untouched.
 
+## Destructive-action awareness is judgment, not a mechanism (2026-08-19)
+
+**A hardcoded blocklist for destructive shell/file commands was proposed and
+the founder rejected it — correctly.** His reasoning:
+
+```
+"you are not going to delete my documents even though I said it, but you
+ WOULD do it once I say 'I have these documents and I don't want these,
+ so just delete them all'... what we need is to make it aware for itself"
+```
+
+`rm -rf ~/Documents` is the IDENTICAL string in both cases. A matcher sees
+only the string; what differs is intent, and intent lives in the
+conversation. So the fix is guidance in the system prompt
+(`sage_agent_runtime_service._destructive_action_awareness_guidance`,
+injected into both the specialist and master/Sage prompt-assembly branches
+in `_handle_sage_chat_unguarded`) — never a gate. `require_approval` stays
+hardcoded `False` at all four shell/hardware call sites in
+`skills_service.py` (confirmed, left untouched) — no approve/deny state, per
+this file's own "No approval system" law.
+
+**Execution mode (sandbox vs. full_access) is deliberately NOT asserted as
+a per-turn fact.** Which gateway/registration a shell call lands on is
+resolved per tool call in `skills_service._runtime_access_mode_from_
+direct_tool_context` (payload override → session metadata → a live
+`gateway_state_repository` registration lookup → guarded default) — not
+known, or cheaply knowable, at prompt-assembly time. A specific mode
+claimed here that turns out wrong is worse than saying nothing (the
+outcome-honesty law, one level up). What the guidance states instead is
+the standing invariant — sandbox is the floor, full_access is a real
+two-factor opt-in — and points the model at the concrete signal every
+hardware/shell tool result already carries
+(`_format_hardware_action_result`'s `runtime_access_mode` field), so it can
+check rather than assume.
+
+Guarded by `server_modules/tests/test_destructive_action_awareness.py`:
+content assertions (states both calibration examples verbatim, names
+reversibility as the axis rather than a command-name list, never asserts a
+specific mode), a redaction-survival test (this exact function,
+`_build_prompt_envelope`, is the one that silently ate 17 of 72 tool names
+in 2026-08-08 — see the entry below), and a structural test that both
+prompt-assembly branches reference the guidance function, so a future edit
+cannot silently drop it from one branch the way this file has repeatedly
+documented happening elsewhere. ~125 words, ~160 cl100k tokens, paid on
+every turn.
+
 ## Craft doctrine
 
 - One accent colour, spent on the single primary action in a view. Everything

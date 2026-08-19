@@ -2116,6 +2116,53 @@ def _build_heartbeat_summary(snapshot: dict) -> str:
     return "\n".join(lines) if lines else ""
 
 
+# 2026-08-19, feat/destructive-action-awareness: the founder rejected a
+# hardcoded blocklist for destructive shell/file commands ("you are not
+# going to delete my documents even though I said it, but you WOULD do it
+# once I say 'I have these documents and I don't want these, so just delete
+# them all'... what we need is to make it aware for itself"). `rm -rf
+# ~/Documents` is the identical string in both cases — a matcher can only
+# ever see the string, never the intent behind it, which is exactly why
+# require_approval is hardcoded False at every shell/hardware call site in
+# skills_service.py and stays that way (no approval-gate product law). This
+# is judgment, carried as guidance, not a mechanism. A module-level function
+# (rather than an inline literal) so it has one definition, is directly unit
+# -testable, and is trivially greppable at both of its two call sites.
+#
+# Execution mode (sandbox vs. full_access) is deliberately NOT asserted here.
+# Which gateway/registration a shell call actually lands on is decided per
+# tool call in skills_service.py's
+# _runtime_access_mode_from_direct_tool_context (explicit payload override ->
+# session metadata -> a live gateway_state_repository registration lookup ->
+# guarded default) — none of that is known, or cheaply knowable, at
+# prompt-assembly time, and a specific mode claimed here that turns out wrong
+# is worse than saying nothing (a false "you're in a sandbox" is exactly the
+# failure this file's own outcome-honesty law forbids). What IS true every
+# turn, and cheap to state, is the invariant: sandbox is the floor,
+# full_access is a real two-factor opt-in (skills_service.py's own
+# hardcoded-False comment plus execution_mode_policy.py's
+# MODE_DEFINITIONS["full_access"]), and every hardware/shell tool result
+# already echoes back which one ran (_format_hardware_action_result's
+# runtime_access_mode field) — so the model can and should read that instead
+# of assuming.
+def _destructive_action_awareness_guidance() -> str:
+    return (
+        "\n\n## Destructive actions\n"
+        "Shell and file tools usually run inside a disposable sandbox — "
+        "nothing there survives past the call, so a mistake costs nothing. "
+        "On hardware whose owner has explicitly opted into full access, the "
+        "identical command runs for real, permanently, on their actual "
+        "machine; a tool result's runtime_access_mode field tells you which "
+        "one you're in, and full access means there is no undo.\n\n"
+        "Reversibility is what matters, not how a command reads. A vague, "
+        "sweeping ask ('delete my documents') is a reason to get specific "
+        "before touching anything wide or permanent; a clear, specific one "
+        "('I have these files, I don't want them — delete them') is a "
+        "reason to just do it. Before acting irreversibly, say plainly "
+        "what you're about to affect."
+    )
+
+
 def _build_prompt_envelope(
     *,
     workspace_id: str,
@@ -6135,6 +6182,14 @@ async def _handle_sage_chat_unguarded(
         "hypothetical.\n"
     )
 
+    # See _destructive_action_awareness_guidance's own module-level docstring
+    # comment for the full rationale (founder's rejected-blocklist decision,
+    # why execution mode is deliberately not asserted here). Applied
+    # unconditionally in both branches below because hardware__action is in
+    # tool_registry_service.ALWAYS_ON_TOOL_NAMES — every turn, specialist or
+    # master, already carries this capability.
+    _destructive_action_awareness_rule = _destructive_action_awareness_guidance()
+
     # ── Phase U2: audience behavioral instructions ──
     _audience_instructions = ""
     if _sender_class != "owner":
@@ -6280,7 +6335,7 @@ async def _handle_sage_chat_unguarded(
         _spec_context_layer_block = (
             f"\n\n## {context_layer_index}" if context_layer_index else ""
         )
-        _specialist_system_prompt = f"{_spec_persona}{_spec_scope_rule}{_spec_autonomy_rule}{_spec_intro_rule}{_spec_honesty_rule}{_spec_capability_manifest_block}{_channel_action_honesty_rule}{_spec_memory_block}{_spec_context_layer_block}{_audience_instructions}{attachment_context}{mcp_tool_inventory}"
+        _specialist_system_prompt = f"{_spec_persona}{_spec_scope_rule}{_spec_autonomy_rule}{_spec_intro_rule}{_spec_honesty_rule}{_spec_capability_manifest_block}{_channel_action_honesty_rule}{_destructive_action_awareness_rule}{_spec_memory_block}{_spec_context_layer_block}{_audience_instructions}{attachment_context}{mcp_tool_inventory}"
         envelope = _build_prompt_envelope(
             workspace_id=normalized_workspace_id,
             message=normalized_message,
@@ -6296,7 +6351,7 @@ async def _handle_sage_chat_unguarded(
             # this pass. Computing the index and then only handing it to
             # specialists would be the same "built and never wired" defect
             # one level down.
-            system_prompt=f"{instruction_bundle.system_prompt.rstrip()}{_audience_instructions}{sage_surface_guardrails}{_channel_action_honesty_rule}" + (f"\n\n## {context_layer_index}" if context_layer_index else "") + f"{attachment_context}{mcp_tool_inventory}",
+            system_prompt=f"{instruction_bundle.system_prompt.rstrip()}{_audience_instructions}{sage_surface_guardrails}{_channel_action_honesty_rule}{_destructive_action_awareness_rule}" + (f"\n\n## {context_layer_index}" if context_layer_index else "") + f"{attachment_context}{mcp_tool_inventory}",
         )
 
     # ── BYO-brain Phase 2: on-box local model turn ─────────────────────────
