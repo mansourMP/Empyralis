@@ -137,8 +137,53 @@ from server_modules import openai_compat_adapter
 from server_modules import provider_profiles
 from server_modules import secret_redaction_service
 from server_modules import tool_result_status
+from server_modules.generation_event_sink import _GENERATION_EVENT_SINK
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _forward_events_to_generation_sink(events: List[Dict[str, Any]]) -> None:
+    """Web-turn streaming fix (companion to direct_chat_stream_response_
+    service.py's durability fix, same investigation): push each translated
+    event to the SAME live sink the legacy engine's own generator already
+    feeds via generation_event_sink.wrap_generation_with_sink, at the
+    moment it is produced rather than only in this module's eventual
+    return value.
+
+    Before this, run_claude_agent_sdk_turn (this file) only ever
+    accumulated events into a local list and returned it once the whole
+    turn finished — nothing in this module ever called the sink. Since the
+    claude_agent_sdk engine is the production default (CLAUDE.md), that
+    meant a web-chat turn on it streamed ZERO bytes for its entire
+    duration: no text delta, no tool/plan step, nothing — the direct cause
+    of the founder's live "no response for a while" report, and it also
+    quietly broke response-start latency (build_agent_turn_stream_
+    response's own peek for a fast-failing turn had nothing to see until
+    the whole turn was done).
+
+    No new transport, no new event shape — this is the identical
+    best-effort, thread-safe, never-let-a-broken-sink-break-generation
+    contract wrap_generation_with_sink already documents; see that
+    function for why exceptions here are swallowed and logged rather than
+    raised. Called from THIS module rather than reusing
+    wrap_generation_with_sink itself because that helper wraps a
+    *generator*, and run_claude_agent_sdk_turn's own message loop
+    (`_run_via_client`) is a plain async for/await, not a generator — the
+    push has to happen inline, per event, as this module's own `_consume`
+    already the one place every translated event passes through exactly
+    once."""
+    sink = _GENERATION_EVENT_SINK.get(None)
+    if sink is None:
+        return
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        try:
+            sink(event)
+        except Exception:
+            LOGGER.exception(
+                "claude_agent_sdk_bridge: generation event sink raised; continuing the turn"
+            )
 
 # The value _run_sage_action_loop_v3's `engine_options={"engine": ...}` must
 # carry to select this engine for a turn. Everything else (empty dict, key
@@ -2166,6 +2211,12 @@ async def run_claude_agent_sdk_turn(
 
         async def _consume(sdk_message: Any, *, state: TranslationState) -> List[Dict[str, Any]]:
             new_events = translate_sdk_message(sdk_message, state=state, trace_context=trace_context)
+            # Web-turn streaming fix — see _forward_events_to_generation_sink's
+            # own docstring. Pushed BEFORE trace persistence below so a slow
+            # persist_ephemeral_envelope call (a real DB write) never delays
+            # what the SSE transport sees; persistence and live-forwarding are
+            # independent consumers of the same translated events.
+            _forward_events_to_generation_sink(new_events)
             # MAN-310 Phase 2 (trace persistence): translate_sdk_message itself
             # stays synchronous/pure (see its own docstring — unit-tested
             # directly, no event loop) and only ever builds the EPHEMERAL

@@ -1934,6 +1934,176 @@ class RunClaudeAgentSdkTurnResumeTests(unittest.TestCase):
         self.assertEqual(len(fake_client.calls), 1)  # nothing to fall back FROM
 
 
+class RunClaudeAgentSdkTurnLiveEventForwardingTests(unittest.TestCase):
+    """Web-turn streaming fix (companion to direct_chat_stream_response_
+    service.py's durability fix): before this, run_claude_agent_sdk_turn
+    only ever accumulated translated events into a local list and returned
+    it once the whole turn finished. The legacy engine's own generator is
+    always wrapped with generation_event_sink.wrap_generation_with_sink,
+    which pushes each event to the live _GENERATION_EVENT_SINK contextvar
+    AS IT IS PRODUCED — direct_chat_service.py's web-chat producer() drains
+    that same sink into its SSE queue in real time. The claude_agent_sdk
+    engine (the production default per CLAUDE.md) never called the sink at
+    all, so a web-chat turn running on it streamed zero bytes for its
+    entire duration — the exact "silence" the founder hit live. These
+    tests assert the sink receives each event as receive_response() yields
+    the underlying SDK message, not only in this function's eventual
+    return value, by pausing the fake client mid-stream and checking the
+    sink BEFORE letting it finish.
+    """
+
+    def test_sink_receives_text_delta_before_the_turn_finishes(self):
+        message_start = sdk_types.StreamEvent(
+            uuid="evt-1", session_id="sess-1", parent_tool_use_id=None,
+            event={"type": "message_start", "message": {"id": "msg-1"}},
+        )
+        block_start = sdk_types.StreamEvent(
+            uuid="evt-2", session_id="sess-1", parent_tool_use_id=None,
+            event={"type": "content_block_start", "index": 0, "content_block": {"type": "text"}},
+        )
+        first_delta = sdk_types.StreamEvent(
+            uuid="evt-3", session_id="sess-1", parent_tool_use_id=None,
+            event={"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hel"}},
+        )
+        second_delta = sdk_types.StreamEvent(
+            uuid="evt-4", session_id="sess-1", parent_tool_use_id=None,
+            event={"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "lo"}},
+        )
+
+        gate = asyncio.Event()
+
+        class _PausingFakeClient:
+            def __init__(self, *, options=None, transport=None):
+                self.options = options
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def query(self, prompt, session_id="default"):
+                return None
+
+            async def receive_response(self):
+                yield message_start
+                yield block_start
+                yield first_delta
+                # Mid-stream pause: the test asserts the sink already saw
+                # the delta above before releasing this.
+                await gate.wait()
+                yield second_delta
+                yield _result_message()
+
+            async def get_context_usage(self):
+                raise AttributeError("not scripted")
+
+        sink_calls: list[dict] = []
+
+        async def _drive():
+            from server_modules.generation_event_sink import _GENERATION_EVENT_SINK
+
+            token = _GENERATION_EVENT_SINK.set(lambda event: sink_calls.append(event))
+            try:
+                with (
+                    patch("claude_agent_sdk.ClaudeSDKClient", new=_PausingFakeClient),
+                    patch.object(claude_agent_sdk_bridge.agent_trace_service, "persist_ephemeral_envelope", new=AsyncMock()),
+                ):
+                    task = asyncio.ensure_future(claude_agent_sdk_bridge.run_claude_agent_sdk_turn(
+                        message="hi",
+                        system_prompt="Be terse.",
+                        prior_messages=[],
+                        tool_defs=[],
+                        generation_services=MagicMock(),
+                        workspace_id="ws-1",
+                        thread_id="trace-1",
+                        provider="anthropic",
+                        model="claude-sonnet-4-5",
+                        credentials={},
+                        trace_context=_trace_context(),
+                    ))
+                    # Poll (bounded) until the sink has seen the first
+                    # delta, without ever letting the turn finish.
+                    for _ in range(200):
+                        if any(
+                            isinstance(e, dict) and e.get("type") == "trace"
+                            and (e.get("payload") or {}).get("event_type") == "assistant.message.delta"
+                            for e in sink_calls
+                        ):
+                            break
+                        await asyncio.sleep(0.01)
+                    else:
+                        self.fail("sink never received the first text delta")
+                    self.assertFalse(task.done(), "turn already finished before the mid-stream pause was released")
+                    calls_before_release = list(sink_calls)
+                    gate.set()
+                    events = await task
+                return events, calls_before_release
+            finally:
+                _GENERATION_EVENT_SINK.reset(token)
+
+        events, calls_before_release = asyncio.run(_drive())
+
+        # The delta was visible to the sink WHILE the turn was still
+        # running, not only after — the whole point of this fix.
+        self.assertTrue(
+            any(
+                (e.get("payload") or {}).get("data") == {"message_id": "msg-1", "delta": "Hel"}
+                for e in calls_before_release
+            ),
+            "first delta was not forwarded to the sink before the turn finished",
+        )
+        # And the sink's own event stream matches the function's eventual
+        # return value — live forwarding is additive, never a second,
+        # divergent source of truth.
+        delta_payloads = [
+            (e.get("payload") or {}).get("data")
+            for e in sink_calls
+            if isinstance(e, dict) and e.get("type") == "trace"
+            and (e.get("payload") or {}).get("event_type") == "assistant.message.delta"
+        ]
+        self.assertEqual(delta_payloads, [
+            {"message_id": "msg-1", "delta": "Hel"},
+            {"message_id": "msg-1", "delta": "lo"},
+        ])
+        returned_delta_payloads = [
+            (e.get("payload") or {}).get("data")
+            for e in events
+            if isinstance(e, dict) and e.get("type") == "trace"
+            and (e.get("payload") or {}).get("event_type") == "assistant.message.delta"
+        ]
+        self.assertEqual(delta_payloads, returned_delta_payloads)
+        final_event = next(e for e in events if e["type"] == "final")
+        self.assertEqual(final_event["payload"]["reply"], "ok")
+
+    def test_no_sink_set_behaves_exactly_as_before(self):
+        """When _GENERATION_EVENT_SINK is unset (Telegram / API / background
+        turns — every non-web-chat caller), forwarding must be a no-op:
+        same return value, no sink attribute error, nothing to break."""
+        fake_client = _fake_claude_sdk_client([[_result_message()]])
+
+        with (
+            patch("claude_agent_sdk.ClaudeSDKClient", new=fake_client),
+            patch.object(claude_agent_sdk_bridge.agent_trace_service, "persist_ephemeral_envelope", new=AsyncMock()),
+        ):
+            events = asyncio.run(claude_agent_sdk_bridge.run_claude_agent_sdk_turn(
+                message="hi",
+                system_prompt="Be terse.",
+                prior_messages=[],
+                tool_defs=[],
+                generation_services=MagicMock(),
+                workspace_id="ws-1",
+                thread_id="trace-1",
+                provider="anthropic",
+                model="claude-sonnet-4-5",
+                credentials={},
+                trace_context=_trace_context(),
+            ))
+
+        final_event = next(e for e in events if e["type"] == "final")
+        self.assertEqual(final_event["payload"]["reply"], "ok")
+
+
 class RunClaudeAgentSdkTurnTracePersistenceTests(unittest.TestCase):
     """MAN-310 Phase 2: run_claude_agent_sdk_turn is the async context that
     makes each PERSISTED_TRACE_EVENT_TYPES envelope translate_sdk_message
