@@ -488,10 +488,58 @@ def _local_tool_descriptors() -> List[ToolDescriptor]:
             label="Local shell exec",
             connector_id="shell",
             action_id="exec",
-            description="Execute a shell command on the local machine",
+            description=(
+                "Execute one or more shell commands on the local machine. Running on this "
+                "machine is a slow network round trip (the machine may be far from where this "
+                "runs) — if you already know you need several commands (e.g. cd into a "
+                "directory then run a build, or check three things in sequence), pass them ALL "
+                "at once in `commands` instead of calling this tool once per command. Commands "
+                "in one `commands` call run in order, in ONE shared session: `cd`, `export`, "
+                "and anything else that changes the shell's own state in one command carries "
+                "into the next, exactly like typing them one after another in the same "
+                "terminal. By default the batch stops at the first command that fails and the "
+                "rest are reported as not run (set `stop_on_failure` to false to run every "
+                "command regardless). Use `command` for a single, standalone command."
+            ),
             capability_id="shell.execute",
             requires_runtime=True,
-            parameters={"type": "object", "properties": {"command": {"type": "string", "description": "Shell command to run"}}, "required": ["command"]},
+            parameters={
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "A single shell command to run. Omit if using `commands`."},
+                    "commands": {
+                        "type": "array",
+                        "description": (
+                            "Two or more commands to run in order, in one round trip, sharing one "
+                            "session (cwd/env carry from one command to the next). Omit if using "
+                            "`command`. Provide either a plain string per command, or an object "
+                            "with `command` and an optional per-command `timeout_seconds`."
+                        ),
+                        "items": {
+                            "anyOf": [
+                                {"type": "string"},
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "command": {"type": "string"},
+                                        "timeout_seconds": {"type": "integer", "description": "Budget for this one command, in seconds."},
+                                    },
+                                    "required": ["command"],
+                                },
+                            ]
+                        },
+                        "minItems": 1,
+                    },
+                    "stop_on_failure": {
+                        "type": "boolean",
+                        "description": "Only used with `commands`. Default true: stop the batch at the first failing command. Set false to run every command regardless of earlier failures.",
+                    },
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "description": "Timeout in seconds. With `command`, the timeout for that command. With `commands`, the default applied to any entry that doesn't set its own timeout_seconds.",
+                    },
+                },
+            },
         ),
         ToolDescriptor(
             tool_name="screenshot__capture",
@@ -3919,12 +3967,39 @@ def _gateway_arguments_for_direct_local_tool(
         payload.setdefault("mode", normalized_action or "read")
         return payload
     if normalized_connector == "shell":
+        def _aliased(text_value: str) -> str:
+            text_value = text_value.replace("/root/Desktop", str(Path.home() / "Desktop"))
+            text_value = text_value.replace("/root/Documents", str(Path.home() / "Documents"))
+            text_value = text_value.replace("/root/Downloads", str(Path.home() / "Downloads"))
+            return text_value
+
         command = str(payload.get("command") or "").strip()
         if command:
-            command = command.replace("/root/Desktop", str(Path.home() / "Desktop"))
-            command = command.replace("/root/Documents", str(Path.home() / "Documents"))
-            command = command.replace("/root/Downloads", str(Path.home() / "Downloads"))
-            payload["command"] = command
+            payload["command"] = _aliased(command)
+        # Batch dispatch: a `commands` array means "run these in one round
+        # trip" (see batch-shell.ts / GatewayShellRuntime.executeShellBatch
+        # on the gateway side, which is what actually detects and handles
+        # this — this function only needs to apply the same home-directory
+        # alias rewrite per entry that the single-command path already
+        # does). Deliberately NOT set a `command` key here even when empty:
+        # gateway_execution_service._normalize_gateway_capability only
+        # touches `args["command"]` when a truthy `command` is present, so
+        # leaving it absent is what keeps `commands`/`stop_on_failure`
+        # passed through untouched.
+        raw_commands = payload.get("commands")
+        if isinstance(raw_commands, list) and raw_commands:
+            normalized_commands: List[Any] = []
+            for entry in raw_commands:
+                if isinstance(entry, str):
+                    normalized_commands.append(_aliased(entry))
+                elif isinstance(entry, dict):
+                    entry_command = str(entry.get("command") or "")
+                    normalized_entry = dict(entry)
+                    normalized_entry["command"] = _aliased(entry_command)
+                    normalized_commands.append(normalized_entry)
+                else:
+                    normalized_commands.append(entry)
+            payload["commands"] = normalized_commands
         return payload
     if normalized_connector == "computer":
         normalized_path = _normalize_direct_local_path_argument(
@@ -4242,6 +4317,89 @@ def _format_gateway_direct_local_tool_result(
         return callbacks.format_direct_local_tool_result(inner_result)
     normalized_connector = str(connector_id or "").strip().lower()
     normalized_action = str(action_id or "").strip().lower()
+    if (
+        normalized_connector == "shell"
+        and isinstance(inner_result, dict)
+        and isinstance(inner_result.get("commands"), list)
+    ):
+        # Batch result: GatewayShellRuntime.executeShellBatch's shape, one
+        # entry per command with its own status/exit_code/stdout/stderr/
+        # reason. This MUST be checked, and formatted, before the
+        # single-command branch below — that branch reads `command`/
+        # `exit_code` off the TOP of inner_result, which a batch result
+        # doesn't have, and would silently read as "completed" with an
+        # empty command (exit_code missing -> `not exit_code` is True).
+        batch_commands = inner_result.get("commands") or []
+        stop_on_failure = bool(inner_result.get("stop_on_failure"))
+        stopped_early = bool(inner_result.get("stopped_early"))
+        batch_timed_out = bool(inner_result.get("batch_timed_out"))
+        action_entries: List[Dict[str, Any]] = []
+        worst_status = "completed"
+        for entry in batch_commands:
+            if not isinstance(entry, dict):
+                continue
+            status = str(entry.get("status") or "").strip().lower()
+            command_text = str(entry.get("command") or "").strip()
+            exit_code = entry.get("exit_code")
+            stdout = str(entry.get("stdout") or "").strip()
+            stderr = str(entry.get("stderr") or "").strip()
+            reason = str(entry.get("reason") or "").strip()
+            # Never collapse the gateway's five-way outcome into a single
+            # completed/failed bit — "failed" (ran, bad exit), "skipped"/
+            # "not_run" (never ran) and "timed_out" (ran, unknown exit) are
+            # three different facts and stay distinguishable in the prose
+            # below even after this flattens to a chat-visible string.
+            if status == "success":
+                action_status = "completed"
+            elif status in ("skipped", "not_run"):
+                action_status = "not_run"
+            elif status == "timed_out":
+                action_status = "timed_out"
+            else:
+                action_status = "failed"
+            if action_status != "completed":
+                worst_status = "failed"
+            preview_parts = [part for part in [stdout, f"stderr:\n{stderr}" if stderr else "", reason] if part]
+            output_preview = "\n".join(preview_parts).strip() or f"[{status or 'unknown'}]"
+            action_entries.append(
+                {
+                    "tool": "run_command",
+                    "command": command_text,
+                    "status": action_status,
+                    "exit_code": exit_code,
+                    "output_preview": output_preview,
+                    "stdout_preview": stdout,
+                    "stderr_preview": stderr,
+                }
+            )
+        summary_bits = [f"Ran a batch of {len(batch_commands)} command(s) on this device"]
+        if stopped_early and stop_on_failure:
+            summary_bits.append("— stopped early after a failure")
+        if batch_timed_out:
+            summary_bits.append("— the batch's shared time budget ran out before every command finished")
+        result = {
+            "summary": " ".join(summary_bits).strip() + ".",
+            "result_data": {
+                "tool_variant": "run_command_batch",
+                "child_result": {
+                    "outputs": {
+                        "actions": action_entries,
+                        "artifacts": [],
+                    }
+                },
+            },
+        }
+        formatted = callbacks.format_direct_local_tool_result(result)
+        return _with_gateway_tool_status(
+            formatted,
+            {
+                "status": worst_status,
+                "commands": [
+                    {"command": e.get("command"), "status": e.get("status"), "exit_code": e.get("exit_code")}
+                    for e in action_entries
+                ],
+            },
+        )
     if normalized_connector == "shell" and isinstance(inner_result, dict):
         command = str(inner_result.get("command") or "").strip()
         stdout = str(inner_result.get("stdout") or "").strip()

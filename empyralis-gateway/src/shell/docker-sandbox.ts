@@ -151,7 +151,16 @@ export interface DockerRunResult {
  */
 export function spawnDockerRun(
   args: string[],
-  options: { timeoutMs: number; stdin?: string } = { timeoutMs: 30_000 },
+  options: {
+    timeoutMs: number;
+    stdin?: string;
+    containerNameForTimeoutKill?: string;
+    /** Externally triggered early-stop (e.g. a batch's own per-command
+     *  watchdog deciding ONE command in a shared container overran its
+     *  budget, well before the outer `timeoutMs` backstop would fire).
+     *  Runs the identical kill sequence as a natural timeout. */
+    signal?: AbortSignal;
+  } = { timeoutMs: 30_000 },
 ): Promise<DockerRunResult> {
   return new Promise((resolve, reject) => {
     const child = spawn("docker", args, { stdio: ["pipe", "pipe", "pipe"] });
@@ -160,11 +169,49 @@ export function spawnDockerRun(
     let timedOut = false;
     let settled = false;
 
-    const timer = setTimeout(() => {
+    // SIGKILLing the LOCAL `docker` CLI process is not the same as
+    // stopping the REMOTE container the daemon is running — the CLI is a
+    // thin RPC frontend, and killing it does not propagate to the
+    // container (SIGKILL can't be caught to relay, and `docker run`
+    // without `-d` does not guarantee the daemon tears the container down
+    // just because its client disconnected). Left alone, a batch
+    // container that outlives its own deadline keeps running (and, for a
+    // shared batch container, keeps holding whatever command was mid-flight)
+    // until something else notices and cleans it up — nothing does today.
+    // Ask the daemon directly to stop the one container we know the name
+    // of. Best-effort and fire-and-forget: a hung `docker kill` must never
+    // delay settling this promise (the caller's deadline already fired),
+    // and if this box's Docker is wedged enough that `docker kill` also
+    // hangs, there is nothing more this call can do from here anyway —
+    // `killer.unref()` keeps it from holding the event loop open either way.
+    const killNow = (): void => {
       timedOut = true;
       child.kill("SIGKILL");
-    }, options.timeoutMs);
+      if (options.containerNameForTimeoutKill) {
+        try {
+          const killer = spawn("docker", ["kill", options.containerNameForTimeoutKill], { stdio: "ignore" });
+          killer.unref?.();
+          killer.on("error", () => {
+            // Nothing to do — this is best-effort insurance on top of --rm,
+            // not the primary cleanup mechanism.
+          });
+        } catch {
+          // Same.
+        }
+      }
+    };
+
+    const timer = setTimeout(killNow, options.timeoutMs);
     timer.unref?.();
+
+    const onAbort = (): void => killNow();
+    if (options.signal) {
+      if (options.signal.aborted) {
+        killNow();
+      } else {
+        options.signal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
 
     child.stdout.on("data", (chunk: Buffer) => {
       stdout += chunk.toString("utf8");
@@ -176,12 +223,16 @@ export function spawnDockerRun(
       child.stdin.write(options.stdin, "utf8");
     }
     child.stdin.end();
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onAbort);
+    };
     child.on("error", (error) => {
       if (settled) {
         return;
       }
       settled = true;
-      clearTimeout(timer);
+      cleanup();
       reject(error);
     });
     child.on("close", (code) => {
@@ -189,7 +240,7 @@ export function spawnDockerRun(
         return;
       }
       settled = true;
-      clearTimeout(timer);
+      cleanup();
       resolve({ exitCode: code, stdout, stderr, timedOut });
     });
   });
