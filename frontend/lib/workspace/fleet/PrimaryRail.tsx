@@ -23,15 +23,23 @@ import {
 import { logout } from "@/lib/auth/auth-client";
 import { useAccountShell } from "@/lib/shell/account-shell-context";
 import { useRevealedEmail } from "@/lib/shell/use-revealed-email";
-import { getInboxLastSeenAt, useFleetAgents, useFleetProjects, useFleetWorkspace, useFleetWorkspaceTasks, useWorkspaceActivity } from "./fleet-data";
+import { getInboxLastSeenAt, resolveAgentProjectId, useFleetAgents, useFleetProjects, useFleetWorkspace, useFleetWorkspaceTasks, useWorkspaceActivity } from "./fleet-data";
 import { deriveStatus, findSageAgent } from "./fleet-presentation";
 import { ProjectIcon } from "./fleet-project-identity";
 import { planAgentCountShape } from "./agent-count-shape";
 import { myWorkBadgeCount } from "./my-work";
 import { useOwnAccountId } from "./members-data";
 import { visibleRailItems } from "./primary-rail-nav";
-import { projectAgentsSpaceLinks, railSpaceFromPathname, settingsSpaceLinks, spaceBackHref, type RailSpaceLink } from "./primary-rail-space";
+import {
+  projectAgentsSpaceLinks,
+  railSpaceFromPathname,
+  settingsSpaceLinks,
+  spaceBackHref,
+  workspaceAgentsSpaceLinks,
+  type RailSpaceLink,
+} from "./primary-rail-space";
 import { projectAgentsSpaceIsActive } from "./project-agents-rail-shape";
+import { workspaceAgentsSpaceIsActive } from "./workspace-agents-rail-shape";
 import { activeProjectIdFromPathname } from "./primary-rail-project-mode";
 import { AgentSigil, StatusDot } from "./fleet-indicators";
 import { rememberLastViewedAgent } from "./AgentsList";
@@ -95,17 +103,25 @@ const money = (n: number) => (n === 0 ? "—" : `$${n.toFixed(4)}`);
  * the account menu instead — it's a look-up-occasionally screen, not a nav
  * destination. Keyboard: `j`/`k` move a highlight, Enter opens it; `g` then
  * a section key jumps directly (g i inbox, g m my work, g p projects,
- * g s settings) — the Linear muscle-memory model, and it covers the pinned
- * footer row too so pinning is a position, not a demotion.
+ * g a agents, g c context) — the Linear muscle-memory model, and it covers
+ * the pinned footer row too so pinning is a position, not a demotion.
  *
- * Conversations and Agents are GONE from this rail (see primary-rail-nav.ts),
- * not merely folded into the Projects sub-list — both used to aggregate
- * across every project's agents, which is exactly the boundary "an agent
+ * Conversations is GONE from this rail (see primary-rail-nav.ts) — it still
+ * aggregates across every project's agents, exactly the boundary "an agent
  * belongs to its project and works only there" says a nav surface must not
- * reach past. Agents are entities that live INSIDE the project that owns
- * them, reached by opening that project's own Agents tab — where, at 2+
- * agents, this rail morphs into the project-agents space and lists them
- * itself (primary-rail-space.ts, gated by project-agents-rail-shape.ts).
+ * reach past.
+ *
+ * Agents CAME BACK 2026-08-19 — a founder reversal on this one point (see
+ * primary-rail-nav.ts's own history for the exact words), not a re-opening
+ * of that boundary. It is a top-level row again, but it does not aggregate
+ * into the content area the way the pre-2026-08-13 shape did: pressing it
+ * morphs THIS rail into the workspace-agents space — every real agent,
+ * across every project — the same mechanism Settings already uses
+ * (primary-rail-space.ts, gated by workspace-agents-rail-shape.ts). A
+ * project's own Agents tab is untouched and still opens the older,
+ * project-scoped twin of this same mechanism (project-agents) — the two
+ * are independent, see primary-rail-space.ts's header for why they stay
+ * that way rather than merging.
  *
  * COUNTS ARE NON-ZERO ONLY. Inbox and My work each show a number when they
  * have one and nothing when they don't — a zero badge is noise, and it is
@@ -324,14 +340,32 @@ export function PrimaryRail({
         : [],
     [space, allAgents],
   );
+  // The workspace-agents space lists EVERY real agent in the workspace —
+  // `agents` (declared above: allAgents with Sage/the Operator already
+  // filtered out, the same exclusion every other agent surface here makes)
+  // is exactly that list. Each row needs a resolved project id to build its
+  // href (resolveAgentProjectId — the same fallback every other agent link
+  // in this app already goes through), so that resolution happens here, not
+  // inside primary-rail-space.ts, which stays free of fleet-data.
+  const spaceWorkspaceAgents = useMemo(
+    () =>
+      space?.kind === "workspace-agents"
+        ? agents.map((a) => ({ agent_id: a.agent_id, label: a.label, project_id: resolveAgentProjectId(a.project_id, projects) }))
+        : [],
+    [space, agents, projects],
+  );
   // Whether the agents space actually morphs the rail is the SAME predicate
-  // ProjectDetailPage calls to decide whether to hide its own Tasks/
-  // Documents/Agents tab strip (project-agents-rail-shape.ts's
-  // projectAgentsSpaceIsActive) — never a second rule, and never two rules
-  // that happen to agree today. Below the gate the rail simply stays flat.
+  // ProjectDetailPage (project-agents) / the workspace Agents page
+  // (workspace-agents) calls to decide whether to hide its own picking
+  // surface — never a second rule, and never two rules that happen to
+  // agree today. Below the gate the rail simply stays flat.
   const effectiveSpace =
     space?.kind === "project-agents"
       ? projectAgentsSpaceIsActive(true, spaceProjectAgents.length)
+        ? space
+        : null
+      : space?.kind === "workspace-agents"
+      ? workspaceAgentsSpaceIsActive(true, agents.length)
         ? space
         : null
       : space;
@@ -351,8 +385,9 @@ export function PrimaryRail({
   const spaceLinks: RailSpaceLink[] | null = useMemo(() => {
     if (!effectiveSpace) return null;
     if (effectiveSpace.kind === "settings") return settingsSpaceLinks(effectiveSpace);
+    if (effectiveSpace.kind === "workspace-agents") return workspaceAgentsSpaceLinks(effectiveSpace, spaceWorkspaceAgents);
     return projectAgentsSpaceLinks(effectiveSpace, spaceProjectAgents);
-  }, [effectiveSpace, spaceProjectAgents]);
+  }, [effectiveSpace, spaceProjectAgents, spaceWorkspaceAgents]);
   const spaceBack = effectiveSpace ? spaceBackHref(effectiveSpace, lastOutsideSpaceRef.current) : null;
   const spaceProject =
     effectiveSpace?.kind === "project-agents"
@@ -361,6 +396,8 @@ export function PrimaryRail({
   const spaceTitle = effectiveSpace
     ? effectiveSpace.kind === "settings"
       ? "Settings"
+      : effectiveSpace.kind === "workspace-agents"
+      ? "Agents"
       : spaceProject?.name || "Agents"
     : null;
 
@@ -590,9 +627,15 @@ export function PrimaryRail({
             // An agent row carries the agent's own identity (sigil + live
             // status dot) instead of a generic icon — the same rendering
             // the old in-content list used, now living where picking lives.
+            // workspace-agents looks the row up in the full, already
+            // Sage-excluded `agents` list (not spaceWorkspaceAgents, which
+            // only carries the fields workspaceAgentsSpaceLinks needs to
+            // build an href — AgentSigil/StatusDot need the real record).
             const agent =
               effectiveSpace.kind === "project-agents"
                 ? spaceProjectAgents.find((a) => a.agent_id === link.key)
+                : effectiveSpace.kind === "workspace-agents"
+                ? agents.find((a) => a.agent_id === link.key)
                 : undefined;
             return (
               <Link

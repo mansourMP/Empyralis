@@ -1811,13 +1811,17 @@ a.fleet-breadcrumb:hover {
   margin-inline: 0;
 }
 
-/* The bare /agents index, once the PRIMARY rail has morphed into the
-   project-agents space (2+ agents — primary-rail-space.ts; the old
-   in-content .fleet-agents-rail column and its agents/layout.tsx split
-   are deleted — a replaced shell takes its CSS with it): the old flat
-   table is gone from here, replaced by a quiet prompt — the rail IS the
-   browse surface, so a second one in the content would just be the same
-   list twice. */
+/* A bare /agents index, once the PRIMARY rail has morphed into a picker
+   (2+ agents — primary-rail-space.ts): the flat table/board/list is gone
+   from here, replaced by a quiet prompt — the rail IS the browse surface,
+   so a second one in the content would just be the same list twice. Shared
+   by TWO spaces on purpose, not a coincidence of naming: a project's own
+   /agents (project-agents — the old in-content .fleet-agents-rail column
+   and its agents/layout.tsx split are deleted, a replaced shell takes its
+   CSS with it) and the workspace-level /agents (workspace-agents, added
+   2026-08-19 when the founder moved agents back onto the rail). Both are
+   the identical shape — a quiet centered sentence — so one rule serves
+   both rather than two copies drifting apart. */
 .fleet-project-agents-placeholder {
   display: flex;
   align-items: center;

@@ -1,4 +1,4 @@
-import { FolderKanban, Inbox, Library, ListChecks, type LucideIcon } from "lucide-react";
+import { Bot, FolderKanban, Inbox, Library, ListChecks, type LucideIcon } from "lucide-react";
 
 /**
  * The primary rail's destinations — pulled into its own pure,
@@ -44,15 +44,35 @@ import { FolderKanban, Inbox, Library, ListChecks, type LucideIcon } from "lucid
  * never changes the rail — a space exists only where the content's whole
  * job used to be a second nav column.
  *
- * PROJECT IS STILL THE SPINE (CLAUDE.md, "an agent belongs to its project and
- * works only there"): Conversations and Agents remain GONE as TOP-LEVEL rows.
- * Both used to aggregate across every project's agents, which is exactly the
- * boundary that rule says a nav surface must not reach past. Their routes
- * (`/w/{id}/agents`, `/w/{id}/conversations`) are DELIBERATELY still live —
- * several entries in next.config.ts's LEGACY_REDIRECTS point AT `/agents`,
- * and turning it into a redirect target itself risks the exact "a redirect
- * runs ahead of the router and makes a real page unreachable" trap CLAUDE.md
- * documents. They are simply not linked from here.
+ * 2026-08-19   AGENTS COMES BACK, and this is a founder reversal, not a
+ *              drift — CLAUDE.md's own history section on this file must be
+ *              read as superseded on this one point, not re-litigated. His
+ *              words: "agents should be just open, not inside this specific
+ *              project" — "move all those agents under one button that
+ *              would say Agents; at the moment I press Agents [they] appear
+ *              on this left rail. Not at the middle of the screen, not at
+ *              the main content page." Influenced by Grok's app. So Agents
+ *              is a rail destination again, but NOT the pre-2026-08-13
+ *              shape that aggregated across projects into a full-page
+ *              grid/board/list in the CONTENT area — that page (`/agents`)
+ *              still exists, unlinked-elsewhere, but pressing this row no
+ *              longer routes a reader into it. It routes into a SPACE
+ *              (primary-rail-space.ts's "workspace-agents" kind, the exact
+ *              mechanism Settings already uses): the rail itself becomes
+ *              the picker, workspace-wide, across every project; the
+ *              content area shows only the agent that was picked, or a
+ *              quiet prompt while none is. Tagged `aggregatesAgents` for the
+ *              same reason Inbox is — with zero real agents there is
+ *              nothing to pick, so it hides itself exactly like Inbox does.
+ *
+ * Conversations remains GONE. It still aggregates across every project the
+ * same way Agents used to, and nothing the founder said above touches it —
+ * this reversal is specifically about agents, not a re-opening of the whole
+ * 2026-08-13 boundary. Its route (`/w/{id}/conversations`) is DELIBERATELY
+ * still live — several entries in next.config.ts's LEGACY_REDIRECTS point AT
+ * `/agents`, and turning either route into a redirect target itself risks
+ * the exact "a redirect runs ahead of the router and makes a real page
+ * unreachable" trap CLAUDE.md documents. It is simply not linked from here.
  *
  * "My work" answers "what is assigned to me, across every project" — a
  * question that had no surface at all before: you opened each project and
@@ -89,7 +109,8 @@ export type RailNavItem = {
    *  real agents there is nothing to aggregate — every event class the
    *  activity ledger knows about is agent- or gateway-driven, so Inbox hides
    *  itself from the rail at agent-count-shape.ts's "none" mode (see
-   *  visibleRailItems below).
+   *  visibleRailItems below). Agents itself carries the same tag for the
+   *  same reason: a picker with nothing in it is worse than no row at all.
    *
    *  Projects is deliberately NOT tagged: it is the workspace's own data
    *  (CLAUDE.md positioning — "the WORKSPACE is the product"), not a view OF
@@ -103,6 +124,7 @@ export const RAIL_ITEMS: RailNavItem[] = [
   { key: "inbox", label: "Inbox", segment: "inbox", icon: Inbox, chord: "i", aggregatesAgents: true },
   { key: "my-work", label: "My work", segment: "my-work", icon: ListChecks, chord: "m" },
   { key: "projects", label: "Projects", segment: "projects", icon: FolderKanban, chord: "p" },
+  { key: "agents", label: "Agents", segment: "agents", icon: Bot, chord: "a", aggregatesAgents: true },
   { key: "context", label: "Context", segment: "context", icon: Library, chord: "c" },
 ];
 
