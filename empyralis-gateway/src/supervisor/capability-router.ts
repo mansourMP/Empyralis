@@ -108,10 +108,32 @@ export class GatewayCapabilityRouter {
       // actually configured; see openclaw/capabilities.ts.
       ...openClawTransportCapabilities(),
       ...this.externalAgentProxyRuntime.requestedCapabilities(),
-      // shell_sandbox capabilities are filtered the same way as browser's —
-      // gated on the "shell_sandbox" desktop permission, which is only
-      // "granted" when Docker reads ready (see runtime/desktop-permissions.ts).
-      ...filterCapabilitiesByDesktopPermission(this.shellRuntime?.requestedCapabilities() ?? []),
+      // shell_sandbox capabilities are declared unconditionally, NOT gated
+      // here on live Docker readiness the way browser/llm/cli_setup still
+      // are below. They used to go through the same
+      // filterCapabilitiesByDesktopPermission() call those do — which meant
+      // that whenever Docker wasn't (yet) confirmed ready, shell.execute/
+      // filesystem.read_write were dropped from this array ENTIRELY, not
+      // just marked not-ready. That array becomes runtimeMetadata.
+      // requestedCapabilities (index.ts), which is the SAME array that
+      // seeds capability_readiness.requested in every heartbeat
+      // (health/service-inventory.ts's buildFastPassiveInventorySnapshot/
+      // collectPassiveInventorySnapshot map permission_states off exactly
+      // that array) — so a capability missing here was permanently invisible
+      // to permission_states too, not just "restricted": the backend's
+      // gateway_capability_not_ready check (server_modules/
+      // gateway_execution_service.py) had no key to find at all, no matter
+      // how quickly Docker itself came up. Real dispatch-time safety is
+      // unaffected: handleToolInvoke() below still calls
+      // assertCapabilityPermissionReady() before running anything, which
+      // independently throws blocked/local_permission_denied while Docker
+      // isn't ready (see runtime/desktop-permissions.ts, exercised by
+      // desktop-permissions-shell-sandbox.test.ts). Advertising the
+      // capability and being allowed to run it are separate questions;
+      // capability_readiness.permission_states is what's supposed to answer
+      // "ready or why not" for the *advertised* set, and it can only do that
+      // if the capability is actually IN that set.
+      ...(this.shellRuntime?.requestedCapabilities() ?? []),
       // llm.generate is gated on the "llm_runtime" permission, only "granted"
       // when a local Ollama endpoint reads ready — same pattern as shell/Docker
       // (BYO-brain Phase 2).
