@@ -30,6 +30,7 @@ import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
 import { FleetListSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import { HeaderAction, useBreadcrumbBadge } from "@/lib/workspace/fleet/Breadcrumbs";
 import { planAgentCountShape } from "@/lib/workspace/fleet/agent-count-shape";
+import { workspaceAgentsSpaceIsActive } from "@/lib/workspace/fleet/workspace-agents-rail-shape";
 
 type SortMode = "last_active" | "status" | "cost" | "name" | "group";
 
@@ -165,6 +166,18 @@ export default function AgentsPage() {
   // during the initial fetch never fires a bogus redirect.
   const agentCountMode = useMemo(() => planAgentCountShape(agents.length), [agents.length]);
   const soloAgent = agentCountMode === "solo" ? agents[0] : null;
+  // 2026-08-19 — the founder moved agents back onto the rail: pressing
+  // "Agents" morphs PrimaryRail into the workspace-agents space instead of
+  // landing a reader in a full-page grid ("not at the middle of the
+  // screen, not at the main content page"). The SAME predicate the rail
+  // uses to decide whether it has morphed (workspace-agents-rail-shape.ts's
+  // workspaceAgentsSpaceIsActive) decides here whether this page hides its
+  // own grid/board/list — never a second, hand-rolled re-check of the
+  // count, the exact drift the project-agents twin of this shape already
+  // guards against. `true` for "on route" because this whole page IS the
+  // Agents route — there is no second view to disambiguate the way
+  // ProjectDetailPage's own `view === "agents"` has to.
+  const workspaceAgentsRailActive = workspaceAgentsSpaceIsActive(true, agents.length);
   const soloHref = useMemo(() => {
     if (!soloAgent) return null;
     const pid = resolveAgentProjectId(soloAgent.project_id, projects);
@@ -400,12 +413,23 @@ export default function AgentsPage() {
             AgentViewOptions' own Ordering row takes over at that point (see
             that component's file header). Filters stay wired up always:
             project/status/channel narrow which agents are shown regardless
-            of layout. */}
+            of layout.
+
+            HIDDEN when the rail has morphed into the workspace-agents space
+            (2+ agents — workspaceAgentsRailActive above). At that moment
+            the rail's own "‹ Back / Agents / agent rows" IS the picker;
+            rendering board/grouped/filter/sort controls for a grid that no
+            longer renders here would be controls with nothing to act on
+            (CLAUDE.md, "the rail is where you pick; the content is what you
+            picked"). The panel toggle stays reachable — same
+            project-agents precedent, ProjectDetailPage's own content
+            toolbar — since it's the only door to the Properties drawer
+            below and has nothing to do with how agents are browsed. */}
         <div className="fleet-agent-view-cluster">
-          <AgentViewOptions options={viewOptions} onChange={updateViewOptions} />
+          {!workspaceAgentsRailActive && <AgentViewOptions options={viewOptions} onChange={updateViewOptions} />}
           <FleetToolbar
-            filters={agents.length > 0 ? filters : undefined}
-            sortOptions={agents.length > 0 && surface === "list" ? SORT_OPTIONS : undefined}
+            filters={!workspaceAgentsRailActive && agents.length > 0 ? filters : undefined}
+            sortOptions={!workspaceAgentsRailActive && agents.length > 0 && surface === "list" ? SORT_OPTIONS : undefined}
             sortValue={sort}
             sortDefault="last_active"
             onSortChange={(v) => updateFilters({ sort: v as SortMode })}
@@ -420,7 +444,7 @@ export default function AgentsPage() {
           closed. The page shows agents; everything else is behind the
           toggle above, not a permanent strip competing with the list. */}
       <div className="fleet-content-with-panel">
-        <div className={`fleet-content-main${surface === "board" ? " fleet-content-main--agent-board" : ""}`}>
+        <div className={`fleet-content-main${!workspaceAgentsRailActive && surface === "board" ? " fleet-content-main--agent-board" : ""}`}>
           {loading && agents.length === 0 ? (
             // Which skeleton to show is decided by the SAME `surface` the
             // real branches below switch on — a saved board/grouped view
@@ -444,6 +468,14 @@ export default function AgentsPage() {
               desc="Agents do the work — they handle customer chats, run tasks, and use your tools. Create your first one to get started."
               onCreate={() => setWizardOpen(true)}
             />
+          ) : workspaceAgentsRailActive ? (
+            // 2+ agents: the rail's workspace-agents space is the browse
+            // surface now (primary-rail-space.ts) — this pane just prompts
+            // a pick, same shell and same class as the project-agents
+            // space's own placeholder (fleet-theme.css's
+            // .fleet-project-agents-placeholder — an identical shape,
+            // reused rather than a second rule).
+            <div className="fleet-project-agents-placeholder">Select an agent to start chatting.</div>
           ) : surface === "board" ? (
             filtered.length === 0 ? (
               <div className="fleet-page-state-body">No agents match these filters.</div>
