@@ -23,10 +23,11 @@ import {
 import { logout } from "@/lib/auth/auth-client";
 import { useAccountShell } from "@/lib/shell/account-shell-context";
 import { useRevealedEmail } from "@/lib/shell/use-revealed-email";
-import { getInboxLastSeenAt, resolveAgentProjectId, useFleetAgents, useFleetProjects, useFleetWorkspace, useFleetWorkspaceTasks, useWorkspaceActivity } from "./fleet-data";
+import { getInboxLastSeenAt, resolveAgentProjectId, useFleetAgents, useFleetNotifications, useFleetProjects, useFleetWorkspace, useFleetWorkspaceTasks, useWorkspaceActivity } from "./fleet-data";
 import { deriveStatus, findSageAgent } from "./fleet-presentation";
 import { ProjectIcon } from "./fleet-project-identity";
 import { planAgentCountShape } from "./agent-count-shape";
+import { isMyStuckTask } from "./inbox-needs-you";
 import { myWorkBadgeCount } from "./my-work";
 import { useOwnAccountId } from "./members-data";
 import { visibleRailItems } from "./primary-rail-nav";
@@ -276,26 +277,49 @@ export function PrimaryRail({
   }, [workspaceId]);
 
   const INBOX_BADGE_LIMIT = 100;
-  // Backend-computed, not client-filtered: a genuine count of what's new
-  // since the last visit, not the fetch page size dressed up as one (U3-H —
-  // this used to read a suspicious, round "50" for a never-visited reader
-  // with any real backlog, since the old version just returned however many
-  // of the newest N events happened to be unseen).
-  const { events: inboxNewEvents } = useWorkspaceActivity(workspaceId, INBOX_BADGE_LIMIT, lastSeenAt);
-  const inboxUnreadCount = inboxNewEvents.length;
-  const inboxUnreadLabel = inboxUnreadCount >= INBOX_BADGE_LIMIT ? `${INBOX_BADGE_LIMIT}+` : String(inboxUnreadCount);
+  // The Inbox badge is now the SAME "needs you" question the page itself
+  // answers (inbox-needs-you.ts) — not the raw ledger. Three terms, summed:
+  //
+  //   unread notifications   real per-user rows (task_notification_
+  //                          service.py), already unread-only by the
+  //                          hook's own default.
+  //   my stuck tasks         assigned to me, sitting in blocked/
+  //                          awaiting_input right now — the exact 17-day-
+  //                          old-task shape the old ledger badge never
+  //                          caught, since it only ever counted ledger rows.
+  //   unseen blocked runs    activity_ledger's `blocked_action` class
+  //                          (run_failed/machine_revoked/machine_
+  //                          enrollment_failed), newer than the last visit
+  //                          — server-filtered by BOTH event_class and
+  //                          since_created_at at once (independent AND'd
+  //                          filters, see runtime_events_api.py), so this
+  //                          reuses the exact "what's new since I last
+  //                          looked" semantics the old badge already had,
+  //                          just scoped to the subset that actually needs
+  //                          attention instead of every ledger row.
+  const { events: unseenBlockedRuns } = useWorkspaceActivity(workspaceId, INBOX_BADGE_LIMIT, lastSeenAt, "blocked_action");
+  const { notifications: unreadNotifications } = useFleetNotifications(workspaceId, true, INBOX_BADGE_LIMIT);
 
   // My work's count — the SAME function the page itself partitions with
   // (my-work.ts), against the SAME workspace-wide fetch, so the badge and
   // the page can never disagree about what "mine" means. Both readers share
   // one polled resource (useFleetWorkspaceTasks' cache key), so having the
   // rail show a number costs no extra request while the page is open.
+  // Also the source for the Inbox badge's "stuck" half, via
+  // inbox-needs-you.ts's own isMyStuckTask — same list, two different
+  // pure-module readings, never two fetches.
   const { tasks: workspaceTasks } = useFleetWorkspaceTasks(workspaceId);
   const myAccountId = useOwnAccountId();
   const myWorkCount = useMemo(
     () => myWorkBadgeCount(workspaceTasks, myAccountId),
     [workspaceTasks, myAccountId],
   );
+  const myStuckTaskCount = useMemo(
+    () => workspaceTasks.filter((t) => isMyStuckTask(t, myAccountId)).length,
+    [workspaceTasks, myAccountId],
+  );
+  const inboxUnreadCount = unreadNotifications.length + myStuckTaskCount + unseenBlockedRuns.length;
+  const inboxUnreadLabel = inboxUnreadCount >= INBOX_BADGE_LIMIT ? `${INBOX_BADGE_LIMIT}+` : String(inboxUnreadCount);
 
   // Sage is the Operator, not a listed worker — the same exclusion every
   // other agent surface (AgentsList, command palette, Projects table) makes.
