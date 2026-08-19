@@ -15,7 +15,7 @@ import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fet
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { Cpu, Loader2, MemoryStick, MoreHorizontal, Server, Terminal, TriangleAlert } from "lucide-react";
+import { Cpu, Loader2, MemoryStick, MoreHorizontal, Plug, Radio, Server, Terminal, TriangleAlert } from "lucide-react";
 
 import { GatewayPairPanel } from "@/lib/gateway/GatewayPairPanel";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
@@ -25,7 +25,7 @@ import { FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import { StatusChip, TintTile } from "@/lib/workspace/fleet/fleet-indicators";
 import { formatDateTime } from "@/lib/workspace/fleet/fleet-presentation";
 import { HardwareRenameField } from "@/lib/workspace/fleet/hardware-rename-field";
-import { useFleetAgents } from "@/lib/workspace/fleet/fleet-data";
+import { useFleetAgents, useWorkspaceStatusStrip } from "@/lib/workspace/fleet/fleet-data";
 import {
   connectionPresentation,
   type FleetGateway,
@@ -155,6 +155,53 @@ function HardwareResourceChip({ resources }: { resources: GatewayResources | nul
         </span>
       )}
     </span>
+  );
+}
+
+/** The three agent-hosting-plumbing counters that used to sit on the
+ *  workspace home's status strip — reusing useWorkspaceStatusStrip
+ *  unmodified (it already computes exactly these three, honestly: real
+ *  connected counts for channels/connectors, no catalog denominator; a
+ *  real online/total fraction for computers, since that total is the
+ *  owner's own paired machines). Static stat tiles, not links: Computers
+ *  is already the rest of this page, and there is no dedicated
+ *  cross-agent Channels/Connectors surface to point at (each agent's own
+ *  Configure tab is where those actually live) — a fabricated href would
+ *  be the dead-control mistake this codebase keeps a standing rule
+ *  against. */
+function InfrastructureStrip({ workspaceId }: { workspaceId: string }) {
+  const status = useWorkspaceStatusStrip(workspaceId);
+
+  if (status.loading) {
+    return (
+      <div className="fleet-status-strip">
+        {[0, 1, 2].map((i) => <div key={i} className="fleet-status-strip-skeleton" />)}
+      </div>
+    );
+  }
+
+  return (
+    <div className="fleet-status-strip">
+      <div className="fleet-status-strip-item">
+        <Radio size={16} strokeWidth={1.75} />
+        <span className="fleet-status-strip-value">{status.channelsConnected}</span>
+        <span className="fleet-status-strip-label">
+          {status.channelsConnected === 1 ? "Channel connected" : "Channels connected"}
+        </span>
+      </div>
+      <div className="fleet-status-strip-item">
+        <Plug size={16} strokeWidth={1.75} />
+        <span className="fleet-status-strip-value">{status.connectorsConnected}</span>
+        <span className="fleet-status-strip-label">
+          {status.connectorsConnected === 1 ? "Connector connected" : "Connectors connected"}
+        </span>
+      </div>
+      <div className="fleet-status-strip-item">
+        <Cpu size={16} strokeWidth={1.75} />
+        <span className="fleet-status-strip-value">{status.hardwareOnline}/{status.hardwareTotal}</span>
+        <span className="fleet-status-strip-label">Computers online</span>
+      </div>
+    </div>
   );
 }
 
@@ -626,6 +673,16 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
           </p>
         </>
       ) : null}
+      {/* Infrastructure status — moved here from the workspace home
+          (CLAUDE.md, 2026-08-19 FleetHome pass): "this page's job is
+          workspace content, not agent-hosting status." Channels/Connectors/
+          Computers are all agent-hosting plumbing, and Hardware — the one
+          settings surface already about how agents run and connect — is
+          where that status actually belongs, not a workspace home meant to
+          show projects/tasks/documents. Renders on BOTH mounts of this
+          component (Settings and the standalone /hardware route), same as
+          everything else here. */}
+      <InfrastructureStrip workspaceId={workspaceId} />
       {/* Each box row opens its own machine-detail ROUTE (hardware/[gatewayId]),
           matching the Projects list -> project-detail pattern — a deliberate
           departure from this list's earlier "a box row already says

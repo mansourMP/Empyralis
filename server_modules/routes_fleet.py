@@ -439,8 +439,23 @@ async def fleet_projects(
         if visible_ids is not None:
             rows = [p for p in rows if str(p.get("id") or "").strip() in visible_ids]
         counts = await projects.count_agents_by_project(tenant_id=tenant_id, workspace_id=resolved_workspace_id)
+        # Workspace-home cards lead with WORK, not agent headcount (CLAUDE.md
+        # positioning: "the workspace is the product"). Same one-query-per-
+        # workspace shape as count_agents_by_project, added alongside it in
+        # project_tasks_service/project_documents_repository rather than a
+        # third counting path.
+        from server_modules import project_tasks_service, project_documents_repository
+
+        task_counts = await project_tasks_service.count_tasks_by_project(
+            tenant_id=tenant_id, workspace_id=resolved_workspace_id
+        )
+        document_counts = await project_documents_repository.count_documents_by_project(
+            tenant_id=tenant_id, workspace_id=resolved_workspace_id
+        )
         for p in rows:
             p["agent_count"] = int(counts.get(p["id"], 0))
+            p["task_count"] = int(task_counts.get(p["id"], 0))
+            p["document_count"] = int(document_counts.get(p["id"], 0))
             # U3-K: resolved here (once per list call) rather than making the
             # frontend re-derive it from a separate /gateway/registrations
             # fetch — the project settings control and any other reader can

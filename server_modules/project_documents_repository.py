@@ -778,6 +778,37 @@ async def list_documents(
     return [d for d in (_row_to_document(r, include_body=include_body) for r in rows) if d]
 
 
+async def count_documents_by_project(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+) -> Dict[str, int]:
+    """Return {project_id: document_count} for the whole workspace, one
+    query -- same shape as projects_repository.count_agents_by_project /
+    project_tasks_service.count_tasks_by_project, so a project-list caller
+    (fleet_projects) can put a real "N documents" beside "N tasks" without
+    fetching every document body."""
+    pool = await control_plane_repository.ensure_control_plane_schema()
+    if pool is None:
+        return {}
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    rows = await control_plane_repository.rls_fetch(
+        pool,
+        """
+        SELECT project_id, COUNT(*) AS n
+        FROM project_documents
+        WHERE tenant_id = $1 AND workspace_id = $2 AND project_id IS NOT NULL
+        GROUP BY project_id
+        """,
+        resolved_tenant_id,
+        resolved_workspace_id,
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
+    )
+    return {str(r["project_id"]): int(r["n"]) for r in (rows or [])}
+
+
 async def get_document(
     *,
     tenant_id: str,
