@@ -2879,6 +2879,28 @@ runtime now refuses to boot a dev/test/local process without it
 set it by copying a value you found somewhere; if you don't know what it
 should be, ask rather than guess.
 
+**On a truly empty database, `migrations/*.sql` alone will not bootstrap —
+most base tables don't come from there.** `users`, `tenants`, `projects`,
+`workspace_agent_installs`, and more are created lazily by
+`_ensure_*_tables()` helpers scattered across `server_modules/*.py`
+(`control_plane_repository.py`, `auth.py`, ...) the first time request-path
+code touches them — not by anything under `migrations/`, which is mostly
+ALTERs and RLS policies layered on top of tables it assumes already exist.
+So on a brand-new database, `migrations/enable_rls.sql` (and everything
+alphabetically after it that calls the `empyralis_rls_scope_match()`
+function it defines) fails outright, and everything before it that touches
+`tenants`/`projects`/etc. fails too, because nothing has created them yet.
+The working order is: **boot once (it will crash in
+`preflight._check_postgres`, typically "workspace_agent_installs is missing
+stage_4b columns" — that's expected, its job here is only to run enough
+request-path code to lazily create the base tables) → apply
+`migrations/*.sql` in two passes (the second pass picks up
+everything that needed `enable_rls.sql`'s function and failed the first
+time purely on ordering) → boot again, which should now pass preflight
+cleanly.** `fix_rls_function_ownership.sql` will keep failing locally
+regardless — it needs the `empyralis_app` role, which only exists in
+production — and that's fine to ignore for a disposable local stack.
+
 **A test may never reach a live LLM provider.** Enforced in
 `server_modules/tests/conftest.py`, sibling to the `DATABASE_URL` guard and
 added for the same reason: a credentialed developer's `pytest` run was making
