@@ -619,7 +619,15 @@ export function PrimaryRail({
             </span>
             {!effectiveCollapsed && <span className="fleet-rail-item-label">Back</span>}
           </Link>
-          {!effectiveCollapsed && spaceTitle && (
+          {/* The heading is DELIBERATELY absent for the workspace-agents
+              space (founder, 2026-08-19: "i dont want this in this left rail
+              after i open this agents"). The rail rows ARE the agents, and a
+              grey "AGENTS" label above a list of agents restates what the
+              list already says. `spaceTitle` still feeds the <nav>'s
+              aria-label above, so a screen reader keeps the name it needs —
+              removing the visible heading must not remove the accessible
+              one. */}
+          {!effectiveCollapsed && spaceTitle && effectiveSpace.kind !== "workspace-agents" && (
             <div className="fleet-rail-space-title">{spaceTitle}</div>
           )}
           {spaceLinks.map((link) => {
