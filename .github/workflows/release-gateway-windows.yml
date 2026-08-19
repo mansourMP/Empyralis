@@ -1,0 +1,358 @@
+name: Release Gateway (Windows)
+
+# The Windows sibling of release-gateway-linux.yml / release-gateway-macos.yml.
+# Produces empyralis-gateway-win32-<arch>.tar.gz — a build of the SAME dist/
+# output those two already publish, packaged with Windows-selected native
+# optional dependencies. This is the first piece of Windows Agent Computer
+# support (feat/gateway-windows-support) and is deliberately narrower in
+# scope and in TRUST than its two siblings — read "WHAT THIS DOES NOT DO"
+# below before assuming this means "Windows is supported."
+#
+# WHY NO windows-latest RUNNER, cross-packaged on Linux instead: verified
+# locally before writing this file (not assumed), by running the exact
+# command below against this package's real package-lock.json:
+#   npm ci --omit=dev --os=win32 --cpu=x64 --no-audit --no-fund
+# This correctly resolves @img/sharp-win32-x64 (sharp's win32 optional
+# dependency — a baileys-optional peer, degrades gracefully absent, same as
+# the darwin/linux builds) and installs cleanly, 116 packages, zero errors.
+# bufferutil/utf-8-validate (the two ws-native packages, OPTIONAL PEER deps
+# of `ws` — ws falls back to a pure-JS path when absent, verified by reading
+# ws's own package.json peerDependenciesMeta) use prebuildify: the npm
+# package already bundles win32-ia32 AND win32-x64 prebuilt .node binaries
+# inside node_modules/<pkg>/prebuilds/ regardless of which OS ran the
+# install — confirmed directly by inspecting a real local install, which
+# carries darwin-arm64/darwin-x64/linux-x64/win32-ia32/win32-x64 side by
+# side. node-gyp-build picks the right one at REQUIRE time by reading the
+# real process.platform/process.arch of whatever machine actually runs the
+# gateway — so cross-packaging on a Linux runner is not a workaround here,
+# it is exactly how these two packages are meant to be consumed everywhere.
+# `npm run build` is plain `tsc` (pure JS output, platform-independent), so
+# there is no compiled artifact this workflow could get wrong by building on
+# the wrong OS. This mirrors release-gateway-macos.yml's own reasoning
+# exactly (read that file's header for the fuller dependency-tree audit);
+# nothing about the argument changes for a third target platform.
+#
+# ARCH: x64 ONLY, deliberately, not x64+arm64 like the macOS workflow.
+# sharp does publish @img/sharp-win32-arm64, but it is untested here and low
+# value (win32-arm64 Agent Computer hosts — Windows-on-ARM laptops used as
+# a customer's own machine, not a purchased VPS — are a vanishingly small
+# population next to the verification cost of a target this workflow cannot
+# exercise on real hardware). Add it once someone can verify a real
+# win32-arm64 boot, not speculatively.
+#
+# ============================================================================
+# WHAT THIS WORKFLOW DOES NOT DO, i.e. what "Windows support" still needs
+# after this file exists — see CLAUDE.md's own "built, tested, and never
+# wired" failure mode; this section exists so this artifact is never mistaken
+# for a finished feature just because it type-checks and uploads a tarball:
+#
+#  - No customer-facing installer consumes this artifact. There is no
+#    Windows equivalent of scripts/install-agent-computer.sh /
+#    install-agent-computer-macos.sh that downloads it, extracts it, and
+#    wires up a supervisor. scripts/install_agent_computer_windows_service.ps1
+#    is NOT that script — it references an `empyralis-supervisor` Rust
+#    binary/directory that does not exist anywhere in this repo (confirmed:
+#    `ls empyralis-supervisor` -> no such file), config.ts's own comment
+#    marks that whole daemon "ARCHIVED (Phase U1) ... no longer part of the
+#    Empyralis product", and the script requires a full git checkout
+#    ($PSScriptRoot/.. resolution) rather than being a standalone
+#    downloadable installer. It predates and does not match the current
+#    self-update / OpenClaw-provisioning architecture.
+#  - gateway-supervisor-install.ts's resolveExpectedSupervisorUnit() and
+#    gateway-restart-handoff.ts's detectGatewaySupervisor() both correctly,
+#    honestly return "unsupported"/"none" for win32 today (tested — see
+#    src/__tests__/gateway-supervisor-install.test.ts and
+#    gateway-launch-updatability.test.ts) rather than silently misbehaving.
+#    That is the RIGHT behavior for a platform with no Windows supervisor
+#    implementation yet, not a bug this workflow fixes.
+#  - The channel transport (OpenClaw) has no Windows supervisor unit either
+#    (resolveExpectedOpenClawSupervisorUnit() returns null on win32, same
+#    honest-null pattern) — a Windows Agent Computer built from this
+#    artifact would have no channels (Telegram/WhatsApp/etc) until that is
+#    built separately.
+#  - Nothing in the product exposes "Windows" as a choosable hardware
+#    platform (grepped frontend/lib/workspace/fleet and
+#    server_modules/hardware*.py — no such option exists). Publishing this
+#    artifact does not change that, and must not be treated as though it
+#    does.
+#  - The self-update `current`-symlink swap pattern used by
+#    gateway-artifact-installer.ts / gateway-restart-handoff.ts needs
+#    Windows-specific handling before self-update could work on a Windows
+#    box: fs.symlink requires elevated privileges OR Developer Mode on
+#    stock Windows outside a "junction" (Windows' unprivileged directory
+#    reparse point) — real, non-trivial platform work, not done here.
+#
+# So: this file makes it *possible* to hand-verify a real dist/ build on a
+# real Windows machine (`node dist/index.js` after extracting) — the
+# necessary first step before any of the above can be built with confidence
+# — without yet claiming, advertising, or auto-wiring Windows as supported.
+# ============================================================================
+#
+# NOT ON `push`, unlike the Linux/macOS siblings, and that is deliberate,
+# not an oversight: those two auto-publish on every main-branch gateway
+# change specifically because a REAL installer downloads from that exact
+# URL on every fresh box (see this repo's own 2026-08-13 stale-artifact
+# incident — CLAUDE.md, "Bug A"). No installer downloads
+# empyralis-gateway-win32-x64.tar.gz today, so there is no live path an
+# auto-publish here would keep fresh, and auto-publishing an unverified
+# artifact on every commit would look exactly like a finished, monitored
+# release channel when it is not. Switch this to `push` (mirroring the
+# other two, `paths: ["empyralis-gateway/**"]`) once a real Windows
+# installer/consumer exists and this artifact has been verified booting on
+# real Windows at least once — not before.
+#
+# Archive layout mirrors the Linux/macOS artifacts exactly: root holds
+# dist/, node_modules/, package.json, openclaw-bridge-plugin/, no wrapper
+# directory — see release-gateway-macos.yml for the shared reasoning on
+# why openclaw-bridge-plugin/ ships as raw .ts source rather than compiled.
+#
+# Credentials: same repo secrets as the other two workflows
+# (R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY), same bucket.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          Version label for the artifact. Always a distinct/throwaway label
+          for now (e.g. "windows-verify-1") — this is NOT wired to "latest"
+          the way the Linux/macOS builds are, since nothing resolves that
+          URL for Windows yet. Publishing under "latest" here would be
+          inert (no consumer requests it) but misleading to anyone browsing
+          the bucket.
+        required: true
+        default: windows-verify
+
+permissions:
+  contents: read
+  attestations: write
+  id-token: write
+
+concurrency:
+  group: gateway-windows-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gateway:
+    name: Gateway win32-${{ matrix.arch }} tarball
+    # Cross-packaged on a Linux runner — see header comment for why this is
+    # verified-correct rather than a shortcut, exactly like the macOS job.
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_VERSION: ${{ inputs.version || 'windows-verify' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            npm_cpu: x64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Same reasoning as the Linux/macOS workflows' identical step: match
+      # the gateway's own `engines: >=20` floor and what a Windows launcher
+      # would exec with. OpenClaw's own newer-Node requirement is a
+      # separate runtime an installer would fetch for the transport itself,
+      # not something this build step needs to satisfy — see CLAUDE.md's
+      # "OpenClaw needs a NEWER Node than the gateway" entry.
+      - name: Install build dependencies
+        run: npm ci --no-audit --no-fund
+        working-directory: empyralis-gateway
+
+      - name: Compile TypeScript
+        run: npm run build
+        working-directory: empyralis-gateway
+
+      - name: Stage compiled output
+        run: mv empyralis-gateway/dist "$RUNNER_TEMP/dist"
+
+      # The cross-package step — verified locally against this repo's real
+      # package-lock.json before this file was written (see header
+      # comment). --os=win32 --cpu=${{ matrix.npm_cpu }} makes npm resolve
+      # @img/sharp-win32-<arch> instead of the runner's own linux-x64
+      # variant; bufferutil/utf-8-validate need no platform selection at
+      # all (see header comment on prebuildify).
+      - name: Install production dependencies for win32-${{ matrix.arch }}
+        run: npm ci --omit=dev --os=win32 --cpu=${{ matrix.npm_cpu }} --no-audit --no-fund
+        working-directory: empyralis-gateway
+
+      # Identical assembly to the Linux/macOS workflows' own step — same
+      # exclusions, same files asserted present.
+      - name: Assemble artifact tree
+        run: |
+          set -euo pipefail
+          STAGE="$RUNNER_TEMP/gateway-stage"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          mv "$RUNNER_TEMP/dist" "$STAGE/dist"
+          cp -R empyralis-gateway/node_modules "$STAGE/node_modules"
+          cp empyralis-gateway/package.json "$STAGE/package.json"
+
+          mkdir -p "$STAGE/openclaw-bridge-plugin"
+          rsync -a \
+            --exclude 'src/__tests__' \
+            --exclude 'verify' \
+            --exclude 'node_modules' \
+            --exclude 'package-lock.json' \
+            --exclude 'tsconfig.json' \
+            empyralis-gateway/openclaw-bridge-plugin/ "$STAGE/openclaw-bridge-plugin/"
+
+          test -f "$STAGE/dist/index.js"
+          test -f "$STAGE/openclaw-bridge-plugin/index.ts"
+          test -f "$STAGE/openclaw-bridge-plugin/openclaw.plugin.json"
+
+      - name: Create tarball and checksum
+        run: |
+          set -euo pipefail
+          STAGE="$RUNNER_TEMP/gateway-stage"
+          OUT="$RUNNER_TEMP/out"
+          mkdir -p "$OUT"
+          TARBALL="empyralis-gateway-win32-${{ matrix.arch }}.tar.gz"
+          tar -czf "$OUT/$TARBALL" -C "$STAGE" dist node_modules package.json openclaw-bridge-plugin
+          ( cd "$OUT" && sha256sum "$TARBALL" > "$TARBALL.sha256" )
+          ls -l "$OUT"
+          echo "GATEWAY_TARBALL=$TARBALL" >> "$GITHUB_ENV"
+
+      # Same mechanism as the Linux/macOS workflows' identical step — this
+      # is expected to come out BYTE-IDENTICAL to those two builds' own
+      # fingerprint for the same commit, for the same reason stated there:
+      # the fingerprint only hashes dist/**/*.{js,json}, which carries no
+      # platform branching, and excludes node_modules entirely.
+      - name: Compute published build fingerprint
+        run: |
+          set -euo pipefail
+          STAGE="$RUNNER_TEMP/gateway-stage"
+          OUT="$RUNNER_TEMP/out"
+          FINGERPRINT="$(node -e '
+            const { computeGatewayBuildFingerprint } =
+              require(process.env.STAGE + "/dist/update/gateway-build-fingerprint");
+            computeGatewayBuildFingerprint(process.env.STAGE + "/dist").then((r) => {
+              if (!r.fingerprint) {
+                console.error("could not fingerprint the staged build: " + r.reason);
+                process.exit(1);
+              }
+              process.stdout.write(r.fingerprint);
+            });
+          ')"
+          echo "$FINGERPRINT" > "$OUT/$GATEWAY_TARBALL.fingerprint"
+          echo "published build fingerprint: $FINGERPRINT"
+        env:
+          STAGE: ${{ runner.temp }}/gateway-stage
+
+      # COMPLETENESS GATE — narrower than the Linux/macOS siblings'
+      # equivalent step, and honestly so: those two derive their required-
+      # paths list from a REAL customer-facing installer script
+      # (grep -oE 'gateway/dist/...' scripts/install-agent-computer*.sh).
+      # No such script exists for Windows yet (see this workflow's header),
+      # so there is nothing real to derive a Windows-specific required-
+      # paths list FROM — inventing one here would be exactly the
+      # "checked expectations sourced from nothing but themselves" trap
+      # CLAUDE.md documents for preflight._check_rls. What this DOES check
+      # is derived from the two universal, platform-agnostic consumers that
+      # already exist and already run identically on every OS:
+      #  1. dist/index.js / package.json / node_modules — the same baseline
+      #     every platform's artifact needs to boot at all.
+      #  2. openclaw-bridge-plugin/ + its manifest + entry point, derived
+      #     from openclaw-provisioning-runtime.ts's own
+      #     defaultBridgePluginPath() the exact same way the macOS workflow
+      #     derives it — this function has no platform branch, so the
+      #     requirement is real on Windows too the moment a Windows
+      #     supervisor ever calls it.
+      - name: Verify archive contains what every platform's gateway needs
+        run: |
+          set -euo pipefail
+          VERIFY="$RUNNER_TEMP/verify"
+          rm -rf "$VERIFY"
+          mkdir -p "$VERIFY/empyralis-gateway"
+          tar -xzf "$RUNNER_TEMP/out/$GATEWAY_TARBALL" -C "$VERIFY/empyralis-gateway"
+          test -f "$VERIFY/empyralis-gateway/dist/index.js" \
+            || { echo "archive is missing dist/index.js" >&2; exit 1; }
+          test -f "$VERIFY/empyralis-gateway/package.json"
+          test -d "$VERIFY/empyralis-gateway/node_modules"
+
+          RUNTIME_SRC="empyralis-gateway/src/openclaw/provisioning/openclaw-provisioning-runtime.ts"
+          BRIDGE_PLUGIN_DIR_NAME="$(grep -oE 'path\.resolve\(path\.dirname\(entryPath\), "\.\.", "[A-Za-z0-9_-]+"\)' "$RUNTIME_SRC" \
+            | grep -oE '"[A-Za-z0-9_-]+"\)$' | tr -d '")')"
+
+          if [[ -z "${BRIDGE_PLUGIN_DIR_NAME}" ]]; then
+            echo "could not derive the bridge plugin directory name from ${RUNTIME_SRC}'s defaultBridgePluginPath() — that function's shape changed and this grep no longer matches it; fix the grep in release-gateway-windows.yml before trusting this gate" >&2
+            exit 1
+          fi
+          if [[ "${BRIDGE_PLUGIN_DIR_NAME}" != "openclaw-bridge-plugin" ]]; then
+            echo "derived bridge plugin directory name is '${BRIDGE_PLUGIN_DIR_NAME}', expected 'openclaw-bridge-plugin' — either the runtime source changed the directory name (update the packing/tar steps above to match) or this grep drifted; fix before trusting this gate" >&2
+            exit 1
+          fi
+
+          BRIDGE_PLUGIN_DIR="$VERIFY/empyralis-gateway/${BRIDGE_PLUGIN_DIR_NAME}"
+          test -d "${BRIDGE_PLUGIN_DIR}" \
+            || { echo "archive is missing ${BRIDGE_PLUGIN_DIR_NAME}/" >&2; exit 1; }
+          if [[ -z "$(find "${BRIDGE_PLUGIN_DIR}" -type f -print -quit)" ]]; then
+            echo "${BRIDGE_PLUGIN_DIR_NAME}/ exists in the archive but is empty" >&2
+            exit 1
+          fi
+
+          PLUGIN_MANIFEST="${BRIDGE_PLUGIN_DIR}/openclaw.plugin.json"
+          test -f "${PLUGIN_MANIFEST}" \
+            || { echo "MISSING: ${BRIDGE_PLUGIN_DIR_NAME}/openclaw.plugin.json" >&2; exit 1; }
+
+          PLUGIN_PACKAGE_JSON="${BRIDGE_PLUGIN_DIR}/package.json"
+          test -f "${PLUGIN_PACKAGE_JSON}" \
+            || { echo "MISSING: ${BRIDGE_PLUGIN_DIR_NAME}/package.json" >&2; exit 1; }
+
+          PLUGIN_ENTRY_REL="$(jq -r '.openclaw.extensions[0] // empty' "${PLUGIN_PACKAGE_JSON}")"
+          if [[ -z "${PLUGIN_ENTRY_REL}" ]]; then
+            echo "${BRIDGE_PLUGIN_DIR_NAME}/package.json has no .openclaw.extensions[0]" >&2
+            exit 1
+          fi
+          PLUGIN_ENTRY_REL="${PLUGIN_ENTRY_REL#./}"
+          test -f "${BRIDGE_PLUGIN_DIR}/${PLUGIN_ENTRY_REL}" \
+            || { echo "MISSING: ${BRIDGE_PLUGIN_DIR_NAME}/${PLUGIN_ENTRY_REL}" >&2; exit 1; }
+
+          # Advisory, non-blocking — same posture as the macOS workflow's
+          # identical sharp check. sharp is an optional baileys peer; every
+          # consumer already degrades gracefully without it.
+          SHARP_WIN32_DIR="$VERIFY/empyralis-gateway/node_modules/@img/sharp-win32-${{ matrix.arch }}"
+          if [[ ! -d "${SHARP_WIN32_DIR}" ]]; then
+            echo "WARNING: node_modules/@img/sharp-win32-${{ matrix.arch }} is absent from this archive — the --os=win32 --cpu=${{ matrix.arch }} cross-package selection did not pull the win32 sharp binary. Media features will silently degrade (sharp is optional, so the gateway still boots), but this defeats the point of a real win32 build." >&2
+          else
+            echo "sharp win32-${{ matrix.arch }} binary present: $(ls "${SHARP_WIN32_DIR}")"
+          fi
+
+      - name: Attest gateway artifact provenance
+        uses: actions/attest-build-provenance@v2
+        continue-on-error: true
+        with:
+          subject-path: ${{ runner.temp }}/out/${{ env.GATEWAY_TARBALL }}
+
+      - name: Upload gateway artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: empyralis-gateway-win32-${{ matrix.arch }}-${{ env.RELEASE_VERSION }}
+          path: ${{ runner.temp }}/out/*
+          if-no-files-found: error
+          retention-days: 30
+
+      # Published under an explicit, non-"latest" version label ONLY (see
+      # the workflow_dispatch input's own description) — nothing resolves
+      # a "latest" Windows URL today, so there is no live path to keep
+      # fresh and no reason to occupy that name before a real installer
+      # exists to consume it.
+      - name: Publish to Cloudflare R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          set -euo pipefail
+          ENDPOINT="https://76e485cbfb611ff8caa5c1d2afa71890.r2.cloudflarestorage.com"
+          BUCKET="empyralis-agent-computer-releases"
+          DEST="s3://${BUCKET}/agent-computer/${RELEASE_VERSION}/"
+          aws s3 cp "$RUNNER_TEMP/out/$GATEWAY_TARBALL" "$DEST" --endpoint-url "$ENDPOINT"
+          aws s3 cp "$RUNNER_TEMP/out/$GATEWAY_TARBALL.sha256" "$DEST" --endpoint-url "$ENDPOINT"
+          aws s3 cp "$RUNNER_TEMP/out/$GATEWAY_TARBALL.fingerprint" "$DEST" --endpoint-url "$ENDPOINT"

@@ -287,6 +287,17 @@ test("describeDockerAutostartOutcome never tells a Linux box to open Docker Desk
   assert.doesNotMatch(message, /systemctl/);
 });
 
+test("describeDockerAutostartOutcome on unsupported_platform reads the customer's OS name, never the raw Node platform token", () => {
+  const message = describeDockerAutostartOutcome({ kind: "unsupported_platform", platform: "win32" });
+  assert.match(message, /Windows/);
+  assert.doesNotMatch(message, /win32/);
+});
+
+test("describeDockerAutostartOutcome on unsupported_platform falls back to the raw token for a platform it has no human name for, rather than throwing", () => {
+  const message = describeDockerAutostartOutcome({ kind: "unsupported_platform", platform: "sunos" });
+  assert.match(message, /sunos/);
+});
+
 test("describeDockerAutostartOutcome distinguishes not_installed, start_command_failed, and start_timed_out from each other", () => {
   const messages = [
     describeDockerAutostartOutcome({ kind: "not_installed" }),

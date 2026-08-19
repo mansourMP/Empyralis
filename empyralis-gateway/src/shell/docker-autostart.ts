@@ -294,6 +294,27 @@ export async function ensureDockerReady(deps: EnsureDockerReadyDeps = {}): Promi
   return inFlightAttempt;
 }
 
+/** Maps a Node platform token to what a customer actually calls their
+ *  computer's OS — `outcome.platform` on `unsupported_platform` carries the
+ *  raw `NodeJS.Platform` value (e.g. "win32") because that is the correct,
+ *  stable, machine-readable field for a caller to branch on (see this
+ *  file's own test asserting the OUTCOME OBJECT carries "win32" verbatim);
+ *  it was never meant to be read out loud to a person. Falls back to the
+ *  raw token for any platform not named here, so an unmapped future value
+ *  still degrades to something true rather than throwing. */
+function describePlatformForHuman(platform: string): string {
+  switch (platform) {
+    case "win32":
+      return "Windows";
+    case "darwin":
+      return "macOS";
+    case "linux":
+      return "Linux";
+    default:
+      return platform;
+  }
+}
+
 /** Renders a DockerAutostartOutcome into a short, honest clause for a
  *  human — never names a command the reader can't or shouldn't run
  *  themselves (no "run systemctl", no "open Docker Desktop" on Linux), and
@@ -306,7 +327,7 @@ export function describeDockerAutostartOutcome(outcome: DockerAutostartOutcome):
     case "not_installed":
       return "Docker is not installed on this computer, so there is nothing to start — install Docker, then retry.";
     case "unsupported_platform":
-      return `This gateway does not know how to start Docker automatically on ${outcome.platform}.`;
+      return `This gateway does not know how to start Docker automatically on ${describePlatformForHuman(outcome.platform)}.`;
     case "start_command_failed":
       return `Docker is installed but could not be started automatically (${outcome.detail})`;
     case "start_timed_out":
