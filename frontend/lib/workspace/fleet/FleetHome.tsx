@@ -2,13 +2,14 @@
 
 import { useMemo, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 
 import { Bot } from "lucide-react";
 
 import { useFleetAgents, useFleetProjects, useFleetWorkspaceTasks, type FleetAgent, type FleetProject } from "./fleet-data";
 import { useFleetDocumentActivity, type FleetDocumentRevision } from "./documents-data";
 import { useWorkspaceMembers } from "./members-data";
-import { FleetCreateAgentWizard } from "./FleetCreateAgentWizard";
+import { createAgentQuickly, quickCreateAgentChatPath } from "./agent-quick-create";
 import { TelegramPairPanel } from "./TelegramPairPanel";
 import { findSageAgent, timeAgo } from "./fleet-presentation";
 import { ProjectIcon } from "./fleet-project-identity";
@@ -64,11 +65,37 @@ import type { FleetTask } from "./fleet-data";
  *     inbox-needs-you.ts already applied to the Inbox.
  */
 export function FleetHome({ workspaceId }: { workspaceId: string }) {
-  const { agents, loading, error, refresh } = useFleetAgents(workspaceId);
+  const { agents, loading, error } = useFleetAgents(workspaceId);
   const { projects, loading: projectsLoading } = useFleetProjects(workspaceId);
-  const [wizardOpen, setWizardOpen] = useState(false);
+  const [creatingAgent, setCreatingAgent] = useState(false);
+  const [createAgentError, setCreateAgentError] = useState<string | null>(null);
+  const router = useRouter();
 
   const base = `/w/${encodeURIComponent(workspaceId)}`;
+
+  // Zero-decision create (2026-08-19) — replaces the old FleetCreateAgentWizard
+  // modal here entirely, not alongside it. This is the true-empty-workspace
+  // branch (no projects exist yet at all), so the resolved project id comes
+  // back blank and fleet_create_agent gives the agent its own new project,
+  // same as the wizard's own "it sets up its own project for you" comment
+  // used to describe. Straight into that agent's Chat — the same front door
+  // every other path into an agent already uses.
+  async function createFirstAgent() {
+    if (creatingAgent) return;
+    setCreatingAgent(true);
+    setCreateAgentError(null);
+    try {
+      const { agentId, projectId } = await createAgentQuickly(workspaceId, undefined, projects);
+      router.push(quickCreateAgentChatPath({ workspaceId, projectId, agentId }));
+    } catch (e) {
+      // Leave the button re-clickable and SAY what happened — a silently
+      // swallowed failure here is a dead control with extra steps (CLAUDE.md:
+      // "after an action, the product must tell the person what actually
+      // happened").
+      setCreateAgentError(e instanceof Error ? e.message : "Could not create the agent.");
+      setCreatingAgent(false);
+    }
+  }
 
   // Sage is now a corner console (SageLauncher), not a routed page.
   // Dispatch an event that FleetShell listens for to open the console.
@@ -111,22 +138,22 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
   const hasProjects = projects.length > 0;
 
   return (
-    <>
-      <main className={`fleet-content${hasProjects ? " fleet-content--wide" : ""}`}>
+    <main className={`fleet-content${hasProjects ? " fleet-content--wide" : ""}`}>
         {!hasProjects ? (
           <>
             {/* Nothing exists yet — the true zero state, not "zero agents".
                 Creating the first agent is still the fastest path in (it
-                sets up its own project for you, see FleetCreateAgentWizard),
-                so this branch is otherwise unchanged from before this
-                pass. */}
+                sets up its own project for you) — now a single click, no
+                wizard: see agent-quick-create.ts for why every field the
+                old modal asked for is safe to default silently. */}
             <div className="fleet-header">
               <h1 className="fleet-title">Get started</h1>
-              <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setWizardOpen(true)}>
+              <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={createFirstAgent} disabled={creatingAgent}>
                 <span className="fleet-btn-plus">+</span>
-                New agent
+                {creatingAgent ? "Creating…" : "New agent"}
               </button>
             </div>
+            {createAgentError && <p className="fleet-channel-expand-error">{createAgentError}</p>}
             <TelegramPairPanel workspaceId={workspaceId} />
             <EmptyFleet onChat={sageAgent ? openSageConsole : null} />
           </>
@@ -167,23 +194,8 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
             completed. Independent of project count, same as the old status
             strip was: it renders whenever there's anything to show,
             regardless of how many projects exist. */}
-        <RecentWorkFeed workspaceId={workspaceId} agents={agents} />
-      </main>
-
-      {/* Create-agent wizard — the zero-state's own entry point. Refreshes
-          the agent list on finish; the new agent's own project shows up in
-          the grid above on the next render (useFleetProjects polls). */}
-      {wizardOpen && (
-        <FleetCreateAgentWizard
-          workspaceId={workspaceId}
-          onClose={() => setWizardOpen(false)}
-          onCreated={() => {
-            setWizardOpen(false);
-            refresh();
-          }}
-        />
-      )}
-    </>
+      <RecentWorkFeed workspaceId={workspaceId} agents={agents} />
+    </main>
   );
 }
 

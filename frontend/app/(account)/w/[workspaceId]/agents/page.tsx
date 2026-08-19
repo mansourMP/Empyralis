@@ -25,7 +25,7 @@ import { useWorkspaceGateways } from "@/lib/workspace/fleet/gateway-box-picker";
 import { UsageStat, bucketSeries, type UsageBucket } from "@/lib/workspace/fleet/fleet-sparkline";
 import { FleetToolbar, type ToolbarFilter } from "@/lib/workspace/fleet/FleetToolbar";
 import { FleetRightPanel, PanelSection, PanelRow } from "@/lib/workspace/fleet/FleetRightPanel";
-import { FleetCreateAgentWizard } from "@/lib/workspace/fleet/FleetCreateAgentWizard";
+import { createAgentQuickly, quickCreateAgentChatPath } from "@/lib/workspace/fleet/agent-quick-create";
 import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
 import { FleetListSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import { HeaderAction, useBreadcrumbBadge } from "@/lib/workspace/fleet/Breadcrumbs";
@@ -184,14 +184,15 @@ export default function AgentsPage() {
     return pid ? `${base}/projects/${encodeURIComponent(pid)}/agents/${encodeURIComponent(soloAgent.agent_id)}/chat` : null;
   }, [soloAgent, projects, base]);
   // ?new=1 is the command palette's "New agent" target (`go(base + "/agents?
-  // new=1")`) — it must still open the wizard on a workspace that already
-  // has exactly one agent, not bounce away from it before the wizard effect
-  // below ever gets to open. Read once, synchronously, at mount (matching
-  // consumedNew's own one-shot style further down): the query is stripped
-  // from the URL within the same render pass the wizard opens in, so
-  // re-deriving this from the live URL on every render would start
-  // redirecting again the instant the param is gone — before the reader
-  // has done anything with the wizard that just opened.
+  // new=1")`) — it must still create a new agent on a workspace that
+  // already has exactly one, not bounce away to that existing one before
+  // the create-and-navigate effect below ever runs. Read once,
+  // synchronously, at mount (matching consumedNew's own one-shot style
+  // further down): the query is stripped from the URL within the same
+  // render pass the create kicks off in, so re-deriving this from the live
+  // URL on every render would start redirecting again the instant the
+  // param is gone — before the async create has finished and pushed its
+  // own destination.
   const [suppressSoloRedirect] = useState<boolean>(
     () => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("new") === "1",
   );
@@ -250,23 +251,44 @@ export default function AgentsPage() {
   // fed into the properties drawer below so both live off one fetch.
   const [usageTotals, setUsageTotals] = useState<{ usd_cost?: number; total_tokens?: number; events?: number } | null>(null);
   const [usageBuckets, setUsageBuckets] = useState<UsageBucket[]>([]);
-  const [wizardOpen, setWizardOpen] = useState(false);
+  const [creatingAgent, setCreatingAgent] = useState(false);
+  const [createAgentError, setCreateAgentError] = useState<string | null>(null);
   // Properties drawer — closed by default, an overlay over the sheet. The
   // page itself shows only agents; everything else (spend, tokens, channel
   // count) lives behind this toggle instead of a permanent strip up top.
   const [panelOpen, setPanelOpen] = useState(false);
 
-  // Onboarding hand-off: /agents?new=1 lands straight in the wizard. Read the
-  // flag client-side (no useSearchParams → no Suspense boundary needed),
-  // consume it once, and clean the URL so a refresh doesn't reopen it.
+  // Zero-decision create (2026-08-19) — replaces the old FleetCreateAgentWizard
+  // modal everywhere it was reachable from, this page included. See
+  // agent-quick-create.ts for why every field the wizard used to ask for is
+  // safe to default silently; every other Configure tab (Model, Hardware,
+  // Channels, Connectors) is fully functional the instant the agent exists.
+  async function createNewAgent() {
+    if (creatingAgent) return;
+    setCreatingAgent(true);
+    setCreateAgentError(null);
+    try {
+      const { agentId, projectId } = await createAgentQuickly(workspaceId, undefined, projects);
+      router.push(quickCreateAgentChatPath({ workspaceId, projectId, agentId }));
+    } catch (e) {
+      setCreateAgentError(e instanceof Error ? e.message : "Could not create the agent.");
+      setCreatingAgent(false);
+    }
+  }
+
+  // Onboarding hand-off: /agents?new=1 creates straight away, no
+  // intermediate screen. Read the flag client-side (no useSearchParams →
+  // no Suspense boundary needed), consume it once, and clean the URL so a
+  // refresh doesn't fire a second create.
   const consumedNew = useRef(false);
   useEffect(() => {
     if (consumedNew.current) return;
     if (new URLSearchParams(window.location.search).get("new") === "1") {
       consumedNew.current = true;
-      setWizardOpen(true);
       router.replace(`${base}/agents`);
+      void createNewAgent();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router, base]);
 
   useEffect(() => {
@@ -395,10 +417,11 @@ export default function AgentsPage() {
         <button
           type="button"
           className={`fleet-btn${agents.length === 0 ? " fleet-btn--accent" : " fleet-btn--accent-fill"}`}
-          onClick={() => setWizardOpen(true)}
+          onClick={createNewAgent}
+          disabled={creatingAgent}
         >
           <span className="fleet-btn-plus">+</span>
-          New agent
+          {creatingAgent ? "Creating…" : "New agent"}
         </button>
       </HeaderAction>
 
@@ -463,11 +486,15 @@ export default function AgentsPage() {
           ) : error && agents.length === 0 ? (
             <FleetSurfaceError title="Couldn’t load agents" message={error} onRetry={refresh} />
           ) : agents.length === 0 ? (
-            <FirstAgentEmpty
-              title="No agents yet"
-              desc="Agents do the work — they handle customer chats, run tasks, and use your tools. Create your first one to get started."
-              onCreate={() => setWizardOpen(true)}
-            />
+            <>
+              <FirstAgentEmpty
+                title="No agents yet"
+                desc="Agents do the work — they handle customer chats, run tasks, and use your tools. Create your first one to get started."
+                onCreate={createNewAgent}
+                busy={creatingAgent}
+              />
+              {createAgentError && <p className="fleet-channel-expand-error">{createAgentError}</p>}
+            </>
           ) : workspaceAgentsRailActive ? (
             // 2+ agents: the rail's workspace-agents space is the browse
             // surface now (primary-rail-space.ts) — this pane just prompts
@@ -538,17 +565,6 @@ export default function AgentsPage() {
           </PanelSection>
         </FleetRightPanel>
       </div>
-
-      {wizardOpen && (
-        <FleetCreateAgentWizard
-          workspaceId={workspaceId}
-          onClose={() => setWizardOpen(false)}
-          onCreated={() => {
-            setWizardOpen(false);
-            refresh();
-          }}
-        />
-      )}
     </main>
   );
 }

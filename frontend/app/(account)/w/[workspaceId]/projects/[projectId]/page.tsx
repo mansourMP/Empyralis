@@ -48,7 +48,7 @@ import {
   type TaskViewOptions as TaskViewOptionsState,
 } from "@/lib/workspace/fleet/task-view-options";
 import { FleetRightPanel, PanelSection, PanelRow, PanelRowsSkeleton } from "@/lib/workspace/fleet/FleetRightPanel";
-import { FleetCreateAgentWizard } from "@/lib/workspace/fleet/FleetCreateAgentWizard";
+import { createAgentQuickly, quickCreateAgentChatPath } from "@/lib/workspace/fleet/agent-quick-create";
 import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
 import { FleetBoardSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import { PROJECT_TAB_LABEL, PROJECT_TAB_VIEWS } from "@/lib/workspace/fleet/project-views";
@@ -216,9 +216,31 @@ export default function ProjectDetailPage() {
 
   const projectBase = `${base}/projects/${encodeURIComponent(projectId)}`;
 
-  const [wizardOpen, setWizardOpen] = useState(false);
+  const [creatingAgent, setCreatingAgent] = useState(false);
+  const [createAgentError, setCreateAgentError] = useState<string | null>(null);
   // Properties drawer — closed by default, an overlay over the sheet.
   const [panelOpen, setPanelOpen] = useState(false);
+
+  // Zero-decision create (2026-08-19) — replaces the old FleetCreateAgentWizard
+  // modal here entirely. Opened from inside a project, so the project is
+  // already implicit — resolveQuickCreateProjectId (via createAgentQuickly)
+  // takes THIS project id as the current one, the same default the old
+  // wizard's initialProjectId prop gave it, just without a screen asking to
+  // confirm what is already obvious from context. See agent-quick-create.ts
+  // for why every other field the wizard used to ask for is safe to default
+  // silently.
+  async function createNewAgent() {
+    if (creatingAgent) return;
+    setCreatingAgent(true);
+    setCreateAgentError(null);
+    try {
+      const { agentId, projectId: landedProjectId } = await createAgentQuickly(workspaceId, projectId, projects);
+      router.push(quickCreateAgentChatPath({ workspaceId, projectId: landedProjectId, agentId }));
+    } catch (e) {
+      setCreateAgentError(e instanceof Error ? e.message : "Could not create the agent.");
+      setCreatingAgent(false);
+    }
+  }
   // Agents | Tasks | Documents — a real ROUTE per view (`${projectBase}/agents`,
   // `${projectBase}/tasks`, `${projectBase}/documents`), not component state.
   //
@@ -583,9 +605,10 @@ export default function ProjectDetailPage() {
           <button
             type="button"
             className={`fleet-btn${inProject.length === 0 ? " fleet-btn--accent" : " fleet-btn--accent-fill"}`}
-            onClick={() => setWizardOpen(true)}
+            onClick={createNewAgent}
+            disabled={creatingAgent}
           >
-            <span className="fleet-btn-plus">+</span> New agent
+            <span className="fleet-btn-plus">+</span> {creatingAgent ? "Creating…" : "New agent"}
           </button>
         ) : view === "tasks" ? (
           <button
@@ -926,11 +949,15 @@ export default function ProjectDetailPage() {
           ) : agentsError && inProject.length === 0 ? (
             <FleetSurfaceError title="Couldn’t load agents" message={agentsError} onRetry={refresh} />
           ) : inProject.length === 0 ? (
-            <FirstAgentEmpty
-              title="No agents in this project"
-              desc="Create one — it’ll be assigned here."
-              onCreate={() => setWizardOpen(true)}
-            />
+            <>
+              <FirstAgentEmpty
+                title="No agents in this project"
+                desc="Create one — it’ll be assigned here."
+                onCreate={createNewAgent}
+                busy={creatingAgent}
+              />
+              {createAgentError && <p className="fleet-channel-expand-error">{createAgentError}</p>}
+            </>
           ) : soloAgent ? (
             // The redirect effect above is already firing — this is the one
             // paint before it commits, same quiet-state convention the
@@ -1007,15 +1034,6 @@ export default function ProjectDetailPage() {
           // Stays open when "Create more" is on — the composer decides that,
           // not this page, so this handler only refreshes and reports.
           onCreated={(notice) => { setTaskNotice(notice); refreshTasks(); }}
-        />
-      )}
-
-      {wizardOpen && (
-        <FleetCreateAgentWizard
-          workspaceId={workspaceId}
-          initialProjectId={projectId}
-          onClose={() => setWizardOpen(false)}
-          onCreated={() => { setWizardOpen(false); refresh(); }}
         />
       )}
 

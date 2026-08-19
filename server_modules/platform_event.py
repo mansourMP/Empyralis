@@ -267,25 +267,34 @@ NO_AI_PROVIDER = PlatformEvent(
 NO_AI_PROVIDER_WEB = PlatformEvent(
     code="no_ai_provider_web",
     title="AI provider not configured",
-    detail="Your agent needs an AI provider. Open AI & Setup →",
-    channel_text="Your agent needs an AI provider. Open AI & Setup →",
+    # No trailing arrow: this chat surface renders plain text, not a link —
+    # a "→" here reads as a clickable affordance that does not exist (see
+    # CLAUDE.md's "No dead controls" law). Also deliberately does not name
+    # a specific settings screen: the previous text named "AI & Setup",
+    # which has not existed as a page anywhere in this app for some time
+    # (CLAUDE.md's "copy that names a screen goes stale" failure mode) —
+    # naming the agent's own Model tab in words is accurate regardless of
+    # where that tab's route moves next.
+    detail="Your agent needs an AI provider connected before it can reply. Open this agent's Model settings to connect one.",
+    channel_text="Your agent needs an AI provider connected before it can reply. Open this agent's Model settings to connect one.",
     severity="error",
 )
 
-# Web-chat variants (plain text, no escaping)
+# Web-chat variants (plain text, no escaping, no trailing-arrow affordance —
+# see NO_AI_PROVIDER_WEB's comment above; the same reasoning applies here).
 AI_LIMIT_REACHED_WEB = PlatformEvent(
     code="ai_limit_reached_web",
     title="AI limit reached",
-    detail="AI usage limit reached. Open AI & Setup →",
-    channel_text="AI usage limit reached. Open AI & Setup →",
+    detail="AI usage limit reached. Check Billing & usage in Settings, or connect your own AI provider.",
+    channel_text="AI usage limit reached. Check Billing & usage in Settings, or connect your own AI provider.",
     severity="error",
 )
 
 AUTH_FAILED_WEB = PlatformEvent(
     code="ai_auth_failed_web",
     title="AI needs attention",
-    detail="AI configuration needs attention. Open AI & Setup →",
-    channel_text="AI configuration needs attention. Open AI & Setup →",
+    detail="AI configuration needs attention. Open this agent's Model settings to check it.",
+    channel_text="AI configuration needs attention. Open this agent's Model settings to check it.",
     severity="error",
 )
 

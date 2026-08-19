@@ -703,15 +703,15 @@ export function PrimaryRail({
               + agent should be at the bottom of this left rail"). Deliberately
               identical in shape and reasoning to "+ New project" below: a real
               <Link>, never a button that opens a dialog straight from the rail,
-              so `?new=1` hands off to the ONE create-agent wizard the agents
-              page already owns (the same URL the command palette's own "New
-              agent" uses) instead of standing up a second composer -- and being
-              an <a> means cmd-click opens it in a new tab like any other
-              navigation. Neutral, never accent-filled: the agents page's own
-              "+ New agent" header action is that view's one accent action, and
-              two filled buttons in one view is a bug. Only in the
-              workspace-agents space: the project-agents space is scoped to one
-              project, and Settings has nothing to create. */}
+              so `?new=1` hands off to the ONE zero-decision create the agents
+              page already owns (agent-quick-create.ts — the same URL the
+              command palette's own "New agent" uses) instead of standing up a
+              second composer -- and being an <a> means cmd-click opens it in a
+              new tab like any other navigation. Neutral, never accent-filled:
+              the agents page's own "+ New agent" header action is that view's
+              one accent action, and two filled buttons in one view is a bug.
+              Only in the workspace-agents space: the project-agents space is
+              scoped to one project, and Settings has nothing to create. */}
           {effectiveSpace.kind === "workspace-agents" && (
             <Link
               href={`${hrefFor("agents")}?new=1`}
