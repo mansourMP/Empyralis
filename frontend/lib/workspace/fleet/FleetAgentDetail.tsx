@@ -1247,7 +1247,23 @@ export function FleetAgentDetail({
               configureSheet — same components, same props, moved rather
               than duplicated. */}
           {activeTab === "work" && <WorkTab workspaceId={workspaceId} agentId={agentId} agent={agent} onAgentChanged={onRenamed} />}
-          {activeTab === "chat" && (
+          {/* ChatTab stays MOUNTED on every tab, hidden (not removed) when
+              a different one is active — never conditionally rendered like
+              WorkTab above. Founder-observed bug: clicking Work (or
+              Configure) mid-turn used to unmount ChatTab outright, which
+              silently threw away everything local to that turn — the
+              in-flight send()'s streamed reply, its own 90s watchdog, and
+              the draft the founder had just typed ("he came back,
+              re-pasted his message"). Navigating away from a live turn
+              must not silently discard the UI's own record of it (this
+              file's own hard constraint), and a `display:none` wrapper is
+              the smallest change that satisfies it — the turn keeps
+              streaming in the background exactly as it would have on Chat,
+              and returning to Chat shows it mid-flight rather than
+              re-fetching a possibly-incomplete thread from scratch. It
+              also removes the remount-triggered skeleton for this exact
+              navigation path: nothing to reload if nothing ever unmounted. */}
+          <div style={activeTab === "chat" ? undefined : { display: "none" }}>
             <ChatTab
               key={agentId}
               workspaceId={workspaceId}
@@ -1257,7 +1273,7 @@ export function FleetAgentDetail({
               onTurnComplete={refreshConversations}
               onAgentSaved={onRenamed}
             />
-          )}
+          </div>
         </div>
         <FleetRightPanel open={propertiesOpen} onClose={() => setPropertiesOpen(false)} ariaLabel="Sessions">
           {propertiesContent}

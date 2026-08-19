@@ -5,7 +5,7 @@ import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fet
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { ArrowUp, Check, ChevronDown, Loader2, Paperclip, X, type LucideIcon } from "lucide-react";
+import { AlertCircle, ArrowUp, Check, ChevronDown, Loader2, Paperclip, X, type LucideIcon } from "lucide-react";
 
 import { useAccountShell } from "@/lib/shell/account-shell-context";
 import { useRevealedEmail } from "@/lib/shell/use-revealed-email";
@@ -14,6 +14,7 @@ import { ChatMessage, type WorkstationChatMessageRecord } from "@/lib/workspace/
 import { ContextUsageRail, type ContextUsagePayload } from "./ContextUsageRail";
 import type { FleetAgent } from "./fleet-data";
 import { FleetAgentChatSkeleton } from "./fleet-states";
+import { resolveAgentChatViewState } from "./agent-chat-view-state";
 import {
   resolveAgentModelSummary,
   formatModelOnlyLabel,
@@ -865,10 +866,26 @@ export function AgentChat({
   ), [account, revealedAccountEmail]);
 
   const loadThread = useCallback(async () => {
+    // A read has no watchdog of its own elsewhere in this file — the 90s
+    // one below (send()) exists only for the SEND path and this file's own
+    // hard constraint is to never touch or weaken it. Without an
+    // independent timeout here, a stalled connection (a proxy holding the
+    // socket open, a backend mid-restart — exactly the kind of hiccup this
+    // navigation-fix pass hit repeatedly against a disposable stack) leaves
+    // this fetch's promise pending forever: `loading` never flips to
+    // false, and the skeleton the founder reported — "the entire thing
+    // disappeared and there was just this loading skeleton loading" —
+    // stays up permanently, because nothing ever reaches the `finally`
+    // below. 20s is generous for a plain thread read (nowhere near the
+    // 90s a real model turn may legitimately need) and, like the send
+    // watchdog, routes a stall into the ordinary catch/finally rather than
+    // an unresolved promise.
+    const readWatchdog = new AbortController();
+    const readTimeout = setTimeout(() => readWatchdog.abort(), 20_000);
     try {
       const res = await fleetAuthorizedFetch(
         `/api/threads/${encodeURIComponent(threadId)}?workspace_id=${encodeURIComponent(workspaceId)}`,
-        { credentials: "include" },
+        { credentials: "include", signal: readWatchdog.signal },
       );
       if (res.status === 404) {
         // Nothing sent on this thread yet — not an error, just an empty
@@ -884,8 +901,14 @@ export function AgentChat({
       setMessages(turns.map(turnToMessage));
       setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load the conversation.");
+      const timedOut = e instanceof DOMException && e.name === "AbortError";
+      setError(
+        timedOut
+          ? "No response for a while loading this conversation. Try again."
+          : e instanceof Error ? e.message : "Could not load the conversation.",
+      );
     } finally {
+      clearTimeout(readTimeout);
       setLoading(false);
     }
   }, [workspaceId, threadId]);
@@ -1358,14 +1381,39 @@ export function AgentChat({
     setPendingAttachments((cur) => cur.filter((a) => a.file_id !== fileId));
   }, []);
 
-  const showEmptyState = !loading && messages.length === 0 && !streamingText;
+  // The one place "loading" / "a load that failed" / "genuinely empty" /
+  // "there is content" gets decided — see agent-chat-view-state.ts's own
+  // header comment for the live bug this closes (a failed loadThread()
+  // used to render the calm "say something to start" welcome copy, which
+  // is CLAUDE.md's own outcome-honesty law violated: "empty" and "I could
+  // not load this" are different facts and must never share one screen).
+  const chatViewState = resolveAgentChatViewState({
+    loading,
+    error,
+    messageCount: messages.length,
+    streamingActive: Boolean(streamingText),
+  });
 
   return (
     <div className="fleet-sage-chat">
       <div className="fleet-sage-chat-list" ref={listRef}>
-        {loading ? (
+        {chatViewState === "loading" ? (
           <FleetAgentChatSkeleton bubbles={4} />
-        ) : showEmptyState ? (
+        ) : chatViewState === "error" ? (
+          <div className="fleet-sage-chat-empty">
+            <span className="fleet-empty-icon"><AlertCircle size={20} strokeWidth={1.75} /></span>
+            <div className="fleet-tab-state-title">Couldn&rsquo;t load this conversation</div>
+            <div className="fleet-tab-state-body">
+              {error || "Something went wrong loading your messages."} Your connection may have hiccupped — this
+              isn&rsquo;t an empty conversation, it just couldn&rsquo;t be read yet.
+            </div>
+            <div className="fleet-sage-chat-suggestions">
+              <button type="button" className="fleet-sage-chat-suggestion" onClick={() => void loadThread()}>
+                Try again
+              </button>
+            </div>
+          </div>
+        ) : chatViewState === "empty" ? (
           <div className="fleet-sage-chat-empty">
             <span className="fleet-empty-icon"><EmptyIcon size={20} strokeWidth={1.75} /></span>
             <div className="fleet-tab-state-title">{emptyTitle}</div>
@@ -1440,7 +1488,9 @@ export function AgentChat({
             )}
           </>
         )}
-        {error && <p className="fleet-channel-expand-error">{error}</p>}
+        {/* Only shown alongside existing content — chatViewState === "error"
+            already gives the failure its own full, honest block above. */}
+        {error && chatViewState === "content" && <p className="fleet-channel-expand-error">{error}</p>}
       </div>
 
       {/* Consolidated composer: textarea, pending-attachment chips, then ONE
