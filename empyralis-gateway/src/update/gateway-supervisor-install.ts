@@ -104,10 +104,37 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
 
 export type GatewaySupervisorMode = "launchd" | "systemd";
 
+/** system: /etc/systemd/system, root-owned, `systemctl` (no --user). This is
+ *  the ONLY mode a VPS-provisioned box has ever used — install-agent-
+ *  computer.sh runs as root at provision time, and the running gateway's own
+ *  self-repair (gateway-doctor.ts) inherits the same scope by never setting
+ *  EMPYRALIS_GATEWAY_SUPERVISOR_SCOPE, so this stays the default and no
+ *  existing box's behavior changes.
+ *
+ *  user: ~/.config/systemd/user, no root required, `systemctl --user`. Added
+ *  for the desktop app (MAN-356-adjacent "installing the app IS pairing the
+ *  machine" — src-tauri has no path to /etc/systemd/system as an ordinary
+ *  logged-in user, the same reason macOS already uses a per-user
+ *  LaunchAgent rather than a system daemon). Selected by setting
+ *  EMPYRALIS_GATEWAY_SUPERVISOR_SCOPE=user in the child's environment before
+ *  it calls into this module — never guessed from uid/euid, since a
+ *  desktop app could plausibly run as root on some exotic setup and would
+ *  still want its OWN session's unit, not the system one. */
+export type GatewaySystemdScope = "system" | "user";
+
+function resolveSystemdScope(env: NodeJS.ProcessEnv): GatewaySystemdScope {
+  const raw = String(env.EMPYRALIS_GATEWAY_SUPERVISOR_SCOPE || "").trim().toLowerCase();
+  return raw === "user" ? "user" : "system";
+}
+
 export interface GatewaySupervisorUnitDefinition {
   mode: GatewaySupervisorMode;
   /** Absolute path of the unit/plist file this platform expects. */
   unitPath: string;
+  /** `mode === "systemd"` only. Which `systemctl` scope this unit lives
+   *  under — decides whether the registrar passes `--user`. Irrelevant for
+   *  launchd, which is always per-user by construction. */
+  systemdScope?: GatewaySystemdScope;
   /** Fully-rendered file contents this module would write. Drift detection
    *  is a plain string-equality check against this — safe because this
    *  module fully controls rendering (deterministic output for the same
@@ -214,6 +241,11 @@ export interface SupervisedProgramDefinition {
    * unchanged.
    */
   user?: string;
+  /** systemd only. "system" (default, omitted) renders exactly as before —
+   *  `User=`/`Group=` if given, `WantedBy=multi-user.target`. "user" drops
+   *  both (meaningless inside a --user manager) and targets
+   *  `default.target` instead. See GatewaySystemdScope's doc comment. */
+  systemdScope?: GatewaySystemdScope;
 }
 
 export function renderLaunchAgentPlist(opts: SupervisedProgramDefinition): string {
@@ -263,7 +295,18 @@ export function renderSystemdUnit(opts: SupervisedProgramDefinition): string {
     .sort()
     .map((key) => `Environment=${key}=${String(opts.environment?.[key] ?? "")}`)
     .join("\n");
-  const userLines = opts.user ? `User=${opts.user}\nGroup=${opts.user}\n` : "";
+  // `User=`/`Group=` is meaningless (and rejected by systemd) on a --user
+  // unit: a user-scope manager already runs entirely as the invoking user,
+  // there is nothing to drop privilege to. Only emit it for a system-scope
+  // unit, matching every existing box's rendered output exactly.
+  const userLines =
+    opts.user && opts.systemdScope !== "user" ? `User=${opts.user}\nGroup=${opts.user}\n` : "";
+  // A system unit's `WantedBy=multi-user.target` has no meaning inside a
+  // user manager (there is no multi-user target in that instance) — a user
+  // unit wants `default.target`, systemd --user's equivalent of "the
+  // session is up." Byte-identical output for the (default, unset)
+  // system-scope case keeps every existing box's unit unchanged.
+  const wantedBy = opts.systemdScope === "user" ? "default.target" : "multi-user.target";
   return `[Unit]
 Description=${opts.description ?? "Empyralis Agent Computer Gateway"}
 Documentation=https://empyralis.ai
@@ -280,7 +323,7 @@ KillSignal=SIGTERM
 TimeoutStopSec=30
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=${wantedBy}
 `;
 }
 
@@ -311,16 +354,25 @@ export function resolveExpectedSupervisorUnit(
   }
   if (opts.platform === "linux") {
     const unitName = String(opts.env.EMPYRALIS_SYSTEMD_UNIT || "").trim() || DEFAULT_SYSTEMD_UNIT_NAME;
-    const unitPath = path.join("/etc/systemd/system", unitName);
+    const scope = resolveSystemdScope(opts.env);
+    // Every VPS-provisioned box today leaves EMPYRALIS_GATEWAY_SUPERVISOR_
+    // SCOPE unset, so scope === "system" and unitPath/contents below are
+    // byte-identical to before this change — no existing box drifts.
+    const unitPath =
+      scope === "user"
+        ? path.join(opts.homeDir, ".config", "systemd", "user", unitName)
+        : path.join("/etc/systemd/system", unitName);
     return {
       mode: "systemd",
       unitPath,
       name: unitName,
+      systemdScope: scope,
       contents: renderSystemdUnit({
         label: unitName,
         programArguments: [opts.execPath, opts.entryPath],
         workingDirectory,
         logPath: path.join(opts.logDir, "gateway.log"),
+        systemdScope: scope,
       }),
     };
   }
@@ -510,8 +562,16 @@ export function createSystemdJobRegistrar(
     if (definition.mode !== "systemd") {
       return;
     }
-    await exec("systemctl", ["daemon-reload"]);
-    await exec("systemctl", ["enable", definition.name]);
+    // The scope lives on the DEFINITION (resolved once, from env, in
+    // resolveExpectedSupervisorUnit) rather than being threaded into this
+    // factory — a single registrar instance built at process start can
+    // register either kind of unit without the caller having to know in
+    // advance which one it will be handed. Unset/"system" renders to zero
+    // extra args, so this is exec("systemctl", ["daemon-reload"]) exactly
+    // as before for every existing box.
+    const scopeArgs = definition.systemdScope === "user" ? ["--user"] : [];
+    await exec("systemctl", [...scopeArgs, "daemon-reload"]);
+    await exec("systemctl", [...scopeArgs, "enable", definition.name]);
   };
 }
 

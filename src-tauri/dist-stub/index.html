@@ -1,0 +1,10 @@
+<!doctype html>
+<!--
+  This directory exists only to satisfy Tauri's `frontendDist` config
+  requirement. Nothing in this app ever loads it: every window this crate
+  creates uses WebviewUrl::External pointed at the real hosted app (see
+  lib.rs's app_base_url()/ensure_main_window). There is no bundled
+  frontend anymore — the webview always renders the deployed Empyralis
+  app, or a developer-configured EMPYRALIS_DESKTOP_APP_URL override.
+-->
+<html><body></body></html>

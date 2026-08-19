@@ -34,6 +34,12 @@ import { GatewayCliSetupRuntime } from "./llm/cli-setup-runtime";
 import { GatewaySelfUpdateRuntime } from "./update/gateway-self-update-runtime";
 import { GatewayRestartRuntime } from "./update/gateway-restart-runtime";
 import { readAndClearPendingGatewayRestartMarker } from "./update/gateway-restart-pending";
+import { resolveGatewayLaunchEntrypoint } from "./update/gateway-launch-path";
+import {
+  auditAndRepairGatewaySupervisorInstall,
+  createLaunchdJobRegistrar,
+  createSystemdJobRegistrar,
+} from "./update/gateway-supervisor-install";
 import {
   computeGatewayBuildFingerprint,
   isGatewayBuildFingerprint,
@@ -388,8 +394,70 @@ export async function attemptGatewayPairing(params: {
   }
 }
 
+/** Desktop-app-only install path: audits and (best-effort) repairs THIS
+ *  machine's supervisor unit, then exits — never boots the rest of the
+ *  gateway (no process lock, no cloud connection, no channel runtimes).
+ *  Mirrors gateway-doctor.ts's SUPERVISOR_PRESENCE_CHECK wiring exactly
+ *  (same resolveGatewayLaunchEntrypoint call, same registrars) rather than
+ *  reusing its private helpers directly, so this stays a small, obviously
+ *  correct addition instead of widening that module's exported surface.
+ *
+ *  Exists because the desktop app (src-tauri) needs supervisor installation
+ *  to happen SYNCHRONOUSLY, right after it spawns the gateway for the first
+ *  time — waiting for the `gateway.doctor.run` capability to be invoked
+ *  remotely by the cloud is not a fit for "installing the app IS pairing
+ *  the machine." Symmetric with the existing EMPYRALIS_GATEWAY_LAUNCH_PROBE
+ *  flag (gateway-launch-repair.ts) in shape: one env var, one early exit,
+ *  never wired into the ordinary boot path.
+ *
+ *  Prints one JSON line to stdout and exits 0 on success OR on a handled,
+ *  reported failure (permission denied, unsupported platform) — exit 0
+ *  because "the audit ran and reported honestly" is success from the
+ *  caller's perspective; the caller reads the JSON to know whether
+ *  supervision actually landed. Only an unexpected exception exits 1. */
+const GATEWAY_INSTALL_SUPERVISOR_ENV = "EMPYRALIS_GATEWAY_INSTALL_SUPERVISOR";
+
+async function runInstallSupervisorAndExit(config: GatewayConfig): Promise<never> {
+  const env = process.env;
+  const platform = process.platform;
+  const runningEntryPath = require.main?.filename || process.argv[1] || process.execPath;
+  const entryPath = resolveGatewayLaunchEntrypoint({
+    runningEntryPath,
+    stateDir: config.stateDir,
+    env,
+  });
+  const logDir = path.join(config.stateDir, "logs");
+  const registerJob =
+    platform === "darwin"
+      ? createLaunchdJobRegistrar(typeof process.getuid === "function" ? process.getuid() : 0)
+      : platform === "linux"
+        ? createSystemdJobRegistrar()
+        : undefined;
+
+  try {
+    const outcome = await auditAndRepairGatewaySupervisorInstall(
+      { env, platform, entryPath, logDir, registerJob },
+      true,
+    );
+    console.log(JSON.stringify({ ok: true, outcome }));
+    process.exit(0);
+  } catch (error) {
+    console.log(
+      JSON.stringify({
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+    process.exit(0);
+  }
+}
+
 async function main(): Promise<void> {
   const config = loadGatewayConfig();
+  if (String(process.env[GATEWAY_INSTALL_SUPERVISOR_ENV] || "").trim() === "1") {
+    await runInstallSupervisorAndExit(config);
+    return;
+  }
   // Single-use hand-off from whichever process (gateway.self_update or
   // gateway.restart) triggered THIS boot, if any — see update/gateway-
   // restart-pending.ts's module doc comment for why the post-restart health

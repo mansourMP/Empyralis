@@ -45,13 +45,10 @@ def _release_config(base: Dict[str, Any], repository: str) -> Dict[str, Any]:
         "endpoints": _updater_endpoints(repository),
     }
 
-    windows_thumbprint = _env("WINDOWS_CERTIFICATE_THUMBPRINT")
-    windows_timestamp = _env("WINDOWS_TIMESTAMP_URL") or "http://timestamp.comodoca.com"
-    if windows_thumbprint:
-        windows_cfg = bundle.setdefault("windows", {})
-        windows_cfg["certificateThumbprint"] = windows_thumbprint
-        windows_cfg["digestAlgorithm"] = "sha256"
-        windows_cfg["timestampUrl"] = windows_timestamp
+    # Windows is explicitly out of scope for this app (see CLAUDE.md's
+    # "Windows is out" entry) — this generator only ever runs on macOS/Linux
+    # release jobs, so there is deliberately no Windows-signing branch here
+    # to keep in sync with a job that does not exist.
 
     apple_identity = _env("APPLE_SIGNING_IDENTITY")
     if apple_identity:

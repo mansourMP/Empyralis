@@ -1,0 +1,7 @@
+Placeholder. CI populates this directory with a real, official Node.js
+binary distribution (bin/node + its lib/ dependents) for the target
+platform/arch before running `tauri build` — see
+.github/workflows/build.yml's "Fetch portable Node runtime" step and
+empyralis-gateway/src/update/desktop-node-version.ts for the pinned
+version. This placeholder exists only so `cargo check`/`cargo build`
+succeed in a plain checkout without requiring a real download.
