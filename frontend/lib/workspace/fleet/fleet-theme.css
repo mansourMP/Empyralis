@@ -6431,6 +6431,12 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
    two accent-filled buttons in one view is a bug. */
 .fleet-rail-subitem--new { color: var(--text-muted); }
 .fleet-rail-subitem--new:hover { color: var(--text-primary); }
+/* "+ New agent" at the foot of the workspace-agents rail space. Same muted
+   treatment as "+ New project" above -- it is a create affordance sitting
+   under a list of existing things, not a destination competing with them, so
+   it reads quieter than the rows above it until hovered. */
+.fleet-rail-item--new { color: var(--text-muted); }
+.fleet-rail-item--new:hover { color: var(--text-primary); }
 .fleet-rail-subitem-newicon {
   display: inline-flex;
   align-items: center;
