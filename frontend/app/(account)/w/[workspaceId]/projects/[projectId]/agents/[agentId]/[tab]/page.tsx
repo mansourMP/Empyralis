@@ -13,7 +13,7 @@ import { ProjectIcon } from "@/lib/workspace/fleet/fleet-project-identity";
 // it isn't a dead page: rawTab's own fallback below coerces any
 // unrecognized tab string to "chat" (the agent's front door), the same
 // graceful landing every other typo'd tab already gets.
-const VALID_TABS = ["general", "work", "channels", "connectors", "tools", "capabilities", "hardware", "model", "skills", "memory", "chat"] as const;
+const VALID_TABS = ["general", "work", "channels", "connectors", "tools", "capabilities", "hardware", "model", "skills", "memory", "chat", "persona"] as const;
 type Tab = (typeof VALID_TABS)[number];
 
 export default function AgentDetailPage() {

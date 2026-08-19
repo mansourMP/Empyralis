@@ -8,6 +8,7 @@ import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import {
   AlertTriangle,
   ArrowLeft,
+  Bot,
   BookOpen,
   Brain,
   Check,
@@ -38,8 +39,10 @@ import {
 import { WorkTab } from "./tabs/WorkTab";
 import { HardwareTab } from "./tabs/HardwareTab";
 import { MemoryTab } from "./tabs/MemoryTab";
+import { ProfileFilesSection } from "./tabs/ProfileFilesSection";
 import { AgentChat } from "./AgentChat";
 import { GroupedRail, type GroupedRailGroup } from "./GroupedRail";
+import { defaultAgentProfileSegment, isProfileTab, planAgentProfileSegments, type AgentProfileSegmentId } from "./agent-profile-shape";
 import {
   defaultAgentThreadId,
   newAgentThreadId,
@@ -82,6 +85,7 @@ import { resolveAgentModelSummary, platformCreditsTierLabel } from "./fleet-mode
 import { FleetToggleRowsSkeleton, FleetCardGridSkeleton } from "./fleet-states";
 
 import "./agent-configure-sheet.css";
+import "./agent-profile-sheet.css";
 
 // Properties panel's Placement row used to render placement.label with no
 // tone at all — the one row on that panel that never went red/green, even
@@ -127,27 +131,31 @@ function isChannelConnected(
   return channel.connected;
 }
 
-type TabId = "general" | "work" | "channels" | "connectors" | "hardware" | "model" | "skills" | "memory" | "tools" | "capabilities" | "chat";
+type TabId = "general" | "work" | "channels" | "connectors" | "hardware" | "model" | "skills" | "memory" | "tools" | "capabilities" | "chat" | "persona";
 
-// Single source of id/label/icon truth for every one of the eleven
+// Single source of id/label/icon truth for every one of the twelve
 // sections — Chat and Work are permanent AgentDetailHeader controls (see
-// that component), the other nine live in the Configure sheet's
-// GroupedRail groups (CONFIGURE_GROUPS below), and both read labels/icons
-// from here so neither surface can drift from the other. Eleven ids remain
-// valid [tab] route segments regardless of which surface renders them
-// (VALID_TABS, [tab]/page.tsx) — moving a tab between surfaces is a
-// rendering change, not a routing one. Declared with "chat" first — chat is
-// the agent's front door (an agent opens to Chat, not a config screen — see
-// [tab]/page.tsx's own "chat" fallback). The Configure sheet ignores this
-// order entirely (each group below picks its own members/grouping
-// explicitly by id).
+// that component), Persona and Memory live in the Profile sheet (opened by
+// tapping the agent's own identity while on Chat — see
+// PROFILE_SEGMENT_DEFS below), the other eight live in the Configure
+// sheet's GroupedRail groups (CONFIGURE_GROUPS below), and all three
+// surfaces read labels/icons from here so none of them can drift from the
+// others. Twelve ids remain valid [tab] route segments regardless of which
+// surface renders them (VALID_TABS, [tab]/page.tsx) — moving a tab between
+// surfaces is a rendering change, not a routing one. Declared with "chat"
+// first — chat is the agent's front door (an agent opens to Chat, not a
+// config screen — see [tab]/page.tsx's own "chat" fallback). The Configure
+// and Profile sheets both ignore this order entirely (each picks its own
+// members/grouping explicitly by id).
 //
 // "Overview" is GONE, not renamed (founder, 2026-08-13: "remove overview
 // because it's something that we genuinely don't need inside this agent").
 // Its former content is redistributed rather than deleted wholesale:
-//   - agent rename (AgentTitle) + Persona + Schedule → moved here, into a
-//     new "general" Configure tab (below) — set-once identity/behaviour
-//     config, exactly what Configure already exists to hold.
+//   - agent rename (AgentTitle) + Schedule → moved here, into a new
+//     "general" Configure tab (below) — set-once identity/behaviour config,
+//     exactly what Configure already exists to hold. Persona (below) moved
+//     out of that same tab a second time on 2026-08-19 — see the Profile
+//     sheet comment further down for why it now has its own surface.
 //   - the one-line status sentence (NowStrip) → deleted outright. It was a
 //     fourth restatement of the same status the Properties/Sessions panel's
 //     own "Status" row, the agents rail's StatusDot, and the agents list
@@ -161,6 +169,7 @@ type TabId = "general" | "work" | "channels" | "connectors" | "hardware" | "mode
 //     weaken Work, which is untouched.
 const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
   { id: "chat", label: "Chat", icon: MessageSquare },
+  { id: "persona", label: "Persona", icon: Bot },
   { id: "general", label: "General", icon: LayoutGrid },
   { id: "model", label: "Model", icon: Sparkles },
   { id: "skills", label: "Skills", icon: BookOpen },
@@ -180,27 +189,56 @@ const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
 // deleted (founder: "the rest must not be deleted" — true of every section
 // except Overview itself, which the founder separately asked removed
 // outright), it just isn't equal-billing top-level nav anymore
-// (UI-CONTRACT: "a surface must earn its place"). Memory joins Configure
-// here too (founder: "Memory moves inside Configure. It stops being a
-// top-level tab.") — see CONFIGURE_GROUPS below for where it landed.
+// (UI-CONTRACT: "a surface must earn its place").
+//
+// Persona and Memory left Configure a second time on 2026-08-19 — see the
+// Profile sheet comment below (~line 1420) for the founder's own words and
+// the reasoning; PROFILE_TAB_IDS there is their new home, not
+// CONFIGURE_GROUPS.
 
 // Configure sheet groups — BRAIN (what it thinks with) / REACH (how it's
 // reached, and what it can reach out to) / COMPUTE (what it runs on).
 // Rendered via GroupedRail, the same component Settings uses, per the
 // design's whole point: one rail component, two callers, not a rail built
 // twice. Order within each group is the order the old flat tab strip had
-// them in. "general" (identity/persona/schedule, ex-Overview) and "memory"
-// both join Brain — both are "what/how it thinks and remembers", the same
-// theme that already justified moving Model/Capabilities/Skills off the top
-// strip, so neither needed a fourth group invented just to hold it
-// (UI-CONTRACT: "most configuration is set once and does not deserve equal
-// billing").
+// them in. "general" (identity/schedule, ex-Overview) stays in Brain — it's
+// still "what/how it thinks", the same theme that already justified moving
+// Model/Capabilities/Skills off the top strip, so it didn't need a fourth
+// group invented just to hold it (UI-CONTRACT: "most configuration is set
+// once and does not deserve equal billing").
 const CONFIGURE_GROUPS: { id: string; label: string; tabs: TabId[] }[] = [
-  { id: "brain", label: "Brain", tabs: ["general", "model", "capabilities", "skills", "memory"] },
+  { id: "brain", label: "Brain", tabs: ["general", "model", "capabilities", "skills"] },
   { id: "reach", label: "Reach", tabs: ["channels", "connectors", "tools"] },
   { id: "compute", label: "Compute", tabs: ["hardware"] },
 ];
 const CONFIGURE_TAB_IDS = new Set<TabId>(CONFIGURE_GROUPS.flatMap((g) => g.tabs));
+
+// Profile sheet — Telegram's "tap the name in a chat header to see who
+// you're talking to" pattern, applied to an agent. Founder, 2026-08-19,
+// describing this exact product: "on top there is a profile of this
+// specific chat, if I open it — for an agent, on top there would be a
+// specific prompt like system prompt or whatever... And media and other
+// files also going to be there — memory files is going to be just
+// alongside media and others." Opened by tapping the identity block
+// (avatar + name) in AgentDetailHeader while already on Chat — see that
+// component's own comment for why the same tap does something different
+// on every OTHER tab (returns to Chat, unchanged).
+//
+// Deliberately its own sheet, not folded into Configure: Configure holds
+// set-once TECHNICAL configuration (Model, Channels, Hardware, ...);
+// Profile holds "who this agent IS" — the two are different questions with
+// different audiences, and Telegram's own metaphor (tap a name, not a
+// settings gear) is specifically about identity, not configuration.
+// PROFILE_TAB_IDS mirrors CONFIGURE_TAB_IDS's role exactly (a set of [tab]
+// route segments that render inside a sheet instead of as a top-level tab)
+// — pulled into its own pure module (agent-profile-shape.ts) rather than a
+// bare Set literal here because which segments show (Persona is hidden for
+// the workspace master — it has no per-agent persona field anything reads)
+// is a real decision worth a test, not just a membership check.
+const PROFILE_SEGMENT_DEFS: Record<AgentProfileSegmentId, { label: string; icon: LucideIcon }> = {
+  persona: { label: "Persona", icon: Bot },
+  memory: { label: "Memory & Files", icon: Brain },
+};
 
 // ── Cost period (Day/Week/Month) — shared by the Properties panel's "Cost
 // today" stat and the Model tab's own identical row. summarize_usage
@@ -402,6 +440,16 @@ function StopAgentConfirmDialog({
 // every chat app uses — so a dedicated "Chat with this agent" button never
 // existed here in the first place rather than being deleted and replaced.
 //
+// 2026-08-19: on Chat itself, the identity block used to be inert (nowhere
+// left for it to lead — "already the destination"). It is now Telegram's
+// OTHER half of that same affordance: tap the name IN the chat to see the
+// agent's profile (PROFILE_SEGMENT_DEFS' own comment above has the
+// founder's words). Every other tab keeps its existing "return to Chat"
+// behavior unchanged — tapping the name from Work or from inside Configure
+// still means "take me back to the conversation", not "open the profile of
+// whatever I'm currently looking at"; only Chat itself gained a new
+// destination for a tap that used to go nowhere.
+//
 // Work is a PERSISTENT, visible header control, not a menu item — founder
 // correction, same day: the target user runs agents on behalf of OTHER
 // businesses, and for that person "chat with my own agent" is the least
@@ -432,6 +480,7 @@ function AgentDetailHeader({
   chatHref,
   workHref,
   configureHref,
+  profileHref,
   onOpenSessions,
   onAgentChanged,
 }: {
@@ -448,6 +497,7 @@ function AgentDetailHeader({
   chatHref: string;
   workHref: string;
   configureHref: string;
+  profileHref: string;
   onOpenSessions: () => void;
   onAgentChanged?: () => void;
 }) {
@@ -497,11 +547,18 @@ function AgentDetailHeader({
       <Link href={backHref} className="fleet-icon-btn fleet-chat-header-back" aria-label={`Back to ${backLabel}`}>
         <ArrowLeft size={16} strokeWidth={1.75} />
       </Link>
-      {/* On Chat itself there's nowhere for the identity to lead — it's
-          already the destination — so it stays static. Everywhere else it's
-          a real link back to Chat (see the block comment above). */}
+      {/* On Chat itself, the tap opens this agent's Profile — Telegram's
+          "tap the name" pattern (see the block comment above, 2026-08-19).
+          Everywhere else it's still the existing real link back to Chat. */}
       {activeTab === "chat" ? (
-        <span className="fleet-chat-header-identity-wrap">{identityInner}</span>
+        <Link
+          href={profileHref}
+          replace
+          className="fleet-chat-header-identity-wrap fleet-chat-header-identity-wrap--link"
+          aria-label={`Open ${agentLabel}'s profile`}
+        >
+          {identityInner}
+        </Link>
       ) : (
         <Link
           href={chatHref}
@@ -932,6 +989,10 @@ export function FleetAgentDetail({
   // already resolved, so this is true on first paint, not after a second
   // click — the sheet opens on the right section immediately.
   const sheetOpen = CONFIGURE_TAB_IDS.has(activeTab);
+  // Same rule, for the Profile sheet — isProfileTab (agent-profile-shape.ts)
+  // rather than a second inline Set, so the membership check and the
+  // segments actually rendered below can never disagree.
+  const profileOpen = isProfileTab(activeTab);
 
   // This route is always .../agents/[agentId]/[tab] (the only place this
   // component is mounted) — the last path segment IS the tab id, so a link
@@ -990,6 +1051,11 @@ export function FleetAgentDetail({
   useEffect(() => {
     if (sheetOpen) sheetRef.current?.focus();
   }, [sheetOpen]);
+  // Same for the Profile sheet.
+  const profileSheetRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (profileOpen) profileSheetRef.current?.focus();
+  }, [profileOpen]);
 
   // Content for the Properties overlay below (FleetRightPanel) — same
   // PanelSection/PanelRow shape the project page's own Properties panel
@@ -1231,6 +1297,7 @@ export function FleetAgentDetail({
         chatHref={tabHref("chat")}
         workHref={tabHref("work")}
         configureHref={tabHref(sheetOpen ? activeTab : CONFIGURE_GROUPS[0].tabs[0])}
+        profileHref={tabHref(profileOpen ? activeTab : defaultAgentProfileSegment(isMaster))}
         onOpenSessions={() => setPropertiesOpen(true)}
         onAgentChanged={onRenamed}
       />
@@ -1354,9 +1421,6 @@ export function FleetAgentDetail({
             {activeTab === "skills" && (
               <SkillsTab workspaceId={workspaceId} agentId={agentId} agent={agent} onSaved={onRenamed} />
             )}
-            {activeTab === "memory" && (
-              <MemoryTab workspaceId={workspaceId} agentId={agentId} agent={agent} onChat={() => onChat(agentId)} />
-            )}
             {activeTab === "channels" && (
               <ChannelsTab workspaceId={workspaceId} agentId={agentId} agent={agent} onChannelsChanged={refreshChannels} />
             )}
@@ -1368,6 +1432,91 @@ export function FleetAgentDetail({
             )}
             {activeTab === "hardware" && (
               <HardwareTab workspaceId={workspaceId} agentId={agentId} agent={agent} onSaved={onRenamed} />
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
+  // Profile sheet — see PROFILE_SEGMENT_DEFS' own comment above for the
+  // founder's words and the reasoning. Reuses the exact same dialog shell
+  // as configureSheet (agent-configure-backdrop/-sheet/-body/-content —
+  // see agent-profile-sheet.css's own header comment for why: the two
+  // sheets are never open at once, and the shell is already tuned —
+  // responsive breakpoints, backdrop, focus trap keydown handling — so
+  // there is nothing to gain from a second, parallel implementation. The
+  // identity header (avatar + name + status) is the one genuinely
+  // different piece, plus the segmented rail only appearing when there is
+  // more than one segment to pick between (a rail of one is worse than no
+  // rail — the same call already made for ProjectAgentsRail at one agent).
+  const profileSegments = planAgentProfileSegments(isMaster);
+  const profileGroups: GroupedRailGroup[] =
+    profileSegments.length > 1
+      ? [
+          {
+            id: "profile",
+            items: profileSegments.map((id) => {
+              const def = PROFILE_SEGMENT_DEFS[id];
+              return { id, label: def.label, icon: def.icon, href: tabHref(id) };
+            }),
+          },
+        ]
+      : [];
+
+  const profileSheet = profileOpen ? (
+    <div className="agent-configure-backdrop" onClick={closeSheet}>
+      <div
+        ref={profileSheetRef}
+        className="agent-configure-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${agent?.label || "Agent"} profile`}
+        tabIndex={-1}
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          // Same stopPropagation-before-window contract as configureSheet's
+          // own dialog root above — see that block's comment.
+          e.stopPropagation();
+          if (e.key === "Escape") {
+            e.preventDefault();
+            closeSheet();
+          }
+        }}
+      >
+        <div className="agent-configure-header">
+          <div className="agent-profile-identity">
+            <AgentSigil seed={agentId} size={36} />
+            <div style={{ minWidth: 0 }}>
+              <p className="agent-profile-identity-name">{agent?.label || "Unnamed agent"}</p>
+              <span className="agent-profile-identity-status">
+                <StatusDot tone={status.tone} size={6} />
+                {status.label}
+              </span>
+            </div>
+          </div>
+          <button type="button" className="fleet-detail-close" onClick={closeSheet} aria-label="Close">
+            <X size={16} strokeWidth={1.75} />
+          </button>
+        </div>
+        <div className="agent-configure-body">
+          {profileGroups.length > 0 && (
+            <GroupedRail groups={profileGroups} activeId={activeTab} ariaLabel="Agent profile" replace />
+          )}
+          <div className="agent-configure-content">
+            {activeTab === "persona" && !isMaster && agent && (
+              <PersonaEditor workspaceId={workspaceId} agentId={agentId} agent={agent} />
+            )}
+            {activeTab === "memory" && (
+              <div className="agent-profile-memory-files">
+                <div className="agent-profile-memory-pane">
+                  <MemoryTab workspaceId={workspaceId} agentId={agentId} agent={agent} onChat={() => onChat(agentId)} />
+                </div>
+                <div className="agent-profile-files-pane">
+                  <h3 className="agent-profile-files-heading">Files</h3>
+                  <ProfileFilesSection workspaceId={workspaceId} threadId={threadId} />
+                </div>
+              </div>
             )}
           </div>
         </div>
@@ -1391,6 +1540,7 @@ export function FleetAgentDetail({
         {inner}
       </div>
       {configureSheet}
+      {profileSheet}
     </>
   );
 }
@@ -1399,12 +1549,20 @@ export function FleetAgentDetail({
 //
 // Overview itself is gone (founder, 2026-08-13: "remove overview because
 // it's something that we genuinely don't need inside this agent"). This is
-// the part of it that survives, relocated: name, persona and schedule are
-// all set-once configuration a person would go looking for under Configure,
-// not glance at daily — the exact reasoning that already moved Model and
-// Capabilities off the top tab strip. The status sentence and the day-
-// grouped activity feed that used to sit alongside these did NOT move here;
-// see TABS' own comment above for why each was dropped rather than moved.
+// the part of it that survives, relocated: name and schedule are set-once
+// configuration a person would go looking for under Configure, not glance
+// at daily — the exact reasoning that already moved Model and Capabilities
+// off the top tab strip. The status sentence and the day-grouped activity
+// feed that used to sit alongside these did NOT move here; see TABS' own
+// comment above for why each was dropped rather than moved.
+//
+// Persona moved OUT of here a second time on 2026-08-19, into its own
+// Profile-sheet segment (PersonaEditor's own component definition below is
+// unchanged — same fields, same PATCH, same save — just rendered from
+// profileSheet now instead of from this function). "Who this agent is" and
+// "how it operates" turned out to be different questions once there was a
+// dedicated place to ask the first one; see PROFILE_SEGMENT_DEFS' comment
+// above for the founder's own words.
 function GeneralTab({
   workspaceId,
   agentId,
@@ -1422,9 +1580,6 @@ function GeneralTab({
     <div className="fleet-detail-overview">
       {agent && (
         <AgentTitle workspaceId={workspaceId} agentId={agentId} label={agent.label || ""} onRenamed={onRenamed} />
-      )}
-      {!isMaster && agent && (
-        <PersonaEditor workspaceId={workspaceId} agentId={agentId} agent={agent} />
       )}
       {!isMaster && agent && (
         <ScheduleSection workspaceId={workspaceId} agentId={agentId} />

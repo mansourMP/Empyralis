@@ -1,0 +1,135 @@
+/* Agent Profile sheet — Telegram's "tap the name to see who you're
+   talking to" pattern (founder, 2026-08-19). Reuses the exact same
+   dialog shell as agent-configure-sheet.css (.agent-configure-backdrop/
+   -sheet/-body/-content) rather than a parallel set of near-identical
+   rules — the two sheets are never open at once, and any future tuning of
+   the shell (breakpoints, shadow, blur) should apply to both without
+   being copy-pasted twice. This file only adds what's actually different:
+   the identity header (avatar + name + status instead of a plain title)
+   and the Memory+Files stacking inside the "Memory & Files" segment.
+   Same var(--…) token discipline as agent-configure-sheet.css for the
+   same reason — untouched by the concurrent dark-mode pass. */
+
+.agent-profile-identity {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.agent-profile-identity-name {
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+
+.agent-profile-identity-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+/* The "Memory & Files" segment stacks two independently-scrollable
+   regions rather than letting MemoryTab's own `.fleet-memory-browser
+   { height: 100% }` claim the whole pane — without a bounded height here
+   it fills every pixel of .agent-configure-content and the Files list
+   below it is pushed out of view entirely (measured, not guessed). 420px
+   is enough to show several memory files without the pane reading as a
+   cramped island; Files gets whatever's left, scrolling on its own once
+   the list is longer than that. */
+.agent-profile-memory-files {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.agent-profile-memory-pane {
+  height: 420px;
+  min-height: 0;
+  display: flex;
+}
+
+.agent-profile-files-pane {
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+
+.agent-profile-files-heading {
+  margin: 0 0 10px;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.agent-profile-files-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+.agent-profile-files-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.agent-profile-file-row {
+  border-radius: 8px;
+}
+
+.agent-profile-file-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  text-decoration: none;
+  color: inherit;
+}
+
+.agent-profile-file-link:hover {
+  background: var(--bg-inset);
+}
+
+.agent-profile-file-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  background: var(--bg-inset);
+  color: var(--text-secondary);
+}
+
+.agent-profile-file-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1px;
+}
+
+.agent-profile-file-name {
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-profile-file-sub {
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+}
