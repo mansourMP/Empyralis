@@ -960,8 +960,22 @@ const NOISE_EVENT_CLASSES = ["system_activity"];
  *  rail's Inbox count uses this so its number is a real, backend-computed
  *  count of what's new, not the fetch page size dressed up as one. The
  *  Inbox page itself omits it (wants the full recent feed regardless of
- *  read state). */
-export function useWorkspaceActivity(workspaceId: string, limit = 8, sinceCreatedAt?: string | null) {
+ *  read state).
+ *
+ *  eventClass (optional): server-side `event_class=` filter — the Inbox's
+ *  "needs you" view and the rail's own blocked-run badge count both want
+ *  ONLY `blocked_action` rows (run_failed/machine_revoked/machine_
+ *  enrollment_failed — see activity_ledger_service.record_notification_
+ *  activity's classification), never the full noisy feed filtered
+ *  client-side. When set, `exclude_event_class` is omitted — the two are
+ *  independent AND'd filters server-side, so asking for exactly one class
+ *  makes excluding a different one redundant. */
+export function useWorkspaceActivity(
+  workspaceId: string,
+  limit = 8,
+  sinceCreatedAt?: string | null,
+  eventClass?: string | null,
+) {
   const [events, setEvents] = useState<WorkspaceActivityEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -969,8 +983,11 @@ export function useWorkspaceActivity(workspaceId: string, limit = 8, sinceCreate
   const refresh = useCallback(async () => {
     try {
       const since = sinceCreatedAt ? `&since_created_at=${encodeURIComponent(sinceCreatedAt)}` : "";
+      const classFilter = eventClass
+        ? `&event_class=${encodeURIComponent(eventClass)}`
+        : `&exclude_event_class=${NOISE_EVENT_CLASSES.join(",")}`;
       const res = await fleetAuthorizedFetch(
-        `/api/activity/timeline?workspace_id=${encodeURIComponent(workspaceId)}&limit=${limit}&exclude_event_class=${NOISE_EVENT_CLASSES.join(",")}${since}`,
+        `/api/activity/timeline?workspace_id=${encodeURIComponent(workspaceId)}&limit=${limit}${classFilter}${since}`,
         { credentials: "include" },
       );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -983,7 +1000,7 @@ export function useWorkspaceActivity(workspaceId: string, limit = 8, sinceCreate
     } finally {
       setLoading(false);
     }
-  }, [workspaceId, limit, sinceCreatedAt]);
+  }, [workspaceId, limit, sinceCreatedAt, eventClass]);
 
   useEffect(() => {
     refresh();
@@ -1040,6 +1057,83 @@ export function markInboxSeenNow(workspaceId: string) {
   } catch {
     /* best-effort */
   }
+}
+
+// ── Per-user notifications (MAN-146) ────────────────────────────────────────
+// The real, recipient-scoped feed task_notification_service.py's own module
+// docstring says "a future frontend pass should read from THIS" — this is
+// that pass. GET /fleet/notifications had zero frontend callers before this;
+// see task_notification_service.py for why it exists (a mention/assignment/
+// comment addressed at exactly one person, never broadcast to the whole
+// workspace the way the activity ledger is).
+export type FleetNotification = {
+  id: string;
+  source_event_type: "task_mention" | "task_assigned" | "task_comment" | string | null;
+  task_id: string | null;
+  comment_id: string | null;
+  actor_type: string | null;
+  actor_id: string | null;
+  body: string;
+  deep_link: string | null;
+  read_at: string | null;
+  is_read: boolean;
+  created_at: string | null;
+};
+
+/** unreadOnly defaults true — the "needs you" surfaces (Inbox, the rail
+ *  badge) only ever want notifications nobody has acted on yet; a caller
+ *  wanting the full history (a future "all notifications" view) passes
+ *  false explicitly. */
+export function useFleetNotifications(workspaceId: string, unreadOnly = true, limit = 50) {
+  const fetcher = useCallback(async (): Promise<FleetNotification[]> => {
+    if (!workspaceId) return [];
+    const res = await fleetAuthorizedFetch(
+      `/api/w/${encodeURIComponent(workspaceId)}/fleet/notifications?limit=${limit}&unread_only=${unreadOnly ? "true" : "false"}`,
+      { credentials: "include" },
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    // The route answers {ok:false,error,notifications:[]} with HTTP 200 on a
+    // service-level failure (routes_fleet.fleet_list_notifications) — an
+    // empty array alone would read as "no notifications" when it actually
+    // means "couldn't ask". Throwing here is what lets the shared-resource
+    // cache's own error state (and the page's error-vs-empty branch) tell
+    // the two apart, the same posture every other fetcher in this file
+    // already takes on its own {ok:false} shape.
+    if (data?.ok === false) throw new Error(getErrorMessage(data, "Could not load notifications"));
+    return Array.isArray(data.notifications) ? (data.notifications as FleetNotification[]) : [];
+  }, [workspaceId, unreadOnly, limit]);
+
+  const { data: notifications, loading, error, refresh } = useSharedPolledResource<FleetNotification[]>(
+    `fleet-notifications:${workspaceId}:${unreadOnly ? "unread" : "all"}`,
+    fetcher,
+    30_000,
+    [],
+  );
+
+  return { notifications, loading, error, refresh };
+}
+
+/** Marks exactly one of the caller's own notifications read (the backend's
+ *  WHERE clause is recipient-scoped — see task_notification_service.
+ *  mark_notification_read — so there is nothing to check client-side beyond
+ *  passing the id through). Refreshes both the unread and all-notification
+ *  caches for this workspace so a read notification disappears from the
+ *  Inbox on the next render rather than waiting for the 30s poll. */
+export async function markFleetNotificationRead(workspaceId: string, notificationId: string): Promise<void> {
+  const res = await fleetAuthorizedFetch(
+    `/api/w/${encodeURIComponent(workspaceId)}/fleet/notifications/${encodeURIComponent(notificationId)}/read`,
+    {
+      method: "POST",
+      credentials: "include",
+      headers: buildCookieAuthHeaders("POST"),
+    },
+  );
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data?.ok === false) {
+    throw new Error(apiErrorMessage(data, `Could not mark this notification read (HTTP ${res.status})`));
+  }
+  refreshSharedResources(`fleet-notifications:${workspaceId}:`);
 }
 
 export type WorkspaceStatusStrip = {

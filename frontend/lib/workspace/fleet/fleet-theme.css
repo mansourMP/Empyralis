@@ -1837,6 +1837,7 @@ a.fleet-breadcrumb:hover {
   background: transparent;
   color: var(--text-primary);
   text-align: left;
+  text-decoration: none; /* rows are <button>s in Activity, real <a> (next/link) in Needs-you */
   font: inherit;
   cursor: pointer;
 }
@@ -1846,6 +1847,19 @@ a.fleet-breadcrumb:hover {
 .fleet-inbox-row:focus-visible {
   outline: 2px solid var(--accent-ring);
   outline-offset: -2px;
+}
+/* A Needs-you row with no resolvable href (see inbox-needs-you.ts: never a
+   link to nowhere) renders as plain text — no pointer cursor, no hover
+   highlight suggesting a click does something it doesn't. */
+.fleet-inbox-row--static {
+  cursor: default;
+}
+.fleet-inbox-row--static:hover {
+  background: transparent;
+}
+.fleet-inbox-row-detail {
+  color: var(--text-muted);
+  font-weight: 400;
 }
 
 /* Unread — a plain filled dot. Read — the same dot, hollow, so the row's
@@ -1929,6 +1943,35 @@ a.fleet-breadcrumb:hover {
   font-variant-numeric: tabular-nums;
 }
 .fleet-inbox-trace-row-title { color: var(--text-secondary); }
+
+/* Needs-you tab: a plain padded column (`.fleet-content`, not the
+   master-detail `--split` shape Activity uses), so `.fleet-inbox-list`'s
+   own master-detail geometry (fixed 30% width, 320px floor, right border,
+   fixed height + its own scroll) has to be reset back to a normal
+   full-width, natural-height block here — dense inside a group, airy
+   between groups (craft doctrine). */
+.fleet-inbox-needsyou {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+.fleet-inbox-needsyou-section .fleet-inbox-list {
+  flex: none;
+  min-width: 0;
+  height: auto;
+  overflow: hidden; /* clips rows to the rounded corners below */
+  border-right: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+}
+.fleet-inbox-needsyou-section .fleet-inbox-list .fleet-inbox-row:last-child {
+  border-bottom: none;
+}
+.fleet-inbox-section-error {
+  font-size: 13px;
+  color: var(--warning-text);
+  padding: 10px 0 12px;
+}
 
 /* The relative anchor the properties drawer overlays against — NOT a flex
    row splitting width with a permanent sibling. The main content sheet is
