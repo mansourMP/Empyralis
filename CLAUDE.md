@@ -5128,3 +5128,71 @@ Blast radius measured, not assumed: exactly one agent's behavior changes.
 And Sage's own `hardware_access` is never stamped (its turn resolves
 no specialist context), so setting Sage to "Cloud only" does not yet disable
 its tools; it still cannot borrow, because step 3 gates on ownership.
+
+## Windows is out. macOS + Linux only (2026-08-19)
+
+**Founder's decision, final, do not re-litigate:** *"ship macOS and of course
+Linux, because VPS is Linux, fuck Windows we are not going toward that."*
+
+```
+macOS   the desktop app + the founder's own machine
+Linux   every Agent Computer VPS, and the desktop app as a fast follow
+Windows NOT SUPPORTED. not "later", not "partial" — out of scope.
+```
+
+This kills the work scoped that same day (weeks of effort, blocked on nobody
+owning a Windows box to verify against — Session-0 isolation vs Docker
+Desktop, symlink-vs-junction for self-update, an unwritten supervisor).
+What SURVIVES that scoping pass and stays on main, deliberately:
+
+- `.github/workflows/release-gateway-windows.yml` — `workflow_dispatch`-only,
+  never on push. It is a verified-working cross-package build and costs
+  nothing to keep; it is NOT a supported channel and its own header says so.
+- `shell/docker-autostart.ts`'s honest platform naming ("Windows" not
+  "win32" in customer prose) — correct regardless of support status, since
+  the message is what a person on any unsupported platform reads.
+
+`scripts/install_agent_computer_windows_service.ps1` is DEAD CODE and should
+be deleted on sight: it builds an `empyralis-supervisor` Rust binary that
+commit `9e70d4b4` ("Phase U: product refocus — kill supervisor") removed, and
+it requires a full git checkout rather than being a customer installer.
+
+## Telegram is the interaction model, and the reason is NOT the layout (2026-08-19)
+
+The founder keeps holding Telegram up as the bar — *"once it's connected to
+this platform it just works. It just works so shamelessly that it's just
+perfect."* He proposes copying its shape: chat is the main surface, and
+tapping the name in the header opens a PROFILE holding identity, the system
+prompt, media, files — with agent MEMORY sitting alongside media/files.
+
+**Adopt the shape, but understand what actually makes Telegram feel that
+way, because copying the layout without it changes nothing.** What makes a
+messenger feel perfect is a RELIABILITY CONTRACT, not a screen:
+
+```
+a message you send is never lost, even if you close the app mid-send
+history is always there, instantly, without a spinner
+closing the window does not stop anything that was already happening
+you never lose your place
+```
+
+As of this writing Empyralis chat violates every one of those (the web turn
+runs inline in the HTTP request and dies with the tab; the SSE stream
+delivered zero bytes for 90s; navigating away showed a permanent skeleton).
+**Order matters: the contract first, the profile second.** A Telegram-shaped
+UI on top of a chat that loses your work is worse than today, because it
+raises the promise without raising the behaviour.
+
+On the profile itself, one correction to the analogy that must not be
+cargo-culted: Telegram's profile describes a STATIC entity someone else
+made, and its tabs are MEDIA TYPES (Media/Files/Links/Music). An agent is
+something the owner CONFIGURES, so its profile is an editing surface, and
+its tabs are not media types — the honest equivalents are **persona/system
+prompt, memory, files, and what it has done**. Same gesture (name in header
+-> the thing behind the name), different contents. Copying the tab names
+would be imitating the surface of the surface.
+
+Corollary the founder also raised: **agent creation is too heavy** (project,
+name, model, placement, "tons of things") measured against how effortless
+adding a bot in Telegram is. Reducing that is real work, not polish — but it
+sits behind the reliability contract too.
