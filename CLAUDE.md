@@ -5329,3 +5329,50 @@ traces — the real `surface=sage` one carrying provider/model/events, and a
 `surface=web` shell with empty provider/model and `finished_at` NULL.
 CLAUDE.md already flags this duplicate-shell trace as unfixed; this is a
 direct observation of it on production, not a code reading.
+
+## The 500x slowdown is China, not the product (2026-08-19)
+
+Measured from a real US vantage point, not read off a hypothesis. Provisioned
+two throwaway DigitalOcean droplets (SFO — same region as production, and
+NYC — cross-country US), paired the SFO one as a real Agent Computer through
+the product's own pairing flow, ran a real turn from a fresh throwaway
+account. Both droplets destroyed and confirmed absent via `GET /v2/droplets`
+afterward; production `/health` 200 before and after; no founder data touched.
+
+```
+                            founder (China)        US customer (SFO droplet)
+ICMP to production ......   100% packet loss        0%, 0.5-2.4ms
+TLS handshake alone .....   1.7-2.3s                 ~50-70ms
+GET /health total ........  3,456-4,462ms             0.92-1.45s
+hardware round trip only .  ~0.35s is real work,      0.469s — ALL of it is
+                            ~7.75s is WAN tax          real work, ~zero WAN tax
+```
+
+**100% ICMP packet loss is not distance, it's interference.** Ordinary
+distance latency degrades gracefully; it does not drop every ping. That
+number is the signature of the GFW filtering traffic, not the product being
+slow. The `/health` figure disentangles this cleanly: a same-region US
+customer's 0.92-1.45s for that endpoint is ALREADY almost entirely
+backend/Cloudflare processing time — nearly identical to hitting production
+over pure loopback (0.9-1.4s). For a US customer the network's contribution
+is close to zero. For the founder in China, the network **is** the cost.
+
+**Verdict: do not spend launch-window effort chasing latency the product
+does not actually have.** The founder's own experience is real and
+frustrating, but it is not representative of what he is selling. A customer
+with a US-placed Agent Computer pays almost no network tax on either leg.
+
+This does not make the batching work (`feat/batched-hardware-dispatch`,
+merged) wasted — round-trip count still matters for ANY customer whose box
+is far from the cloud (which will be common — this is a global product) and
+the on-machine win (N containers -> 1, shared cwd/env) stands on its own.
+But do not chase network latency further without first checking who is
+actually far from the box: for the founder specifically, the fix is not in
+this codebase at all — it's a China-side network problem (VPN/route
+selection) has nothing to fix here.
+
+One secondary finding, not a bug: a droplet's TCP `connect` time can be far
+faster than its ICMP round-trip to the same origin IP once Cloudflare is in
+front — TLS/HTTP hits a nearby edge PoP, ICMP goes straight to origin
+(Cloudflare doesn't proxy ICMP). "Ping the origin" and "connect to the site"
+measure different paths; do not conflate them when reading a future probe.
