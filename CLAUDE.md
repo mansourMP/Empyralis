@@ -3551,8 +3551,40 @@ data, which plausibly carries `email`) — Cloudflare's scraper is not known
 to reliably exempt `<script>`-embedded JSON from its regex. This is a
 **Cloudflare dashboard toggle** (zone `empyralis.ai` → Rules/Configuration
 → **Scrape Shield → Email Address Obfuscation**, turn OFF), not something
-fixable in this repo — the founder is the only one who can flip it. Left
-unflipped as of this writing; only he can act on it. Whether it is ALSO a
+fixable in this repo — the founder is the only one who can flip it.
+
+**FLIPPED AND VERIFIED OFF, 2026-08-19.** Done in the founder's own
+logged-in dashboard, at his explicit instruction. In the CURRENT Cloudflare
+dashboard this setting no longer lives under a "Scrape Shield" nav item at
+all — it is a card in the searchable list at **Security → Settings**
+(zone → Security → Settings, search "obfusc"), which is why the older
+directions above lead nowhere. Confirmed at the source rather than from
+the toggle's pixels, because that list is VIRTUALIZED (only on-screen
+cards exist in the DOM, so a reload plus a DOM read finds nothing and
+proves nothing):
+
+```
+GET /api/v4/zones/f186dff85e419cc25b5fe4012066a5dc/settings/email_obfuscation
+  before ......... value "on"   (read off the live checkbox: checked === true)
+  after .......... value "off"
+  modified_on .... 2026-08-19T09:29:42Z
+```
+
+Zone id for `empyralis.ai` is `f186dff85e419cc25b5fe4012066a5dc`; account id
+is `76e485cbfb611ff8caa5c1d2afa71890`. A same-origin `fetch` from a
+logged-in dashboard tab against `/api/v4/...` is the honest way to read or
+confirm any zone setting — it needs no API token and cannot be fooled by a
+UI that has re-rendered optimistically.
+
+NOT verified by this pass, and do not claim it was: whether turning this
+off also resolves the React #418 hydration error. `curl` on `/login`
+returns zero `email-decode`/`cfemail` occurrences, but `/login` never
+carried an email to obfuscate — the injection was observed on
+AUTHENTICATED pages, whose RSC flight payload serializes the account
+email, and those cannot be fetched without the founder's session. If the
+hydration error persists on a logged-in page, the remaining suspect is a
+genuine app-side SSR/CSR mismatch, to be reproduced against a seeded local
+account. Whether it is ALSO a
 contributing cause of the React #418 hydration error (by rewriting HTML
 the browser parses into something that no longer matches what Next.js's
 server render produced) is plausible and would be consistent with the
@@ -4039,11 +4071,25 @@ never exposed to this bug and needs no fix.
   per `docs/DEPLOY-RUNBOOK.md`, a Python change needs a merge plus an
   explicit restart there, and neither this session nor the one that fixed
   Bug B had production access to confirm the restart happened.
-- **Whether the Cloudflare "Cache Everything" edge rule still exists on the
-  zone is invisible from the wire.** A probe returning
-  `cf-cache-status: DYNAMIC` is consistent with the rule being removed,
-  changed, or simply not matching that particular request — it is not
-  proof the rule is gone.
+- ~~**Whether the Cloudflare "Cache Everything" edge rule still exists on
+  the zone is invisible from the wire.**~~ **ANSWERED 2026-08-19: the rule
+  is GONE.** Read from the dashboard session directly, which is the only
+  vantage point that can see it (a `cf-cache-status: DYNAMIC` probe never
+  could — it is consistent with removed, changed, or simply not matching):
+
+  ```
+  GET /api/v4/zones/f186dff85e419cc25b5fe4012066a5dc/pagerules   → []  (zero)
+  GET /api/v4/zones/f186dff85e419cc25b5fe4012066a5dc/rulesets    → 3, phases:
+        http_request_sanitize | http_request_firewall_managed | ddos_l7
+        ← all default managed. NO cache phase ruleset exists.
+  ```
+
+  Both surfaces a "Cache Everything" rule could live on are empty, so the
+  2026-08-13 stale-installer mechanism cannot recur from this cause. The
+  content-hash `?v=` cache-buster added then is still the right defence
+  and stays. Note the check must cover BOTH surfaces — page rules are the
+  legacy home, cache rulesets the modern one, and finding one empty says
+  nothing about the other.
 - **Cloudflare's cache is per-PoP.** A stale copy may still sit in
   datacenters other than the one any single probe's anycast route happened
   to reach, even after the rule is fixed and even after one probe comes
