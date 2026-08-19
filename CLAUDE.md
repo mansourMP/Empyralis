@@ -934,6 +934,28 @@ that the debit primitive has exactly one call site and that the two seam
 call sites are mutually exclusive by control flow — behavioural tests can
 only cover the engines that exist today.
 
+**The billing half of that gap is fixed. A SIBLING gap at the same seam is
+not, and is why the legacy engine still cannot be deleted.** Found the same
+day (2026-08-09, `investigate/single-turn-engine`, folded in here rather
+than kept as its own branch): `direct_chat_generation_service.py`'s
+`persist_direct_chat_memory_best_effort`/`persist_direct_chat_transcript_
+best_effort` — fact extraction, the daily-log summary, the session
+transcript — are called only from that module, never from
+`sage_agent_runtime_service.py`. Grepped as of 2026-08-19: still zero call
+sites for either function outside `direct_chat_generation_service.py`. So a
+turn on the SDK engine (the production default) writes thread history via
+`thread_service.record_user_turn`/`record_assistant_turn` — which DOES run
+on both engines, do not mistake it for the memory pipeline — but never runs
+the memory pipeline itself. "Empyralis is the owned-context layer" is not
+yet true on the engine that actually runs. Also still open, same grep pass:
+`reasoning_effort` has zero references in `openai_compat_adapter.py`, so it
+is silently dropped for every adapter-routed provider (OpenAI/Gemini/xAI) on
+the SDK engine — the Fleet Model tab's reasoning-effort picker is a dead
+control for those agents; the legacy engine honours it natively. Move both
+onto the shared post-loop path before ever deleting legacy —
+`EMPYRALIS_FORCE_LEGACY_ENGINE` (MAN-312) and the per-agent legacy pin exist
+precisely because legacy is still the only engine that carries these two.
+
 **Stale string matching.** An error bucket matched `"ai limit"`; the message
 was reworded to `"AI usage limit reached"` and users got a generic "Something
 went wrong" for five weeks. Match on stable codes, never on prose.
@@ -1520,6 +1542,62 @@ that pass only because the developer's real vault key file exists — on a
 clean box they hit `runtime_kernel_unavailable`. Left out of the determinism
 fix deliberately so a pollution fix does not arrive disguised as a stability
 one; it needs its own change and its own full-suite measurement.
+
+**`setup_kind="oauth_or_app_install"` means TWO doors, and treating it as
+one suppressed a channel that works.** Found and fixed 2026-08-19, folded in
+from `feat/channel-connect-ux` (branch deleted — its own UI component,
+`ChannelGroupPolicyPanel.tsx`, was superseded by the later card-grid/doors
+rewrite documented elsewhere in this file, but this backend finding was
+still real and undocumented anywhere). `connection_catalog_service.
+_oauth_setup_unconfigured` gated EVERY connection carrying that setup_kind
+on `oauth_connection_configured()`, i.e. on a deployment-level OAuth
+client_id/secret being set — correct for a connection whose only real door
+IS OAuth, wrong for one that also has a genuine non-OAuth door. `discord_bot`
+is exactly that case: its real setup path (`FleetAgentDetail.tsx`'s
+`byo_bot` flow, a pasted bot token) needs no OAuth app at all, and Discord is
+not one of the self-configuring dynamic-client-registration providers — so
+on any deployment without `DISCORD_CLIENT_ID`/`DISCORD_CLIENT_SECRET` set,
+`setup_available` was forced `False` and the UI told the customer OAuth
+credentials were missing, for a door that was never going to use them.
+`github` carries the identical `setup_kind` label but has NO app_install
+path actually wired anywhere in this codebase (grepped: zero `GITHUB_APP_*`
+references) — OAuth is genuinely its only door today, so it must stay
+gated, which is why the fix is a per-connection exemption
+(`_OAUTH_OR_APP_INSTALL_WITH_NO_OAUTH_ALTERNATE_DOOR = {"discord_bot"}`),
+never a blanket removal of `oauth_or_app_install` from the gated set — that
+would have traded one silent-unavailability bug for a silent
+looks-available-but-isn't one on GitHub. Verified red-before/green-after
+with two new tests in `test_connection_catalog_service.py`.
+
+Same pass, still open, NOT fixed (a display gap, not a suppression bug):
+`routes_fleet.fleet_agent_channels` computed `health_status`/`display_state`/
+`last_error` via `connection_catalog_service.status_items()` but never
+forwarded them to the frontend — so even a channel correctly reported as
+unavailable gave the customer no reason why. Now forwarded as
+`healthStatus`/`displayState`/`lastError` (purely additive fields; no
+existing consumer read the missing ones, so nothing regressed by adding
+them) — a frontend consumer showing the reason on the channel card is a
+separate, unbuilt follow-up.
+
+Also still open, unverified against the box mechanism (recorded, not
+independently re-derived this pass): a gateway-published health snapshot
+(`personal_channel_health` in registration metadata, written BY the box)
+goes stale the moment the gateway itself goes offline and keeps asserting
+whatever it last said — any reader must check the gateway is online FIRST
+or it can paint "Connected" over a machine that's down. Same class of
+dishonesty CLAUDE.md's outcome-honesty law names elsewhere, just pointed at
+a channel pill instead of a mutation result.
+
+Same source branch, one more worth keeping so nobody "fixes" it back:
+**Apple licenses no Messages icon to third parties, so `imessage.svg` being a
+neutral monogram (not Apple's speech-bubble mark) is deliberate, not a
+missing asset.** Their guidelines forbid using any Apple-owned icon without
+an express written trademark licence and forbid anything "confusingly
+similar" — their only published Messages brand assets belong to the separate
+Apple Messages for Business programme, which this product's personal-account
+iMessage bridge is not. Confirmed still true on main: `frontend/public/
+brand-assets/channels/imessage.svg` is a plain green rounded-square glyph,
+not Apple's bubble.
 
 **Branches whose work gets redone on main.** Nine branches were found with
 real commits, all superseded by the same fixes re-implemented directly on
@@ -2856,6 +2934,28 @@ runtime now refuses to boot a dev/test/local process without it
 (`server_modules/preflight.py`'s `_check_local_stack_database_url`). Never
 set it by copying a value you found somewhere; if you don't know what it
 should be, ask rather than guess.
+
+**On a truly empty database, `migrations/*.sql` alone will not bootstrap —
+most base tables don't come from there.** `users`, `tenants`, `projects`,
+`workspace_agent_installs`, and more are created lazily by
+`_ensure_*_tables()` helpers scattered across `server_modules/*.py`
+(`control_plane_repository.py`, `auth.py`, ...) the first time request-path
+code touches them — not by anything under `migrations/`, which is mostly
+ALTERs and RLS policies layered on top of tables it assumes already exist.
+So on a brand-new database, `migrations/enable_rls.sql` (and everything
+alphabetically after it that calls the `empyralis_rls_scope_match()`
+function it defines) fails outright, and everything before it that touches
+`tenants`/`projects`/etc. fails too, because nothing has created them yet.
+The working order is: **boot once (it will crash in
+`preflight._check_postgres`, typically "workspace_agent_installs is missing
+stage_4b columns" — that's expected, its job here is only to run enough
+request-path code to lazily create the base tables) → apply
+`migrations/*.sql` in two passes (the second pass picks up
+everything that needed `enable_rls.sql`'s function and failed the first
+time purely on ordering) → boot again, which should now pass preflight
+cleanly.** `fix_rls_function_ownership.sql` will keep failing locally
+regardless — it needs the `empyralis_app` role, which only exists in
+production — and that's fine to ignore for a disposable local stack.
 
 **A test may never reach a live LLM provider.** Enforced in
 `server_modules/tests/conftest.py`, sibling to the `DATABASE_URL` guard and

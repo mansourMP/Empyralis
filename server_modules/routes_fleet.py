@@ -2713,6 +2713,18 @@ async def fleet_agent_channels(
                 "nextAction": item.get("next_action") or "connect",
                 "runtimeUsable": bool(item.get("runtime_usable")),
                 "setupAvailable": bool(item.get("setup_available")),
+                # status_items() already computes all three; they were simply
+                # not forwarded, so the Channels grid could say a channel was
+                # unavailable but never WHY, and a channel that had genuinely
+                # broken (Discord's live-socket check, an OAuth app the
+                # deployment never configured, a local bridge reporting an
+                # error) was indistinguishable from one merely not set up yet.
+                # health_status/last_error are the only place that reason
+                # exists; display_state is the backend's own already-resolved
+                # verdict, forwarded so the client cannot invent a fifth one.
+                "healthStatus": item.get("health_status") or "",
+                "displayState": item.get("display_state") or "",
+                "lastError": item.get("last_error") or None,
             })
 
         # Slack's per-agent binding is a specific channel id within the

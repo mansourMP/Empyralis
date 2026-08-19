@@ -1023,22 +1023,33 @@ export function WorkTab({
     );
   }
 
+  // ONE empty state, not two. This used to fall through into the two-pane
+  // split with BOTH sides independently rendering their own "nothing here"
+  // copy — a left "No conversations yet" box beside a right "you'll watch
+  // what it does here" box, two panels explaining the same absence in
+  // different words. Short-circuiting here means the split (and its
+  // right-pane "Select a conversation" fallback further down) only ever
+  // renders once there is at least one thread to show or select.
+  if (threads.length === 0) {
+    return (
+      <div className="fleet-page-state">
+        <InboxIcon size={22} strokeWidth={1.75} />
+        <div className="fleet-page-state-title">No conversations yet</div>
+        <div className="fleet-page-state-body">
+          When {agentName} handles a conversation, you’ll watch it here — every channel, step by step.
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="fleet-work-root">
       <div className="fleet-work-split">
           <div className="fleet-work-list">
             <div className="fleet-work-stream-header">
               Work stream
-              {threads.length > 0 ? <span className="fleet-work-stream-header-count">· {threads.length}</span> : null}
+              <span className="fleet-work-stream-header-count">· {threads.length}</span>
             </div>
-            {threads.length === 0 ? (
-              <div className="fleet-work-list-empty">
-                <div className="fleet-work-list-empty-title">No conversations yet</div>
-                <div className="fleet-work-list-empty-desc">
-                  When {agentName} handles conversations, they’ll appear here — every channel, in one place.
-                </div>
-              </div>
-            ) : null}
             {unreadCount > 0 && (
               <div className="fleet-work-list-live" aria-live="polite">
                 <span className="fleet-work-conv-dot" /> {unreadCount} new
@@ -1127,10 +1138,11 @@ export function WorkTab({
                 <ActivityTimeline rows={activityRows} />
               </>
             ) : (
+              // threads.length is always > 0 here — the empty-state early
+              // return above already handled the zero-thread case, so this
+              // only ever means "a thread exists but none is selected yet."
               <div className="fleet-page-state-body" style={{ padding: 20 }}>
-                {threads.length === 0
-                  ? "When this agent handles a conversation, you’ll watch what it does here — step by step."
-                  : "Select a conversation to see its activity."}
+                Select a conversation to see its activity.
               </div>
             )}
           </div>

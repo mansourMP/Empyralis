@@ -144,6 +144,20 @@ const TERMINAL_RUN_STATUSES: &[&str] = &[
     "terminated",
     "expired",
     "archived",
+    // 2026-08-13: the MAN-108 widening above transcribed Python's list BY
+    // HAND and dropped this one. server_modules/shared.py's
+    // TERMINAL_RUN_STATUSES is {completed, failed, timeout,
+    // waiting_for_input, stopped, cancelled} -- and a run really does reach
+    // it (worker_dispatch_service.py:703 sets exactly this status on a run
+    // that pauses for input). So archiving such a run still fell into
+    // archive_non_terminal_run_requires_review: MAN-306's symptom, surviving
+    // in the one status the fix for MAN-306 forgot to copy. A hand-copied
+    // list goes stale the moment the source changes and says nothing when it
+    // does -- see the drift test in
+    // server_modules/tests/test_kernel_terminal_status_drift.py, which reads
+    // BOTH lists from their own files so the expected set and the actual set
+    // can never come from the same place again.
+    "waiting_for_input",
 ];
 
 const SESSION_STATUSES: &[&str] = &[

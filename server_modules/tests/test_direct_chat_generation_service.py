@@ -353,6 +353,112 @@ class DirectChatGenerationServiceTests(unittest.TestCase):
         self.assertEqual(events[-1]["payload"]["reply"], "Checking now.")
         self.assertTrue(events[-1]["payload"]["response_leak_guard"]["redacted"])
 
+    def test_stream_provider_backed_direct_chat_executes_dsml_recovered_hardware_tool_call(self) -> None:
+        # MAN-308: this is what the FIXED provider layer
+        # (iter_openai_compatible_chat_events in orion_local_worker_llm.py,
+        # via extract_dsml_tool_calls_from_text) now hands up after
+        # recovering a deepseek-reasoner turn that emitted its tool call as
+        # DSML markup in message.content instead of populating the
+        # structured `tool_calls` field on the API response — see
+        # test_orion_local_worker_llm_direct_tools.py's
+        # test_iter_openai_compatible_chat_events_parses_dsml_tool_call_when_
+        # structured_tool_calls_missing for proof of that recovery at the
+        # provider layer. This test covers the other half of MAN-308's
+        # verification requirement: once a tool call reaches THIS service,
+        # it must actually execute (reach execute_single_direct_tool_call)
+        # and be recorded in the turn's tool step stream, not merely be
+        # parsed and then dropped again.
+        stream_rounds = iter(
+            [
+                [
+                    {
+                        "type": "result",
+                        "reply": "Checking now.",
+                        "usage_masked": {"provider": "deepseek"},
+                        "provider": "deepseek",
+                        "model": "deepseek-reasoner",
+                        "attempted_providers": "deepseek",
+                        "error": "",
+                        "tool_calls": [
+                            {
+                                "name": "hardware__action",
+                                "arguments": {"action": "shell.execute", "command": "whoami"},
+                            }
+                        ],
+                    },
+                ],
+                [
+                    {
+                        "type": "result",
+                        "reply": "Ran it -- the output was 'agent-user'.",
+                        "usage_masked": {"provider": "deepseek"},
+                        "provider": "deepseek",
+                        "model": "deepseek-reasoner",
+                        "attempted_providers": "deepseek",
+                        "error": "",
+                        "tool_calls": [],
+                    }
+                ],
+            ]
+        )
+        services = self._services(stream_events=[])
+        services.generate_chat_reply_stream_with_provider_fallback = lambda **kwargs: iter(next(stream_rounds))
+        executed: list[dict] = []
+
+        def _execute_single_direct_tool_call(**kwargs):
+            executed.append(dict(kwargs.get("tool_call") or {}))
+            return '{"status": "ok", "output": "agent-user\\n"}'
+
+        services.execute_single_direct_tool_call = _execute_single_direct_tool_call
+
+        events = list(
+            direct_chat_generation_service.stream_provider_backed_direct_chat(
+                services=services,
+                context={"provider": "deepseek"},
+                metadata={"provider": "deepseek", "model": "deepseek-reasoner"},
+                system_prompt="System prompt",
+                normalized_workspace_id="default",
+                normalized_requested_provider="deepseek",
+                normalized_requested_model="deepseek-reasoner",
+                normalized_reasoning_effort="medium",
+                normalized_thread_id="thread-1",
+                normalized_message="run whoami on my paired hardware",
+                compacted_prior_messages=[],
+                prior_messages_used=False,
+                history_mode="none",
+                connected_systems=[],
+                tool_capabilities=[],
+                availability_payload={"ai_ready": True},
+                tools=[{"name": "hardware__action", "parameters": {"type": "object"}}],
+                direct_chat_credentials={},
+                proactive_suggestions=[],
+                tool_loop_session_key="session-1",
+                fallback_reason=None,
+                session_ctx=None,
+                trace_context=None,
+                resolved_chat_max_iterations=3,
+                direct_tool_result_summary_system_message="Summarize tool results.",
+                assistant_plan_tools=[{"name": "hardware__action"}],
+            )
+        )
+
+        # The tool call reached the real executor exactly once, carrying the
+        # DSML-recovered arguments intact.
+        self.assertEqual(len(executed), 1)
+        self.assertEqual(executed[0]["name"], "hardware__action")
+        self.assertEqual(executed[0]["arguments"]["command"], "whoami")
+
+        # It was recorded in the turn's tool step stream -- the same
+        # connector/action-keyed step direct_tool_execution_service.py's
+        # direct_tool_step_payload labels "Using hardware runtime" in
+        # production -- not silently swallowed after being parsed.
+        hardware_steps = [event for event in events if event.get("connector") == "hardware"]
+        self.assertTrue(hardware_steps, "expected a hardware tool step event in the stream")
+        self.assertTrue(any(event.get("status") == "done" for event in hardware_steps))
+
+        self.assertEqual(events[-1]["type"], "final")
+        self.assertIn("agent-user", events[-1]["payload"]["reply"])
+
     def test_stream_provider_backed_direct_chat_returns_final_answer(self) -> None:
         events = list(
             direct_chat_generation_service.stream_provider_backed_direct_chat(

@@ -34,6 +34,19 @@ LAUNCH_LOCKED = "locked"
 _USABLE_LAUNCH_STATUSES = {LAUNCH_LIVE, LAUNCH_LIVE_WHEN_CONFIGURED}
 _GENERIC_CONNECTION_TEST_RUNNER = "not_implemented"
 _OAUTH_SETUP_KINDS = {"oauth", "oauth_or_app_install", "oauth_mailbox"}
+# setup_kind="oauth_or_app_install" means exactly what it says: TWO doors,
+# not one. _oauth_setup_unconfigured below must only suppress availability
+# for connections whose OAUTH door is their only REAL one. discord_bot's
+# real door is a pasted bot token (FleetAgentDetail.tsx's byo_bot flow,
+# discord_bot_provisioning_service.py) that needs no deployment-level OAuth
+# app at all -- so gating it on DISCORD_CLIENT_ID/SECRET being configured
+# was suppressing a channel that works on every deployment that never set
+# those. github carries the same setup_kind label but has no app_install
+# door actually wired anywhere in this codebase (grepped: no GITHUB_APP_*
+# reference exists) -- OAuth is its only real door today, so it stays
+# gated. Keyed by connection id, not by setup_kind alone, because the two
+# connections that share this label do not share this fact.
+_OAUTH_OR_APP_INSTALL_WITH_NO_OAUTH_ALTERNATE_DOOR = {"discord_bot"}
 DISPLAY_CONNECTED = "connected"
 DISPLAY_CONNECTABLE = "connectable"
 DISPLAY_REQUIRES_SETUP = "requires_setup"
@@ -2406,7 +2419,13 @@ def _display_state(
 
 
 def _oauth_setup_unconfigured(item: Dict[str, Any]) -> bool:
-    if _token(item.get("setup_kind")) not in _OAUTH_SETUP_KINDS:
+    setup_kind = _token(item.get("setup_kind"))
+    if setup_kind not in _OAUTH_SETUP_KINDS:
+        return False
+    if (
+        setup_kind == "oauth_or_app_install"
+        and _token(item.get("id")) in _OAUTH_OR_APP_INSTALL_WITH_NO_OAUTH_ALTERNATE_DOOR
+    ):
         return False
     try:
         return not connection_oauth_service.oauth_connection_configured(_text(item.get("id")))

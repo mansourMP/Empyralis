@@ -6,19 +6,26 @@ import { Menu } from "lucide-react";
 
 import { BreadcrumbLabelProvider, Breadcrumbs, HeaderActionSlotProvider } from "./Breadcrumbs";
 
-// An agent's Chat tab renders its own single minimal header (AgentChatHeader
-// in FleetAgentDetail.tsx: back + sigil + name + status dot + one "⋯" menu)
-// — this shell's own breadcrumb topbar (chain text, mobile hamburger, the
-// action-slot) would otherwise stack a SECOND header directly above an
-// otherwise-empty chat, which is exactly the clutter the founder named:
-// "a breadcrumb..., a Chat | Work tab strip, and a separate Configure
-// button, all visible at once above an otherwise-empty chat." Scoped to
-// this ONE route via a plain pathname match — every other tab (Work, and
-// the nine Configure sections) keeps the ordinary breadcrumb chrome
-// unchanged, and no HeaderAction ever portals into the action slot on Chat
-// today (only Work's Stop/Resume+Chat controls do), so nothing here loses a
-// destination.
-const AGENT_CHAT_ROUTE = /^\/w\/[^/]+\/projects\/[^/]+\/agents\/[^/]+\/chat$/;
+// Every tab of an agent's detail surface renders its own single minimal
+// header now (AgentDetailHeader in FleetAgentDetail.tsx: back + sigil +
+// name + status dot + a persistent Work control + one "⋯" menu for
+// Sessions/Configure/Stop) — this shell's own breadcrumb topbar (chain
+// text, mobile hamburger, the action-slot) would otherwise stack a SECOND
+// header directly above the content, which is exactly the clutter the
+// founder named: "a breadcrumb..., a Chat | Work tab strip, and a separate
+// Configure button, all visible at once." This used to be scoped to the
+// Chat route alone (2026-08-16) — widened 2026-08-19 to every route under
+// an agent's detail surface, once AgentDetailHeader became the frame for
+// all of them, not just Chat. `[tab]/page.tsx` is the deepest route this
+// app has under `/agents/[agentId]/` (confirmed: no further nesting — a
+// conversation is `?thread=`, a query param, never a path segment), so
+// matching any single trailing segment is exactly "every tab, and nothing
+// past an agent's own detail surface" — no hand-kept list of the eleven
+// tab ids to go stale the next time one is added or renamed. No
+// HeaderAction portals into the action slot on any of these routes
+// anymore (Work's old Stop/Resume+Chat controls moved into the header
+// itself), so nothing here loses a destination.
+const AGENT_DETAIL_ROUTE = /^\/w\/[^/]+\/projects\/[^/]+\/agents\/[^/]+\/[^/]+$/;
 
 /**
  * The content frame for every route that lives directly inside the fleet shell
@@ -62,7 +69,7 @@ export function FleetContentFrame({
 }) {
   const [actionSlot, setActionSlot] = useState<HTMLDivElement | null>(null);
   const pathname = usePathname() || "";
-  const hideTopbarChrome = AGENT_CHAT_ROUTE.test(pathname);
+  const hideTopbarChrome = AGENT_DETAIL_ROUTE.test(pathname);
 
   return (
     <BreadcrumbLabelProvider>

@@ -3,50 +3,28 @@ import { expect, test } from '@playwright/test';
 import { loginAsOwner } from './support/auth';
 
 test.describe('artifact preview and download', () => {
-  async function artifactsEnabled(page) {
-    const bootstrapResponse = await page.request.get('/api/workspaces/ws-1/bootstrap');
-    const bootstrap = bootstrapResponse.ok() ? await bootstrapResponse.json() : null;
-    return bootstrap?.capabilities?.artifacts_enabled === true;
-  }
-
-  test('files surface mounts current artifact inventory', async ({ page }) => {
+  // The workspace-level artifacts PAGE is gone, not just relocated:
+  // '/w/{id}/artifacts' is now a next.config LEGACY_REDIRECT straight to
+  // '/w/{id}/agents' (frontend/next.config.ts), resolved ahead of the
+  // router, UNCONDITIONALLY -- regardless of the artifacts_enabled
+  // capability this test used to branch on. Confirmed live: this suite's
+  // own seeded workspace reports `artifacts_enabled: true` from
+  // /api/workspaces/ws-1/bootstrap (a real pro/pilot-tier entitlement --
+  // server_modules/entitlements_service.py still grants it), and the page
+  // still redirects to /agents with zero trace of an artifacts surface. So
+  // the enabled/disabled branch these two tests used to take no longer
+  // produces two different outcomes -- both land on /agents now. Reported
+  // to the coordinator as a real product gap (a capability the entitlement
+  // system still promises with no reachable UI) rather than silently
+  // designed around here. The DATA path is still very much alive -- see
+  // the artifact-list-endpoint test below, unchanged -- only the page that
+  // would show it is gone.
+  test('the artifacts route no longer has a surface of its own; it redirects to agents', async ({ page }) => {
     await loginAsOwner(page);
-    const enabled = await artifactsEnabled(page);
     await page.goto('/w/ws-1/artifacts');
 
-    if (!enabled) {
-      await expect(page).toHaveURL(/\/w\/ws-1\/sage(?:[/?#]|$)/);
-      await expect(page.locator('[data-workstation-surface="chat"]')).toBeVisible();
-      await expect(page.locator('[data-workstation-surface="artifacts"]')).toHaveCount(0);
-      return;
-    }
-
-    const surface = page.locator('[data-workstation-surface="artifacts"]');
-    await expect(surface).toBeVisible();
-    await expect(surface).toContainText(/files/i);
-    await expect(surface).not.toContainText(/later artifact phase/i);
-    await expect(page.getByRole('button', { name: /refresh/i })).toBeVisible();
-  });
-
-  test('files surface exposes empty state or downloadable artifacts', async ({ page }) => {
-    await loginAsOwner(page);
-    const enabled = await artifactsEnabled(page);
-    await page.goto('/w/ws-1/artifacts');
-
-    if (!enabled) {
-      await expect(page).toHaveURL(/\/w\/ws-1\/sage(?:[/?#]|$)/);
-      await expect(page.locator('[data-workstation-surface="artifacts"]')).toHaveCount(0);
-      return;
-    }
-
-    const surface = page.locator('[data-workstation-surface="artifacts"]');
-    await expect(surface).toBeVisible();
-    const downloadButtons = page.getByRole('button', { name: /download/i });
-    if (await downloadButtons.count()) {
-      await expect(downloadButtons.first()).toBeVisible();
-    } else {
-      await expect(surface).toContainText(/no files yet/i);
-    }
+    await expect(page).toHaveURL(/\/w\/ws-1\/agents(?:[/?#]|$)/);
+    await expect(page.locator('.fleet-root')).toBeVisible();
   });
 
   test('artifact list endpoint is workspace scoped', async ({ page }) => {
