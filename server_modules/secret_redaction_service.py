@@ -29,6 +29,19 @@ _SENSITIVE_KEY_PARTS = (
     "mobile",
 )
 
+_ISO_DATE_TOKEN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _is_only_iso_dates(text: str) -> bool:
+    """True when every whitespace-separated part is an ISO calendar date.
+
+    The phone sweep's character class includes spaces, so two adjacent dates
+    ("2026-08-19 2026-08-20") arrive as ONE match; testing the whole match
+    against a single-date pattern would miss that and redact both."""
+    parts = text.split()
+    return bool(parts) and all(_ISO_DATE_TOKEN.match(part) for part in parts)
+
+
 _SENSITIVE_VALUE_PATTERNS = (
     (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----", re.DOTALL), "[redacted-private-key]"),
     (re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]+\b", re.IGNORECASE), "Bearer [redacted]"),
@@ -66,11 +79,27 @@ _SENSITIVE_VALUE_PATTERNS = (
     #      "06.12.34.56.78" passes unredacted; every version string, IP and
     #      decimal a shell command prints survives. On a surface whose job is
     #      showing command output, that trade only goes one way.
+    #   3. An ISO calendar date is digits-and-hyphens of exactly phone-ish
+    #      length, so `2026-08-19` matched and became "[redacted-phone]" —
+    #      observed 2026-08-19 in a real agent's own MEMORY.md on
+    #      production, where a launch audit read "[redacted-phone] —
+    #      Pre-launch environment audit (platform launches
+    #      ~[redacted-phone])". A memory write is redacted BEFORE disk, so
+    #      that is a permanent edit, not a display filter — the dates are
+    #      simply gone. Full ISO timestamps (`2026-08-19T09:13:06Z`) always
+    #      survived, because the trailing `T` trips the `(?![\w.-])`
+    #      boundary, which is exactly why this went unnoticed for so long.
+    #      A real phone number is never `\d{4}-\d{2}-\d{2}`, so exempting
+    #      that shape costs no coverage: `415-555-0142`, `+1-415-555-0142`
+    #      and `(415) 555 0142` all still redact.
     (
         re.compile(r"(?<![\w.-])(?:\+?\d[\d\s().-]{7,}\d)(?![\w.-])"),
         lambda m: (
             m.group(0)
-            if ("." in m.group(0) and not any(c in m.group(0) for c in " ()+"))
+            if (
+                _is_only_iso_dates(m.group(0))
+                or ("." in m.group(0) and not any(c in m.group(0) for c in " ()+"))
+            )
             else "[redacted-phone]"
         ),
     ),
