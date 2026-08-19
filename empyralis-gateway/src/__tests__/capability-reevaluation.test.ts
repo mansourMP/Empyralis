@@ -142,6 +142,18 @@ async function buildClient(supportedCapabilities: () => string[]) {
     makeMockTokenStore() as any,
     mockCapabilityRouter as any,
     makeMockPersonalChannelRuntimes() as any,
+    undefined, // webSocketImpl: unused by these tests, real default is fine
+    // dockerAutostart: several tests below drive sendHeartbeat() with
+    // "shell.execute" in requestedCapabilities, which (since docker-
+    // autostart.ts landed) reaches this dependency whenever the real,
+    // unmocked docker probe inside refreshPassiveInventorySnapshot()
+    // reports Docker not ready. Left at the real default this fake would
+    // spawn `open -a Docker` on whatever machine runs this suite —
+    // forbidden outright (CLAUDE.md: never touch the founder's own Docker
+    // state as a test side effect). This suite has nothing to do with
+    // Docker autostart at all, so a no-op fake that is never even meant to
+    // be asserted on is the correct stand-in.
+    async () => ({ kind: "not_installed" }),
   );
   return { client, journalEntries };
 }

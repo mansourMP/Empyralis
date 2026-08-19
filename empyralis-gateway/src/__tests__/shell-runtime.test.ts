@@ -6,6 +6,7 @@ import path from "path";
 
 import { execFileWithTimeout } from "../shell/exec-file-with-timeout";
 import { GatewayShellRuntime, resolveExecutionMode, type GatewayShellRuntimeConfig } from "../shell/runtime";
+import type { DockerAutostartOutcome } from "../shell/docker-autostart";
 import type { GatewayRequestEnvelope, GatewayToolInvokePayload } from "../protocol/types";
 
 let dockerAvailability: Promise<boolean> | null = null;
@@ -38,10 +39,20 @@ const SAGE_AUTHORIZED_POLICY = {
   policy: { mode: "full_access", full_access_warning_acknowledged: true },
 };
 
+// Every test in this file that reaches the sandbox-mode Docker check must
+// never spawn a real "open -a Docker" / "systemctl start docker" — that
+// would touch the machine running the suite (forbidden — see docker-
+// autostart.test.ts for the real, injected-fake coverage of that module).
+// baseConfig() therefore always supplies a fake dockerAutostart that never
+// runs a real process; individual tests below override it to exercise the
+// specific outcome they care about.
+const NEVER_STARTS_DOCKER: () => Promise<DockerAutostartOutcome> = async () => ({ kind: "not_installed" });
+
 function baseConfig(overrides: Partial<GatewayShellRuntimeConfig> = {}): GatewayShellRuntimeConfig {
   return {
     stateDir: fs.mkdtempSync(path.join(os.tmpdir(), "empyralis-shell-runtime-test-")),
     fullAccessLocallyEnabled: false,
+    dockerAutostart: NEVER_STARTS_DOCKER,
     ...overrides,
   };
 }
@@ -182,6 +193,107 @@ test("Docker-down error names the SERVER authorization as the reason when the lo
   const runtime = new GatewayShellRuntime(baseConfig({ dockerReadyCheck: async () => false, fullAccessLocallyEnabled: true }));
   const frame = makeInvokeFrame("shell.execute", { command: "echo hello" }); // no SAGE_AUTHORIZED_POLICY
   await assert.rejects(runtime.handleCapabilityInvoke(frame), /full_access is not active because: server did not authorize full_access for this call/);
+});
+
+// ── Docker autostart: sandbox mode gets ONE lever before giving up. These
+// pin GatewayShellRuntime's own wiring of docker-autostart.ts's outcomes
+// into the thrown message — docker-autostart.test.ts covers the module's
+// internal behavior (platform branching, cooldown, single-flight) against
+// an injected command runner. Nothing here ever spawns a real process. ──
+
+test("Docker not ready: an autostart attempt is made, and a successful start moves past the availability gate", async () => {
+  let autostartCalls = 0;
+  const runtime = new GatewayShellRuntime(baseConfig({
+    dockerReadyCheck: async () => false,
+    dockerAutostart: async () => {
+      autostartCalls += 1;
+      return { kind: "started" };
+    },
+  }));
+  const frame = makeInvokeFrame("shell.execute", { command: "echo recovered" });
+  try {
+    await runtime.handleCapabilityInvoke(frame);
+  } catch (error) {
+    // This runtime's stateDir has no real Docker guaranteed to be present
+    // OR running on the machine executing this suite — whatever happens
+    // downstream of the availability gate (a real `docker run` spawn) is
+    // out of scope here. What this test pins is that the gate itself did
+    // NOT refuse the call once autostart reported "started".
+    assert.doesNotMatch(
+      String((error as Error).message),
+      /requires Docker.*or an explicitly enabled and authorized full_access/,
+    );
+  }
+  assert.equal(autostartCalls, 1);
+});
+
+test("Docker not installed: the refusal says there is nothing to start, and names no start command", async () => {
+  const runtime = new GatewayShellRuntime(baseConfig({
+    dockerReadyCheck: async () => false,
+    dockerAutostart: async () => ({ kind: "not_installed" }),
+  }));
+  const frame = makeInvokeFrame("shell.execute", { command: "echo hello" });
+  await assert.rejects(
+    runtime.handleCapabilityInvoke(frame),
+    /Docker is not installed on this computer, so there is nothing to start/,
+  );
+});
+
+test("Docker installed but the start command failed: the refusal carries the real failure detail", async () => {
+  const runtime = new GatewayShellRuntime(baseConfig({
+    dockerReadyCheck: async () => false,
+    dockerAutostart: async () => ({
+      kind: "start_command_failed",
+      detail: "Unable to find application named \"Docker\"",
+    }),
+  }));
+  const frame = makeInvokeFrame("shell.execute", { command: "echo hello" });
+  await assert.rejects(
+    runtime.handleCapabilityInvoke(frame),
+    /could not be started automatically \(Unable to find application named "Docker"\)/,
+  );
+});
+
+test("Docker installed and asked to start, but not ready in time: the refusal says it may still be starting, distinct from not_installed and start_command_failed", async () => {
+  const runtime = new GatewayShellRuntime(baseConfig({
+    dockerReadyCheck: async () => false,
+    dockerAutostart: async () => ({ kind: "start_timed_out" }),
+  }));
+  const frame = makeInvokeFrame("shell.execute", { command: "echo hello" });
+  await assert.rejects(
+    runtime.handleCapabilityInvoke(frame),
+    /was asked to start and may still be starting up.*Wait a bit and try again/,
+  );
+});
+
+test("Docker autostart is never consulted when full_access mode is authorized — Docker's state is irrelevant to that path", async () => {
+  let autostartCalls = 0;
+  const runtime = new GatewayShellRuntime(baseConfig({
+    fullAccessLocallyEnabled: true,
+    dockerReadyCheck: async () => false,
+    dockerAutostart: async () => {
+      autostartCalls += 1;
+      return { kind: "started" };
+    },
+  }));
+  const frame = makeInvokeFrame("shell.execute", { command: "echo full-access" }, SAGE_AUTHORIZED_POLICY);
+  const result = await runtime.handleCapabilityInvoke(frame);
+  assert.equal(result.execution_mode, "full_access");
+  assert.equal(autostartCalls, 0);
+});
+
+test("Docker already ready: dockerAutostart is never called at all", async () => {
+  let autostartCalls = 0;
+  const runtime = new GatewayShellRuntime(baseConfig({
+    dockerReadyCheck: async () => true,
+    dockerAutostart: async () => {
+      autostartCalls += 1;
+      return { kind: "started" };
+    },
+  }));
+  const frame = makeInvokeFrame("shell.execute", { command: "echo already-ready" });
+  await runtime.handleCapabilityInvoke(frame);
+  assert.equal(autostartCalls, 0);
 });
 
 // ── full_access mode: direct host execution, no Docker required ──
