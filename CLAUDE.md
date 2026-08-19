@@ -5268,3 +5268,64 @@ and only now gets a chance to run, but the latency itself is untouched. And
 live `tool_progress` streaming is verified by code plus unit tests only —
 the verification prompts never triggered a tool call, so nobody has watched
 a tool step stream in real time.
+
+## Performance: measure from a CUSTOMER's seat, not the founder's (2026-08-19)
+
+**A 26-second agent turn was investigated as a code problem. It is a
+GEOGRAPHY problem, and roughly 12–16 of those seconds are the Pacific.**
+The founder is in China; production is a single VPS in San Francisco.
+
+```
+GET /healthz, same endpoint, two vantage points
+  on the server, loopback ............     7 ms
+  from the founder's Mac ............. 3,456–4,462 ms      ~500x
+  ICMP to production ................. 100% packet loss  (filtered)
+  TLS handshake alone ................ 1.7–2.3 s
+```
+
+Trace-level breakdown of a real `uname -a` turn (`trace_6df93c7b…`,
+agent_trace_events, deepseek-v4-pro):
+
+```
++4.1s   click -> trace start            one Pacific crossing
++0.2s   tool decision
++8.1s   TOOL EXECUTION                  cloud -> box -> cloud, TWICE
+          of which, measured ON the Mac:
+            docker info ....... 0.17s   (readiness probe, cached 60s)
+            docker run --rm ... 0.16s   warm; 3.57s COLD, first run only
+            ─────────────────────────
+            ~0.35s local. the other ~7.7s is the round trip.
++8.4s   DeepSeek generating the answer  real model time, not ours
++5.5s   persistence tail
+```
+
+The server does its part in single-digit milliseconds. **Do not spend
+optimization effort on code paths that are already fast because the
+founder's own experience feels slow** — his path is the worst one the
+product will ever have, and a customer in the US/EU hits that same 7ms
+server with no GFW in between. Before optimizing anything for latency,
+measure from a vantage point an actual customer would have; otherwise you
+are tuning against the ocean.
+
+What DOES have leverage, and is the only latency work worth doing here:
+**cut round TRIPS, not milliseconds.** Every `hardware__action` tool call
+is a full cloud->box->cloud crossing, so a task needing three commands pays
+three crossings. Batching commands into one dispatch helps the founder AND
+every customer whose box is far from the cloud — it is a structural win,
+not a local one. (In flight as of this writing on
+`feat/batched-hardware-dispatch`; it also collapses N containers into one,
+since `docker-sandbox.ts` runs `docker run --rm -i` per call today and
+therefore carries NO state between commands — `cd` in one call is invisible
+to the next.)
+
+Corollary worth stating because it will come up again: the agent's BRAIN
+runs in the cloud and its HANDS run on the box (measured, MAN-318). That
+split is what makes every tool call a network crossing. Any future proposal
+to reduce agent latency should be evaluated against how many crossings it
+removes, not how much CPU it saves.
+
+Also confirmed live while measuring, and still open: a web turn opens TWO
+traces — the real `surface=sage` one carrying provider/model/events, and a
+`surface=web` shell with empty provider/model and `finished_at` NULL.
+CLAUDE.md already flags this duplicate-shell trace as unfixed; this is a
+direct observation of it on production, not a code reading.
