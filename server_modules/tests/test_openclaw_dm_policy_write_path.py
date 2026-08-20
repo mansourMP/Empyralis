@@ -67,14 +67,19 @@ from server_modules import openclaw_channel_registry, personal_channels_service
 # A channel in DM_POLICY_CHANNEL_KEYS, taken from the registry rather than
 # typed, so it cannot go on naming a key the gate no longer reads.
 #
-# This constant has now been repointed twice, and the arc is the point:
-# whatsapp_personal (dropped by the 2026-08-14 OpenClaw cutover) -> the
-# cloud-session lane's telegram_personal, briefly "the one non-OpenClaw
+# This constant has now been repointed three times, and the arc is the
+# point: whatsapp_personal (dropped by the 2026-08-14 OpenClaw cutover) ->
+# the cloud-session lane's telegram_personal, briefly "the one non-OpenClaw
 # personal channel a real message still crosses _enforce_dm_policy on" ->
-# nothing, because that lane was deleted on 2026-08-15. DM_POLICY_CHANNEL_KEYS
-# is now EXACTLY the OpenClaw-transported set, with no first-party member at
-# all, which is the cutover's intended end state finally reached.
-_DM_POLICY_CHANNEL_KEY = f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}telegram"
+# nothing, because that lane was deleted on 2026-08-15 -> openclaw_telegram
+# itself, repointed a fourth time on 2026-08-20 (feat/seamless-telegram-
+# setup) because telegram stopped being an OpenClaw-active personal channel
+# at all — see openclaw_channel_registry.py's own "CORRECTION, 2026-08-20"
+# comment; sage_telegram_hosted, a pre-existing cloud bot lane, is what a
+# customer reaches for Telegram now. DM_POLICY_CHANNEL_KEYS is EXACTLY the
+# OpenClaw-transported set, with no first-party member at all, so any
+# channel still in it proves the same contract this test is actually about.
+_DM_POLICY_CHANNEL_KEY = f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}signal"
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]

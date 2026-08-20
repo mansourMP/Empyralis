@@ -97,10 +97,15 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
             [entry["channel_key"] for entry in openclaw_catalog],
             [channel.channel_key for channel in service.OPENCLAW_ACTIVE_CHANNELS],
         )
-        # whatsapp/telegram/signal/imessage/openclaw-weixin are now among the
-        # active (cut-over) channels — proof the cutover actually moved them.
+        # whatsapp/signal/imessage/openclaw-weixin are now among the active
+        # (cut-over) channels — proof the cutover actually moved them.
+        # telegram is deliberately NOT among them (2026-08-20 correction —
+        # see openclaw_channel_registry.py): sage_telegram_hosted is a
+        # cloud-hosted bot lane, not a duplicate of anything the transport
+        # moved.
         active_ids = {channel.id for channel in service.OPENCLAW_ACTIVE_CHANNELS}
-        self.assertTrue({"whatsapp", "telegram", "signal", "imessage", "openclaw-weixin"}.issubset(active_ids))
+        self.assertTrue({"whatsapp", "signal", "imessage", "openclaw-weixin"}.issubset(active_ids))
+        self.assertNotIn("telegram", active_ids)
         # Every transported channel is "preview" — a property of the
         # transport, not a per-channel judgement, so there is no list to keep
         # honest. Nothing here has been driven with real credentials yet
@@ -198,33 +203,47 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
         self.assertEqual(by_key["sms_twilio"]["product_surface"], "business_channel")
         self.assertEqual(by_key["telegram_bot"]["binding_channel_key"], "telegram")
         self.assertEqual(by_key["telegram_bot"]["runtime_lane"], service.STUDIO_CONNECTOR_RUNTIME_LANE)
-        # telegram_personal/whatsapp_personal/signal_personal/imessage_personal/
-        # wechat_personal DELETED 2026-08-14 (full OpenClaw channel cutover);
-        # their live replacements are openclaw_telegram/openclaw_whatsapp/
-        # openclaw_signal/openclaw_imessage/openclaw_openclaw-weixin, which
-        # share the exact same PERSONAL_GATEWAY_RUNTIME_LANE/requires_agent_
-        # computer/taxonomy shape (they always required an Agent Computer,
-        # cutover or not).
-        self.assertEqual(by_key["openclaw_telegram"]["runtime_lane"], service.PERSONAL_GATEWAY_RUNTIME_LANE)
-        self.assertTrue(by_key["openclaw_telegram"]["requires_agent_computer"])
-        self.assertEqual(by_key["openclaw_telegram"]["surface_kind"], "messaging_channel")
-        self.assertEqual(by_key["openclaw_telegram"]["product_surface"], "personal_messaging")
-        self.assertEqual(by_key["openclaw_telegram"]["navigation_group"], "personal_messaging")
-        self.assertEqual(by_key["openclaw_telegram"]["ownership_boundary"], "agent_computer")
+        # whatsapp_personal/signal_personal/imessage_personal/wechat_personal
+        # DELETED 2026-08-14 (full OpenClaw channel cutover); their live
+        # replacements are openclaw_whatsapp/openclaw_signal/openclaw_imessage/
+        # openclaw_openclaw-weixin, which share the exact same
+        # PERSONAL_GATEWAY_RUNTIME_LANE/requires_agent_computer/taxonomy shape
+        # (they always required an Agent Computer, cutover or not).
+        #
+        # telegram_personal was ALSO deleted the same day, but its own
+        # replacement is NOT openclaw_telegram — see openclaw_channel_
+        # registry.py's "CORRECTION, 2026-08-20" comment. telegram_personal
+        # had no first-party successor at all (OpenClaw's pinned build has no
+        # personal-account credential shape for Telegram), so it is simply
+        # gone; sage_telegram_hosted (a pre-existing, unrelated cloud bot
+        # lane) is what a customer reaches instead, and openclaw_telegram now
+        # behaves like openclaw_discord/openclaw_slack/openclaw_sms —
+        # declared, superseded, never active — asserted generically by
+        # test_openclaw_channel_registry.py's superseded-channel sweep.
+        self.assertEqual(by_key["openclaw_whatsapp"]["runtime_lane"], service.PERSONAL_GATEWAY_RUNTIME_LANE)
+        self.assertTrue(by_key["openclaw_whatsapp"]["requires_agent_computer"])
+        self.assertEqual(by_key["openclaw_whatsapp"]["surface_kind"], "messaging_channel")
+        self.assertEqual(by_key["openclaw_whatsapp"]["product_surface"], "personal_messaging")
+        self.assertEqual(by_key["openclaw_whatsapp"]["navigation_group"], "personal_messaging")
+        self.assertEqual(by_key["openclaw_whatsapp"]["ownership_boundary"], "agent_computer")
         self.assertEqual(by_key["openclaw_whatsapp"]["surface_support"], ["sage"])
         self.assertTrue(by_key["openclaw_whatsapp"]["live_capable"])
         self.assertTrue(by_key["openclaw_signal"]["live_capable"])
         self.assertTrue(by_key["openclaw_imessage"]["live_capable"])
         self.assertTrue(by_key["openclaw_openclaw-weixin"]["live_capable"])
-        # None of the five is launchable from this catalog directly — an
+        # None of the four is launchable from this catalog directly — an
         # OpenClaw channel is credentialed inside OpenClaw on the owner's own
         # machine, so a "Connect" button here would be a dead control.
         for cut_over_key in (
-            "openclaw_telegram", "openclaw_whatsapp", "openclaw_signal",
+            "openclaw_whatsapp", "openclaw_signal",
             "openclaw_imessage", "openclaw_openclaw-weixin",
         ):
             self.assertFalse(by_key[cut_over_key]["launch_allowed"])
             self.assertEqual(by_key[cut_over_key]["status"], "openclaw_transport")
+        # openclaw_telegram is superseded now, not cut over — the honest,
+        # already-general assertion any other superseded channel gets.
+        self.assertFalse(by_key["openclaw_telegram"]["launch_allowed"])
+        self.assertEqual(by_key["openclaw_telegram"]["status"], "superseded_by_first_party")
         self.assertEqual(by_key["apple_messages_business"]["provider"], "apple_messages_business_msp")
         self.assertEqual(by_key["apple_messages_business"]["runtime_lane"], service.STUDIO_CONNECTOR_RUNTIME_LANE)
         self.assertEqual(by_key["apple_messages_business"]["product_surface"], "business_channel")
@@ -275,12 +294,15 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
             self.assertEqual(spec["live_capable"], "true")
 
     def test_agent_computer_bridge_channels_pass_personal_preflight(self) -> None:
-        """The five platforms cut over 2026-08-14 (whatsapp/telegram/signal/
-        imessage/openclaw-weixin) are all live_capable, so they pass
-        preflight — same contract the first-party channels they replaced
-        satisfied."""
+        """The four platforms cut over 2026-08-14 (whatsapp/signal/imessage/
+        openclaw-weixin) are all live_capable, so they pass preflight — same
+        contract the first-party channels they replaced satisfied. telegram
+        REMOVED 2026-08-20 (feat/seamless-telegram-setup) — see
+        openclaw_channel_registry.py's own "CORRECTION, 2026-08-20" comment;
+        it is first-party owned again (sage_telegram_hosted), so
+        openclaw_telegram is no longer a personal-gateway channel."""
         for channel_key in (
-            "openclaw_whatsapp", "openclaw_telegram", "openclaw_signal",
+            "openclaw_whatsapp", "openclaw_signal",
             "openclaw_imessage", "openclaw_openclaw-weixin",
         ):
             preflight = service.personal_bridge_preflight(channel_key)

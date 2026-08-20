@@ -257,28 +257,37 @@ class OpenClawOverlapResolutionTests(unittest.TestCase):
             )
 
     def test_the_eight_platforms_we_overlap_resolve_correctly_post_cutover(self) -> None:
-        """2026-08-14 full OpenClaw channel cutover. Of the 8 platforms that
-        overlap an existing Empyralis implementation, 5 are now OpenClaw-owned
-        (their first-party runtime is deleted in the same change) and 3 stay
+        """2026-08-14 full OpenClaw channel cutover, CORRECTED 2026-08-20
+        (feat/seamless-telegram-setup). Of the 8 platforms that overlap an
+        existing Empyralis implementation, 4 are OpenClaw-owned (their
+        first-party runtime is deleted in the same change) and 4 stay
         first-party because they are Studio business-connector channels with
         no Agent Computer requirement today — see
         openclaw_channel_registry.OPENCLAW_CUT_OVER_CHANNEL_IDS's own comment
-        for why forcing discord/slack/sms onto a hardware-bound transport
-        would be a regression, not an improvement."""
+        for why forcing discord/slack/sms/telegram onto a hardware-bound
+        transport would be a regression, not an improvement. Telegram moved
+        from the first group to the second here: "telegram" was a bare
+        platform-token collision that swept up `sage_telegram_hosted` (a
+        cloud-hosted bot lane, unrelated to the deleted gramjs personal-
+        account lane the cutover was actually retiring) along with it — see
+        the registry's own "CORRECTION, 2026-08-20" comment for the full
+        story, discovered by a fresh cloud-only agent's Channels tab showing
+        Telegram as "Needs Gateway" with no way to reach the paste-a-token
+        flow at all."""
         active = {channel.id for channel in channel_lane_contract_service.OPENCLAW_ACTIVE_CHANNELS}
         superseded = {
             channel.id for channel in channel_lane_contract_service.OPENCLAW_SUPERSEDED_CHANNELS
         }
         self.assertEqual(
             active & {"telegram", "whatsapp", "signal", "imessage", "openclaw-weixin", "discord", "slack", "sms"},
-            {"telegram", "whatsapp", "signal", "imessage", "openclaw-weixin"},
+            {"whatsapp", "signal", "imessage", "openclaw-weixin"},
         )
-        self.assertEqual(superseded, {"discord", "slack", "sms"})
+        self.assertEqual(superseded, {"discord", "slack", "sms", "telegram"})
         # WeChat Work is NOT the same product as consumer WeChat and is not
         # superseded by anything of ours.
         self.assertIn("wecom", active)
 
-    def test_cut_over_list_names_exactly_the_five_platforms_retired_2026_08_14(self) -> None:
+    def test_cut_over_list_names_exactly_the_four_platforms_retired_2026_08_14(self) -> None:
         """CHANNEL-ADOPTION-PLAN.md step 6: port -> verify -> swap -> delete.
 
         Moving an id into OPENCLAW_CUT_OVER_CHANNEL_IDS is the swap, and the
@@ -288,7 +297,7 @@ class OpenClawOverlapResolutionTests(unittest.TestCase):
         """
         self.assertEqual(
             openclaw_channel_registry.OPENCLAW_CUT_OVER_CHANNEL_IDS,
-            frozenset({"whatsapp", "signal", "imessage", "openclaw-weixin", "telegram"}),
+            frozenset({"whatsapp", "signal", "imessage", "openclaw-weixin"}),
         )
         for channel_id in openclaw_channel_registry.OPENCLAW_CUT_OVER_CHANNEL_IDS:
             owner = channel_lane_contract_service._OPENCLAW_FIRST_PARTY_OWNER_BY_ID.get(channel_id)

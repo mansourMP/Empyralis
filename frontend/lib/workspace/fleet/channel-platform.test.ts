@@ -206,33 +206,40 @@ for (const id of cutOverIds) {
   );
 }
 
-// Telegram specifically: the registry cut it over, so the hosted-bot card is
-// the stale one and the transported card is the survivor.
+// Telegram specifically: CORRECTED 2026-08-20 (feat/seamless-telegram-setup).
+// It used to be in the cut-over set and this test asserted the hosted-bot
+// card yielded to the transported one — that was a platform-token collision,
+// not a considered call (see openclaw_channel_registry.py's own
+// "CORRECTION, 2026-08-20" comment on OPENCLAW_CUT_OVER_CHANNEL_IDS for the
+// full reasoning). `sage_telegram_hosted` is a Studio business-connector
+// channel exactly like discord_bot/slack/sms_twilio — cloud-hosted, no
+// Agent Computer needed — so it now behaves identically to them: it survives
+// every transported platform, Telegram included.
 {
-  assert(cutOverIds.has("telegram"), "the registry still lists telegram as cut over (this test's premise)");
+  assert(!cutOverIds.has("telegram"), "telegram is deliberately NOT cut over (this test's premise)");
   const telegram = platformCarrying("telegram");
   assert(Boolean(telegram), "the manifest carries a Telegram card");
   if (telegram) {
     const plan = planUnifiedChannelGrid(CHANNEL_GRID_PLATFORMS, [telegram]);
     assert(
-      plan.superseded.some((item) => item.entry.id === "sage_telegram_hosted"),
-      "the first-party hosted-Telegram card yields to the transported Telegram card",
+      !plan.superseded.some((item) => item.entry.id === "sage_telegram_hosted"),
+      "the first-party hosted-Telegram card is NOT superseded — it needs no computer, and must stay reachable",
     );
     assert(
-      !plan.firstParty.some((entry) => /telegram/i.test(entry.label)),
-      "no first-party card still says Telegram once the transport carries it",
+      plan.firstParty.some((entry) => entry.id === "sage_telegram_hosted"),
+      "the hosted-Telegram card survives even though the transport also carries telegram",
     );
   }
 }
 
 // --- Precision: a platform the transport does NOT carry keeps its card. --
 //
-// Slack and Discord are superseded upstream (their first-party runtimes still
-// own those platforms), so they never reach the transported grid — and their
-// cards must survive every other transported platform. This is the
-// over-aggressive direction, and it is the one that would silently delete a
-// working channel.
-for (const id of ["slack", "discord"]) {
+// Slack, Discord and Telegram are superseded upstream (their first-party
+// runtimes still own those platforms), so they never reach the transported
+// grid — and their cards must survive every other transported platform. This
+// is the over-aggressive direction, and it is the one that would silently
+// delete a working channel.
+for (const id of ["slack", "discord", "telegram"]) {
   assert(!cutOverIds.has(id), `${id} is deliberately NOT cut over (this test's premise)`);
   const withoutThatPlatform = allPlatforms.filter(
     (platform) => !platform.variants.some((variant) => variant.channel_id === id),

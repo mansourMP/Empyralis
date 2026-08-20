@@ -275,7 +275,11 @@ async def test_same_workspace_agent_id_on_telegram_assign_route_still_works() ->
         ),
         patch(
             "server_modules.hosted_bot_provisioning_service.agent_bot_webhook_url",
-            return_value="",
+            return_value="https://example.com/webhook",
+        ),
+        patch(
+            "server_modules.hosted_bot_provisioning_service.set_webhook",
+            new=AsyncMock(return_value={"ok": True}),
         ),
         patch(
             "server_modules.agent_bindings_repository.upsert_channel_binding",

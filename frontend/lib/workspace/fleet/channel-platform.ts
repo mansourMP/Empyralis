@@ -77,6 +77,39 @@ const LANE_SUFFIX_SEGMENTS = new Set([
   "api",
 ]);
 
+/** Lanes that are a genuinely INDEPENDENT, hardware-free implementation of a
+ *  platform, never a duplicate to be resolved away. `_personal`/`_twilio`
+ *  name the account-pairing / SMS-carrier lanes OpenClaw's cutover set is
+ *  actually about (see openclaw_channel_registry.py's own comment); `_hosted`
+ *  and `_official` name a CLOUD BOT lane — sage_telegram_hosted,
+ *  wechat_official — that needs no Agent Computer at all, exactly like
+ *  discord_bot/slack/sms_twilio.
+ *
+ *  Found live, 2026-08-20: `OPENCLAW_CUT_OVER_CHANNEL_IDS` briefly listed
+ *  "telegram" as a bare platform token to retire the deleted gramjs
+ *  PERSONAL-account lane — but `resolve_transport_ownership` decides per
+ *  PLATFORM, not per LANE, so the token also swept up `sage_telegram_hosted`,
+ *  an unrelated, still-live, hardware-free lane. A fresh cloud-only agent's
+ *  Channels tab showed Telegram as "Needs Gateway" with the actual paste-a-
+ *  token flow unreachable — the exact "force an agent to acquire hardware it
+ *  does not need" regression this module's own Discord/Slack precedent
+ *  exists to prevent. Fixed at the source (openclaw_channel_registry.py no
+ *  longer cuts telegram over) — this set is the SECOND, structural layer:
+ *  even if a future active-catalog change re-introduces that same
+ *  cross-lane collision for telegram, wechat, or a channel added later, a
+ *  protected first-party card is never silently dropped for it. */
+const PROTECTED_HARDWARE_FREE_LANE_SUFFIXES = new Set(["hosted", "official"]);
+
+/** True when a first-party entry's own lane suffix (its LAST segment, before
+ *  laneCore strips it) names a protected hardware-free bot lane. Checked on
+ *  the ID directly, never the label — a label can be renamed without the
+ *  lane changing, and the lane is what the guarantee is actually about. */
+function hasProtectedHardwareFreeLane(entry: { id: string }): boolean {
+  const segments = segmentsOf(entry.id);
+  const last = segments[segments.length - 1];
+  return last !== undefined && PROTECTED_HARDWARE_FREE_LANE_SUFFIXES.has(last);
+}
+
 /** Lowercase alphanumeric runs. Non-ASCII is dropped, so OpenClaw's own
  *  `WeCom（企业微信）` and `Weixin（微信）` reduce to `wecom` / `weixin` — their
  *  words, normalised, never re-typed here. */
@@ -178,7 +211,19 @@ export type UnifiedChannelGridPlan<
 };
 
 /** THE RULE. A first-party card whose platform the transport actively carries
- *  is not rendered — the transported card is the one card for that platform. */
+ *  is not rendered — the transported card is the one card for that platform.
+ *
+ *  EXCEPT a protected hardware-free bot lane (`hasProtectedHardwareFreeLane`
+ *  — `sage_telegram_hosted`, `wechat_official`), which never yields. Those
+ *  lanes are not a duplicate of whatever the transport carries for the same
+ *  platform; they are a genuinely different, strictly EASIER way to connect,
+ *  the same category as discord_bot/slack/sms_twilio (which never collide in
+ *  the first place because their OpenClaw equivalents are never active — see
+ *  openclaw_channel_registry.py's OPENCLAW_CUT_OVER_CHANNEL_IDS). Backend
+ *  policy is expected to already keep telegram/wechat off the active
+ *  transported catalog for exactly this reason; this is the second,
+ *  structural layer so a future active-catalog regression cannot silently
+ *  make a computer mandatory for a channel that has never needed one. */
 export function planUnifiedChannelGrid<
   F extends FirstPartyChannelGridEntry,
   T extends TransportedPlatformLike,
@@ -187,6 +232,10 @@ export function planUnifiedChannelGrid<
   const kept: F[] = [];
   const superseded: { entry: F; carriedBy: T }[] = [];
   for (const entry of firstParty) {
+    if (hasProtectedHardwareFreeLane(entry)) {
+      kept.push(entry);
+      continue;
+    }
     const tokens = firstPartyPlatformTokens(entry);
     const carrier = carriers.find((candidate) =>
       Array.from(tokens).some((token) => candidate.tokens.has(token)),
@@ -203,13 +252,24 @@ export function planUnifiedChannelGrid<
  *  This is the assertion the 2026-08-14 duplicate cards would have failed. It
  *  reads the same token sets the rule above does, so a dedupe that stops
  *  matching (a renamed label, a new lane suffix) surfaces here as a collision
- *  rather than as two cards nobody notices until they are on screen. */
+ *  rather than as two cards nobody notices until they are on screen.
+ *
+ *  A protected hardware-free first-party lane (`hasProtectedHardwareFreeLane`
+ *  — same exemption `planUnifiedChannelGrid` grants) is excluded from the
+ *  sweep entirely: two cards for one platform is a real defect ONLY when
+ *  neither of them is a settled, intentional survivor. A protected lane
+ *  colliding with whatever the transport carries for the same platform is
+ *  exactly that settled case (`sage_telegram_hosted` beside a manifest that
+ *  still lists a `telegram` channel) — asserted as fine, not ignored by
+ *  omission, so a future protected entry that stops resolving to a real
+ *  first-party card would still be caught by every OTHER assertion in this
+ *  file. */
 export function channelGridPlatformCollisions(
   firstParty: readonly FirstPartyChannelGridEntry[],
   transported: readonly TransportedPlatformLike[],
 ): string[][] {
   const cards = [
-    ...firstParty.map((entry) => ({ label: entry.label, tokens: firstPartyPlatformTokens(entry) })),
+    ...firstParty.filter((entry) => !hasProtectedHardwareFreeLane(entry)).map((entry) => ({ label: entry.label, tokens: firstPartyPlatformTokens(entry) })),
     ...transported.map((platform) => ({ label: platform.label, tokens: transportedPlatformTokens(platform) })),
   ];
   const groups: { labels: string[]; tokens: Set<string> }[] = [];

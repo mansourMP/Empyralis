@@ -19,6 +19,7 @@ agent_install_id — there is no session to derive a tenant from up front.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import secrets
@@ -36,6 +37,25 @@ LOGGER = logging.getLogger(__name__)
 TELEGRAM_API_BASE = "https://api.telegram.org"
 CHANNEL_KEY_TELEGRAM = "telegram_bot"
 POOL_BOT_VAULT_PROVIDER = "telegram_bot"
+
+# Owner-recognition for a BYO bot — see claim_channel_owner_identity_if_
+# unclaimed's own docstring (personal_channels_repository.py) for why this
+# exists and why it is safe: a BYO bot has no phone/QR pairing step to prove
+# "this Telegram account is the owner", and command_registry._is_sender_owner
+# / sage_agent_runtime_service._resolve_channel_sender_class both read
+# personal_channels_repository as their ONLY authoritative source (CLAUDE.md:
+# "identity_links is a dead column"). Without a writer for the BYO family,
+# EVERY sender on a BYO bot — the true owner included — was permanently
+# classified "audience": no shell/hardware/memory_write/connector_write
+# tools, and every owner-gated command (/config /mcp /plugins /debug /bash)
+# silently unreachable. This key is a distinct namespace from
+# TELEGRAM_PERSONAL_CHANNEL_KEY ("telegram_personal", the gramjs pairing
+# flow) and from CHANNEL_KEY_TELEGRAM above ("telegram_bot", the
+# agent_channel_bindings row) — three different tables/purposes, not a
+# collision.
+BYO_OWNER_CLAIM_CHANNEL_KEY = "telegram_agent_byo"
+BYO_OWNER_CLAIM_GATEWAY_ID = "byo"
+BYO_OWNER_CLAIM_PROVIDER = "telegram_byo"
 
 # First-contact marketing reply: sent once per (agent, chat_id) the first time
 # a not-yet-onboarded stranger messages an agent's BYO bot, if the agent has
@@ -252,15 +272,53 @@ async def assign_byo_bot(*, agent_install_id: str, workspace_id: str, tenant_id:
         token=token, bot_username=bot_username, bot_id=bot_id,
     )
 
+    # Register the webhook BEFORE writing an enabled binding, and treat
+    # failure here as a real failure — not a best-effort log line. This used
+    # to swallow every setWebhook failure (missing deployment env var,
+    # a transient Telegram-side error) into `webhook_set: False` while still
+    # returning `ok: True` and writing an ENABLED binding, so the frontend's
+    # existing "Bot token saved — this agent's own bot is live" success
+    # message was shown for a bot that could never actually receive a
+    # message (CLAUDE.md: "the product must tell the person what actually
+    # happened" — reporting success on a mutation that only partially
+    # worked is the worst case, not the safest one). The token itself was
+    # already validated by get_me() above, so a webhook failure here is
+    # never the customer's fault — worth one retry for an ordinary
+    # transient hiccup before giving up and saying so honestly.
     secret = _new_secret()
-    webhook_set = False
     webhook_url = agent_bot_webhook_url(agent_install_id)
-    if webhook_url:
+    if not webhook_url:
+        delete_vault_credential_by_id(cred_id)
+        raise RuntimeError(
+            "This bot's token is valid, but Empyralis isn't configured to "
+            "receive Telegram messages right now. Nothing was saved — try "
+            "again shortly, or contact support if this keeps happening."
+        )
+    webhook_set = False
+    last_webhook_error: Optional[str] = None
+    for attempt in range(3):
+        if attempt:
+            await asyncio.sleep(0.75 * attempt)
         try:
             res = await set_webhook(token, url=webhook_url, secret_token=secret)
-            webhook_set = bool(res.get("ok"))
+            if res.get("ok"):
+                webhook_set = True
+                break
+            last_webhook_error = str(res.get("description") or "Telegram rejected the webhook.")
         except Exception as exc:
-            LOGGER.warning("assign_byo_bot: setWebhook best-effort failed: %s", exc)
+            last_webhook_error = str(exc)
+            LOGGER.warning(
+                "assign_byo_bot: setWebhook attempt %d failed for %s: %s",
+                attempt + 1, agent_install_id, exc,
+            )
+    if not webhook_set:
+        delete_vault_credential_by_id(cred_id)
+        raise RuntimeError(
+            "This bot's token is valid, but Empyralis couldn't connect it "
+            "to Telegram just now"
+            + (f" ({last_webhook_error})." if last_webhook_error else ".")
+            + " Nothing was saved — try again."
+        )
 
     try:
         await bindings.upsert_channel_binding(
@@ -486,6 +544,15 @@ async def route_agent_inbound(
     bot_username = str(binding_meta.get("bot_username") or "")
     credential_id = str(binding_meta.get("credential_id") or "")
     label = await _agent_label(agent_install_id, workspace_id, tenant_id)
+    # The real per-message Telegram user id, never the chat id — a group
+    # chat_id is shared by every member (a BYO bot can be added to a group
+    # by anyone since it's a real, discoverable Telegram bot), so
+    # substituting it would collapse every distinct sender into the same
+    # identity. Falls back to chat_id only if the caller has no sender_id
+    # (Telegram omitted `from` entirely — never a real 1:1 DM). Computed
+    # once, up front, so both the owner-claim check below and the turn
+    # dispatch further down use the identical value.
+    real_sender_id = str(sender_id or "").strip() or str(chat_id)
 
     if not deliver:
         return {
@@ -531,6 +598,39 @@ async def route_agent_inbound(
                 "reply_sent": True,
             }
 
+    # Owner-recognition claim — private DMs only. A BYO bot has no phone/QR
+    # pairing step, so command_registry._is_sender_owner and
+    # sage_agent_runtime_service._resolve_channel_sender_class (both read
+    # personal_channels_repository as their one authoritative source) could
+    # never recognize ANY sender as owner, the real owner included — see
+    # BYO_OWNER_CLAIM_CHANNEL_KEY's own comment above. First private DM
+    # claims it, one-shot, workspace-wide; never from a group message, where
+    # `real_sender_id` is a participant who added the bot, not necessarily
+    # the person who created it. Best-effort: a claim failure must never
+    # block the real turn that follows.
+    if str(chat_type or "").strip().lower() not in {"group", "supergroup"}:
+        try:
+            from server_modules import personal_channels_repository as _pcr
+
+            # Synchronous/blocking, matching every other caller of this
+            # sqlite3-backed module (e.g. command_registry._is_sender_owner
+            # calling _channel_linked_owner_ids inline) — not worth a
+            # thread hop for a single locked local-file query.
+            _pcr.claim_channel_owner_identity_if_unclaimed(
+                gateway_id=BYO_OWNER_CLAIM_GATEWAY_ID,
+                channel_key=BYO_OWNER_CLAIM_CHANNEL_KEY,
+                agent_id=agent_install_id,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                sender_id=real_sender_id,
+                provider=BYO_OWNER_CLAIM_PROVIDER,
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "route_agent_inbound: owner-claim best-effort failed for %s: %s",
+                agent_install_id, exc,
+            )
+
     from server_modules import specialist_runtime_context as _src
 
     try:
@@ -568,19 +668,11 @@ async def route_agent_inbound(
 
     from server_modules.sage_reply_dispatcher import dispatch_sage_reply_safe
 
-    # The real per-message Telegram user id, never the chat id — a group
-    # chat_id is shared by every member (a BYO bot can be added to a group
-    # by anyone since it's a real, discoverable Telegram bot), so
-    # substituting it collapsed every distinct sender into the same
-    # identity. Falls back to chat_id only if the caller has no sender_id
-    # (Telegram omitted `from` entirely — never a real 1:1 DM).
-    real_sender_id = str(sender_id or "").strip() or str(chat_id)
-
     delivered = await dispatch_sage_reply_safe(
         transport=transport,
         workspace_id=workspace_id,
         message=str(message or ""),
-        channel_origin="telegram_agent_byo",
+        channel_origin=BYO_OWNER_CLAIM_CHANNEL_KEY,
         sender_id=real_sender_id,
         thread_id=thread_id,
         reply_to_id=str(reply_to_message_id or "") or None,

@@ -40,6 +40,7 @@ class RouteAgentInboundSenderIdentityTests(unittest.IsolatedAsyncioTestCase):
              patch.object(prov, "resolve_bot_token", return_value="bot-token-123"), \
              patch("server_modules.specialist_runtime_context.resolve_specialist_runtime_context", new=AsyncMock(return_value=None)), \
              patch("server_modules.agent_registry_repository.get_workspace_agent_install_bundle", new=AsyncMock(return_value={"metadata": {}})), \
+             patch("server_modules.personal_channels_repository.claim_channel_owner_identity_if_unclaimed"), \
              patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch):
             result = await prov.route_agent_inbound(
                 agent_install_id="agent-1",
@@ -64,6 +65,7 @@ class RouteAgentInboundSenderIdentityTests(unittest.IsolatedAsyncioTestCase):
              patch.object(prov, "resolve_bot_token", return_value="bot-token-123"), \
              patch("server_modules.specialist_runtime_context.resolve_specialist_runtime_context", new=AsyncMock(return_value=None)), \
              patch("server_modules.agent_registry_repository.get_workspace_agent_install_bundle", new=AsyncMock(return_value={"metadata": {}})), \
+             patch("server_modules.personal_channels_repository.claim_channel_owner_identity_if_unclaimed"), \
              patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch):
             await prov.route_agent_inbound(
                 agent_install_id="agent-1", chat_id="-100999", message="hi", sender_id="111",
@@ -88,6 +90,7 @@ class RouteAgentInboundSenderIdentityTests(unittest.IsolatedAsyncioTestCase):
              patch.object(prov, "resolve_bot_token", return_value="bot-token-123"), \
              patch("server_modules.specialist_runtime_context.resolve_specialist_runtime_context", new=AsyncMock(return_value=None)), \
              patch("server_modules.agent_registry_repository.get_workspace_agent_install_bundle", new=AsyncMock(return_value={"metadata": {}})), \
+             patch("server_modules.personal_channels_repository.claim_channel_owner_identity_if_unclaimed"), \
              patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch):
             await prov.route_agent_inbound(
                 agent_install_id="agent-1", chat_id="555444", message="hi",
@@ -141,7 +144,8 @@ class AssignByoBotConflictTests(unittest.IsolatedAsyncioTestCase):
             patch.object(prov, "get_me", new=AsyncMock(return_value={"username": "parts_pro_bot", "id": "999"})),
             patch.object(prov.bindings, "find_inbound_owner_conflict", new=AsyncMock(return_value=None)),
             patch.object(prov, "store_byo_bot_credential", return_value="cred-123"),
-            patch.object(prov, "agent_bot_webhook_url", return_value=""),
+            patch.object(prov, "agent_bot_webhook_url", return_value="https://example.com/webhook"),
+            patch.object(prov, "set_webhook", new=AsyncMock(return_value={"ok": True})),
             patch.object(prov.bindings, "upsert_channel_binding", new=AsyncMock(side_effect=db_error)),
             patch.object(prov, "delete_vault_credential_by_id") as delete_mock,
         ):
@@ -161,7 +165,8 @@ class AssignByoBotConflictTests(unittest.IsolatedAsyncioTestCase):
             patch.object(prov, "get_me", new=AsyncMock(return_value={"username": "parts_pro_bot", "id": "999"})),
             patch.object(prov.bindings, "find_inbound_owner_conflict", new=AsyncMock(return_value=None)),
             patch.object(prov, "store_byo_bot_credential", return_value="cred-123"),
-            patch.object(prov, "agent_bot_webhook_url", return_value=""),
+            patch.object(prov, "agent_bot_webhook_url", return_value="https://example.com/webhook"),
+            patch.object(prov, "set_webhook", new=AsyncMock(return_value={"ok": True})),
             patch.object(prov.bindings, "upsert_channel_binding", new=AsyncMock(return_value={"id": "x"})) as upsert_mock,
         ):
             result = await prov.assign_byo_bot(
@@ -221,7 +226,8 @@ class AssignByoBotCrossWorkspaceOwnershipTests(unittest.IsolatedAsyncioTestCase)
             patch.object(prov, "get_me", new=AsyncMock(return_value={"username": "parts_pro_bot", "id": "999"})),
             patch.object(prov.bindings, "find_inbound_owner_conflict", new=AsyncMock(return_value=None)),
             patch.object(prov, "store_byo_bot_credential", return_value="cred-123"),
-            patch.object(prov, "agent_bot_webhook_url", return_value=""),
+            patch.object(prov, "agent_bot_webhook_url", return_value="https://example.com/webhook"),
+            patch.object(prov, "set_webhook", new=AsyncMock(return_value={"ok": True})),
             patch.object(prov.bindings, "upsert_channel_binding", new=AsyncMock(return_value={"id": "x"})) as upsert_mock,
         ):
             result = await prov.assign_byo_bot(
@@ -229,6 +235,90 @@ class AssignByoBotCrossWorkspaceOwnershipTests(unittest.IsolatedAsyncioTestCase)
             )
         scope_mock.assert_awaited_once_with("agent-own", tenant_id="tenant-1", workspace_id="ws-1")
         self.assertEqual(result["bot_username"], "parts_pro_bot")
+        upsert_mock.assert_awaited_once()
+
+
+class AssignByoBotWebhookHonestyTests(unittest.IsolatedAsyncioTestCase):
+    """assign_byo_bot used to swallow every setWebhook failure into
+    `webhook_set: False` while still returning `ok: True` and writing an
+    ENABLED channel binding — so the Fleet UI's "Bot token saved — this
+    agent's own bot is live" success message was shown for a bot that could
+    never receive a message (a deployment missing its public base URL env
+    var, or a transient Telegram-side error). These tests fail against the
+    pre-fix code (which never raises here and always upserts the binding)
+    and pass against the fix, which raises and rolls back the credential
+    instead of writing a dead-but-enabled binding."""
+
+    async def test_missing_public_base_url_raises_and_rolls_back_credential_no_binding_written(self) -> None:
+        with (
+            patch.object(prov.bindings, "agent_install_in_scope", new=AsyncMock(return_value=True)),
+            patch.object(prov, "get_me", new=AsyncMock(return_value={"username": "parts_pro_bot", "id": "999"})),
+            patch.object(prov.bindings, "find_inbound_owner_conflict", new=AsyncMock(return_value=None)),
+            patch.object(prov, "store_byo_bot_credential", return_value="cred-123"),
+            patch.object(prov, "agent_bot_webhook_url", return_value=""),
+            patch.object(prov, "delete_vault_credential_by_id") as delete_mock,
+            patch.object(prov.bindings, "upsert_channel_binding", new=AsyncMock()) as upsert_mock,
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                await prov.assign_byo_bot(
+                    agent_install_id="agent-2", workspace_id="ws-1", tenant_id="tenant-1", token="tok",
+                )
+        self.assertNotIsInstance(ctx.exception, prov.TelegramBotAlreadyBoundError)
+        delete_mock.assert_called_once_with("cred-123")
+        # The binding must never be written enabled=True for a bot that
+        # cannot receive a message — that would be the exact lie this fix
+        # exists to prevent.
+        upsert_mock.assert_not_awaited()
+
+    async def test_setwebhook_failing_every_attempt_raises_and_rolls_back(self) -> None:
+        with (
+            patch.object(prov.bindings, "agent_install_in_scope", new=AsyncMock(return_value=True)),
+            patch.object(prov, "get_me", new=AsyncMock(return_value={"username": "parts_pro_bot", "id": "999"})),
+            patch.object(prov.bindings, "find_inbound_owner_conflict", new=AsyncMock(return_value=None)),
+            patch.object(prov, "store_byo_bot_credential", return_value="cred-123"),
+            patch.object(prov, "agent_bot_webhook_url", return_value="https://example.com/webhook"),
+            patch.object(prov, "set_webhook", new=AsyncMock(return_value={"ok": False, "description": "bad request"})),
+            patch("asyncio.sleep", new=AsyncMock()),
+            patch.object(prov, "delete_vault_credential_by_id") as delete_mock,
+            patch.object(prov.bindings, "upsert_channel_binding", new=AsyncMock()) as upsert_mock,
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                await prov.assign_byo_bot(
+                    agent_install_id="agent-2", workspace_id="ws-1", tenant_id="tenant-1", token="tok",
+                )
+        self.assertIn("bad request", str(ctx.exception))
+        delete_mock.assert_called_once_with("cred-123")
+        upsert_mock.assert_not_awaited()
+
+    async def test_setwebhook_succeeding_on_a_later_attempt_still_succeeds(self) -> None:
+        """A transient first failure must not sink the whole assignment —
+        the token was already validated by get_me(), so retrying an
+        ordinary hiccup before giving up is worth it."""
+        attempts = {"n": 0}
+
+        async def _flaky_set_webhook(*args, **kwargs):
+            attempts["n"] += 1
+            if attempts["n"] < 2:
+                return {"ok": False, "description": "temporarily unavailable"}
+            return {"ok": True}
+
+        with (
+            patch.object(prov.bindings, "agent_install_in_scope", new=AsyncMock(return_value=True)),
+            patch.object(prov, "get_me", new=AsyncMock(return_value={"username": "parts_pro_bot", "id": "999"})),
+            patch.object(prov.bindings, "find_inbound_owner_conflict", new=AsyncMock(return_value=None)),
+            patch.object(prov, "store_byo_bot_credential", return_value="cred-123"),
+            patch.object(prov, "agent_bot_webhook_url", return_value="https://example.com/webhook"),
+            patch.object(prov, "set_webhook", new=_flaky_set_webhook),
+            patch("asyncio.sleep", new=AsyncMock()),
+            patch.object(prov, "delete_vault_credential_by_id") as delete_mock,
+            patch.object(prov.bindings, "upsert_channel_binding", new=AsyncMock(return_value={"id": "x"})) as upsert_mock,
+        ):
+            result = await prov.assign_byo_bot(
+                agent_install_id="agent-2", workspace_id="ws-1", tenant_id="tenant-1", token="tok",
+            )
+        self.assertEqual(attempts["n"], 2)
+        self.assertTrue(result["webhook_set"])
+        delete_mock.assert_not_called()
         upsert_mock.assert_awaited_once()
 
 

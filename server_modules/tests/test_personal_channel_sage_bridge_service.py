@@ -68,7 +68,22 @@ def _build_whatsapp_reply(**kwargs):
 # first-party key nothing can produce to `openclaw_telegram`, the key a real
 # Telegram message actually arrives under now, resolved from the registry so
 # a rename fails here rather than quietly testing nothing.
-_TELEGRAM_CHANNEL_KEY = f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}telegram"
+#
+# REPOINTED AGAIN, 2026-08-20 (feat/seamless-telegram-setup): a real Telegram
+# message no longer arrives under `openclaw_telegram` at all — see
+# openclaw_channel_registry.py's own "CORRECTION, 2026-08-20" comment.
+# `sage_telegram_hosted` (hosted_bot_provisioning_service.py) is what a
+# customer reaches for Telegram now, and it does not route through
+# personal_channel_sage_bridge_service — it has its own dispatcher
+# (sage_reply_dispatcher.dispatch_sage_reply_safe). Every test below is
+# actually about the GENERIC personal-gateway/local-bridge reply path
+# (guard_personal_gateway_inbound_message, group-gate, media handling), which
+# any live OpenClaw-transported channel exercises identically — the name
+# "Telegram" is now a historical label on this constant, not a claim about
+# which platform is under test; `fallback_label="Telegram"` at each call site
+# is unaffected by this since it only ever fed a display string, decoupled
+# from `surface_channel`'s real routing value even before this change.
+_TELEGRAM_CHANNEL_KEY = f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}signal"
 
 
 def _build_telegram_reply(**kwargs):

@@ -403,7 +403,7 @@ def is_registry_channel_package(npm_package: str) -> bool:
 #
 # 2026-08-14 full channel cutover, founder's explicit order ("remove the
 # entire old channels... whatever comes with the new gateway, everything must
-# be wired"). Cut over the five PERSONAL-GATEWAY-LANE platforms whose
+# be wired"). Cut over the four PERSONAL-GATEWAY-LANE platforms whose
 # first-party implementation this OpenClaw transport genuinely supersedes —
 # each one already required a paired Agent Computer before this change, so
 # nothing about the hardware requirement moves:
@@ -412,31 +412,59 @@ def is_registry_channel_package(npm_package: str) -> bool:
 #   imessage  - pairing (imsg/BlueBubbles), first-party local-bridge retired.
 #   openclaw-weixin - plugin_absent today (external @tencent-weixin plugin,
 #             pinned 2.4.3 — installs on demand), first-party retired.
-#   telegram  - credential (Bot API) ONLY on the pinned build; there is no
-#             personal-account credential shape upstream at all. Cutting this
-#             over is a deliberate CONVERSION from an account channel
-#             (gramjs, ban-risk, retired) to a bot channel — not a like-for-
-#             like swap. See CLAUDE.md's Telegram entry for the honesty
-#             consequence on the setup surface.
 #
-# Deliberately EXCLUDED, and not merely deferred: discord, slack, sms. All
-# three are STUDIO BUSINESS CONNECTOR channels (STUDIO_CONNECTOR_RUNTIME_LANE
-# in channel_lane_contract_service, not PERSONAL_GATEWAY_RUNTIME_LANE) — their
-# existing first-party implementations are cloud-only bot/webhook connectors
-# that need no Agent Computer at all. OpenClaw is a hardware-bound transport
-# by construction (it runs ON the customer's own machine); cutting these three
-# over would force every Discord/Slack/SMS-using agent to acquire and pair
-# hardware it does not need today, for a channel that already works. That is
-# a functional regression, not "OpenClaw genuinely supporting" the channel in
-# a way that improves on today's implementation — the founder's "whatever
-# OpenClaw carries, we carry" is about the personal-messaging lane this whole
+# Deliberately EXCLUDED, and not merely deferred: discord, slack, sms,
+# telegram. All four are STUDIO BUSINESS CONNECTOR channels
+# (STUDIO_CONNECTOR_RUNTIME_LANE in channel_lane_contract_service, not
+# PERSONAL_GATEWAY_RUNTIME_LANE) — their existing first-party implementations
+# are cloud-only bot/webhook connectors that need no Agent Computer at all.
+# OpenClaw is a hardware-bound transport by construction (it runs ON the
+# customer's own machine); cutting these four over would force every
+# Discord/Slack/SMS/Telegram-using agent to acquire and pair hardware it does
+# not need today, for a channel that already works. That is a functional
+# regression, not "OpenClaw genuinely supporting" the channel in a way that
+# improves on today's implementation — the founder's "whatever OpenClaw
+# carries, we carry" is about the personal-messaging lane this whole
 # transport was built for, not about collapsing a deliberately hardware-free
 # business-connector lane into a hardware-bound one. discord_personal (the
 # personal-lane Discord entry) is ALSO cloud_connector/bot-token-backed for
 # the same Discord-ToS-forbids-self-bots reason, so it carries the identical
 # argument and stays first-party too.
+#
+# CORRECTION, 2026-08-20 (feat/seamless-telegram-setup): telegram used to be
+# on the cut-over side, and it was wrong — a platform-token collision, not a
+# considered call. "telegram" the PLATFORM has two entirely separate
+# first-party lanes: the deleted personal-account one (gramjs, ban-risk —
+# `telegram_personal`, retired same change as whatsapp/signal/imessage
+# above, correctly) and `telegram_bot`
+# (hosted_bot_provisioning_service.py's CHANNEL_KEY_TELEGRAM, family
+# `studio_business`, `session_owner: cloud_connector` in
+# STUDIO_CHANNEL_ROADMAP — structurally identical to discord_bot/slack/
+# sms_twilio in every classifying dimension, cloud-hosted, needs no gateway).
+# The cutover comment reasoned about the first lane (a real, correct swap:
+# gramjs has no personal-account credential shape upstream at all, matching
+# the honesty note in CLAUDE.md's Telegram entry) but the id it added —
+# "telegram", the bare platform token — swept up the second, unrelated lane
+# too, because `resolve_transport_ownership` decides per PLATFORM, not per
+# LANE. Net effect: `channel-platform.ts`'s ONE-PLATFORM-ONE-CARD merge
+# (frontend/lib/workspace/fleet/channel-platform.ts, landed the same day as
+# this cutover) resolved the resulting "two Telegram cards" collision by
+# keeping the OpenClaw-transported one and dropping `sage_telegram_hosted`
+# — silently making a computer/VPS mandatory to connect Telegram, the exact
+# "force an agent to acquire hardware it does not need, for a channel that
+# already works" regression this comment already names as the reason
+# discord/slack/sms stay first-party. Verified live: a fresh cloud-only
+# agent's Channels tab showed Telegram as "Needs Gateway" with no way to
+# reach the paste-a-BotFather-token flow at all. Removed from this set so
+# `telegram_bot` resolves first-party again, exactly like discord_bot/slack/
+# sms_twilio always have — `openclaw_telegram` stays declared and visible
+# (a customer who genuinely wants Telegram bundled with their other OpenClaw
+# channels on one box can still reach it there), it just stops being the
+# ADVERTISED, ACTIVE implementation. `telegram_personal`'s retirement is
+# untouched — there is no first-party personal-account implementation left
+# to protect.
 OPENCLAW_CUT_OVER_CHANNEL_IDS: frozenset[str] = frozenset(
-    {"whatsapp", "signal", "imessage", "openclaw-weixin", "telegram"}
+    {"whatsapp", "signal", "imessage", "openclaw-weixin"}
 )
 
 # Where OpenClaw's id and Empyralis's platform token spell the same platform
