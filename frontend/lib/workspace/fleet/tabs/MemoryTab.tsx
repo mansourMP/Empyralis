@@ -3,19 +3,90 @@
 import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { FileText, Info, Loader2, Trash2 } from "lucide-react";
+import { CalendarClock, FileText, Info, Loader2, Lock, Sparkles, Trash2 } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { parseMarkdownLiteBlocks, renderMarkdownLiteInline } from "@/lib/workspace/markdown-lite";
 import type { FleetAgent } from "../fleet-data";
 
 /**
- * MEMORY tab — the Phase 6 memory tree. MEMORY.md is the index and is shown
- * first; topic files follow. The owner can read, edit (PUT), and delete a file.
+ * MEMORY tab — everything this agent actually remembers, in one picker.
+ *
+ * There are FOUR real stores behind an agent's memory and until 2026-08-20
+ * this surface showed exactly one of them. The other three were live, were
+ * feeding the model's own prompt, and were unreachable from any screen:
+ *
+ *   Memory files   MEMORY.md index + memory/files/**.md topic files.
+ *                  Server-side, on the backend's own disk. The original
+ *                  contents of this tab; read/edit/delete, unchanged.
+ *   Facts          the memory_entries key/value table — what the agent's
+ *                  own `memory_write` tool writes. Carries attribution
+ *                  (trust_tier), so a fact a stranger told it on a channel
+ *                  is visibly different from one the owner stated.
+ *   Recent activity the rolling day-log. NOT a log viewer: this exact text
+ *                  is re-injected into the next turn as "Recent Daily
+ *                  Logs", so it is what the agent will read about itself
+ *                  tomorrow.
+ *   Your note      the per-PERSON private note (Postgres,
+ *                  agent_private_memory_notes). Scoped to the signed-in
+ *                  caller by the server, which takes no user id from this
+ *                  client at all — a teammate's note is not addressable
+ *                  from here, by construction rather than by filtering.
+ *
+ * They share ONE left-hand picker rather than growing a second tab strip:
+ * the rail is where you pick, the pane is what you picked.
+ *
  * Paths are server-hardened, so we pass them through as-is.
  */
 
 type TreeFile = { path: string; size?: number };
+
+/** A pseudo-path for one of the three non-file stores. Kept in the same
+ *  `selected` slot as a real file path so there is one selection model and
+ *  one active-item rule, never two competing ones. The `__` prefix cannot
+ *  collide with a real tree path: the server rejects any path that is not a
+ *  markdown file at most one subdirectory deep. */
+const FACTS_VIEW = "__facts__";
+const DAILY_VIEW = "__daily__";
+const PRIVATE_VIEW = "__private__";
+const PSEUDO_VIEWS: ReadonlySet<string> = new Set([FACTS_VIEW, DAILY_VIEW, PRIVATE_VIEW]);
+
+type MemoryFact = {
+  key: string;
+  content: string;
+  updated_at?: number;
+  trust_tier?: string;
+  source_sender_name?: string | null;
+  source_platform?: string | null;
+};
+
+/** The four trust tiers derive_trust_tier (agent_memory.py) can return,
+ *  turned into the shortest honest label. "agent_inferred" is the legacy/
+ *  no-attribution case and is the common one, so it says the plain truth
+ *  ("no source recorded") instead of something that sounds like a verdict. */
+function trustLabel(tier?: string, senderName?: string | null): string | null {
+  switch (String(tier || "")) {
+    case "owner":
+      return "from you";
+    case "non_owner_sender":
+      return senderName ? `from ${senderName}` : "from someone else";
+    case "unverified":
+      return senderName ? `from ${senderName} (unverified)` : "unverified source";
+    case "agent_inferred":
+      return "no source recorded";
+    default:
+      return null;
+  }
+}
+
+function formatFactTime(seconds?: number): string | null {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0) return null;
+  try {
+    return new Date(seconds * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  } catch {
+    return null;
+  }
+}
 
 // ── Rendering: MEMORY.md and topic files are hand-authored markdown-ish text
 // (see workspace_context.py's DEFAULT_CONTEXT_FILE_CONTENTS), not full CommonMark.
@@ -178,6 +249,22 @@ export function MemoryTab({
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<"preview" | "edit">("preview");
 
+  // ── The three non-file stores. Each keeps its own "could not load" flag
+  // rather than folding into the shared `error` banner: an unreadable facts
+  // table must not read as "this agent has no facts", and it must not blank
+  // the memory files sitting beside it either.
+  const [facts, setFacts] = useState<MemoryFact[]>([]);
+  const [factsError, setFactsError] = useState<string | null>(null);
+  const [factsLoaded, setFactsLoaded] = useState(false);
+  const [daily, setDaily] = useState<string>("");
+  const [dailyError, setDailyError] = useState<string | null>(null);
+  const [dailyLoaded, setDailyLoaded] = useState(false);
+  const [privateNote, setPrivateNote] = useState<string>("");
+  const [privateOriginal, setPrivateOriginal] = useState<string>("");
+  const [privateError, setPrivateError] = useState<string | null>(null);
+  const [privateLoaded, setPrivateLoaded] = useState(false);
+  const [privateSaving, setPrivateSaving] = useState(false);
+
   // Agent identity guard — this tab can stay mounted across an agent switch
   // (command palette / Back nav swap the agentId prop without unmounting it,
   // same as every other fleet tab), so any state describing "which file is
@@ -194,7 +281,105 @@ export function MemoryTab({
     setOriginal("");
     setIsDefault(false);
     setMode("preview");
+    // The three stores below are per-agent too, so they get the same
+    // re-key treatment for the same reason: without it, agent A's facts
+    // stay on screen under agent B's name, and a private-note Save would
+    // PUT A's text at B's URL.
+    setFacts([]);
+    setFactsError(null);
+    setFactsLoaded(false);
+    setDaily("");
+    setDailyError(null);
+    setDailyLoaded(false);
+    setPrivateNote("");
+    setPrivateOriginal("");
+    setPrivateError(null);
+    setPrivateLoaded(false);
   }, [agentId]);
+
+  // Facts load with the tree (the left list shows their COUNT, so it cannot
+  // wait for a click); the day-log and the private note are pulled only when
+  // opened — both can be large, and neither has anything to show in the list.
+  const loadFacts = useCallback(async () => {
+    try {
+      const res = await fleetAuthorizedFetch(`${apiBase}/facts`, { credentials: "include" });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d?.ok === false) throw new Error(d?.error || `HTTP ${res.status}`);
+      setFacts(Array.isArray(d?.facts) ? (d.facts as MemoryFact[]) : []);
+      setFactsError(null);
+    } catch (e) {
+      setFactsError(e instanceof Error ? e.message : "Could not load facts.");
+    } finally {
+      setFactsLoaded(true);
+    }
+  }, [apiBase]);
+
+  const loadDaily = useCallback(async () => {
+    try {
+      const res = await fleetAuthorizedFetch(`${apiBase}/daily`, { credentials: "include" });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d?.ok === false) throw new Error(d?.error || `HTTP ${res.status}`);
+      setDaily(String(d?.content || ""));
+      setDailyError(null);
+    } catch (e) {
+      setDailyError(e instanceof Error ? e.message : "Could not load recent activity.");
+    } finally {
+      setDailyLoaded(true);
+    }
+  }, [apiBase]);
+
+  const loadPrivate = useCallback(async () => {
+    try {
+      const res = await fleetAuthorizedFetch(`${apiBase}/private-note`, { credentials: "include" });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d?.ok === false) throw new Error(d?.error || `HTTP ${res.status}`);
+      const text = String(d?.note?.content || "");
+      setPrivateNote(text);
+      setPrivateOriginal(text);
+      setPrivateError(null);
+    } catch (e) {
+      setPrivateError(e instanceof Error ? e.message : "Could not load your note.");
+    } finally {
+      setPrivateLoaded(true);
+    }
+  }, [apiBase]);
+
+  async function deleteFact(key: string) {
+    if (typeof window !== "undefined" && !window.confirm("Forget this? The agent will no longer know it.")) return;
+    try {
+      const res = await fleetAuthorizedFetch(`${apiBase}/facts?key=${encodeURIComponent(key)}`, {
+        method: "DELETE",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("DELETE", {}),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d?.ok === false) throw new Error(d?.error || `HTTP ${res.status}`);
+      setFacts((prev) => prev.filter((f) => f.key !== key));
+      setFactsError(null);
+    } catch (e) {
+      setFactsError(e instanceof Error ? e.message : "Could not forget that.");
+    }
+  }
+
+  async function savePrivate() {
+    setPrivateSaving(true);
+    try {
+      const res = await fleetAuthorizedFetch(`${apiBase}/private-note`, {
+        method: "PUT",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("PUT", { "Content-Type": "application/json" }),
+        body: JSON.stringify({ content: privateNote }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d?.ok === false) throw new Error(d?.error || `HTTP ${res.status}`);
+      setPrivateOriginal(privateNote);
+      setPrivateError(null);
+    } catch (e) {
+      setPrivateError(e instanceof Error ? e.message : "Could not save your note.");
+    } finally {
+      setPrivateSaving(false);
+    }
+  }
 
   // `silent` skips the loading flag — used by save()/del() below to refresh
   // the tree AFTER a mutation. Without this, `setLoading(true)` unmounted
@@ -225,6 +410,14 @@ export function MemoryTab({
   }, [apiBase]);
 
   useEffect(() => { loadTree(); }, [loadTree]);
+  useEffect(() => { loadFacts(); }, [loadFacts]);
+
+  const openView = useCallback((view: string) => {
+    setSelected(view);
+    setError(null);
+    if (view === DAILY_VIEW && !dailyLoaded) loadDaily();
+    if (view === PRIVATE_VIEW && !privateLoaded) loadPrivate();
+  }, [dailyLoaded, privateLoaded, loadDaily, loadPrivate]);
 
   const openFile = useCallback(async (path: string) => {
     setSelected(path);
@@ -249,6 +442,8 @@ export function MemoryTab({
   useEffect(() => {
     if (!selected && files.length > 0) openFile(files[0].path);
   }, [files, selected, openFile]);
+
+  const isPseudo = selected !== null && PSEUDO_VIEWS.has(selected);
 
   async function save() {
     if (!selected) return;
@@ -375,9 +570,162 @@ export function MemoryTab({
             The agent creates topic files here as it learns things worth remembering.
           </div>
         )}
+
+        {/* The three non-file stores, in the SAME picker. A second tab strip
+            beside a list that is already the picker is the two-navigation-
+            surfaces bug this codebase has shipped and reverted before. */}
+        <div className="fleet-memory-file-list-title" style={{ marginTop: 14 }}>What it knows</div>
+        <button
+          type="button"
+          className={`fleet-memory-file-item${selected === FACTS_VIEW ? " is-active" : ""}`}
+          onClick={() => openView(FACTS_VIEW)}
+        >
+          <Sparkles size={13} strokeWidth={1.75} />
+          <span className="fleet-memory-file-item-path">Facts</span>
+          {/* Rendered only once the facts request has actually answered:
+              a "0" printed while the fetch is still in flight is a claim
+              this component cannot support yet, and reads as "it knows
+              nothing" rather than "not loaded". */}
+          {factsLoaded && !factsError && (
+            <span className="fleet-memory-file-item-size">{facts.length}</span>
+          )}
+        </button>
+        <button
+          type="button"
+          className={`fleet-memory-file-item${selected === DAILY_VIEW ? " is-active" : ""}`}
+          onClick={() => openView(DAILY_VIEW)}
+        >
+          <CalendarClock size={13} strokeWidth={1.75} />
+          <span className="fleet-memory-file-item-path">Recent activity</span>
+        </button>
+        <button
+          type="button"
+          className={`fleet-memory-file-item${selected === PRIVATE_VIEW ? " is-active" : ""}`}
+          onClick={() => openView(PRIVATE_VIEW)}
+        >
+          <Lock size={13} strokeWidth={1.75} />
+          <span className="fleet-memory-file-item-path">Your note</span>
+        </button>
       </div>
       <div className="fleet-memory-editor">
-        {selected ? (
+        {selected === FACTS_VIEW ? (
+          <>
+            <div className="fleet-memory-editor-header">
+              <span className="fleet-memory-editor-filename">Facts</span>
+            </div>
+            <div className="fleet-memory-preview-scroll">
+              <p className="fleet-memory-file-list-hint" style={{ padding: 0, marginBottom: 12 }}>
+                Short things this agent recorded for itself. Forgetting one removes it from
+                everything the agent reads from then on.
+              </p>
+              {factsError ? (
+                <div className="fleet-channel-expand-error">{factsError}</div>
+              ) : !factsLoaded ? (
+                <div aria-busy="true" aria-label="Loading facts">
+                  {[88, 74, 92].map((w, i) => (
+                    <div key={i} className="fleet-skeleton-bar" style={{ width: `${w}%`, height: 11, marginBottom: 10 }} />
+                  ))}
+                </div>
+              ) : facts.length === 0 ? (
+                <p className="fleet-page-state-body">Nothing recorded yet.</p>
+              ) : (
+                <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 8 }}>
+                  {facts.map((f) => {
+                    const tier = trustLabel(f.trust_tier, f.source_sender_name);
+                    const when = formatFactTime(f.updated_at);
+                    return (
+                      <li
+                        key={f.key}
+                        style={{ display: "flex", alignItems: "flex-start", gap: 8, minWidth: 0 }}
+                      >
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div className="fleet-memory-preview-p" style={{ margin: 0 }}>{f.content}</div>
+                          {(tier || when) && (
+                            <div className="fleet-memory-file-item-size" style={{ marginTop: 2 }}>
+                              {[tier, when].filter(Boolean).join(" · ")}
+                            </div>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          className="fleet-btn"
+                          onClick={() => deleteFact(f.key)}
+                          aria-label={`Forget: ${f.content.slice(0, 60)}`}
+                          title="Forget this"
+                        >
+                          <Trash2 size={13} strokeWidth={1.75} />
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          </>
+        ) : selected === DAILY_VIEW ? (
+          <>
+            <div className="fleet-memory-editor-header">
+              <span className="fleet-memory-editor-filename">Recent activity</span>
+            </div>
+            <div className="fleet-memory-preview-scroll">
+              <p className="fleet-memory-file-list-hint" style={{ padding: 0, marginBottom: 12 }}>
+                A running day-by-day note the agent keeps of its own turns — and reads back on
+                its next one.
+              </p>
+              {dailyError ? (
+                <div className="fleet-channel-expand-error">{dailyError}</div>
+              ) : !dailyLoaded ? (
+                <div aria-busy="true" aria-label="Loading recent activity">
+                  {[92, 70, 84].map((w, i) => (
+                    <div key={i} className="fleet-skeleton-bar" style={{ width: `${w}%`, height: 11, marginBottom: 10 }} />
+                  ))}
+                </div>
+              ) : daily.trim() ? (
+                <MemoryPreview content={daily} />
+              ) : (
+                <p className="fleet-page-state-body">Nothing in the last two weeks.</p>
+              )}
+            </div>
+          </>
+        ) : selected === PRIVATE_VIEW ? (
+          <>
+            <div className="fleet-memory-editor-header">
+              <span className="fleet-memory-editor-filename">Your note</span>
+              <div className="fleet-memory-editor-actions">
+                <button
+                  type="button"
+                  className="fleet-btn fleet-btn--accent"
+                  onClick={savePrivate}
+                  disabled={privateSaving || !privateLoaded || privateNote === privateOriginal || !privateNote.trim()}
+                >
+                  {privateSaving ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : "Save"}
+                </button>
+              </div>
+            </div>
+            <div className="fleet-memory-preview-scroll">
+              <p className="fleet-memory-file-list-hint" style={{ padding: 0, marginBottom: 12 }}>
+                How you personally want this agent to work with you. Yours alone — teammates
+                have their own, and nobody can read yours.
+              </p>
+              {privateError && <div className="fleet-channel-expand-error">{privateError}</div>}
+              {!privateLoaded ? (
+                <div aria-busy="true" aria-label="Loading your note">
+                  {[90, 76].map((w, i) => (
+                    <div key={i} className="fleet-skeleton-bar" style={{ width: `${w}%`, height: 11, marginBottom: 10 }} />
+                  ))}
+                </div>
+              ) : (
+                <textarea
+                  className="fleet-memory-editor-textarea"
+                  value={privateNote}
+                  onChange={(e) => setPrivateNote(e.currentTarget.value)}
+                  placeholder="e.g. Answer briefly. I care about the trade-off, not the summary."
+                  spellCheck={false}
+                />
+              )}
+            </div>
+          </>
+        ) : selected && !isPseudo ? (
           <>
             <div className="fleet-memory-editor-header">
               <span className="fleet-memory-editor-filename">{selected}</span>

@@ -2632,6 +2632,12 @@ async def fleet_agent_memory_file_write(
     current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
     resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    # Was missing on both mutations while the GETs beside them carried it --
+    # a no-op for a workspace owner today (an owner already clears every
+    # project ACL in their own workspace), but the asymmetry is exactly the
+    # kind of latent gap CLAUDE.md records for _enforce_agent_project_access
+    # itself: the READ was gated and the WRITE was not.
+    await _enforce_agent_project_access(current_user, resolved_workspace_id, await _resolve_tenant(resolved_workspace_id), agent_id, minimum_role="owner")
     from server_modules import agent_memory_tree_service as tree
 
     try:
@@ -2651,11 +2657,188 @@ async def fleet_agent_memory_file_delete(
     current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
     resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    await _enforce_agent_project_access(current_user, resolved_workspace_id, await _resolve_tenant(resolved_workspace_id), agent_id, minimum_role="owner")
     from server_modules import agent_memory_tree_service as tree
 
     try:
         ns = await _resolve_memory_namespace(resolved_workspace_id, agent_id)
         return {"ok": True, "deleted": tree.delete_file(resolved_workspace_id, path, agent_install_id=ns), "path": path}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+# ── What the agent WROTE ITSELF: facts + this person's private note ──────────
+#
+# The memory tree above (MEMORY.md + topic files) was the only memory a
+# person could ever SEE. Two other stores were live and completely invisible
+# from any screen:
+#
+#   memory_entries (SQLite, server-side, per workspace+install)
+#       the agent's own key/value facts -- what `memory_write` writes, and
+#       what direct-chat fact extraction writes when it runs. Carries the
+#       attribution columns agent_memory._row_to_entry already returns
+#       (source_platform/surface/sender_*, derive_trust_tier), so a fact
+#       learned from a stranger on a channel is distinguishable from one the
+#       owner stated directly. That distinction existed in the database and
+#       reached nobody.
+#
+#   agent_private_memory_notes (Postgres, per workspace+install+USER)
+#       the per-person half of the shared-vs-private split. Reachable ONLY
+#       through the model's memory_get_private tool until now -- a person
+#       could not read, correct, or even confirm the existence of the note
+#       their own agent keeps about them.
+#
+# The private-note routes take NO user_id parameter, deliberately. The only
+# source is the authenticated session (`current_user["user_id"]`), exactly
+# as skills_service's tool dispatch resolves it from session_metadata --
+# CLAUDE.md's "the FIRING CODE decides which layer a write lands in, never a
+# model-supplied (or here, caller-supplied) flag". Adding a user_id query
+# parameter would turn a workspace owner into a reader of every teammate's
+# private note with one URL edit, which is the exact boundary
+# agent_private_memory_repository's four-column WHERE clause exists to make
+# structurally impossible.
+
+
+@router.get("/api/w/{workspace_id}/fleet/agents/{agent_id}/memory/facts")
+async def fleet_agent_memory_facts(
+    request: Request, workspace_id: str, agent_id: str,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """The agent's own key/value facts (shared pool -- every project member
+    sees the same list, same as the memory tree)."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    await _enforce_agent_project_access(current_user, resolved_workspace_id, await _resolve_tenant(resolved_workspace_id), agent_id, minimum_role="viewer")
+    from server_modules import memory_service
+
+    try:
+        ns = await _resolve_memory_namespace(resolved_workspace_id, agent_id)
+        entries = memory_service.list_memory_entries(resolved_workspace_id, agent_install_id=ns)
+        return {
+            "ok": True,
+            "agent_id": agent_id,
+            "scope": "workspace" if ns is None else "install",
+            "facts": entries,
+            "count": len(entries),
+        }
+    except Exception as exc:
+        # "no facts" and "could not read the facts" are different facts and
+        # must not share one screen (CLAUDE.md's outcome-honesty law). The
+        # caller distinguishes them on `ok`, never on an empty list.
+        return {"ok": False, "error": str(exc), "facts": [], "count": 0}
+
+
+@router.delete("/api/w/{workspace_id}/fleet/agents/{agent_id}/memory/facts")
+async def fleet_agent_memory_fact_delete(
+    request: Request, workspace_id: str, agent_id: str,
+    key: str = Query(..., description="The fact's storage key, as returned by the facts listing"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    await _enforce_agent_project_access(current_user, resolved_workspace_id, await _resolve_tenant(resolved_workspace_id), agent_id, minimum_role="owner")
+    from server_modules import memory_service
+
+    try:
+        ns = await _resolve_memory_namespace(resolved_workspace_id, agent_id)
+        # `deleted` is the row count, not the request outcome: a key that was
+        # already gone returns ok=True/deleted=False rather than an error.
+        deleted = memory_service.delete_memory(resolved_workspace_id, key, agent_install_id=ns)
+        return {"ok": True, "deleted": bool(deleted), "key": key}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "deleted": False, "key": key}
+
+
+@router.get("/api/w/{workspace_id}/fleet/agents/{agent_id}/memory/daily")
+async def fleet_agent_memory_daily(
+    request: Request, workspace_id: str, agent_id: str,
+    days: int = Query(14, ge=1, le=30, description="How many days back to read"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """The rolling day-log this agent's own turns append to.
+
+    THIS IS THE FEEDBACK LOOP, not a log viewer: the same text is injected
+    back into the next turn's prompt as the "Recent Daily Logs" section
+    (workspace_context_memory_adapter.load_workspace_context_payload), so
+    what shows here is literally what the agent will read about itself
+    tomorrow. It is a THIRD store, separate from both the memory tree and
+    the facts table, and it had no reader outside the prompt assembler --
+    a person could not see the one part of memory that grows on its own.
+
+    Note for anyone extending this: `memory_service.get_recent_logs` reads
+    `.orion-stack/memory/<workspace>/<date>.md`, which is NOT the same file
+    set as `memory_append_daily_note`'s `<context dir>/memory/<date>.md`.
+    Two daily-note stores exist; `consolidate_daily_memory_notes` reads only
+    the second. See CLAUDE.md's memory-storage entry."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    await _enforce_agent_project_access(current_user, resolved_workspace_id, await _resolve_tenant(resolved_workspace_id), agent_id, minimum_role="viewer")
+    from server_modules import memory_service
+
+    try:
+        ns = await _resolve_memory_namespace(resolved_workspace_id, agent_id)
+        text = memory_service.get_recent_logs(resolved_workspace_id, days=days, agent_install_id=ns)
+        return {"ok": True, "days": days, "content": text or "", "has_content": bool(str(text or "").strip())}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "content": "", "has_content": False}
+
+
+class FleetPrivateMemoryNoteWriteRequest(BaseModel):
+    content: str = ""
+
+
+@router.get("/api/w/{workspace_id}/fleet/agents/{agent_id}/memory/private-note")
+async def fleet_agent_private_memory_note_read(
+    request: Request, workspace_id: str, agent_id: str,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """THIS caller's own private note for this agent. Never anyone else's --
+    see the block comment above."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    await _enforce_agent_project_access(current_user, resolved_workspace_id, await _resolve_tenant(resolved_workspace_id), agent_id, minimum_role="viewer")
+    from server_modules import agent_private_memory_service as private_memory
+
+    user_id = str((current_user or {}).get("user_id") or "").strip()
+    if not user_id:
+        return {"ok": False, "error": "No resolved user identity for this session.", "note": None}
+    try:
+        note = await private_memory.aget_private_memory_note(
+            resolved_workspace_id,
+            agent_install_id=private_memory.resolve_agent_install_scope(agent_id),
+            user_id=user_id,
+        )
+        # `note: None` with ok=True is the honest "you have not written one",
+        # distinct from ok=False ("this could not be read") -- including the
+        # no-Postgres-pool case, which the service also surfaces as None. The
+        # `supported` flag says which of those two Nones this is.
+        return {"ok": True, "note": note, "max_chars": private_memory.PRIVATE_MEMORY_NOTE_MAX_CHARS}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "note": None}
+
+
+@router.put("/api/w/{workspace_id}/fleet/agents/{agent_id}/memory/private-note")
+async def fleet_agent_private_memory_note_write(
+    request: Request, workspace_id: str, agent_id: str,
+    body: FleetPrivateMemoryNoteWriteRequest,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Write THIS caller's own private note. `viewer` is the right floor: a
+    person's private note is theirs, and gating it on `owner` would mean a
+    teammate could be shown a note about themselves they are not allowed to
+    correct."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    await _enforce_agent_project_access(current_user, resolved_workspace_id, await _resolve_tenant(resolved_workspace_id), agent_id, minimum_role="viewer")
+    from server_modules import agent_private_memory_service as private_memory
+
+    user_id = str((current_user or {}).get("user_id") or "").strip()
+    if not user_id:
+        return {"ok": False, "error": "No resolved user identity for this session."}
+    try:
+        saved = await private_memory.awrite_private_memory_note(
+            resolved_workspace_id,
+            agent_install_id=private_memory.resolve_agent_install_scope(agent_id),
+            user_id=user_id,
+            content=body.content or "",
+            reason="owner_ui_edit",
+        )
+        return {"ok": True, **(saved or {})}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 

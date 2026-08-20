@@ -1065,7 +1065,16 @@ onto the shared post-loop path before ever deleting legacy —
 `EMPYRALIS_FORCE_LEGACY_ENGINE` (MAN-312) and the per-agent legacy pin exist
 precisely because legacy is still the only engine that carries these two.
 **The reasoning_effort half is FIXED, 2026-08-20 — see "BYO-subscription
-model truth" below.** The memory-pipeline half is still open.
+model truth" below.** **The memory-pipeline half is FIXED 2026-08-21, and
+the paragraph above was HALF WRONG about it in a way that matters — see
+"Agent memory: where it lives" below. The "zero call sites" claim was
+stale (a real chain existed: `sage_agent_runtime_service` ->
+`conversation_memory_facade_service.persist_interaction` -> `memory_service`).
+The CONCLUSION was right anyway, for a worse reason: every branch behind
+that chain was gated on a metadata flag only the legacy caller sets, and
+the facade returned `{"persisted": True}` regardless. Do not re-derive this
+from a grep — a grep found the callers and would have told you the pipeline
+ran.**
 
 **Stale string matching.** An error bucket matched `"ai limit"`; the message
 was reworded to `"AI usage limit reached"` and users got a generic "Something
@@ -3025,6 +3034,157 @@ from "owner" — so a teammate invited into a shared agent's project
 currently gets the SAME tool authority as the owner (full `memory_write`,
 etc.), a real but separate gap from memory scoping; fixing it would mean
 redesigning the tier model project-wide, which this pass did not touch.
+
+## Agent memory: where it lives, and the pipeline that reported success while doing nothing (2026-08-21)
+
+**Verdict: memory is SERVER-SIDE, all of it. Nothing an agent remembers
+lives on the paired hardware — not one byte, on any path.** Traced from the
+live code, not from the older entries above.
+
+```
+CLOUD / BACKEND SERVER                                   HARDWARE (Agent Computer)
+  <backend repo>/.orion-stack/workspace/<ws>[/agents/<id>]/
+    MEMORY.md              the always-injected index         nothing.
+    memory/files/**.md     topic files                       the box runs tool
+    memory/<date>.md       daily notes written by the        calls in Docker
+                             model's own memory_append       containers that are
+                                                             created and destroyed
+  <backend repo>/.orion-stack/memory/<ws>[/agents/<id>/]     within ONE tool call
+    memory.db (SQLite)     memory_entries — the key/value    (MAN-318). It holds
+                             FACTS memory_write writes       no memory state at
+    <date>.md              the ROLLING DAY-LOG, a SECOND     all, and rebuilding
+                             daily-note store (see below)    a box loses none.
+
+  POSTGRES (control plane)
+    agent_private_memory_notes         one row per (tenant, ws, install, USER)
+    agent_private_memory_note_revisions
+    project_documents                  the shared company-context document
+```
+
+So the founder's own instinct was right and there is nothing to move: the
+server already owns it, so git-style line-by-line editing is available to
+build on rather than a migration to do first. The ONE thing worth knowing
+before building on that: the markdown half is plain files on the backend's
+local disk (`.orion-stack/`), NOT Postgres and NOT `project_documents` — so
+it has no RLS, no revision table, and no compare-and-swap precondition. A
+document-grade editing story for memory files means moving them into
+`project_documents` (which already has all three — see the stale-write
+precondition entry above), not adding a fourth store.
+
+**THERE ARE TWO DAILY-NOTE STORES AND ONLY ONE IS CONSOLIDATED.** Nothing
+says so anywhere, and they are one letter apart in the call graph:
+
+```
+memory_service.save_daily_log  ─▶ .orion-stack/memory/<ws>/<date>.md
+    read by get_recent_logs ─▶ INJECTED every turn as "Recent Daily Logs"
+    read by consolidate_daily_memory_notes ─▶ NO. never.
+
+memory_service.memory_append_daily_note ─▶ <context dir>/memory/<date>.md
+    (the model's own memory_append tool)
+    read by consolidate_daily_memory_notes ─▶ YES, merged into MEMORY.md
+```
+
+Both are real, both reach the model, and a fix aimed at "the daily notes"
+will land in whichever one the author happened to grep first. Merging them
+is worth doing and was not done here.
+
+**THE PIPELINE FIRED NOTHING ON THE PRODUCTION ENGINE, AND SAID IT DID.**
+
+```
+sage_agent_runtime_service.py:7058  (action loop — the production default)
+  persist_interaction(metadata={"trace_id", "source", "channel_origin"})
+        │
+        ▼
+  conversation_memory_facade_service._persist_direct_chat_interaction
+        if metadata["persist_memory"]:     ← only direct_chat_generation_
+        if metadata["persist_transcript"]:    service (LEGACY) ever set these
+        ─▶ both False ─▶ NOTHING RUNS
+        │
+        ▼
+  persist_interaction returns {"persisted": True}      ← hardcoded literal
+```
+
+Measured before the fix, not reasoned about: driving `persist_interaction`
+with the byte-exact metadata that call site passes produced **0 calls into
+`memory_service` and a return value of `persisted: True`.** The one signal
+a caller could check said the opposite of the truth, at the seam that
+decides whether "Empyralis is the owned-context layer" is a true sentence.
+
+Fixed two ways. The return value now names each store separately
+(`daily_log` / `facts` / `transcript`, plus `daily_log_error`), so "nothing
+was persisted" is expressible instead of unreportable. And the
+DETERMINISTIC half — the daily-log summary, `memory_summary_service`'s own
+text builder, no model call, no credentials, no billing — now runs on every
+direct-chat turn. Verified live and un-mocked: a production-shaped
+`persist_interaction` writes a real `.orion-stack/memory/<ws>/<date>.md`
+entry, which `get_recent_logs` then injects into the next turn's prompt.
+That is a closed accumulation loop at zero marginal cost.
+
+**The MODEL-DRIVEN half is deliberately still OFF, and that is a pricing
+decision, not an oversight.** Fact extraction is a SECOND billed LLM call
+per turn (`persist_direct_chat_memory_best_effort` -> `generate_reply`).
+Switching it on for every customer roughly doubles per-turn provider spend,
+which is the founder's call — and the agent's own `memory_write` /
+`memory_write_private` tools already give it a deliberate way to record a
+durable fact, on BOTH engines, and were never affected by any of this. My
+recommendation if asked: leave it off. Deliberate tool-driven writes plus
+the free daily log are better memory than an extraction model's guesses at
+double the price.
+
+Two traps for whoever wires that later. The daily log is written in the
+`not persist_memory` branch precisely because
+`persist_direct_chat_memory_best_effort` writes it as its OWN first step —
+turning extraction on without that guard double-logs every legacy turn (a
+test pins this). And `store_direct_chat_memory_fact` /
+`save_direct_chat_daily_log_summary` both used to DROP `agent_install_id`
+entirely, so everything landed in the workspace namespace and a specialist
+install's own notes were not expressible; the daily-log one now takes it as
+a pass-through (defaulting to None, so nothing already written moves), the
+fact one still does not.
+
+**All four stores are now VISIBLE, in one picker.** The Profile sheet's
+"Memory & Files" segment showed exactly one of the four; the other three
+were live, were feeding the model's prompt, and were reachable from no
+screen at all. `MemoryTab.tsx`'s existing left-hand file list gained three
+more rows — Facts, Recent activity, Your note — rather than a second tab
+strip, because the list was already the picker and two pickers on one
+surface is a bug this codebase has shipped and reverted before.
+
+- **Facts** renders `memory_entries` with its ATTRIBUTION (`trust_tier`,
+  already computed by `derive_trust_tier` and previously reaching nobody),
+  so "you told it this" and "a stranger on a channel told it this" are
+  visibly different. Forgetting one is owner-only — it edits the shared
+  pool every project member reads.
+- **Recent activity** is the day-log, labelled as what it is: not a log
+  viewer, but the text the agent reads back about itself next turn.
+- **Your note** is the per-person private note. **The routes take NO
+  `user_id` parameter of any kind** — query, path or body — and resolve it
+  only from `current_user`. That is the whole boundary: a `user_id=` query
+  parameter would let a workspace owner read every teammate's private note
+  with one URL edit, defeating in one line the four-column WHERE clause
+  `agent_private_memory_repository` exists to enforce. An AST test asserts
+  no such parameter can be added. Its WRITE is `viewer`, not `owner`, on
+  purpose — showing a teammate a note about themselves they are not allowed
+  to correct is worse than not showing it.
+
+`agent_private_memory_service` grew async twins (`aget_`/`awrite_`) because
+`run_coro_sync` blocks the calling thread on a separate loop, which would
+stall the event loop from inside a FastAPI handler. The sync entrypoints
+DELEGATE to them rather than keeping a second copy of the guards — the
+required `user_id`, the empty refusal, the redact-before-write and the size
+cap are enforced in exactly one place, and tests drive the async path
+directly so none of them can be dropped on one side of the split.
+
+Found and closed in passing: the memory-tree PUT/DELETE routes carried no
+`_enforce_agent_project_access` while the GETs beside them did. A no-op for
+a workspace owner today, and exactly the read-gated/write-ungated asymmetry
+that becomes real the moment those roles move.
+
+**Still open, named rather than half-fixed:** the two daily-note stores are
+not merged; `store_direct_chat_memory_fact` still drops its agent scope;
+and the shared pool is still never auto-injected with a per-person block
+(the private note stays pull-based via `memory_get_private`, unchanged from
+2026-08-12's own deliberate scoping).
 
 ## Testing the UI
 

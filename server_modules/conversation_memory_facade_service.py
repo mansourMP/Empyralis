@@ -176,8 +176,15 @@ def persist_interaction(
     )
     surface_kind = str(request.subject.surface_kind or "").strip().lower()
     if surface_kind == DIRECT_CHAT_SURFACE:
-        _persist_direct_chat_interaction(request)
-        return {"surface_kind": DIRECT_CHAT_SURFACE, "persisted": True}
+        # `persisted` used to be a hardcoded True while the callee did
+        # nothing at all on the production engine. It is now derived from
+        # what the callee actually wrote -- see _persist_direct_chat_
+        # interaction's docstring.
+        outcome = _persist_direct_chat_interaction(request)
+        return {
+            **outcome,
+            "persisted": bool(outcome.get("daily_log") or outcome.get("facts") or outcome.get("transcript")),
+        }
     if surface_kind == DURABLE_RUN_SURFACE:
         return {"surface_kind": DURABLE_RUN_SURFACE, "persisted": False}
     raise ValueError(f"Use apersist_interaction() for async memory surface: {surface_kind}")
@@ -298,13 +305,75 @@ def delete_subject_memory(subject: ConversationMemorySubject) -> Dict[str, Any]:
     }
 
 
-def _persist_direct_chat_interaction(request: ConversationMemoryPersistRequest) -> None:
+def _persist_direct_chat_interaction(request: ConversationMemoryPersistRequest) -> Dict[str, Any]:
+    """Persist one direct-chat turn into memory, and REPORT WHAT ACTUALLY
+    HAPPENED.
+
+    Two things were wrong here and they compounded (found 2026-08-20 while
+    tracing whether the memory pipeline fires on the production engine):
+
+      1. Every branch below is gated on a metadata flag
+         (`persist_memory` / `persist_transcript`) that only the LEGACY
+         engine's caller chain (direct_chat_generation_service ->
+         direct_chat_memory_facade_service) ever sets. The production
+         default engine reaches this function through
+         sage_agent_runtime_service's own two `persist_interaction(...)`
+         call sites, whose metadata is `{trace_id, source, channel_origin}`
+         -- neither flag, so EVERY branch was skipped and this function was
+         a no-op on the engine that actually runs.
+
+      2. `persist_interaction` returned `{"persisted": True}` regardless.
+         So the one signal a caller could have checked said the opposite of
+         the truth. That is CLAUDE.md's outcome-honesty law, at the seam
+         where the product's "owned-context layer" positioning is decided.
+
+    Fixed both ways. The return value now names each store separately
+    (`daily_log` / `facts` / `transcript`), so "nothing was persisted" is
+    expressible and greppable instead of being reported as success. And the
+    DAILY LOG -- the deterministic half, `memory_summary_service`'s own
+    text builder, no model call, no provider credentials, no billing -- is
+    now written on EVERY direct-chat turn rather than only on the legacy
+    engine's flagged path. That is what restores real accumulation on the
+    production engine: the daily notes are what
+    `memory_service.consolidate_daily_memory_notes` later merges into
+    MEMORY.md and its topic files.
+
+    The MODEL-DRIVEN half (fact extraction -- a second, billed LLM call per
+    turn, needing provider/model/credentials/generate_reply that the
+    production caller does not thread here) is deliberately still gated on
+    `persist_memory`. Turning that on for every turn roughly doubles the
+    per-turn provider spend for every customer, which is a pricing decision
+    and not a drive-by one. Explicit `memory_write` / `memory_write_private`
+    tool calls remain the model's own way to record a durable fact on both
+    engines, and they were never affected by any of this."""
     from server_modules import memory_service
 
     metadata = request.metadata
     persist_memory = bool(metadata.get("persist_memory"))
     persist_transcript = bool(metadata.get("persist_transcript"))
+    outcome: Dict[str, Any] = {
+        "surface_kind": DIRECT_CHAT_SURFACE,
+        "daily_log": False,
+        "facts": False,
+        "transcript": False,
+    }
+    if not persist_memory:
+        # persist_direct_chat_memory_best_effort writes the daily log as its
+        # OWN first step, so this runs only when that branch will not --
+        # never both, or the legacy engine would double-log every turn.
+        try:
+            summary = memory_service.save_direct_chat_daily_log_summary(
+                workspace_id=request.subject.workspace_id,
+                user_message=request.user_message,
+                assistant_reply=request.assistant_reply,
+                agent_install_id=str(request.subject.responder_install_id or "").strip() or None,
+            )
+            outcome["daily_log"] = bool(summary)
+        except Exception as exc:  # a memory write may never break a reply
+            outcome["daily_log_error"] = str(exc)
     if persist_memory:
+        outcome["daily_log"] = True
+        outcome["facts"] = True
         memory_service.persist_direct_chat_memory_best_effort(
             workspace_id=request.subject.workspace_id,
             provider=metadata.get("provider"),
@@ -321,6 +390,7 @@ def _persist_direct_chat_interaction(request: ConversationMemoryPersistRequest) 
     if persist_transcript:
         save_session_transcript_fn = metadata.get("save_session_transcript_fn")
         if callable(save_session_transcript_fn):
+            outcome["transcript"] = True
             save_session_transcript_fn(
                 workspace_id=request.subject.workspace_id,
                 thread_id=request.subject.thread_id,
@@ -330,3 +400,4 @@ def _persist_direct_chat_interaction(request: ConversationMemoryPersistRequest) 
                 user_message=request.user_message,
                 assistant_reply=request.assistant_reply,
             )
+    return outcome
