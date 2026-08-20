@@ -5984,3 +5984,53 @@ a public channel (rather than declared) is the unresolved half.
 question that is a product decision rather than a bug, add it here in the
 same turn. Do not answer it with a guess and do not let it live only in
 chat. He has explicitly said the recurrence is the cost he cares about.
+
+## Channels: Telegram + Slack. Discord is OUT. (2026-08-20)
+
+**Founder's decision, final:** *"Slack and Telegram is the way to go.
+Discord I don't really want it if it doesn't work — it's not something
+that I want to have in my platform. Telegram and Slack, that's it."*
+
+The reasoning is the gateway/ban-risk axis, not popularity: these two are
+the channels that work with **no paired hardware**, so a customer never
+runs a gateway and never risks an account ban.
+
+Verified against each vendor's OWN documentation, not inference:
+
+```
+TELEGRAM  webhook (setWebhook). Cloud-side, stateless, nothing held open.
+          Hosted-bot option needs no BotFather and no token at all.
+          Verified live 2026-08-20 (real webhook re-registration + a real
+          message round trip).                                    ✓ primary
+
+SLACK     HTTP Events API — public HTTPS endpoint, must 200 within 3s.
+          Slack's own docs RECOMMEND HTTP over Socket Mode for
+          production, which is the shape already implemented.     ✓ second
+
+DISCORD   ✗ CUT. Its HTTP interactions endpoint receives ONLY slash
+          commands; reading ORDINARY MESSAGES requires a persistent
+          Gateway WebSocket and a long-running process. That means one
+          standing connection PER CUSTOMER BOT held open in the backend
+          — which is a single uvicorn worker on a single vCPU. A standing
+          per-customer cost for a channel the founder does not want.
+          DiscordBotRuntimeService exists and works; it is simply not
+          part of the product direction.
+```
+
+**The two-tier split that must be visible wherever channels are chosen** —
+so nobody picks a channel expecting one-click and hits a hardware wall
+(which is exactly the dead end found live on 2026-08-20):
+
+```
+Works now, nothing to install     Telegram · Slack
+Needs your computer paired        WhatsApp · Signal · iMessage · OpenClaw (~20)
+```
+
+A "recommended" stamp alone is not enough — the split is the honest
+information. The founder also asked for filtering on the channel surface
+along this axis (chat-only vs full-account-control vs hardware-required).
+
+**Standing quality bar, his words:** *"as reasonable as possible and as
+BEASTMODE as possible — not MOST, but beast reasonable things."* Which is
+this file's existing "Best, not most" law with the emphasis on depth: the
+handful of things that ship must be genuinely excellent, not numerous.
