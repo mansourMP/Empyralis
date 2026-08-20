@@ -66,7 +66,9 @@ export function AgentConversationList({
       </div>
       <div className="fleet-agents-conversation-list-rows">
         {rows.length === 0 ? (
-          <div className="fleet-agents-conversation-list-empty">No agents match “{query}”.</div>
+          <div className="fleet-agents-conversation-list-empty">
+            {query.trim() ? `No agents match "${query.trim()}".` : "No agents yet."}
+          </div>
         ) : (
           rows.map((agent) => {
             // The workspace's OWN routed agent page (agents/[agentId]/[tab]),
