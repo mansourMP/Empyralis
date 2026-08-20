@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { Coins } from "lucide-react";
 
 import { useCreditBalance, useCreditUsageHistory, startCreditTopUp, type CreditUsageHistoryItem } from "./credit-balance";
+import { useBillingSummary, planUpgradeControl, resolvePlanDisplayLabel, startPlanCheckout, startPortalSession } from "./billing-plan";
 import { MultiSeriesChart, type ChartSeries } from "./fleet-sparkline";
 import { FleetSurfaceError } from "./fleet-states";
 
@@ -53,17 +54,24 @@ export function CreditsPanel({ workspaceId }: { workspaceId: string }) {
   // money — a customer who WAS charged had no way to tell their history
   // failed to load versus actually being unbilled.
   const { history, loading: historyLoading, error: historyError, refresh: refreshHistory } = useCreditUsageHistory(workspaceId, 200);
+  const { summary: billingSummary } = useBillingSummary(workspaceId);
 
   const [amountUsd, setAmountUsd] = useState<number>(10);
   const [topUpState, setTopUpState] = useState<"idle" | "starting" | "not_configured" | "error">("idle");
   const [topUpMessage, setTopUpMessage] = useState<string | null>(null);
+  const [planActionState, setPlanActionState] = useState<"idle" | "starting" | "not_configured" | "error">("idle");
+  const [planActionMessage, setPlanActionMessage] = useState<string | null>(null);
 
   const credits = balance?.credit_balance_credits ?? null;
   const balanceUsd = balance?.credit_balance_usd ?? null;
-  const plan = (history?.plan as Record<string, unknown> | undefined) || {};
   const hostedSageAi = (history?.hosted_sage_ai as Record<string, unknown> | undefined) || {};
-  const planLabel = typeof plan.label === "string" ? plan.label : null;
+  // Outcome-honesty fix (2026-08-20): every fresh workspace's entitlement
+  // tier is internally "pro" (a generous unpaid grant, see
+  // billing_service.py), so this must read the honest display label — not
+  // the raw plan label — or an account that never paid shows "Pro".
+  const planLabel = resolvePlanDisplayLabel(billingSummary?.subscription);
   const monthlyCreditCap = typeof hostedSageAi.monthly_credit_cap === "number" ? hostedSageAi.monthly_credit_cap : null;
+  const upgradeControl = planUpgradeControl(billingSummary);
 
   const debitItems = useMemo(
     () => (history?.items || []).filter((item) => item.kind === "usage_debit"),
@@ -116,6 +124,29 @@ export function CreditsPanel({ workspaceId }: { workspaceId: string }) {
     }
     setTopUpState("error");
     setTopUpMessage(result.message);
+  };
+
+  const handlePlanAction = async () => {
+    setPlanActionState("starting");
+    setPlanActionMessage(null);
+    const result =
+      upgradeControl.kind === "upgrade"
+        ? await startPlanCheckout(workspaceId, upgradeControl.planId)
+        : upgradeControl.kind === "manage"
+          ? await startPortalSession(workspaceId)
+          : null;
+    if (!result) return;
+    const url = "checkoutUrl" in result ? result.checkoutUrl : "portalUrl" in result ? result.portalUrl : null;
+    if (result.ok && url) {
+      window.location.href = url;
+      return;
+    }
+    if (!result.ok && result.notConfigured) {
+      setPlanActionState("not_configured");
+      return;
+    }
+    setPlanActionState("error");
+    setPlanActionMessage(!result.ok ? result.message : null);
   };
 
   return (
@@ -171,13 +202,40 @@ export function CreditsPanel({ workspaceId }: { workspaceId: string }) {
         </button>
         {topUpState === "not_configured" && (
           <span className="fleet-credits-topup-note">
-            Top-up isn't configured yet — the platform owner needs to connect Stripe.
+            Top-up isn't configured yet — the platform owner needs to connect Polar.
           </span>
         )}
         {topUpState === "error" && topUpMessage && (
           <span className="fleet-credits-topup-note fleet-credits-topup-note--error">{topUpMessage}</span>
         )}
       </div>
+
+      {upgradeControl.kind !== "none" && (
+        <div className="fleet-credits-topup" style={{ marginTop: "var(--space-3)" }}>
+          <button
+            type="button"
+            className="fleet-btn fleet-btn--mono"
+            disabled={planActionState === "starting"}
+            onClick={() => { void handlePlanAction(); }}
+          >
+            {planActionState === "starting"
+              ? "Starting…"
+              : upgradeControl.kind === "manage"
+                ? "Manage subscription"
+                : "Upgrade to Pro"}
+          </button>
+          {planActionState === "not_configured" && (
+            <span className="fleet-credits-topup-note">
+              {upgradeControl.kind === "manage"
+                ? "Subscription management isn't configured yet."
+                : "Upgrading isn't configured yet — the platform owner needs to finish setting up Polar."}
+            </span>
+          )}
+          {planActionState === "error" && planActionMessage && (
+            <span className="fleet-credits-topup-note fleet-credits-topup-note--error">{planActionMessage}</span>
+          )}
+        </div>
+      )}
 
       <div className="fleet-usage-chart-block" style={{ marginTop: "var(--space-5)" }}>
         <div className="fleet-usage-chart-title">Credits used · last 14d</div>

@@ -180,12 +180,15 @@ async def billing_credit_usage(
     )
 
 
-@router.post("/billing/webhooks/stripe")
-async def stripe_billing_webhook(request: Request):
+@router.post("/billing/webhooks/polar")
+async def polar_billing_webhook(request: Request):
     body = await request.body()
-    signature = str(request.headers.get("stripe-signature") or "").strip()
+    # Polar signs with three Standard Webhooks headers (webhook-id,
+    # webhook-timestamp, webhook-signature), not one combined header like
+    # Stripe's `stripe-signature` — see polar_client.verify_webhook_signature.
+    headers = dict(request.headers)
     return await run_in_threadpool(
-        billing_service.handle_stripe_webhook,
+        billing_service.handle_polar_webhook,
         body,
-        signature,
+        headers,
     )

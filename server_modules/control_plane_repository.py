@@ -437,7 +437,7 @@ CREATE TABLE IF NOT EXISTS workspace_billing_accounts (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
     workspace_id TEXT NOT NULL UNIQUE,
-    provider TEXT NOT NULL DEFAULT 'stripe',
+    provider TEXT NOT NULL DEFAULT 'polar',
     billing_email TEXT NULL,
     provider_customer_id TEXT NULL,
     default_currency TEXT NOT NULL DEFAULT 'usd',
@@ -451,7 +451,7 @@ CREATE TABLE IF NOT EXISTS workspace_billing_subscriptions (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
     workspace_id TEXT NOT NULL,
-    provider TEXT NOT NULL DEFAULT 'stripe',
+    provider TEXT NOT NULL DEFAULT 'polar',
     plan_id TEXT NOT NULL DEFAULT 'free',
     status TEXT NOT NULL DEFAULT 'active',
     provider_subscription_id TEXT NULL,
@@ -3652,7 +3652,7 @@ def _upsert_local_workspace_billing_account(
         """
         INSERT OR REPLACE INTO workspace_billing_accounts (
             workspace_id, tenant_id, provider, billing_email, provider_customer_id, default_currency, status, metadata_json, created_at, updated_at
-        ) VALUES (?, ?, 'stripe', ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, 'polar', ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             clean_workspace_id,
@@ -3705,7 +3705,7 @@ def _upsert_local_workspace_billing_subscription(
             """
             SELECT id, created_at
             FROM workspace_billing_subscriptions
-            WHERE provider = 'stripe' AND provider_subscription_id = ?
+            WHERE provider = 'polar' AND provider_subscription_id = ?
             LIMIT 1
             """,
             (str(provider_subscription_id or "").strip(),),
@@ -3735,7 +3735,7 @@ def _upsert_local_workspace_billing_subscription(
             id, tenant_id, workspace_id, provider, plan_id, status, provider_subscription_id, provider_price_id, provider_product_id,
             provider_customer_id, checkout_session_id, checkout_url, portal_url, currency, billing_interval,
             current_period_start, current_period_end, cancel_at_period_end, canceled_at, trial_ends_at, metadata_json, created_at, updated_at
-        ) VALUES (?, ?, ?, 'stripe', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, 'polar', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             effective_id,
@@ -3868,7 +3868,7 @@ def _connect_local_identity_db() -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS workspace_billing_accounts (
             workspace_id TEXT PRIMARY KEY,
             tenant_id TEXT NOT NULL,
-            provider TEXT NOT NULL DEFAULT 'stripe',
+            provider TEXT NOT NULL DEFAULT 'polar',
             billing_email TEXT,
             provider_customer_id TEXT,
             default_currency TEXT NOT NULL DEFAULT 'usd',
@@ -3885,7 +3885,7 @@ def _connect_local_identity_db() -> sqlite3.Connection:
             id TEXT PRIMARY KEY,
             tenant_id TEXT NOT NULL,
             workspace_id TEXT NOT NULL,
-            provider TEXT NOT NULL DEFAULT 'stripe',
+            provider TEXT NOT NULL DEFAULT 'polar',
             plan_id TEXT NOT NULL DEFAULT 'free',
             status TEXT NOT NULL DEFAULT 'active',
             provider_subscription_id TEXT,
@@ -7622,7 +7622,7 @@ async def ensure_workspace_billing_defaults(
                 """
                 INSERT INTO workspace_billing_accounts (
                     id, tenant_id, workspace_id, provider, billing_email, provider_customer_id, default_currency, status, metadata, created_at, updated_at
-                ) VALUES ($1, $2, $3, 'stripe', $4, NULL, 'usd', 'active', '{}'::jsonb, $5::timestamptz, $5::timestamptz)
+                ) VALUES ($1, $2, $3, 'polar', $4, NULL, 'usd', 'active', '{}'::jsonb, $5::timestamptz, $5::timestamptz)
                 """,
                 str(uuid.uuid4()),
                 resolved_tenant_id,
@@ -7645,7 +7645,7 @@ async def ensure_workspace_billing_defaults(
                 """
                 INSERT INTO workspace_billing_subscriptions (
                     id, tenant_id, workspace_id, provider, plan_id, status, currency, metadata, created_at, updated_at
-                ) VALUES ($1, $2, $3, 'stripe', 'free', 'active', 'usd', $4::jsonb, $5::timestamptz, $5::timestamptz)
+                ) VALUES ($1, $2, $3, 'polar', 'free', 'active', 'usd', $4::jsonb, $5::timestamptz, $5::timestamptz)
                 """,
                 str(uuid.uuid4()),
                 resolved_tenant_id,
@@ -7768,7 +7768,7 @@ async def update_workspace_billing_plan(
                             """
                             INSERT INTO workspace_billing_subscriptions (
                                 id, tenant_id, workspace_id, provider, plan_id, status, metadata_json, created_at, updated_at
-                            ) VALUES (?, ?, ?, 'stripe', ?, 'active', ?, ?, ?)
+                            ) VALUES (?, ?, ?, 'polar', ?, 'active', ?, ?, ?)
                             """,
                             (str(uuid.uuid4()), resolved_tenant_id, clean_workspace_id, clean_plan_id, _to_json({"source": "pilot_invite"}, default={}), now_ts, now_ts),
                         )
@@ -7795,7 +7795,7 @@ async def update_workspace_billing_plan(
                 """
                 INSERT INTO workspace_billing_subscriptions (
                     id, tenant_id, workspace_id, provider, plan_id, status, metadata, created_at, updated_at
-                ) VALUES ($1, $2, $3, 'stripe', $4, 'active', $5::jsonb, $6::timestamptz, $6::timestamptz)
+                ) VALUES ($1, $2, $3, 'polar', $4, 'active', $5::jsonb, $6::timestamptz, $6::timestamptz)
                 """,
                 str(uuid.uuid4()),
                 resolved_tenant_id,
@@ -7870,7 +7870,7 @@ async def upsert_workspace_billing_account(
             """
             INSERT INTO workspace_billing_accounts (
                 id, tenant_id, workspace_id, provider, billing_email, provider_customer_id, default_currency, status, metadata, created_at, updated_at
-            ) VALUES ($1, $2, $3, 'stripe', $4, $5, $6, $7, $8::jsonb, $9::timestamptz, $10::timestamptz)
+            ) VALUES ($1, $2, $3, 'polar', $4, $5, $6, $7, $8::jsonb, $9::timestamptz, $10::timestamptz)
             ON CONFLICT (workspace_id) DO UPDATE SET
                 tenant_id = EXCLUDED.tenant_id,
                 billing_email = EXCLUDED.billing_email,
@@ -7984,7 +7984,7 @@ async def upsert_workspace_billing_subscription(
                 """
                 SELECT id, created_at
                 FROM workspace_billing_subscriptions
-                WHERE provider = 'stripe' AND provider_subscription_id = $1
+                WHERE provider = 'polar' AND provider_subscription_id = $1
                 LIMIT 1
                 """,
                 str(provider_subscription_id or "").strip(),
@@ -8010,7 +8010,7 @@ async def upsert_workspace_billing_subscription(
                 provider_customer_id, checkout_session_id, checkout_url, portal_url, currency, billing_interval,
                 current_period_start, current_period_end, cancel_at_period_end, canceled_at, trial_ends_at, metadata, created_at, updated_at
             ) VALUES (
-                $1, $2, $3, 'stripe', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                $1, $2, $3, 'polar', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
                 $15::timestamptz, $16::timestamptz, $17, $18::timestamptz, $19::timestamptz, $20::jsonb, $21::timestamptz, $22::timestamptz
             )
             ON CONFLICT (id) DO UPDATE SET
