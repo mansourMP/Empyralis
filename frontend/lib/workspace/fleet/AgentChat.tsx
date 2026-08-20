@@ -2,7 +2,7 @@
 
 import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { AlertCircle, ArrowUp, Check, ChevronDown, Loader2, Paperclip, X, type LucideIcon } from "lucide-react";
@@ -15,6 +15,7 @@ import { ContextUsageRail, type ContextUsagePayload } from "./ContextUsageRail";
 import type { FleetAgent } from "./fleet-data";
 import { FleetAgentChatSkeleton } from "./fleet-states";
 import { resolveAgentChatViewState } from "./agent-chat-view-state";
+import { isNearBottom, shouldSnapChatToBottom } from "./agent-chat-scroll-follow";
 import {
   resolveAgentModelSummary,
   formatModelOnlyLabel,
@@ -171,6 +172,31 @@ function stepKindForTransparencyEventType(eventType: string): string {
 }
 
 const TRANSPARENCY_ERROR_STATUSES = new Set(["failed", "denied", "blocked"]);
+
+/**
+ * Per-conversation scroll-follow memory, keyed by `threadId` — module
+ * scope, not component state, so it survives a component remount within
+ * the same page load. Necessary because a top-tab switch (Chat <-> Work)
+ * genuinely remounts FleetAgentDetail/AgentChat (see the scroll-follow
+ * effect's own comment for how this was confirmed), so a ref alone would
+ * silently reset "was the reader following, and where were they" back to
+ * fresh-mount defaults on every ordinary tab switch — precisely the "back
+ * to Chat lands at the top" bug this whole module exists to close.
+ *
+ * Deliberately NOT sessionStorage/localStorage: this is scratch UI state
+ * for the current tab's lifetime only, not something a customer would ever
+ * want restored after closing the browser, and JSON-serializing on every
+ * scroll tick would be needless overhead this in-memory Map avoids.
+ */
+const CHAT_SCROLL_MEMORY = new Map<string, { wasFollowing: boolean; lastScrollTop: number }>();
+
+function chatScrollMemoryFor(threadId: string): { wasFollowing: boolean; lastScrollTop: number } {
+  return CHAT_SCROLL_MEMORY.get(threadId) ?? { wasFollowing: true, lastScrollTop: 0 };
+}
+
+function chatScrollMemorySet(threadId: string, wasFollowing: boolean, lastScrollTop: number): void {
+  CHAT_SCROLL_MEMORY.set(threadId, { wasFollowing, lastScrollTop });
+}
 
 // Edge/proxy failures (Cloudflare 524s, nginx 502/504s, expired-session 401s)
 // return HTML or plain-text bodies, not JSON — never let those render verbatim
@@ -776,6 +802,7 @@ export function AgentChat({
   placeholder,
   sourceTag,
   liveSyncUrl,
+  paneHidden,
   onTurnComplete,
   onAgentSaved,
 }: {
@@ -797,6 +824,15 @@ export function AgentChat({
    *  another surface (e.g. Telegram) while this tab is open. Optional — no
    *  per-agent equivalent exists yet, only Sage's workspace-wide stream. */
   liveSyncUrl?: string;
+  /** True while this chat's own pane is `display:none` (a different top
+   *  tab is showing but ChatTab kept this mounted — see FleetAgentDetail's
+   *  own comment on why). A hidden pane has zero scrollHeight/clientHeight,
+   *  so the scroll-follow effect below must not read or write scrollTop
+   *  while this is true — see agent-chat-scroll-follow.ts's own header for
+   *  the production bug that shape caused. Omitted (never hidden) for
+   *  SageLauncher's own caller, which unmounts AgentChat instead of hiding
+   *  it. */
+  paneHidden?: boolean;
   /** Fired once a turn has been written, so a caller showing thread-level
    *  state around this chat (the Ask AI console's conversation list) can
    *  re-read it instead of polling for a change only it caused. */
@@ -931,10 +967,114 @@ export function AgentChat({
     };
   }, [liveSyncUrl, loadThread]);
 
+  // Auto-follow, the same contract every messenger keeps: land on the
+  // newest message on open, keep following new content while already at
+  // the bottom, and never yank someone back down mid-scroll while they're
+  // reading history — see agent-chat-scroll-follow.ts's own header for the
+  // production measurement this replaced (`scrollTop: 0` on a 12,979px
+  // scroller).
+  //
+  // Backed by CHAT_SCROLL_MEMORY (module scope, keyed by threadId) rather
+  // than a plain component ref — measured directly, not assumed: switching
+  // FleetAgentDetail's top tab (Chat <-> Work, real `<Link>`s to a
+  // `[tab]` ROUTE segment) genuinely UNMOUNTS this whole component and
+  // mounts a fresh one, wiping every local ref (`draft` state included —
+  // confirmed by typing into the composer, switching to Work and back, and
+  // finding it empty). The header comment on ChatTab's own `hidden` prop
+  // still holds for what it actually protects — the display:none pane
+  // keeps a genuinely IN-FLIGHT stream/turn alive by never unmounting
+  // *during* a send — but a component-local ref for "was this reader
+  // following, and where were they" would silently reset to the fresh-
+  // mount defaults on every ordinary tab switch, which is exactly the
+  // "thrown to the top" bug this section exists to prevent. Keying by
+  // threadId (not a session/component id) is what makes it correct: this
+  // is a property of the CONVERSATION the reader is looking at, not of any
+  // particular mounted instance of it.
+  const memory = chatScrollMemoryFor(threadId);
+  const wasFollowingRef = useRef(memory.wasFollowing);
+  const lastScrollTopRef = useRef(memory.lastScrollTop);
+  // Starts `true` unconditionally (never `!!paneHidden`) so the FIRST
+  // layout-effect run below — whether this is a genuinely fresh
+  // conversation or a remounted return to one already in CHAT_SCROLL_MEMORY
+  // — is treated as "just became visible" and applies whatever the memory
+  // above says, rather than defaulting to a bare snap-to-bottom.
+  const wasPaneHiddenRef = useRef(true);
+
+  // Tracks the reader's own position, independent of React's render cycle
+  // — a plain DOM listener rather than state, so scrolling doesn't itself
+  // trigger a re-render. Attached once per mount; `listRef.current` is a
+  // stable DOM node for the lifetime of THIS instance (a hide/show while
+  // mounted never replaces it — only a route-level remount does, which
+  // re-runs this effect fresh anyway).
   useEffect(() => {
     const el = listRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, streamingText, thinkingText, thinkingExpanded]);
+    if (!el) return;
+    const onScroll = () => {
+      // Chromium fires a genuine 'scroll' event the moment this pane goes
+      // `display:none` — it discards scrollTop (resets it to 0) as part of
+      // hiding, and that reset itself dispatches 'scroll', with EVERY
+      // metric reading 0 (scrollTop/scrollHeight/clientHeight all 0 for an
+      // element with no box). `isNearBottom` reads 0-0-0=0 as "at the
+      // bottom", which would silently overwrite a real "scrolled up to
+      // read history" position with a false "was following" the instant
+      // hiding fires — measured directly against this exact pane. A
+      // `clientHeight` of 0 is never a real user position, so it is
+      // dropped rather than trusted.
+      if (el.clientHeight === 0) return;
+      lastScrollTopRef.current = el.scrollTop;
+      wasFollowingRef.current = isNearBottom({
+        scrollTop: el.scrollTop,
+        scrollHeight: el.scrollHeight,
+        clientHeight: el.clientHeight,
+      });
+      chatScrollMemorySet(threadId, wasFollowingRef.current, lastScrollTopRef.current);
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [threadId]);
+
+  // useLayoutEffect (not useEffect) so the snap happens before the browser
+  // paints — the whole point is that a person opening a long conversation
+  // never sees the top-of-scroll frame at all, not even for one tick.
+  useLayoutEffect(() => {
+    const el = listRef.current;
+    if (!el) return;
+    // A `display:none` pane reports zero for scrollHeight/clientHeight —
+    // reading or writing scrollTop against that would permanently record
+    // "top" for a conversation that was actually at its bottom the moment
+    // this pane is shown again. Skip entirely; the effect below (this same
+    // effect, re-running the moment `paneHidden` itself flips to false, a
+    // dependency here) catches up against real measurements instead.
+    if (paneHidden) {
+      wasPaneHiddenRef.current = true;
+      return;
+    }
+    // Measured directly, not assumed: on a fresh mount (a genuine remount
+    // — see CHAT_SCROLL_MEMORY's own header for why a tab switch is one —
+    // OR a first-ever open), `loading` is still true and the list's real
+    // content has not rendered yet, so scrollHeight === clientHeight (the
+    // skeleton's own height, nothing to scroll). Attempting the restore
+    // HERE would set scrollTop to the remembered pixel value on a
+    // container with nothing to scroll to, and the browser CLAMPS it back
+    // to 0 — silently. Waiting for `loading` to clear (this effect's own
+    // dependency) means the attempt only ever runs once against the real,
+    // final scrollHeight.
+    if (loading) return;
+    const justBecameVisible = wasPaneHiddenRef.current;
+    wasPaneHiddenRef.current = false;
+    if (shouldSnapChatToBottom({ wasFollowing: wasFollowingRef.current, paneHidden: false })) {
+      el.scrollTop = el.scrollHeight;
+      chatScrollMemorySet(threadId, true, el.scrollTop);
+    } else if (justBecameVisible) {
+      // Not following, and this is the render where the pane came back
+      // (fresh mount OR a genuine hide/show) — the DOM's own scrollTop
+      // cannot be trusted here (see lastScrollTopRef's own comment for the
+      // display:none case; a fresh mount starts at 0 regardless), so an
+      // ordinary "leave it alone" would land on the top instead of where
+      // the reader actually was. Put it back from memory.
+      el.scrollTop = lastScrollTopRef.current;
+    }
+  }, [messages, streamingText, thinkingText, thinkingExpanded, paneHidden, threadId, loading]);
 
   const autoGrow = useCallback(() => {
     const el = textareaRef.current;
