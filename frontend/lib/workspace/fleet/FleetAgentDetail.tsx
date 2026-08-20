@@ -4506,6 +4506,8 @@ import {
   platformCreditsTierForModel,
   useCodexModelCatalog,
   visibleCodexModels,
+  useByokModelCatalog,
+  visibleByokModels,
 } from "./fleet-model-config";
 
 /** Label for a <select> model option — appends "(Recommended)" to the
@@ -4729,6 +4731,12 @@ function ModelTab({
   // else the project default) so this never queries the wrong box.
   const effectiveGatewayId = gatewayBinding.trim() || agentProject?.default_gateway_id || "";
   const codexModelCatalog = useCodexModelCatalog(workspaceId, effectiveGatewayId, cliRuntime);
+  // byok_api's own live catalog — asks the provider's real API what this
+  // workspace's already-saved credential can actually see, instead of
+  // trusting MODELS_BY_PROVIDER's hand-typed mirror. Fetches for every
+  // BYOK provider change; a no-op when `provider` isn't byok_api's own
+  // selection (the effect below only reads it while mode === "byok_api").
+  const byokModelCatalog = useByokModelCatalog(workspaceId, mode === "byok_api" ? provider : "");
   const [selectedModel, setSelectedModel] = useState<string>(() =>
     seedSelectedModel(resolveDisplayMode(config), config.provider || "", config.model || ""),
   );
@@ -4768,6 +4776,20 @@ function ModelTab({
       setSelectedModel(live.find((m) => m.isDefault)?.id || live[0].id);
     }
   }, [provider, codexModelCatalog, selectedModel]);
+  // Same correction, for byok_api's own live catalog — an UNTOUCHED
+  // default that this workspace's real credential no longer sees (a
+  // retired/renamed model) gets swapped for a real one; a value the owner
+  // (or the agent's saved config) actually chose is never touched here.
+  useEffect(() => {
+    if (mode !== "byok_api" || !byokModelCatalog.loaded || !byokModelCatalog.supported) return;
+    const live = visibleByokModels(byokModelCatalog);
+    if (!live || live.length === 0) return;
+    const stillMatchesStaticSeed = selectedModel === defaultModelForProvider(provider);
+    const alreadyLiveValid = live.includes(selectedModel);
+    if (stillMatchesStaticSeed && !alreadyLiveValid) {
+      setSelectedModel(live[0]);
+    }
+  }, [mode, provider, byokModelCatalog, selectedModel]);
   // Every field above is seeded from `config` via a useState INITIALIZER,
   // which only runs on the component's very first render. That's fine when
   // `agent` is already loaded by the time this tab mounts (the common path:
@@ -5078,15 +5100,34 @@ function ModelTab({
                 placeholder={provider === "azure_openai" ? "e.g. my-gpt4-deployment" : "e.g. llama-3-70b"}
               />
             </>
-          ) : (
-            <>
-              <label className="fleet-wizard-label">Model</label>
-              <select className="fleet-wizard-input" value={selectedModel} onChange={(e) => { setSelectedModel(e.currentTarget.value); setSaved(false); }}>
-                {modelsForProvider(provider).map((m) => <option key={m} value={m}>{modelOptionLabel(provider, m)}</option>)}
-              </select>
-              <ModelSizeWarning provider={provider} model={selectedModel} />
-            </>
-          )}
+          ) : (() => {
+            // Live discovery (2026-08-20 fix): the model list a BYOK
+            // customer sees is the models their OWN saved credential can
+            // actually reach — never a hand-typed guess. Same "ask the
+            // real source, fall back honestly" contract the cli_
+            // subscription Codex picker already uses below.
+            const liveModels = visibleByokModels(byokModelCatalog);
+            const options = liveModels
+              ? liveModels.map((m) => ({ id: m, label: modelOptionLabel(provider, m) }))
+              : modelsForProvider(provider).map((m) => ({ id: m, label: modelOptionLabel(provider, m) }));
+            const showStaleNote = !liveModels && byokModelCatalog.loaded;
+            return (
+              <>
+                <label className="fleet-wizard-label">Model</label>
+                <select className="fleet-wizard-input" value={selectedModel} onChange={(e) => { setSelectedModel(e.currentTarget.value); setSaved(false); }}>
+                  {options.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+                </select>
+                {showStaleNote && (
+                  <p className="fleet-channel-expand-hint">
+                    {byokModelCatalog.credentialRequired
+                      ? "Save an API key for this provider to see the real, currently-usable models on your account."
+                      : "Couldn't check your account's real models right now — this list may include models that have since been renamed or retired."}
+                  </p>
+                )}
+                <ModelSizeWarning provider={provider} model={selectedModel} />
+              </>
+            );
+          })()}
           {renderReasoningEffortPicker()}
         </div>
       )}

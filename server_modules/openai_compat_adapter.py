@@ -114,8 +114,13 @@ investigation; see the dispatch report for the concrete evidence):
     (prefixed `x-anthropic-billing-header:`) and is dropped, never
     forwarded as an instruction; `thinking` (default shape
     `{"type":"adaptive"}`, not the documented `{"type":"enabled",...}`) is
-    silently stripped, never forwarded (OpenAI-shaped providers have no
-    equivalent); `max_tokens` (CLI default 32000) is clamped per
+    stripped from the BODY (it carries no recoverable effort level) —
+    the model_config.reasoning_effort control is instead forwarded
+    out-of-band, via the per-turn TurnCredential, and applied by
+    `_apply_reasoning_effort` (see the "2b. Reasoning effort" section
+    below) as a real provider-native parameter where one is verified to
+    exist, or an honest system-prompt instruction otherwise — never
+    silently dropped; `max_tokens` (CLI default 32000) is clamped per
     provider+model against a table this module owns (never guessed/
     scraped), falling back to a conservative default when the model is
     unrecognized; `tool_choice` may be entirely absent — never assumed
@@ -516,7 +521,129 @@ def _translate_tool_choice(tool_choice: Any) -> Any:
     raise AdapterTranslationError(f"unrecognized tool_choice.type {kind!r}")
 
 
-def translate_anthropic_request_to_openai(body: Dict[str, Any], *, provider: str) -> Dict[str, Any]:
+
+# ============================================================================
+# 2b. Reasoning effort — the per-agent "Reasoning effort" control
+#     (fleet-provider-constants.ts's REASONING_EFFORT_OPTIONS,
+#     model_config.reasoning_effort), forwarded here because the
+#     `thinking` field the CLI puts on the Anthropic-shaped wire request
+#     (see the module docstring's "Request body quirks tolerated") carries
+#     no recoverable effort level — it arrives as `{"type":"adaptive"}`,
+#     not a named level. The real value is threaded instead through the
+#     per-turn TurnCredential (see mint_turn_credential/messages_endpoint
+#     below), the same way provider/model/credentials already are.
+#
+# Two wire shapes exist among adapter-routed providers, and neither is
+# guessed — both verified against each provider's own documentation,
+# 2026-08-20 (see PROVIDER_MODEL_CATALOG's own per-provider comments in
+# provider_profiles.py for the model-level sourcing):
+#   - a flat top-level `reasoning_effort` string — OpenAI's Chat
+#     Completions API, Google's Gemini OpenAI-compatibility layer, and
+#     xAI's Grok API (developers.openai.com/api/docs/guides/reasoning,
+#     ai.google.dev/gemini-api/docs/openai, docs.x.ai/developers/
+#     model-capabilities/text/reasoning).
+#   - a nested `{"reasoning": {"effort": ...}}` object — OpenRouter's own
+#     unified parameter, a DIFFERENT shape from the three above
+#     (openrouter.ai/docs/guides/best-practices/reasoning-tokens).
+# groq/azure_openai/qwen/mistral/ollama_cloud/custom_openai_compatible are
+# deliberately absent from both sets below: no verified reasoning_effort
+# wire contract exists for them today (see provider_profiles.py's
+# reasoning_levels comments per provider) — sending an unverified field
+# risks a 400 the customer did not cause, which is worse than the control
+# quietly falling back to the system-instruction path just below.
+_REASONING_EFFORT_FLAT_FIELD_PROVIDERS = frozenset({"openai", "gemini", "xai"})
+_REASONING_EFFORT_NESTED_OBJECT_PROVIDERS = frozenset({"openrouter"})
+
+# The picker's own vocabulary (fleet-provider-constants.ts's
+# REASONING_EFFORT_OPTIONS for platform_credits/byok_api) — "max" is a
+# Claude-Agent-SDK-only ceiling with no adapter-routed equivalent, clamped
+# down to whatever the model's own highest verified level is, same as
+# every other out-of-range request.
+_REASONING_EFFORT_LADDER = ["low", "medium", "high", "xhigh", "max"]
+
+
+def clamp_reasoning_effort(requested: str, allowed_levels: List[str]) -> Optional[str]:
+    """Map a requested effort onto the nearest level this specific model is
+    verified to accept, never onto a guess. `allowed_levels` is whatever
+    provider_profiles.reasoning_effort_levels_for_model returned for this
+    exact (provider, model) — it may include values outside the ladder
+    (e.g. "none"/"minimal", which the picker itself never offers); those
+    are simply never chosen as the clamp target since the ladder is the
+    only vocabulary a customer can actually request.
+
+    Returns None when `requested` isn't a recognized level, or when the
+    model has no ladder-representable level at all — both mean "do not put
+    anything on the wire for this," which is the caller's cue to fall back
+    to the honest system-instruction path instead."""
+    requested_normalized = str(requested or "").strip().lower()
+    if requested_normalized not in _REASONING_EFFORT_LADDER:
+        return None
+    allowed_positions = sorted(
+        {
+            _REASONING_EFFORT_LADDER.index(level)
+            for level in allowed_levels
+            if level in _REASONING_EFFORT_LADDER
+        }
+    )
+    if not allowed_positions:
+        return None
+    requested_position = _REASONING_EFFORT_LADDER.index(requested_normalized)
+    at_or_below = [pos for pos in allowed_positions if pos <= requested_position]
+    chosen_position = max(at_or_below) if at_or_below else min(allowed_positions)
+    return _REASONING_EFFORT_LADDER[chosen_position]
+
+
+# The exact wording direct_chat_generation_service.py's legacy-engine path
+# already uses for a model it doesn't recognize as reasoning-capable —
+# reused verbatim so the picker's own help text ("Models that support it
+# natively use it directly; others get it as a strong instruction
+# instead") is equally true on both engines, not a promise this path alone
+# breaks silently.
+def _reasoning_effort_system_instruction(effort: str) -> str:
+    return (
+        f"The user has requested a {effort} reasoning effort. "
+        "Please adjust the depth of your thinking and response accordingly."
+    )
+
+
+def _apply_reasoning_effort(
+    openai_body: Dict[str, Any],
+    *,
+    provider: str,
+    model: str,
+    requested_effort: str,
+) -> None:
+    """Mutates `openai_body` in place: either the real provider-native
+    reasoning parameter (when this exact model is verified to accept it),
+    or — always, never silently dropped — the same honest system-prompt
+    nudge the legacy engine already sends for a non-reasoning model. A
+    customer who picks "High" never gets a turn where the setting simply
+    did nothing, on either engine."""
+    effort = str(requested_effort or "").strip().lower()
+    if not effort:
+        return
+    from server_modules import provider_profiles  # local: see resolve_real_upstream_request's own note
+
+    allowed_levels = provider_profiles.reasoning_effort_levels_for_model(provider, model)
+    clamped = clamp_reasoning_effort(effort, allowed_levels)
+    normalized_provider = str(provider or "").strip().lower()
+    if clamped and normalized_provider in _REASONING_EFFORT_FLAT_FIELD_PROVIDERS:
+        openai_body["reasoning_effort"] = clamped
+        return
+    if clamped and normalized_provider in _REASONING_EFFORT_NESTED_OBJECT_PROVIDERS:
+        openai_body["reasoning"] = {"effort": clamped}
+        return
+    instruction = _reasoning_effort_system_instruction(effort)
+    messages = openai_body.get("messages")
+    if isinstance(messages, list) and messages and messages[0].get("role") == "system":
+        messages[0]["content"] = f"{messages[0].get('content', '')}\n\n[System Instruction: {instruction}]".strip()
+    elif isinstance(messages, list):
+        messages.insert(0, {"role": "system", "content": f"[System Instruction: {instruction}]"})
+
+
+def translate_anthropic_request_to_openai(
+    body: Dict[str, Any], *, provider: str, reasoning_effort: str = "",
+) -> Dict[str, Any]:
     """Anthropic /v1/messages request body -> OpenAI Chat Completions
     request body. Raises AdapterTranslationError (-> HTTP 400, pre-stream)
     on anything that cannot be honestly translated.
@@ -525,7 +652,12 @@ def translate_anthropic_request_to_openai(body: Dict[str, Any], *, provider: str
     are never read from `body` at all — they are stripped by omission, not
     by an explicit delete step. `output_config.format` is best-effort
     mapped to OpenAI's `response_format` (nice-to-have; failures here never
-    fail the whole translation)."""
+    fail the whole translation).
+
+    `reasoning_effort`, by contrast, is NOT read from `body` (the CLI's own
+    `thinking` field on the wire carries no recoverable level — see the 2b
+    section above) — it is the caller's own per-turn value, applied via
+    `_apply_reasoning_effort` after the body is otherwise fully built."""
     if not isinstance(body, dict):
         raise AdapterTranslationError("request body must be a JSON object")
     model = str(body.get("model") or "").strip()
@@ -592,6 +724,9 @@ def translate_anthropic_request_to_openai(body: Dict[str, Any], *, provider: str
                     }
                 except Exception:  # pragma: no cover - defensive, nice-to-have only
                     LOGGER.debug("openai_compat_adapter: output_config->response_format mapping failed, skipping")
+
+    if reasoning_effort:
+        _apply_reasoning_effort(openai_body, provider=provider, model=model, requested_effort=reasoning_effort)
 
     return openai_body
 
@@ -1047,13 +1182,21 @@ class TurnCredential:
     chat_completions_url: str
     headers: Dict[str, str]  # contains the REAL Authorization header — never logged
     minted_at: float = field(default_factory=time.monotonic)
+    # The model_config.reasoning_effort value for THIS turn, carried
+    # alongside the real upstream request rather than parsed out of the
+    # CLI's own request body — see the "2b. Reasoning effort" section
+    # above for why the body can't carry it. Empty means "no override,"
+    # same convention as everywhere else this value travels.
+    reasoning_effort: str = ""
 
 
 _turn_credentials: Dict[str, TurnCredential] = {}
 _turn_credentials_lock = threading.Lock()
 
 
-def mint_turn_credential(*, provider: str, chat_completions_url: str, headers: Dict[str, str]) -> str:
+def mint_turn_credential(
+    *, provider: str, chat_completions_url: str, headers: Dict[str, str], reasoning_effort: str = "",
+) -> str:
     """Mint a random, structureless opaque token for exactly one turn and
     remember the REAL upstream request (URL + auth headers) behind it. The
     opaque token — never the real key — is what becomes the `claude` CLI
@@ -1062,7 +1205,10 @@ def mint_turn_credential(*, provider: str, chat_completions_url: str, headers: D
     token = secrets.token_urlsafe(32)
     with _turn_credentials_lock:
         _turn_credentials[token] = TurnCredential(
-            provider=provider, chat_completions_url=chat_completions_url, headers=dict(headers),
+            provider=provider,
+            chat_completions_url=chat_completions_url,
+            headers=dict(headers),
+            reasoning_effort=str(reasoning_effort or "").strip(),
         )
     return token
 
@@ -1143,17 +1289,27 @@ def resolve_real_upstream_request(provider: str, credentials: Dict[str, Any], mo
     return url, headers
 
 
-def mint_turn_token_for_provider(provider: str, credentials: Optional[Dict[str, Any]], model: str) -> str:
+def mint_turn_token_for_provider(
+    provider: str,
+    credentials: Optional[Dict[str, Any]],
+    model: str,
+    reasoning_effort: str = "",
+) -> str:
     """The single call claude_agent_sdk_bridge.py's resolve_sdk_process_env
     needs once wired (see module docstring step 2): resolves the real
     upstream request for `provider`, then mints and returns the opaque
     token to use as ANTHROPIC_AUTH_TOKEN. Also lazily starts the adapter
     server, since a turn that needs a token also needs the server that will
-    redeem it."""
+    redeem it.
+
+    `reasoning_effort` rides along on the same token so messages_endpoint
+    can apply it per this exact turn — see TurnCredential's own doc."""
     ensure_adapter_server_running()
     creds = credentials if isinstance(credentials, dict) else {}
     url, headers = resolve_real_upstream_request(provider, creds, model)
-    return mint_turn_credential(provider=provider, chat_completions_url=url, headers=headers)
+    return mint_turn_credential(
+        provider=provider, chat_completions_url=url, headers=headers, reasoning_effort=reasoning_effort,
+    )
 
 
 def resolve_adapter_routed_base_url(provider: str) -> str:
@@ -1237,7 +1393,9 @@ async def messages_endpoint(request: Request):
         return _error_response(400, "request body must be a JSON object")
 
     try:
-        openai_body = translate_anthropic_request_to_openai(body, provider=cred.provider)
+        openai_body = translate_anthropic_request_to_openai(
+            body, provider=cred.provider, reasoning_effort=cred.reasoning_effort,
+        )
     except AdapterTranslationError as exc:
         return _error_response(400, str(exc))
     except Exception as exc:  # pragma: no cover - defensive

@@ -1001,6 +1001,8 @@ control for those agents; the legacy engine honours it natively. Move both
 onto the shared post-loop path before ever deleting legacy —
 `EMPYRALIS_FORCE_LEGACY_ENGINE` (MAN-312) and the per-agent legacy pin exist
 precisely because legacy is still the only engine that carries these two.
+**The reasoning_effort half is FIXED, 2026-08-20 — see "BYO-subscription
+model truth" below.** The memory-pipeline half is still open.
 
 **Stale string matching.** An error bucket matched `"ai limit"`; the message
 was reworded to `"AI usage limit reached"` and users got a generic "Something
@@ -5547,3 +5549,127 @@ docs rather than assumed to mirror Stripe's shape.
 thinking aloud, explicitly not final — see the pricing memory). Wire the
 mechanism generically enough to take real product/price IDs once he
 finishes Polar onboarding; do not hardcode invented numbers as final.
+
+## BYO-subscription model truth: live discovery + no dead reasoning control (2026-08-20)
+
+**Founder's requirement, verbatim: a BYOK model list must be the models the
+customer's OWN subscription can actually serve, verified by "the official
+document or by the official harness or by the official subscription... it
+must be right 100%."** Two separate lies were found and fixed.
+
+```
+LIE 1: the model list                    LIE 2: the reasoning picker
+  MODELS_BY_PROVIDER (frontend,            REASONING_EFFORT_OPTIONS shown
+  hand-typed) — "no live models            for every byok_api model, but
+  endpoint reachable from the              openai_compat_adapter.py had
+  browser today"                           ZERO references to
+        │                                  reasoning_effort (CLAUDE.md's
+        ▼                                  own prior entry, above)
+  GET /providers/{id}/models                     │
+  ALREADY EXISTED end to end                      ▼
+  (adapter.list_models — a REAL          picking "High" on an OpenAI/
+  call to the provider's own             Gemini/xAI agent on the SDK
+  /v1/models) — route scoped             engine (production default)
+  correctly, frontend client             did NOTHING. Silent no-op,
+  method present... zero callers.        not an error.
+  "Built, tested, never wired."
+```
+
+**Fix 1 — the live endpoint is now actually called.**
+`fleet-model-config.ts`'s `useByokModelCatalog` (mirrors the existing
+`useCodexModelCatalog` pattern the cli_subscription/Codex picker already
+used) calls it from `FleetAgentDetail.tsx`'s byok_api Model select; a
+failed/empty response falls back to the static list with an honest note,
+same contract as the Codex picker. One real backend gap this surfaced:
+`connectors_core.get_provider_models` resolved a saved default credential
+via `resolve_default_vault_credential` ONLY for `openai`/`ollama_cloud` —
+every other BYOK provider (gemini/xai/groq/openrouter/qwen/mistral/bedrock)
+reported `credential_required: True` unconditionally even with a real key
+saved, because nothing ever looked it up. `resolve_default_vault_credential`
+is provider-agnostic; the fix generalizes the lookup to every provider and
+keeps openai/ollama_cloud's extra env-var fallback layered on top.
+`azure_openai`/`custom_openai_compatible` stay on the static free-text
+field on purpose — a deployment name isn't a discoverable id.
+
+**Fix 2 — reasoning_effort is threaded out-of-band and always does
+something.** The CLI's own `thinking` field on the Anthropic-shaped wire
+request carries no recoverable level (`{"type":"adaptive"}`, no level), so
+it can't be parsed back out — the value is instead carried on the per-turn
+`TurnCredential` the adapter already mints (alongside provider/model/
+credentials), from `claude_agent_sdk_bridge.resolve_sdk_process_env` through
+`mint_turn_token_for_provider` to `messages_endpoint`'s lookup.
+
+```
+requested effort ──▶ provider_profiles.reasoning_effort_levels_for_model(provider, model)
+                              │
+                 clamp to nearest verified level (never invented)
+                     │                              │
+             a level exists                   nothing verified
+                     ▼                              ▼
+        real wire param:                   the SAME honest system-
+        flat "reasoning_effort"            instruction fallback the
+        (openai/gemini/xai) or             LEGACY engine already used
+        nested {"reasoning":               for a non-reasoning model —
+        {"effort":...}} (openrouter)       now true on BOTH engines
+```
+
+Every branch does something real — never the silent no-op CLAUDE.md's own
+prior entry documented. The picker's existing help text ("Models that
+support it natively use it directly; others get it as a strong instruction
+instead") was already promising this; the SDK engine just wasn't keeping
+the promise.
+
+**`supports_reasoning: True` in `PROVIDER_MODEL_CATALOG` means "this model
+reasons internally" — it never meant "the API exposes a settable
+`reasoning_effort`", and the catalog conflated the two in several places,
+confirmed against each provider's own docs (2026-08-20):** `gpt-4o`/
+`gpt-4.1`/`gpt-4.1-mini` aren't reasoning models at all (were wrongly
+`True`); `gemini-1.5-pro`/`gemini-2.0-flash` predate Gemini's thinking
+feature (also wrongly `True`); **every xai model this catalog currently
+offers — grok-4, grok-4-0709, grok-4-latest, grok-3 — reasons with a fixed,
+non-adjustable budget and exposes no `reasoning_effort` at all** (only Grok
+3 Mini and Grok 4.5+/4.6+ do, per docs.x.ai, and neither is in the catalog
+yet). `reasoning_levels: []` is the new disambiguating signal
+(`reasoning_effort_levels_for_model`) that decides whether the wire param is
+ever attempted — `supports_reasoning` keeps its old, narrower meaning as the
+"Reasoning" capability badge, unchanged, so nothing else that reads it
+regresses. qwen/mistral/groq/ollama_cloud/azure_openai/custom_openai_compatible
+have NO verified wire contract today (different param name, or none at
+all) — landing on the fallback instruction rather than a guessed field that
+could 400 a turn the customer did nothing wrong to cause. OpenRouter is the
+one exception with real breadth: its own docs claim graceful degradation
+across OpenAI/Anthropic/Grok/Gemini/Mistral via a *different* wire shape
+(`{"reasoning": {"effort": ...}}`, not the flat field), trusted for every
+model this catalog already marks `supports_reasoning: True` there.
+
+**Verified how, and what that means for confidence per provider.** Every
+wire-shape and per-model claim above came from reading each provider's own
+current documentation (OpenAI, Google, xAI, OpenRouter — not memory, not
+guessed) — satisfying the founder's "official document" bar. None of it was
+verified against a live call: CLAUDE.md's own standing rule (a test may
+never reach a live LLM provider; never touch the founder's personal Claude
+subscription) forecloses that, and no company-billed OpenAI/Gemini/xAI/
+OpenRouter credential was exercised live in this pass either — an actual
+end-to-end request against each real API remains unverified against the
+"official harness" bar and is the natural next step for whoever owns those
+credentials.
+
+Guarded by new tests, all red-before-green (the pre-fix file swapped back in
+via `git diff`+`git checkout --`, confirmed the exact new assertions fail,
+then restored — never `git stash`, per this file's own rule):
+`test_openai_compat_adapter.py`'s `TestClampReasoningEffort`/
+`TestReasoningEffortWiring`, `test_provider_profiles.py`'s
+`ReasoningEffortLevelsForModelTests`, `test_claude_agent_sdk_bridge.py`'s two
+new threading tests, and `test_connectors_core.py`'s
+`GetProviderModelsCredentialResolutionTests`.
+
+Not done in this pass, flagged rather than guessed at: no per-model gating
+was added to HIDE the reasoning-effort picker for a non-reasoning model —
+the fallback-instruction path means it is never rendered-but-inert, so
+hiding it was judged unnecessary rather than skipped for time. `cli_
+subscription`'s own reasoning-effort picker (claude_code/codex/grok_build)
+was already correct before this pass and untouched. Cursor CLI's model
+catalog stays freeform (no published model-id vocabulary, unchanged).
+Ollama's own OpenAI-compat `/v1/chat/completions` reasoning support for
+gpt-oss models is plausible but not verified against Ollama's own docs —
+left in the "no verified wire contract" bucket rather than guessed.

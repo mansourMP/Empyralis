@@ -311,6 +311,129 @@ class TestRequestTranslation:
 
 
 # ============================================================================
+# 1b. Reasoning effort — the CLAUDE.md-cited dead control this fixes.
+#     "openai_compat_adapter.py has zero references to reasoning_effort" is
+#     no longer true; these tests exercise both branches _apply_reasoning_
+#     effort can take: a real provider-native wire parameter, and the
+#     honest system-instruction fallback for a model with no verified one.
+# ============================================================================
+
+class TestClampReasoningEffort:
+    def test_exact_match_passes_through(self):
+        assert adapter.clamp_reasoning_effort("medium", ["low", "medium", "high"]) == "medium"
+
+    def test_clamps_down_to_nearest_allowed_below_request(self):
+        # gpt-5-nano's real catalog levels are ["none", "low"] — "high"
+        # is not invented, it degrades to the highest level actually
+        # available rather than the highest level requested.
+        assert adapter.clamp_reasoning_effort("high", ["none", "low"]) == "low"
+
+    def test_clamps_up_when_nothing_allowed_is_at_or_below_request(self):
+        assert adapter.clamp_reasoning_effort("low", ["medium", "high"]) == "medium"
+
+    def test_no_allowed_levels_returns_none(self):
+        assert adapter.clamp_reasoning_effort("high", []) is None
+
+    def test_unrecognized_requested_value_returns_none(self):
+        assert adapter.clamp_reasoning_effort("ludicrous", ["low", "high"]) is None
+
+    def test_levels_outside_the_five_word_ladder_are_ignored_as_targets(self):
+        # A model whose only catalog levels are "none"/"minimal" (neither
+        # of which the byok_api picker can ever request) has nothing this
+        # ladder can select — never silently promoted to a level the
+        # customer didn't ask for and the model may not accept.
+        assert adapter.clamp_reasoning_effort("low", ["none", "minimal"]) is None
+
+
+class TestReasoningEffortWiring:
+    def test_omitted_when_not_requested(self):
+        body = {"model": "gpt-5.4-mini", "messages": [{"role": "user", "content": "hi"}]}
+        out = adapter.translate_anthropic_request_to_openai(body, provider="openai")
+        assert "reasoning_effort" not in out
+        assert "reasoning" not in out
+        assert out["messages"] == [{"role": "user", "content": "hi"}]
+
+    def test_openai_reasoning_model_gets_native_field(self):
+        body = {"model": "gpt-5.4-mini", "messages": [{"role": "user", "content": "hi"}]}
+        out = adapter.translate_anthropic_request_to_openai(body, provider="openai", reasoning_effort="high")
+        assert out["reasoning_effort"] == "high"
+        assert "reasoning" not in out
+        # No fallback instruction was ALSO injected — the wire param is
+        # the whole effect, not a belt-and-suspenders double-send.
+        assert out["messages"] == [{"role": "user", "content": "hi"}]
+
+    def test_openai_non_reasoning_model_falls_back_to_instruction(self):
+        # gpt-4o is not a reasoning model (provider_profiles.py's own
+        # 2026-08-20 correction) — the picker still has to do SOMETHING.
+        body = {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}
+        out = adapter.translate_anthropic_request_to_openai(body, provider="openai", reasoning_effort="high")
+        assert "reasoning_effort" not in out
+        assert out["messages"][0]["role"] == "system"
+        assert "high reasoning effort" in out["messages"][0]["content"]
+        assert out["messages"][1] == {"role": "user", "content": "hi"}
+
+    def test_fallback_instruction_appends_to_existing_system_message(self):
+        body = {
+            "model": "gpt-4o",
+            "system": [{"type": "text", "text": "You are a helpful assistant."}],
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        out = adapter.translate_anthropic_request_to_openai(body, provider="openai", reasoning_effort="low")
+        assert out["messages"][0]["role"] == "system"
+        assert "helpful assistant" in out["messages"][0]["content"]
+        assert "low reasoning effort" in out["messages"][0]["content"]
+        # Still exactly one system message — never a second one stacked on.
+        assert sum(1 for m in out["messages"] if m["role"] == "system") == 1
+
+    def test_requested_level_clamped_to_model_ceiling(self):
+        # gpt-5-nano's catalog levels are ["none", "low"].
+        body = {"model": "gpt-5-nano", "messages": [{"role": "user", "content": "hi"}]}
+        out = adapter.translate_anthropic_request_to_openai(body, provider="openai", reasoning_effort="xhigh")
+        assert out["reasoning_effort"] == "low"
+
+    def test_gemini_reasoning_model_gets_native_field(self):
+        body = {"model": "gemini-2.5-pro", "messages": [{"role": "user", "content": "hi"}]}
+        out = adapter.translate_anthropic_request_to_openai(body, provider="gemini", reasoning_effort="medium")
+        assert out["reasoning_effort"] == "medium"
+
+    def test_xai_model_has_no_verified_wire_control_falls_back(self):
+        # xAI's own docs (2026-08-20): grok-4 reasons with a fixed budget
+        # and exposes no settable reasoning_effort — every xai model this
+        # catalog currently offers is in the same position.
+        body = {"model": "grok-4", "messages": [{"role": "user", "content": "hi"}]}
+        out = adapter.translate_anthropic_request_to_openai(body, provider="xai", reasoning_effort="high")
+        assert "reasoning_effort" not in out
+        assert out["messages"][0]["role"] == "system"
+        assert "high reasoning effort" in out["messages"][0]["content"]
+
+    def test_openrouter_uses_nested_reasoning_object_not_flat_field(self):
+        body = {"model": "openai/gpt-5.4", "messages": [{"role": "user", "content": "hi"}]}
+        out = adapter.translate_anthropic_request_to_openai(body, provider="openrouter", reasoning_effort="high")
+        assert out["reasoning"] == {"effort": "high"}
+        assert "reasoning_effort" not in out
+
+    def test_unrecognized_model_falls_back_to_instruction_never_a_guess(self):
+        body = {"model": "some-custom-deployment-name", "messages": [{"role": "user", "content": "hi"}]}
+        out = adapter.translate_anthropic_request_to_openai(
+            body, provider="custom_openai_compatible", reasoning_effort="medium",
+        )
+        assert "reasoning_effort" not in out
+        assert "reasoning" not in out
+        assert "medium reasoning effort" in out["messages"][0]["content"]
+
+    def test_mistral_and_groq_have_no_verified_wire_control(self):
+        # mistral-large-latest (reasoning happens on Magistral only, not
+        # this model) and Groq's Llama models (no reasoning at all) both
+        # land on the fallback rather than an unverified wire field.
+        for provider, model in (("mistral", "mistral-large-latest"), ("groq", "llama-3.3-70b-versatile")):
+            body = {"model": model, "messages": [{"role": "user", "content": "hi"}]}
+            out = adapter.translate_anthropic_request_to_openai(body, provider=provider, reasoning_effort="low")
+            assert "reasoning_effort" not in out, provider
+            assert "reasoning" not in out, provider
+            assert "low reasoning effort" in out["messages"][0]["content"], provider
+
+
+# ============================================================================
 # 2. AnthropicStreamAssembler — pure state machine, varied fragmentation
 # ============================================================================
 

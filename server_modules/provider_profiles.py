@@ -945,7 +945,14 @@ PROVIDER_MODEL_CATALOG = {
             "input_cost_per_1k_usd": 0.005,
             "output_cost_per_1k_usd": 0.015,
             "supports_tools": True,
-            "supports_reasoning": True,
+            # Not a reasoning model — OpenAI's Chat Completions API rejects
+            # `reasoning_effort` on gpt-4o (verified against
+            # platform.openai.com/docs/guides/reasoning, 2026-08-20: the
+            # reasoning_effort parameter is documented only for the o-series
+            # and gpt-5.x families). Was wrongly True before this fix — see
+            # CLAUDE.md's "BYO-subscription model truth" entry.
+            "supports_reasoning": False,
+            "reasoning_levels": [],
             "capability_labels": ["Balanced", "Tools", "Multimodal"],
         },
         "gpt-4o-mini": {
@@ -963,7 +970,10 @@ PROVIDER_MODEL_CATALOG = {
             "input_cost_per_1k_usd": 0.002,
             "output_cost_per_1k_usd": 0.008,
             "supports_tools": True,
-            "supports_reasoning": True,
+            # Same correction as gpt-4o above — GPT-4.1 is not a reasoning
+            # model and has no reasoning_effort parameter.
+            "supports_reasoning": False,
+            "reasoning_levels": [],
             "capability_labels": ["Long context", "Tools", "High quality"],
         },
         "gpt-4.1-mini": {
@@ -972,7 +982,8 @@ PROVIDER_MODEL_CATALOG = {
             "input_cost_per_1k_usd": 0.0004,
             "output_cost_per_1k_usd": 0.0016,
             "supports_tools": True,
-            "supports_reasoning": True,
+            "supports_reasoning": False,
+            "reasoning_levels": [],
             "capability_labels": ["Long context", "Fast", "Tools"],
         },
     },
@@ -1109,6 +1120,14 @@ PROVIDER_MODEL_CATALOG = {
             "capability_labels": ["Reasoning", "Long context", "Tools"],
         },
     },
+    # reasoning_levels below are the wire-level values Gemini's own
+    # OpenAI-compatibility layer accepts as a top-level `reasoning_effort`
+    # field (verified against ai.google.dev/gemini-api/docs/openai,
+    # 2026-08-20: "minimal"/"low"/"medium"/"high", plus "none" to disable
+    # thinking — but "reasoning cannot be turned off for Gemini 2.5 Pro or
+    # 3 models", so "none" is omitted from those). Gemini 1.5 and plain
+    # 2.0 Flash predate the thinking/reasoning_effort feature entirely —
+    # both were wrongly marked supports_reasoning True before this fix.
     "gemini": {
         "gemini-3-pro-preview": {
             "label": "Gemini 3 Pro Preview",
@@ -1117,6 +1136,7 @@ PROVIDER_MODEL_CATALOG = {
             "supports_vision": True,
             "supports_json": True,
             "supports_reasoning": True,
+            "reasoning_levels": ["low", "medium", "high"],
             "capability_labels": ["Preview", "Reasoning", "Tools", "Multimodal"],
         },
         "gemini-3-flash-preview": {
@@ -1126,6 +1146,7 @@ PROVIDER_MODEL_CATALOG = {
             "supports_vision": True,
             "supports_json": True,
             "supports_reasoning": True,
+            "reasoning_levels": ["minimal", "low", "medium", "high"],
             "capability_labels": ["Preview", "Fast", "Reasoning", "Multimodal"],
         },
         "gemini-2.5-flash": {
@@ -1135,6 +1156,7 @@ PROVIDER_MODEL_CATALOG = {
             "output_cost_per_1k_usd": 0.0025,
             "supports_tools": True,
             "supports_reasoning": True,
+            "reasoning_levels": ["none", "minimal", "low", "medium", "high"],
             "capability_labels": ["Fast", "Reasoning", "Tools", "Multimodal"],
         },
         "gemini-2.5-flash-lite": {
@@ -1144,6 +1166,7 @@ PROVIDER_MODEL_CATALOG = {
             "supports_vision": True,
             "supports_json": True,
             "supports_reasoning": True,
+            "reasoning_levels": ["none", "minimal", "low", "medium", "high"],
             "capability_labels": ["Lowest cost", "Fast", "Tools", "Multimodal"],
         },
         "gemini-2.5-pro": {
@@ -1153,6 +1176,7 @@ PROVIDER_MODEL_CATALOG = {
             "output_cost_per_1k_usd": 0.01,
             "supports_tools": True,
             "supports_reasoning": True,
+            "reasoning_levels": ["minimal", "low", "medium", "high"],
             "capability_labels": ["Reasoning", "High quality", "Tools", "Multimodal"],
         },
         "gemini-1.5-flash": {
@@ -1162,6 +1186,7 @@ PROVIDER_MODEL_CATALOG = {
             "output_cost_per_1k_usd": 0.0003,
             "supports_tools": True,
             "supports_reasoning": False,
+            "reasoning_levels": [],
             "capability_labels": ["Low cost", "Fast", "Long context"],
         },
         "gemini-1.5-pro": {
@@ -1170,7 +1195,10 @@ PROVIDER_MODEL_CATALOG = {
             "input_cost_per_1k_usd": 0.00125,
             "output_cost_per_1k_usd": 0.005,
             "supports_tools": True,
-            "supports_reasoning": True,
+            # Predates Gemini's thinking/reasoning_effort feature — was
+            # wrongly True before this fix.
+            "supports_reasoning": False,
+            "reasoning_levels": [],
             "capability_labels": ["Long context", "Multimodal", "Tools"],
         },
         "gemini-2.0-flash": {
@@ -1179,14 +1207,19 @@ PROVIDER_MODEL_CATALOG = {
             "input_cost_per_1k_usd": 0.0001,
             "output_cost_per_1k_usd": 0.0004,
             "supports_tools": True,
-            "supports_reasoning": True,
-            "capability_labels": ["Fast", "Reasoning", "Tools"],
+            # Plain 2.0 Flash has no reasoning_effort control — the
+            # "thinking" variant is a separate model id this catalog does
+            # not offer. Was wrongly True before this fix.
+            "supports_reasoning": False,
+            "reasoning_levels": [],
+            "capability_labels": ["Fast", "Tools"],
         },
         "gemini-2.0-flash-lite": {
             "label": "Gemini 2.0 Flash-Lite",
             "context_window_tokens": 1048576,
             "supports_tools": True,
             "supports_reasoning": False,
+            "reasoning_levels": [],
             "supports_vision": True,
             "supports_json": True,
             "capability_labels": ["Low cost", "Fast", "Multimodal"],
@@ -1208,12 +1241,22 @@ PROVIDER_MODEL_CATALOG = {
             "capability_labels": ["Lowest latency", "Low cost", "Tools"],
         },
     },
+    # OpenRouter's own unified reasoning-effort object (a DIFFERENT
+    # wire shape than raw OpenAI-shaped reasoning_effort -- see
+    # openai_compat_adapter.py) is documented as working across
+    # OpenAI/Anthropic/Grok/Gemini/Mistral models with graceful
+    # allocation-based degradation for models with no native effort
+    # control (openrouter.ai/docs/guides/best-practices/reasoning-tokens,
+    # verified 2026-08-20). reasoning_levels here is the superset
+    # OpenRouter itself accepts, not a per-underlying-model guarantee.
+
     "openrouter": {
         "openai/gpt-5.5": {
             "label": "GPT-5.5 via OpenRouter",
             "context_window_tokens": 1050000,
             "supports_tools": True,
             "supports_reasoning": True,
+            "reasoning_levels": ["minimal", "low", "medium", "high", "xhigh"],
             "capability_labels": ["Frontier", "Reasoning", "OpenRouter"],
         },
         "openai/gpt-5.5-pro": {
@@ -1221,6 +1264,7 @@ PROVIDER_MODEL_CATALOG = {
             "context_window_tokens": 1050000,
             "supports_tools": True,
             "supports_reasoning": True,
+            "reasoning_levels": ["minimal", "low", "medium", "high", "xhigh"],
             "capability_labels": ["Highest quality", "Reasoning", "OpenRouter"],
         },
         "openai/gpt-5.4": {
@@ -1228,6 +1272,7 @@ PROVIDER_MODEL_CATALOG = {
             "context_window_tokens": 1050000,
             "supports_tools": True,
             "supports_reasoning": True,
+            "reasoning_levels": ["minimal", "low", "medium", "high", "xhigh"],
             "capability_labels": ["Frontier", "Reasoning", "OpenRouter"],
         },
         "openai/gpt-5.4-mini": {
@@ -1235,6 +1280,7 @@ PROVIDER_MODEL_CATALOG = {
             "context_window_tokens": 400000,
             "supports_tools": True,
             "supports_reasoning": True,
+            "reasoning_levels": ["minimal", "low", "medium", "high", "xhigh"],
             "capability_labels": ["Balanced", "Fast", "OpenRouter"],
         },
         "anthropic/claude-opus-4.7": {
@@ -1242,6 +1288,7 @@ PROVIDER_MODEL_CATALOG = {
             "context_window_tokens": 1000000,
             "supports_tools": True,
             "supports_reasoning": True,
+            "reasoning_levels": ["minimal", "low", "medium", "high", "xhigh"],
             "capability_labels": ["Highest quality", "Reasoning", "OpenRouter"],
         },
         "anthropic/claude-sonnet-4.6": {
@@ -1249,6 +1296,7 @@ PROVIDER_MODEL_CATALOG = {
             "context_window_tokens": 1000000,
             "supports_tools": True,
             "supports_reasoning": True,
+            "reasoning_levels": ["minimal", "low", "medium", "high", "xhigh"],
             "capability_labels": ["Balanced", "Reasoning", "OpenRouter"],
         },
         "google/gemini-3-pro-preview": {
@@ -1256,6 +1304,7 @@ PROVIDER_MODEL_CATALOG = {
             "context_window_tokens": 1048576,
             "supports_tools": True,
             "supports_reasoning": True,
+            "reasoning_levels": ["minimal", "low", "medium", "high", "xhigh"],
             "capability_labels": ["Preview", "Multimodal", "OpenRouter"],
         },
         "google/gemini-3-flash-preview": {
@@ -1263,6 +1312,7 @@ PROVIDER_MODEL_CATALOG = {
             "context_window_tokens": 1048576,
             "supports_tools": True,
             "supports_reasoning": True,
+            "reasoning_levels": ["minimal", "low", "medium", "high", "xhigh"],
             "capability_labels": ["Preview", "Fast", "OpenRouter"],
         },
         "google/gemini-2.5-flash": {
@@ -1270,6 +1320,7 @@ PROVIDER_MODEL_CATALOG = {
             "context_window_tokens": 1000000,
             "supports_tools": True,
             "supports_reasoning": True,
+            "reasoning_levels": ["minimal", "low", "medium", "high", "xhigh"],
             "capability_labels": ["Fast", "Multimodal", "OpenRouter"],
         },
         "x-ai/grok-4": {
@@ -1277,6 +1328,7 @@ PROVIDER_MODEL_CATALOG = {
             "context_window_tokens": 256000,
             "supports_tools": True,
             "supports_reasoning": True,
+            "reasoning_levels": ["minimal", "low", "medium", "high", "xhigh"],
             "capability_labels": ["Reasoning", "OpenRouter"],
         },
         "deepseek/deepseek-chat": {
@@ -1284,6 +1336,7 @@ PROVIDER_MODEL_CATALOG = {
             "context_window_tokens": 128000,
             "supports_tools": True,
             "supports_reasoning": False,
+            "reasoning_levels": [],
             "capability_labels": ["Low cost", "OpenRouter"],
         },
         "mistralai/mistral-large-latest": {
@@ -1291,9 +1344,21 @@ PROVIDER_MODEL_CATALOG = {
             "context_window_tokens": 131072,
             "supports_tools": True,
             "supports_reasoning": True,
+            "reasoning_levels": ["minimal", "low", "medium", "high", "xhigh"],
             "capability_labels": ["Reasoning", "OpenRouter"],
         },
     },
+    # `supports_reasoning: True` here means "this model reasons
+    # internally" — it does NOT mean the API exposes a `reasoning_effort`
+    # control. Verified against docs.x.ai/developers/model-capabilities/
+    # text/reasoning, 2026-08-20: only Grok 3 Mini and Grok 4.5+/4.6+
+    # expose a settable `reasoning_effort`. grok-4, grok-4-0709,
+    # grok-4-latest and grok-3 (the four models this catalog currently
+    # offers) reason with a FIXED, non-adjustable budget — sending
+    # reasoning_effort to any of them is silently ignored by xAI's API.
+    # `reasoning_levels: []` is the disambiguating signal the adapter uses
+    # to decide whether to forward the wire parameter at all — see
+    # openai_compat_adapter.py's reasoning-effort wiring.
     "xai": {
         "grok-4": {
             "label": "Grok 4",
@@ -1301,6 +1366,7 @@ PROVIDER_MODEL_CATALOG = {
             "supports_tools": True,
             "supports_json": True,
             "supports_reasoning": True,
+            "reasoning_levels": [],
             "capability_labels": ["Reasoning", "Tools", "Structured outputs"],
         },
         "grok-4-0709": {
@@ -1309,6 +1375,7 @@ PROVIDER_MODEL_CATALOG = {
             "supports_tools": True,
             "supports_json": True,
             "supports_reasoning": True,
+            "reasoning_levels": [],
             "capability_labels": ["Reasoning", "Tools", "Structured outputs"],
         },
         "grok-4-latest": {
@@ -1317,6 +1384,7 @@ PROVIDER_MODEL_CATALOG = {
             "supports_tools": True,
             "supports_json": True,
             "supports_reasoning": True,
+            "reasoning_levels": [],
             "capability_labels": ["Reasoning", "Tools", "Structured outputs"],
         },
         "grok-3": {
@@ -1325,9 +1393,16 @@ PROVIDER_MODEL_CATALOG = {
             "supports_tools": True,
             "supports_json": True,
             "supports_reasoning": True,
+            "reasoning_levels": [],
             "capability_labels": ["Reasoning", "Tools"],
         },
     },
+    # Alibaba's OpenAI-compatible mode controls reasoning via
+    # `enable_thinking`/`thinking_budget`, NOT an OpenAI-shaped
+    # `reasoning_effort` string — a different wire shape this adapter does
+    # not yet translate. `reasoning_levels: []` keeps `supports_reasoning`
+    # (the internal-capability/"Reasoning" badge) accurate while stopping
+    # the wire param from ever being sent unverified.
     "qwen": {
         "qwen-plus": {
             "label": "Qwen Plus",
@@ -1336,6 +1411,7 @@ PROVIDER_MODEL_CATALOG = {
             "output_cost_per_1k_usd": 0.0,
             "supports_tools": True,
             "supports_reasoning": True,
+            "reasoning_levels": [],
             "capability_labels": ["Reasoning", "Hosted API"],
         },
         "qwen-turbo": {
@@ -1345,6 +1421,7 @@ PROVIDER_MODEL_CATALOG = {
             "output_cost_per_1k_usd": 0.0,
             "supports_tools": True,
             "supports_reasoning": False,
+            "reasoning_levels": [],
             "capability_labels": ["Fast", "Long context"],
         },
         "qwen-max": {
@@ -1354,6 +1431,7 @@ PROVIDER_MODEL_CATALOG = {
             "output_cost_per_1k_usd": 0.0,
             "supports_tools": True,
             "supports_reasoning": True,
+            "reasoning_levels": [],
             "capability_labels": ["High quality", "Reasoning"],
         },
     },
@@ -1404,6 +1482,11 @@ PROVIDER_MODEL_CATALOG = {
             "output_cost_per_1k_usd": 0.0,
             "supports_tools": True,
             "supports_reasoning": True,
+            # Mistral's reasoning-effort control (`prompt_mode="reasoning"`)
+            # only exists on the separate Magistral model family, not on
+            # La Plateforme's OpenAI-compatible chat/completions body for
+            # mistral-large-latest — no `reasoning_effort` field to send.
+            "reasoning_levels": [],
             "capability_labels": ["Reasoning", "Long context", "Hosted API"],
         },
         "mistral-medium-latest": {
@@ -1485,6 +1568,11 @@ PROVIDER_MODEL_CATALOG = {
             "output_cost_per_1k_usd": 0.0,
             "supports_tools": True,
             "supports_reasoning": True,
+            # Ollama's own API exposes a "think" level, not a verified
+            # OpenAI-shaped `reasoning_effort` field on its OpenAI-compat
+            # /v1/chat/completions surface — left unsent until confirmed
+            # against Ollama's own docs rather than guessed.
+            "reasoning_levels": [],
             "capability_labels": ["Hosted API", "Reasoning", "Tools"],
         },
         "gpt-oss:20b": {
@@ -1793,6 +1881,41 @@ def provider_model_catalog(provider: Any) -> List[Dict[str, Any]]:
             }
         )
     return items
+
+
+def reasoning_effort_levels_for_model(provider: Any, model: Any) -> List[str]:
+    """Wire-level `reasoning_effort` values PROVIDER_MODEL_CATALOG says
+    this (provider, model) pair's API actually accepts — the ONE signal
+    openai_compat_adapter.py trusts before ever putting a reasoning
+    parameter on the wire for an adapter-routed (openai/gemini/xai/
+    openrouter/...) turn.
+
+    Deliberately distinct from `supports_reasoning`, which many catalog
+    entries carry as True purely to mean "this model reasons internally"
+    (e.g. xai's grok-4 family, gemini-1.5-pro before this file's own
+    2026-08-20 correction) even when the provider's API exposes no
+    settable effort control for it — see each provider's own comment
+    block in PROVIDER_MODEL_CATALOG for the specific verified source.
+    Returning [] is the safe default for BOTH "doesn't reason" and
+    "reasons, but no verified wire control" — the caller only needs to
+    know whether it is safe to send something, not why.
+
+    Empty for a model this catalog has never heard of (an unrecognized
+    id, or a freeform azure_openai/custom_openai_compatible deployment
+    name) — an unknown model has nothing to look up and nothing is ever
+    guessed for one."""
+    provider_id = normalize_provider_id(provider)
+    model_id = str(model or "").strip()
+    if not model_id:
+        return []
+    for entry in provider_model_catalog(provider_id):
+        if entry.get("id") == model_id:
+            return [
+                str(level).strip().lower()
+                for level in entry.get("reasoning_levels") or []
+                if str(level).strip()
+            ]
+    return []
 
 
 def normalize_provider_model_id(

@@ -273,6 +273,66 @@ class ProviderProfilesTests(unittest.TestCase):
         self.assertAlmostEqual(float(cost or 0.0), 0.42, places=6)
 
 
+class ReasoningEffortLevelsForModelTests(unittest.TestCase):
+    """reasoning_effort_levels_for_model is the ONE signal
+    openai_compat_adapter.py trusts before ever putting a reasoning
+    parameter on the wire for a BYO-subscription turn — see this file's
+    own PROVIDER_MODEL_CATALOG comments (and CLAUDE.md's "BYO-subscription
+    model truth" entry) for the sourcing behind each expected answer."""
+
+    def test_openai_reasoning_model_has_levels(self) -> None:
+        levels = provider_profiles.reasoning_effort_levels_for_model("openai", "gpt-5.4-mini")
+        self.assertIn("high", levels)
+
+    def test_openai_gpt4o_has_no_levels(self) -> None:
+        # gpt-4o is not a reasoning model — was wrongly marked
+        # supports_reasoning True before this fix.
+        self.assertEqual(provider_profiles.reasoning_effort_levels_for_model("openai", "gpt-4o"), [])
+        self.assertEqual(provider_profiles.reasoning_effort_levels_for_model("openai", "gpt-4.1"), [])
+        self.assertEqual(provider_profiles.reasoning_effort_levels_for_model("openai", "gpt-4.1-mini"), [])
+
+    def test_gemini_2_5_pro_has_levels_but_1_5_pro_does_not(self) -> None:
+        self.assertIn("high", provider_profiles.reasoning_effort_levels_for_model("gemini", "gemini-2.5-pro"))
+        self.assertEqual(provider_profiles.reasoning_effort_levels_for_model("gemini", "gemini-1.5-pro"), [])
+        self.assertEqual(provider_profiles.reasoning_effort_levels_for_model("gemini", "gemini-2.0-flash"), [])
+
+    def test_xai_current_catalog_models_have_no_wire_levels(self) -> None:
+        # Every xai model this catalog offers today reasons with a fixed
+        # budget and exposes no settable reasoning_effort (docs.x.ai,
+        # verified 2026-08-20) — this is the concrete finding that the
+        # reasoning-effort picker currently does nothing on the wire for
+        # ANY model in the xai provider's catalog.
+        for model_id in ("grok-4", "grok-4-0709", "grok-4-latest", "grok-3"):
+            self.assertEqual(
+                provider_profiles.reasoning_effort_levels_for_model("xai", model_id), [], model_id,
+            )
+
+    def test_unknown_model_returns_empty_never_guessed(self) -> None:
+        self.assertEqual(
+            provider_profiles.reasoning_effort_levels_for_model("openai", "some-model-nobody-has-heard-of"), [],
+        )
+        self.assertEqual(provider_profiles.reasoning_effort_levels_for_model("openai", ""), [])
+
+    def test_unverified_wire_shape_providers_have_no_levels(self) -> None:
+        # qwen/mistral/ollama_cloud may reason internally but this catalog
+        # has no verified OpenAI-shaped reasoning_effort wire contract for
+        # any of them yet — see each entry's own sourcing comment.
+        self.assertEqual(provider_profiles.reasoning_effort_levels_for_model("qwen", "qwen-plus"), [])
+        self.assertEqual(
+            provider_profiles.reasoning_effort_levels_for_model("mistral", "mistral-large-latest"), [],
+        )
+        self.assertEqual(
+            provider_profiles.reasoning_effort_levels_for_model("ollama_cloud", "gpt-oss:120b"), [],
+        )
+
+    def test_openrouter_carries_the_superset_it_documents(self) -> None:
+        levels = provider_profiles.reasoning_effort_levels_for_model("openrouter", "openai/gpt-5.4")
+        self.assertIn("high", levels)
+        self.assertEqual(
+            provider_profiles.reasoning_effort_levels_for_model("openrouter", "deepseek/deepseek-chat"), [],
+        )
+
+
 class GrokBuildCursorCliProviderCatalogTests(unittest.TestCase):
     """xAI Grok Build / Cursor CLI addition (2026-07-24) — the two new
     cli_subscription provider entries resolve correctly through the same

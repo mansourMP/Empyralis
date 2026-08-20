@@ -580,20 +580,32 @@ async def get_provider_models(
             credentials = resolve_vault_credential(credential_id, workspace_id)
         except Exception as exc:
             raise HTTPException(status_code=404, detail=str(exc))
-    elif provider_id == "openai":
+    else:
+        # No explicit credential/profile named — the caller is asking "what
+        # can THIS workspace's own already-saved key for this provider see
+        # right now" (the Fleet Model tab's live model picker, wired
+        # 2026-08-20). resolve_default_vault_credential is provider-
+        # agnostic, so this now works for every BYOK provider, not just the
+        # two that happened to be hand-cased here before — a gemini/xai/
+        # groq/openrouter/qwen/mistral/bedrock customer with a real saved
+        # key was previously ALWAYS told "credential_required", live
+        # discovery notwithstanding, because nothing ever looked their key
+        # up. openai/ollama_cloud keep their EXTRA, provider-specific
+        # fallback (a host-level env var, for boxes/deployments that were
+        # never asked to paste a key into the vault at all) layered on top
+        # of the same generic vault lookup every other provider now gets.
         try:
-            credentials = resolve_default_vault_credential("openai", workspace_id)
+            credentials = resolve_default_vault_credential(provider_id, workspace_id)
         except Exception:
+            credentials = {}
+        if not credentials and provider_id == "openai":
             key, source = _resolve_hosted_openai_bearer(
                 workspace_id=workspace_id,
                 purpose="provider_models_list",
             )
             if key:
                 credentials = _openai_env_credentials(key, source)
-    elif provider_id == "ollama_cloud":
-        try:
-            credentials = resolve_default_vault_credential("ollama_cloud", workspace_id)
-        except Exception:
+        elif not credentials and provider_id == "ollama_cloud":
             env_key = str(os.getenv("ORION_LOCAL_WORKER_OLLAMA_CLOUD_API_KEY") or os.getenv("OLLAMA_API_KEY") or "").strip()
             if env_key:
                 credentials = {"api_key": env_key}
