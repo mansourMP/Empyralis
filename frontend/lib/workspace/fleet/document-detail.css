@@ -202,7 +202,7 @@ h6.fleet-doc-heading { font-size: 14px; }
   width: 100%;
   min-width: max-content;
   border-collapse: collapse;
-  font-size: 13.5px;
+  font-size: var(--text-sm);
 }
 
 .fleet-doc-table th,
@@ -268,6 +268,22 @@ h6.fleet-doc-heading { font-size: 14px; }
 .fleet-doc-header-row {
   display: flex;
   align-items: flex-start;
+}
+/* MEASURED, 2026-08-21: without this, a 16-character title ("Launch
+   checklist") rendered in a 214.1px box and wrapped onto TWO lines (66px
+   tall) inside a 628px-wide reading column. The h2 is a flex item here, so
+   with no flex basis it shrink-to-fits against its own max-content — and
+   that max-content is computed without the click-to-edit button's 12px
+   padding and 14px pencil, so the button inside then overflowed the box the
+   h2 had just sized to it and broke the line. flex:1 makes the heading claim
+   the row it already owns (this row has exactly one child); min-width:0 lets
+   a genuinely long title ellipsis rather than force the row wider.
+   Scoped to the document page's own row class, never to .fleet-task-page-
+   title itself — a task page's title lives in a different container and is
+   correct as it stands. */
+.fleet-doc-header-row > .fleet-task-page-title {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 /* ── Page shell: a document has no Properties column ────────────────────

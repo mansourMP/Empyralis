@@ -1205,8 +1205,7 @@ a.fleet-breadcrumb:hover {
   font-size: 11px;
   font-weight: var(--weight-medium);
   color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.02em;
+
   padding: 8px 4px 4px;
 }
 
@@ -2277,7 +2276,14 @@ a.fleet-breadcrumb:hover {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 6px 4px;
+  /* MEASURED, 2026-08-21: one Properties list rendered its rows at 30.80px
+     (plain-text values) and 36px (rows whose value is a picker/select) —
+     a 5.2px stagger down a column of ten rows, which is exactly the kind of
+     irregular rhythm that reads as sloppy without anyone being able to name
+     it. A floor of 32px with 4px padding lands BOTH on 32: a 24px control
+     + 8px, and an 18.8px text line rounded up to the floor. */
+  min-height: 32px;
+  padding: 4px;
   font-size: var(--text-sm);
 }
 
@@ -2339,7 +2345,11 @@ a.fleet-breadcrumb:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-primary);
-  font-weight: var(--weight-semibold);
+  /* 500, not 600. UI-CONTRACT §1 allows exactly two weights in product
+     chrome, and 600 here also inverted the emphasis inside the panel: a
+     STATIC value (a date, a creator) came out heavier than the interactive
+     picker sitting two rows above it, which renders at 500. */
+  font-weight: var(--weight-medium);
   font-variant-numeric: tabular-nums;
   text-align: right;
 }
@@ -2984,7 +2994,7 @@ a.fleet-breadcrumb:hover {
 /* Scoped under .fleet-root so the weight beats the `.fleet-root h1` reset. */
 .fleet-root .fleet-title {
   font-size: 18px;
-  font-weight: 550;
+  font-weight: var(--weight-medium);
   color: var(--text-primary);
 }
 
@@ -3740,7 +3750,7 @@ a.fleet-breadcrumb:hover {
 .fleet-connector-picker-connect-different {
   align-self: flex-start;
   margin-left: 34px;
-  font-size: 11.5px;
+  font-size: var(--text-2xs);
   color: var(--text-muted);
   background: none;
   border: none;
@@ -4015,9 +4025,16 @@ a.fleet-breadcrumb:hover {
   margin-bottom: 4px;
 }
 
+/* MEASURED, 2026-08-21: this and its four siblings (.fleet-page-state-title,
+   .fleet-tab-state-title, .fleet-work-empty-title, .fleet-root .fleet-title)
+   all carried font-weight 550 while .fleet-mywork-empty h2 — the same
+   concept, an empty-state title — carried 500. A census of the fleet CSS
+   found EIGHT distinct weights in use (400/500/550/600/640/650/680/700)
+   where UI-CONTRACT §1 allows two. 550/640/650/680 are values nobody chose;
+   they are what a design drifts into. Normalised to the token. */
 .fleet-empty-title {
   font-size: 15px;
-  font-weight: 550;
+  font-weight: var(--weight-medium);
   color: var(--text-primary);
 }
 
@@ -4051,7 +4068,7 @@ a.fleet-breadcrumb:hover {
 
 .fleet-page-state-title {
   font-size: 15px;
-  font-weight: 550;
+  font-weight: var(--weight-medium);
   color: var(--text-primary);
 }
 
@@ -4653,7 +4670,7 @@ a.fleet-breadcrumb:hover {
 
 .fleet-tab-state-title {
   font-size: 15px;
-  font-weight: 550;
+  font-weight: var(--weight-medium);
   color: var(--text-primary);
   display: flex;
   align-items: center;
@@ -5206,7 +5223,7 @@ a.fleet-breadcrumb:hover {
 
 .fleet-status-strip-value {
   font-size: 20px;
-  font-weight: 600;
+  font-weight: var(--weight-medium);
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
 }
@@ -5372,8 +5389,17 @@ a.fleet-breadcrumb:hover {
   background: var(--bg-card-hover);
 }
 
+/* Neutral, not accent. UI-CONTRACT §10 names this exact case: "Selected/
+   active (a toolbar toggle, a picker option, a filter) is a neutral fill
+   (--bg-inset) plus a font-weight bump (400->500), never accent text or an
+   accent background — INCLUDING inside an otherwise exclusive picker like a
+   sort-by list." Measured on the Configure sheet's Model tab: the accent
+   border here put a SECOND accent element on screen beside the Save button,
+   which is the one primary action that view is allowed. --text-primary
+   matches .fleet-tier-picker-option.is-selected, its neighbour in the same
+   panel, which already got this right. */
 .fleet-wizard-option.is-selected {
-  border-color: var(--accent);
+  border-color: var(--text-primary);
   background: var(--bg-inset);
 }
 
@@ -5497,8 +5523,7 @@ a.fleet-breadcrumb:hover {
   padding: 0 8px 8px;
   font-size: var(--text-2xs);
   font-weight: var(--weight-medium);
-  letter-spacing: var(--tracking-wide);
-  text-transform: uppercase;
+
   color: var(--text-muted);
 }
 .fleet-memory-file-list-count {
@@ -6248,7 +6273,14 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   gap: var(--fleet-list-gap);
   align-items: center;
   width: 100%;
-  padding: 10px var(--fleet-list-padding-x);
+  /* MEASURED, 2026-08-21: 6px, not 10px. With 10px this row rendered 52px
+     when the project had no description and 60.70px when it did — two
+     heights in ONE table, and the 60.7 was fractional because both text
+     lines carried `normal` line-heights (20.3px + 17.4px). Whole-number
+     line-heights below plus 6px padding put both variants at exactly 52px:
+     one-line = the 28px tile + 12px (min-height wins), two-line = 20 + 2 +
+     16 + 12 = 50 (min-height wins). */
+  padding: 6px var(--fleet-list-padding-x);
   min-height: 52px;
   background: transparent;
   border: 0;
@@ -6277,6 +6309,8 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 }
 .fleet-project-cell-name-title {
   font-size: 14px;
+  /* Whole-number line-height — see .fleet-project-row's padding note. */
+  line-height: 20px;
   font-weight: 500;
   color: var(--text-primary);
   overflow: hidden;
@@ -6286,6 +6320,7 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 }
 .fleet-project-cell-name-desc {
   font-size: 12px;
+  line-height: 16px;
   color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -6408,7 +6443,11 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 .fleet-rail-item-chord {
   margin-left: auto;
   font-family: var(--app-font-mono, ui-monospace, monospace);
-  font-size: 9px;
+  /* 10px, matching .fleet-rail-search-btn kbd four rows above it — the same
+     concept (a keyboard hint) was rendering at 9px here and 10px there,
+     within one rail. 9px was also the smallest type anywhere in the
+     product. */
+  font-size: 10px;
   letter-spacing: 0.05em;
   color: var(--text-muted);
   border: 1px solid var(--border);
@@ -6480,8 +6519,7 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   font-size: 11px;
   font-weight: var(--weight-medium);
   color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.02em;
+
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -6707,7 +6745,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   gap: var(--space-2); height: 100%; padding: var(--space-8);
   color: var(--text-muted); text-align: center;
 }
-.fleet-work-empty-title { font-size: 15px; font-weight: 550; color: var(--text-primary); }
+.fleet-work-empty-title { font-size: 15px; font-weight: var(--weight-medium); color: var(--text-primary); }
 .fleet-work-empty-desc { font-size: var(--text-sm); line-height: 1.5; max-width: 420px; }
 
 /* ── WORK tab v2: control bar + metrics strip + activity timeline ──────────
@@ -6801,7 +6839,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
 .fleet-work-metric { padding: var(--space-3) var(--space-5); border-right: 1px solid var(--border); min-width: 0; }
 .fleet-work-metric:last-child { border-right: none; }
 .fleet-work-metric-label {
-  font-size: 11px; font-weight: var(--weight-medium); text-transform: uppercase;
+  font-size: 11px; font-weight: var(--weight-medium);
   letter-spacing: var(--tracking-wide); color: var(--text-muted);
 }
 .fleet-work-metric-value {
@@ -6815,7 +6853,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   display: flex; align-items: center; gap: 6px;
   padding: var(--space-2) var(--space-4);
   font-size: var(--text-2xs); font-weight: var(--weight-medium);
-  letter-spacing: var(--tracking-wide); text-transform: uppercase;
+
   color: var(--text-muted); background: var(--bg-panel);
   border-bottom: 1px solid var(--border);
 }
@@ -6876,7 +6914,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
 .fleet-work-activity-label {
   flex-shrink: 0; padding: var(--space-3) var(--space-5) var(--space-2);
   font-size: var(--text-2xs); font-weight: var(--weight-medium);
-  letter-spacing: var(--tracking-wide); text-transform: uppercase; color: var(--text-muted);
+  color: var(--text-muted);
 }
 /* Honest disclosure, shown only when a conversation has no linkable trace
    (predates trace instrumentation, or the backend couldn't create one) — the
@@ -6899,7 +6937,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
 .fleet-work-plan-header {
   padding: var(--space-3) var(--space-5) var(--space-2);
   font-size: var(--text-2xs); font-weight: var(--weight-medium);
-  letter-spacing: var(--tracking-wide); text-transform: uppercase; color: var(--text-muted);
+  color: var(--text-muted);
 }
 .fleet-work-plan-header-count { color: var(--text-muted); font-weight: var(--weight-regular); text-transform: none; letter-spacing: normal; }
 .fleet-work-plan-list { display: flex; flex-direction: column; max-height: 240px; overflow-y: auto; padding-bottom: var(--space-2); }
@@ -7040,8 +7078,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   gap: 6px;
   font-size: 11px;
   font-weight: var(--weight-medium);
-  text-transform: uppercase;
-  letter-spacing: var(--tracking-wide);
+
   color: var(--text-muted);
 }
 .fleet-hw-dash-gauge-head svg { flex-shrink: 0; }
@@ -8041,10 +8078,9 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
 }
 .fleet-context-usage-panel-title {
   font-size: var(--text-xs);
-  font-weight: 600;
+  font-weight: var(--weight-medium);
   color: var(--text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
+
 }
 /* No-data state (2026-08-07: the ring itself is now always visible — see
    ContextUsageRing's own docstring — so the popover behind it needs an
@@ -8355,6 +8391,36 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
     height: 48px;
     min-height: 48px;
     padding-left: var(--space-2);
+    /* MEASURED, 2026-08-21 at 375px. The desktop rule deliberately carries
+       NO right inset so the primary action shares one right edge with the
+       panel-toggle in the toolbar below it (see its own comment). On mobile
+       that argument inverts into its opposite: the action's right edge sat
+       at 375 while the toolbar's last icon button sat at 351 — a 24px
+       mismatch, and the action pressed flush against the screen edge while
+       the hamburger opposite it kept an 8px gutter. 24px here restores
+       exactly the alignment the desktop rule exists to protect.
+       The gap stops the breadcrumb and the action from abutting at 0px,
+       which is what they did (crumbs right 256.4, action x 256.4). */
+    padding-right: var(--space-6);
+    gap: var(--space-3);
+  }
+
+  /* UI-CONTRACT §4: "Count: 12px muted, SAME LINE (`Agents · 4`, not a
+     second row)". Measured on a project page at 375px, "· 0 agents" broke
+     onto a second line and pushed the mobile breadcrumb to 34.8px inside a
+     48px bar, with the title clipped behind the primary action. */
+  .fleet-breadcrumb-count {
+    white-space: nowrap;
+  }
+
+  /* Three lines is one line more than a mobile list row gets (§3: 44-52px,
+     two-line). Measured: described projects rendered 70.4px against 52.4px
+     for the rest — title, description AND the meta line. The meta line
+     ("1 agent · 0 tok · 24m ago") is the one that carries information the
+     title does not, and it is what the Agents list already shows in this
+     slot, so the description is the line that goes. */
+  .fleet-project-cell-name-desc {
+    display: none;
   }
 
   .fleet-topbar-menu-btn {
@@ -8373,6 +8439,18 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   .fleet-breadcrumb-mobile-current {
     font-size: 15px;
     font-weight: var(--weight-medium);
+  }
+
+  /* MEASURED, 2026-08-21 at 375px: the back link's parent label had 34px of
+     room for 48px of text, so it rendered as "P…" — an ellipsis of one
+     letter, which names nothing — while stealing that width from the page
+     title, which then truncated to "Marketin". The chevron alone IS the
+     back affordance at this size (UI-CONTRACT §4's topbar spec is
+     hamburger / title+count / action, with no back label), and the link
+     keeps its full `aria-label="Back to {parent}"`, so nothing is lost to
+     a screen reader. */
+  .fleet-breadcrumb-mobile-back-label {
+    display: none;
   }
 
   .fleet-rail,
@@ -8563,13 +8641,35 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
     display: none;
   }
 
-  /* Projects list keeps the grid-collapse treatment (3 tracks + a muted
-     .fleet-agent-meta-mobile second line) — only Agent rows got the full
-     UI Contract redesign below; Projects wasn't in scope for that pass. */
+  /* MEASURED, 2026-08-21. The 3-track collapse that used to sit here was
+     already dead — and worse than dead, it was actively lying.
+
+       header  | Project | Cost this month | Status |   <- all three visible
+       row     | Atlas   |    (none)       | (none) |   <- two are display:none
+
+     The Projects table reuses .fleet-agent-cell-right for its numeric cells
+     (deliberately — see the desktop rule's own comment, "one shared visual
+     system for a right-aligned tabular cell"). The Agents mobile redesign
+     further down this same block then wrote `.fleet-agent-cell-right {
+     display: none }`, which silently emptied the Projects rows' Cost and
+     Status cells too. Its sibling `.fleet-agents-list-header { display:
+     none }` did NOT reach the Projects header, because that header is a
+     different class. Net result on a 375px phone: 172px of a 327px-wide
+     list was two column headers standing over permanently empty columns —
+     with "Cost this month" wrapping onto two lines to do it — while the
+     name column was squeezed to 139px and every project truncated
+     ("Marketing sit…", "Channel relia…", "Billing & Pola…").
+
+     One track now, and no header, which is exactly what the rows actually
+     render — and the same shape the Agents list already collapses to. Name
+     column: 139px -> 327px. */
   .fleet-projects-list {
-    --fleet-list-grid: minmax(0, 1fr) 64px 108px;
+    --fleet-list-grid: minmax(0, 1fr);
     --fleet-list-gap: 8px;
     --fleet-list-padding-x: 0px;
+  }
+  .fleet-projects-list-header {
+    display: none;
   }
   .fleet-col-agents-count,
   .fleet-col-tokens,
@@ -9125,7 +9225,9 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
 }
 
 .fleet-board-column-title {
-  font-weight: var(--weight-semibold);
+  /* 500 per UI-CONTRACT §1 — a column header is chrome, and it already
+     carries a status ring and a count to distinguish it from the cards. */
+  font-weight: var(--weight-medium);
   color: var(--text-primary);
   white-space: nowrap;
   overflow: hidden;
@@ -9545,12 +9647,23 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   border-top: 1px solid var(--border);
 }
 
+/* MEASURED, 2026-08-21: these rendered ALL-CAPS at weight 600, which
+   UI-CONTRACT §1 forbids twice over ("sentence case everywhere", "weights
+   are 400 or 500 ONLY"). They also disagreed with each other on tracking:
+   measured -0.12px here versus +0.36px on .fleet-task-page-side-title, for
+   what is visually the same label — because the `.fleet-root h2` reset
+   below re-declared margin and weight and forgot letter-spacing, so the
+   0.03em never applied to the <h2> variants ("Sub-tasks", "Activity") while
+   it did apply to the <div> one ("Properties"). Negative tracking on
+   uppercase is the wrong direction anyway. Sentence case at 500 removes
+   the contradiction rather than patching one side of it — and NO tracking
+   is declared here at all now, so every micro-label in the app inherits
+   the same -0.01em by construction instead of by literals that have to be
+   kept equal by hand. */
 .fleet-task-page-section-title {
   margin: 0 0 12px;
   font-size: 12px;
-  font-weight: var(--weight-semibold);
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
+  font-weight: var(--weight-medium);
   color: var(--text-muted);
 }
 /* Same requalification as .fleet-task-page-title above — this one renders as
@@ -9559,7 +9672,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
    reset. */
 .fleet-root h2.fleet-task-page-section-title {
   margin: 0 0 12px;
-  font-weight: var(--weight-semibold);
+  font-weight: var(--weight-medium);
 }
 
 .fleet-task-page-activity-empty {
@@ -9578,33 +9691,42 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   background: var(--bg-inset);
 }
 
+/* MEASURED, 2026-08-21: every comment used to be a bordered, 8px-rounded,
+   filled CARD, floated 14px apart — eight of them down an activity feed is
+   eight boxes to read past. UI-CONTRACT §10 is explicit: "Hairline lists,
+   not cards. A list row is a border-bottom hairline in a flat list, not a
+   bordered/shadowed card per row." Flat now: no border box, no radius, no
+   fill, one hairline between entries and none after the last. The feed
+   reads as a stream, and one border, one radius and one background per
+   comment stopped being drawn. */
 .fleet-task-page-comments {
   list-style: none;
   margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 14px;
 }
 .fleet-task-page-comment {
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-  background: var(--bg-card);
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
 }
+.fleet-task-page-comment:last-child { border-bottom: none; }
 .fleet-task-page-comment-head {
   display: flex;
   align-items: baseline;
   gap: 8px;
   margin-bottom: 4px;
 }
+/* 12px/11px off the shared scale, not the 12.5px/11.5px literals that used
+   to sit here — a half-pixel type step is not a step, it is a value nobody
+   chose, and it renders differently per zoom level. */
 .fleet-task-page-comment-author {
-  font-size: 12.5px;
-  font-weight: var(--weight-semibold);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
   color: var(--text-primary);
 }
 .fleet-task-page-comment-time {
-  font-size: 11.5px;
+  font-size: var(--text-2xs);
   color: var(--text-muted);
 }
 .fleet-task-page-comment-body {
@@ -9674,23 +9796,23 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
 }
 .fleet-task-page-side-title {
   font-size: 12px;
-  font-weight: var(--weight-semibold);
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
+  font-weight: var(--weight-medium);
   color: var(--text-muted);
   margin-bottom: 6px;
 }
 .fleet-task-page-side-link {
   color: var(--text-primary);
   text-decoration: none;
-  font-weight: var(--weight-semibold);
+  /* Inherits .fleet-panel-row-value's own 500 rather than overriding it back
+     to 600 — this IS a panel-row value, it just happens to be a link. */
+  font-weight: var(--weight-medium);
 }
 .fleet-task-page-side-link:hover { text-decoration: underline; }
 .fleet-task-page-side-note {
   margin-top: 16px;
   padding-top: 12px;
   border-top: 1px solid var(--border);
-  font-size: 11.5px;
+  font-size: var(--text-2xs);
   line-height: 1.5;
   color: var(--text-muted);
 }
@@ -10046,10 +10168,9 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
    as more structure than two five-item groups need. */
 .fleet-composer-pop-section-label {
   padding: 6px 8px 2px;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-medium);
+
   color: var(--text-muted);
 }
 .fleet-composer-pop-search {
@@ -10390,7 +10511,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
 }
 .fleet-label-editor-error {
   margin-top: 6px;
-  font-size: 11.5px;
+  font-size: var(--text-2xs);
   line-height: 1.45;
   color: var(--warning-text);
 }
@@ -11992,8 +12113,7 @@ h2.fleet-sage-console-title {
 .fleet-mywork-group-label {
   margin-bottom: 4px;
   font-size: var(--text-2xs);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+
   color: var(--text-muted);
 }
 

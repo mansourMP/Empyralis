@@ -57,11 +57,28 @@
 }
 
 @media (max-width: 720px) {
+  /* MEASURED, 2026-08-21 at 375px. Four nested insets — the backdrop's 24px
+     padding, the sheet's own calc(100vw - 24px), the body's 16px, and the
+     tab component's own 28px — left a 221px content column inside a 375px
+     screen. 41% of the phone was padding, which is why "Capability preset"
+     broke onto two lines and every value crowded the right edge.
+     UI-CONTRACT §8 says it plainly: a dialog on mobile is a FULL-SCREEN
+     sheet, not a desktop centred dialog shrunk to fit. Full-bleed here
+     hands ~74px back to the content and squares the corners against the
+     device edge, which is what makes it read as a sheet rather than a
+     floating card that happens to be large. */
+  .agent-configure-backdrop {
+    padding: 0;
+  }
+
   .agent-configure-sheet {
     width: 100%;
-    max-width: calc(100vw - 24px);
-    height: 88vh;
+    max-width: none;
+    height: 100%;
     max-height: none;
+    border-width: 0;
+    border-radius: 0;
+    box-shadow: none;
   }
 
   /* GroupedRail collapses to a horizontal strip below 720px on its own
@@ -74,7 +91,7 @@
      each full width. */
   .agent-configure-body {
     flex-direction: column;
-    padding: 16px;
+    padding: 12px;
     gap: 12px;
     overflow-y: auto;
   }

@@ -339,12 +339,16 @@ a.fleet-task-detail-nav-btn:hover {
   gap: 6px;
   min-width: 0;
 }
+/* A person's name renders at 500 everywhere it appears on this page — the
+   activity actor, the assignee chip, and the comment author are one concept
+   and were rendering at 600/600/600 against the comment author's 500 after
+   the type pass. UI-CONTRACT §1: 400 or 500 only. */
 .fleet-task-detail-actor-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 140px;
-  font-weight: var(--weight-semibold);
+  font-weight: var(--weight-medium);
   color: var(--text-primary);
 }
 
@@ -360,7 +364,7 @@ a.fleet-task-detail-nav-btn:hover {
   color: var(--text-secondary);
 }
 .fleet-activity-actor {
-  font-weight: var(--weight-semibold);
+  font-weight: var(--weight-medium);
   color: var(--text-primary);
 }
 .fleet-activity-action {

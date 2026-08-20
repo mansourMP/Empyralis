@@ -957,7 +957,7 @@ export default function ProjectDetailPage() {
           ) : (
             // 2+ agents: the rail's project-agents space
             // is the browse surface now — this pane just prompts a pick.
-            <div className="fleet-project-agents-placeholder">Select an agent to start chatting.</div>
+            <div className="fleet-project-agents-placeholder">Pick an agent to watch it work.</div>
           )}
         </div>
 
