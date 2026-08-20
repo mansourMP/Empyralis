@@ -5921,6 +5921,78 @@ flawless, not merely fixed. The zero-friction path already exists — the
 hosted bot, "no BotFather, no token" — and belongs immediately after agent
 creation.
 
+## The platform is not a chat product — the composer is gone (2026-08-20)
+
+**Settled, not open.** Founder, verbatim: *"messaging would never be done
+inside this platform. I'm strictly going to prohibit that and nobody is
+going to use that... you want to speak and have an agent, go set it up, go
+to Telegram and speak with the agent inside that channel. We are not going
+to try to be a channel."* And on what stays: *"we will only show what kind
+of messages had been going from which channel, and agent's output and its
+tools and other things in the process, but you wouldn't be able to speak
+with the agent."*
+
+```
+BEFORE                                AFTER
+Chat tab   composer, send, history      ONE surface, both old tab ids:
+Work tab   read-only activity view      channel · agent output · tool
+  ↑ two competing header controls       calls/plan steps · LIVE via SSE
+                                         NO composer, NO send, anywhere
+```
+
+`FleetAgentDetail.tsx`'s "chat" tab (the agent's front door) no longer
+mounts `AgentChat` (the composer). It and the legacy "work" tab id now
+render the SAME component — `tabs/WorkTab.tsx`, left unrenamed on purpose
+(its own header comment explains why: the file is a genuine cross-
+reference target for `ConversationsView.tsx`'s shared `.fleet-work-*`
+markup/CSS, ~5 other files cite it by filename, and the founder's objection
+was to the visible "Work" BUTTON, not this internal name). That surface
+already did the real job — per-channel conversation list, live tool/plan
+step streaming over `GET /api/agent-traces/{id}/stream` — so nothing about
+watching an agent work was weakened; only the SECOND, composer-only tab
+was deleted, along with everything that existed solely to serve it:
+`ChatTab`, the owner-only "Sessions" right-panel section (a second,
+narrower conversation picker duplicating WorkTab's own left-hand list —
+this codebase's own "only ONE surface may be the picker at a time" rule),
+"New chat", the `?thread=` URL/localStorage plumbing, and the whole
+`fleet-agent-conversations.ts` module (deleted outright — its sole
+consumer was the thing just removed).
+
+The persistent header "Work" button — founder: *"there is a button that
+was saying Work — I don't really like it, I think it must go"* — is gone;
+the identity link always opens the agent's Profile now (nothing left to
+switch between). The "⋯" menu's "Sessions" item is "Properties"; the right
+panel is Properties only.
+
+**`AgentChat.tsx` and its composer are UNCHANGED** — they remain Sage's own
+workspace-level "Ask AI" console (`SageLauncher.tsx`), a deliberately
+different per-user surface this pass did not touch (CLAUDE.md's own "Ask
+AI is per-user" section). Whether Ask AI is next is an open question for
+the founder, not decided here — do not extend this removal to it on a
+guess.
+
+**Attribution was already fully built, this pass only verified it.** The
+founder's replacement for "watch the conversation": *"all I have to do is
+just check which agent pushed this specific task, or updated or commented
+by this agent, or pushed by this agent when it comes to documents."*
+`TaskDetailView.tsx` already renders real "Created by"/"Completed by" rows
+(`task.created_by`, `task.completed_by_user_id`/`completed_by_agent_id`,
+real avatar+name via `AgentSigil`/`MemberAvatar`) and a per-comment author
+in its Activity feed. `DocumentHistory.tsx` already renders full revision
+authorship (`changed_by_type`: human/agent/external_agent, wired since
+2026-08-12 — see this file's own "built, tested, and never wired" note on
+`empyralis_list_document_revisions`, since fixed). Nothing new was built
+for this — it was reachable and rendering correctly before this pass
+started; this pass only confirmed that by reading the code and does not
+claim to have driven it live against a real agent-authored task/document
+edit.
+
+This is closely related to, but does NOT resolve, item 2 in the section
+immediately below (whether the web UI is a workspace or a setup surface)
+— it removes ONE way people might have spent time in the web UI, on a
+specific and explicit founder instruction, not a general judgment about
+the rest of the surface.
+
 ## OPEN FOUNDER DECISIONS — unresolved, do not guess (2026-08-20)
 
 These are questions the founder has raised MORE THAN ONCE and has not yet

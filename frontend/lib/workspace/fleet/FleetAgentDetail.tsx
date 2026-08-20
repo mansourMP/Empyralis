@@ -2,9 +2,9 @@
 
 import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
 
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
-import { useRouter, usePathname, useSearchParams } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -15,7 +15,6 @@ import {
   ChevronRight,
   Clock,
   Cpu,
-  Inbox,
   LayoutGrid,
   Loader2,
   Lock,
@@ -28,7 +27,6 @@ import {
   Smartphone,
   Sparkles,
   Square,
-  SquarePen,
   Trash2,
   Users,
   Wand2,
@@ -40,16 +38,8 @@ import { WorkTab } from "./tabs/WorkTab";
 import { HardwareTab } from "./tabs/HardwareTab";
 import { MemoryTab } from "./tabs/MemoryTab";
 import { ProfileFilesSection } from "./tabs/ProfileFilesSection";
-import { AgentChat } from "./AgentChat";
 import { GroupedRail, type GroupedRailGroup } from "./GroupedRail";
 import { defaultAgentProfileSegment, isProfileTab, planAgentProfileSegments, type AgentProfileSegmentId } from "./agent-profile-shape";
-import {
-  defaultAgentThreadId,
-  newAgentThreadId,
-  persistAgentThreadId,
-  readPersistedAgentThreadId,
-  useAgentConversations,
-} from "./fleet-agent-conversations";
 
 import {
   resumeFleetAgent,
@@ -74,7 +64,6 @@ import {
 import { timeAgo, formatDateTime, formatNumber, usagePayerLabel, type AgentStatusTone, type UsageMatrixRow } from "./fleet-presentation";
 import { AgentSigil, StatusChip, StatusDot } from "./fleet-indicators";
 import { PanelSection, PanelRow, FleetRightPanel, type PanelValueTone } from "./FleetRightPanel";
-import type { SageConversation } from "./SageConsolePanels";
 import type { UsageBucket } from "./fleet-sparkline";
 import { channelIconSrc } from "./fleet-icons";
 import { ConnectorPicker } from "./ConnectorPicker";
@@ -131,21 +120,27 @@ function isChannelConnected(
   return channel.connected;
 }
 
+// "work" stays a legal value — [tab]/page.tsx's VALID_TABS still accepts a
+// direct hit on the old .../work URL, same "dead-but-live" treatment
+// CLAUDE.md already documents for /agents and /conversations — but it is no
+// longer a distinct SURFACE: activeTab==="work" renders the exact same
+// observation view as activeTab==="chat" (see the render below), so an old
+// bookmark still works instead of 404ing.
 type TabId = "general" | "work" | "channels" | "connectors" | "hardware" | "model" | "skills" | "memory" | "tools" | "capabilities" | "chat" | "persona";
 
-// Single source of id/label/icon truth for every one of the twelve
-// sections — Chat and Work are permanent AgentDetailHeader controls (see
-// that component), Persona and Memory live in the Profile sheet (opened by
-// tapping the agent's own identity while on Chat — see
+// Single source of id/label/icon truth for every one of the remaining
+// sections — Chat is the agent's front door, rendered directly (no tab
+// strip; see the render below), Persona and Memory live in the Profile
+// sheet (opened by tapping the agent's own identity — see
 // PROFILE_SEGMENT_DEFS below), the other eight live in the Configure
 // sheet's GroupedRail groups (CONFIGURE_GROUPS below), and all three
 // surfaces read labels/icons from here so none of them can drift from the
-// others. Twelve ids remain valid [tab] route segments regardless of which
-// surface renders them (VALID_TABS, [tab]/page.tsx) — moving a tab between
-// surfaces is a rendering change, not a routing one. Declared with "chat"
-// first — chat is the agent's front door (an agent opens to Chat, not a
-// config screen — see [tab]/page.tsx's own "chat" fallback). The Configure
-// and Profile sheets both ignore this order entirely (each picks its own
+// others. "work" is deliberately absent from this list now (see the TabId
+// comment above) — it has no label/icon of its own to show anywhere, it
+// just resolves to the same content as "chat". Declared with "chat" first —
+// chat is the agent's front door (an agent opens to Chat, not a config
+// screen — see [tab]/page.tsx's own "chat" fallback). The Configure and
+// Profile sheets both ignore this order entirely (each picks its own
 // members/grouping explicitly by id).
 //
 // "Overview" is GONE, not renamed (founder, 2026-08-13: "remove overview
@@ -157,23 +152,22 @@ type TabId = "general" | "work" | "channels" | "connectors" | "hardware" | "mode
 //     out of that same tab a second time on 2026-08-19 — see the Profile
 //     sheet comment further down for why it now has its own surface.
 //   - the one-line status sentence (NowStrip) → deleted outright. It was a
-//     fourth restatement of the same status the Properties/Sessions panel's
-//     own "Status" row, the agents rail's StatusDot, and the agents list
+//     fourth restatement of the same status the Properties panel's own
+//     "Status" row, the agents rail's StatusDot, and the agents list
 //     all already show — nobody has to "go looking for it" on a tab that no
 //     longer exists when it is already one glance away everywhere else.
-//   - the day-grouped activity feed → deleted outright, not folded into
-//     Work. Work's own timeline (agent_trace_service's tool/plan/browser/
-//     delegation/approval event taxonomy) is a strictly richer account of
-//     "what this agent has actually done" than the activity_ledger_events
-//     list Overview showed — removing the shallower duplicate does not
-//     weaken Work, which is untouched.
+//   - the day-grouped activity feed → deleted outright, not folded into the
+//     observation view. That view's own trace-based timeline
+//     (agent_trace_service's tool/plan/browser/delegation/approval event
+//     taxonomy) is a strictly richer account of "what this agent has
+//     actually done" than the activity_ledger_events list Overview showed
+//     — removing the shallower duplicate does not weaken it.
 const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
   { id: "chat", label: "Chat", icon: MessageSquare },
   { id: "persona", label: "Persona", icon: Bot },
   { id: "general", label: "General", icon: LayoutGrid },
   { id: "model", label: "Model", icon: Sparkles },
   { id: "skills", label: "Skills", icon: BookOpen },
-  { id: "work", label: "Work", icon: Inbox },
   { id: "channels", label: "Channels", icon: Radio },
   { id: "connectors", label: "Connectors", icon: Plug },
   { id: "tools", label: "Tools", icon: Users },
@@ -182,13 +176,13 @@ const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
   { id: "memory", label: "Memory", icon: Brain },
 ];
 
-// Chat and Work are the two you actually watch day to day — both live as
-// permanent AgentDetailHeader controls now (Chat via the identity link,
-// Work as its own header button), not a tab strip. Everything else moved
-// into the Configure sheet, reached from the header's "⋯" menu; nothing was
-// deleted (founder: "the rest must not be deleted" — true of every section
-// except Overview itself, which the founder separately asked removed
-// outright), it just isn't equal-billing top-level nav anymore
+// Chat is the one thing you actually watch day to day — rendered directly,
+// no tab strip, no composer (2026-08-20: the platform is not a chat
+// product — see FleetAgentDetail's own top-of-file note). Everything else
+// moved into the Configure sheet, reached from the header's "⋯" menu;
+// nothing was deleted (founder: "the rest must not be deleted" — true of
+// every section except Overview itself, which the founder separately asked
+// removed outright), it just isn't equal-billing top-level nav anymore
 // (UI-CONTRACT: "a surface must earn its place").
 //
 // Persona and Memory left Configure a second time on 2026-08-19 — see the
@@ -423,49 +417,36 @@ function StopAgentConfirmDialog({
 // a breadcrumb + Chat|Work tabs + Configure button + a duplicate "Chat with
 // this agent" button all visible above the content at once (founder: "main
 // content page must be empty and just super clean... I don't want it to be
-// developer tool", said while looking at the Work tab specifically —
-// applied here to every sub-surface, not just Chat, so switching tabs
-// changes the CONTENT, never the chrome). Telegram's own shape: back, who
-// you're talking to, one overflow control — never zero wayfinding. Back is
-// always a real <Link> to the project (the same destination the old
-// breadcrumb's parent crumb pointed at), never router.back() and never a
-// second, tab-dependent destination — CLAUDE.md's "only ONE surface may be
-// the picker at a time" extends here to "only one back path", so every tab
-// shares the identical backHref rather than each inventing its own idea of
-// "up". Sigil + StatusDot are the same pair AgentsList/ProjectAgentsRail
-// already use for "who is this and is it up".
+// developer tool"). Telegram's own shape: back, who you're talking to, one
+// overflow control — never zero wayfinding. Back is always a real <Link> to
+// the project (the same destination the old breadcrumb's parent crumb
+// pointed at), never router.back() and never a second, tab-dependent
+// destination — CLAUDE.md's "only ONE surface may be the picker at a time"
+// extends here to "only one back path", so every tab shares the identical
+// backHref rather than each inventing its own idea of "up". Sigil +
+// StatusDot are the same pair AgentsList/ProjectAgentsRail already use for
+// "who is this and is it up".
 //
-// The identity block doubles as the way back to Chat from any other tab —
-// the same "tap the contact name to return to the conversation" affordance
-// every chat app uses — so a dedicated "Chat with this agent" button never
-// existed here in the first place rather than being deleted and replaced.
+// The identity block always opens this agent's Profile now — 2026-08-20,
+// following the founder's "not a chat product" decision (see
+// FleetAgentDetail's own top-of-file note): there is no separate "Chat"
+// destination to return to any more, so the one destination behind an
+// agent's name is who/what it is, exactly like tapping a contact's name in
+// Telegram. Every tab (the observation view included) shares this.
 //
-// 2026-08-19: on Chat itself, the identity block used to be inert (nowhere
-// left for it to lead — "already the destination"). It is now Telegram's
-// OTHER half of that same affordance: tap the name IN the chat to see the
-// agent's profile (PROFILE_SEGMENT_DEFS' own comment above has the
-// founder's words). Every other tab keeps its existing "return to Chat"
-// behavior unchanged — tapping the name from Work or from inside Configure
-// still means "take me back to the conversation", not "open the profile of
-// whatever I'm currently looking at"; only Chat itself gained a new
-// destination for a tap that used to go nowhere.
-//
-// Work is a PERSISTENT, visible header control, not a menu item — founder
-// correction, same day: the target user runs agents on behalf of OTHER
-// businesses, and for that person "chat with my own agent" is the least
-// important thing on this screen (the composer's own copy says so —
-// "Your owner test chat... not what a real customer would see"). What that
-// person actually does all day is watch what their agents did for other
-// people across every channel and step in when needed, i.e. Work — so it
-// gets the same permanent-header weight as identity/back, always present
-// regardless of which tab is open, marked current (not hidden) while
-// already on it. Everything genuinely secondary — Sessions, Configure,
-// Stop/Resume (danger-styled, separated by a divider, a real but
-// occasionally-needed control that must never sit beside the primary
-// action people came here for) — stays in the "⋯" menu. Reuses
-// DocumentDetailView's own "⋯" menu shell (.fleet-list-row-menu-wrap/
-// .fleet-list-row-menu/-item, defined once in fleet-theme.css) rather than
-// inventing a fourth dropdown implementation.
+// THE "WORK" BUTTON IS GONE — founder, 2026-08-19/20, on the platform no
+// longer being a messaging surface: "I don't really like it, I think it
+// must go." Chat and Work used to be two competing header controls (one for
+// the owner's own private test chat, one for watching real conversations);
+// with the composer removed there is only one thing left to look at, so
+// there is only one thing in the header pointing at it — the identity link
+// itself, exactly as Telegram's own chat header has no second "go to this
+// conversation" button beside the contact name. Configure, Stop/Resume, and
+// opening Properties (danger-styled and separated by a divider — a real but
+// occasionally-needed control that must never sit beside anything primary)
+// stay in the "⋯" menu. Reuses DocumentDetailView's own "⋯" menu shell
+// (.fleet-list-row-menu-wrap/.fleet-list-row-menu/-item, defined once in
+// fleet-theme.css) rather than inventing a fourth dropdown implementation.
 function AgentDetailHeader({
   workspaceId,
   agentId,
@@ -473,15 +454,12 @@ function AgentDetailHeader({
   agentLabel,
   statusTone,
   statusLabel,
-  activeTab,
   sheetOpen,
   backHref,
   backLabel,
-  chatHref,
-  workHref,
-  configureHref,
   profileHref,
-  onOpenSessions,
+  configureHref,
+  onOpenProperties,
   onAgentChanged,
 }: {
   workspaceId: string;
@@ -490,15 +468,12 @@ function AgentDetailHeader({
   agentLabel: string;
   statusTone: AgentStatusTone;
   statusLabel: string;
-  activeTab: TabId;
   sheetOpen: boolean;
   backHref: string;
   backLabel: string;
-  chatHref: string;
-  workHref: string;
-  configureHref: string;
   profileHref: string;
-  onOpenSessions: () => void;
+  configureHref: string;
+  onOpenProperties: () => void;
   onAgentChanged?: () => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -547,40 +522,17 @@ function AgentDetailHeader({
       <Link href={backHref} className="fleet-icon-btn fleet-chat-header-back" aria-label={`Back to ${backLabel}`}>
         <ArrowLeft size={16} strokeWidth={1.75} />
       </Link>
-      {/* On Chat itself, the tap opens this agent's Profile — Telegram's
-          "tap the name" pattern (see the block comment above, 2026-08-19).
-          Everywhere else it's still the existing real link back to Chat. */}
-      {activeTab === "chat" ? (
-        <Link
-          href={profileHref}
-          replace
-          className="fleet-chat-header-identity-wrap fleet-chat-header-identity-wrap--link"
-          aria-label={`Open ${agentLabel}'s profile`}
-        >
-          {identityInner}
-        </Link>
-      ) : (
-        <Link
-          href={chatHref}
-          replace
-          className="fleet-chat-header-identity-wrap fleet-chat-header-identity-wrap--link"
-          aria-label={`Open chat with ${agentLabel}`}
-        >
-          {identityInner}
-        </Link>
-      )}
-      {/* Persistent, always-visible — not a menu item. See the block
-          comment above for why Work outranks Chat/Sessions/Configure for
-          this product's actual user. Current (not hidden) while already on
-          Work, matching how the identity link behaves on Chat. */}
+      {/* Tap the name to see this agent's Profile — Telegram's "tap the
+          name" pattern (see the block comment above). There is no other
+          destination behind it any more: the observation view below IS the
+          front door, on every tab that isn't already a sheet over it. */}
       <Link
-        href={workHref}
+        href={profileHref}
         replace
-        className={`fleet-btn fleet-chat-header-work${activeTab === "work" ? " is-active" : ""}`}
-        aria-current={activeTab === "work" ? "page" : undefined}
+        className="fleet-chat-header-identity-wrap fleet-chat-header-identity-wrap--link"
+        aria-label={`Open ${agentLabel}'s profile`}
       >
-        <Inbox size={14} strokeWidth={1.75} />
-        <span className="fleet-btn-label">Work</span>
+        {identityInner}
       </Link>
       <div className="fleet-list-row-menu-wrap fleet-chat-header-menu" ref={menuRef}>
         <button
@@ -601,10 +553,10 @@ function AgentDetailHeader({
               className="fleet-list-row-menu-item"
               onClick={() => {
                 setMenuOpen(false);
-                onOpenSessions();
+                onOpenProperties();
               }}
             >
-              Sessions
+              Properties
             </button>
             {!sheetOpen && (
               <Link
@@ -760,9 +712,37 @@ function buildCostDisplayRows(matrix: UsageMatrixRow[]): CostDisplayRow[] {
 }
 
 /**
- * Agent detail — a routed page (top tabs + a permanent properties panel that
- * never reflows the content column). Every tab has real data or an
- * intentional empty state with a working next action. No stubs.
+ * Agent detail — a routed page (a permanent properties panel that never
+ * reflows the content column, Configure/Profile as overlay sheets). Every
+ * tab has real data or an intentional empty state with a working next
+ * action. No stubs.
+ *
+ * READ-ONLY OBSERVATION, NOT A CHAT PRODUCT — 2026-08-20, founder: "messaging
+ * would never be done inside this platform. I'm strictly going to prohibit
+ * that and nobody is going to use that... you want to speak and have an
+ * agent, go set it up, go to Telegram and speak with the agent inside that
+ * channel. We are not going to try to be a channel." And on what's left:
+ * "we will only show what kind of messages had been going from which
+ * channel, and agent's output and its tools and other things in the
+ * process, but you wouldn't be able to speak with the agent."
+ *
+ * So there is no composer anywhere on this page, and no code path that
+ * originates a turn from here. What used to be two competing surfaces —
+ * Chat (the owner's own private test composer, AgentChat.tsx) and Work (a
+ * read-only activity view) — is now ONE: tabs/WorkTab.tsx, rendered for
+ * both the "chat" and legacy "work" tab ids (see the TabId comment below).
+ * It shows, per real conversation across every channel: which channel a
+ * message arrived from, the agent's own output, and its tool calls/plan
+ * steps — LIVE, via SSE, while a turn is still running (that's the reason
+ * to open this page at all; removing the composer must never mean losing
+ * the ability to watch work happen). Control happens over the channel
+ * itself, via the `/command` surface `sage_command_dispatcher` already
+ * dispatches on every personal channel — never from a screen here.
+ *
+ * AgentChat.tsx and its composer are UNCHANGED and still real code — they
+ * remain Sage's own workspace-level "Ask AI" console (SageLauncher.tsx),
+ * a deliberately different, per-user product surface this pass did not
+ * touch. Only THIS agent detail page's Chat tab lost its composer.
  */
 export function FleetAgentDetail({
   workspaceId,
@@ -828,29 +808,17 @@ export function FleetAgentDetail({
   // used on every tab/width removes that special case entirely: there is no
   // longer a column for Chat's mobile layout to have "no room" for.
   const [propertiesOpen, setPropertiesOpen] = useState(false);
-  // Sessions (Part 2, "the right panel becomes sessions") — lifted out of
-  // ChatTab, which used to own this alone for its own header New chat/
-  // History controls (both deleted — the Sessions panel below is now the
-  // one place conversations are started and browsed, not a second copy in
-  // the tab header).
-  // popover. It's now ALSO the source for the Sessions section of the
-  // persistent right panel (below), which has to know the open thread and
-  // the full conversation list regardless of which top tab is active — so
-  // the state lives here, once, and both ChatTab and the panel read it.
-  const [threadId, setThreadId] = useState<string>(
-    () => readPersistedAgentThreadId(workspaceId, agentId) || defaultAgentThreadId(agentId),
-  );
-  const { conversations, refresh: refreshConversations } = useAgentConversations(workspaceId, agentId, true);
-  useEffect(() => {
-    persistAgentThreadId(workspaceId, agentId, threadId);
-  }, [workspaceId, agentId, threadId]);
-  // Synced from the `?thread=` URL param (ChatThreadSearchParamBridge,
-  // mounted below) — a direct link or cmd-click lands on the right
-  // conversation the moment Next resolves the param, same guarantee the old
-  // ChatTab-local version made.
-  const onThreadParamChange = useCallback((thread: string | null) => {
-    if (thread) setThreadId(thread);
-  }, []);
+  // No composer, no owner-only test thread — the platform is not a channel
+  // (founder, 2026-08-19/20: "messaging would never be done inside this
+  // platform... go to Telegram and speak with the agent inside that
+  // channel"). `threadId` here is just an OBSERVER of whichever real
+  // conversation WorkTab's own left-hand list currently has selected
+  // (WorkTab owns the selection; it calls this back on every change) — it
+  // exists only so the Profile sheet's Files pane (below) can show the
+  // files attached to the conversation someone is actually looking at,
+  // instead of a fixed id nothing ever selected. null until WorkTab has
+  // loaded at least one real conversation to select.
+  const [threadId, setThreadId] = useState<string | null>(null);
   const { channels, refresh: refreshChannels, telegramBotConnected, slackChannelBinding } = useFleetAgentChannels(workspaceId, agentId);
   const { connectors } = useFleetAgentConnectors(workspaceId, agentId);
   const [costPeriod, setCostPeriod] = useState<CostPeriod>("day");
@@ -989,15 +957,6 @@ export function FleetAgentDetail({
   // navigation is real links" rule GroupedRail.tsx itself already follows.
   const pathname = usePathname();
   const tabHref = useCallback((tab: TabId) => pathname.replace(/\/[^/]+$/, `/${tab}`), [pathname]);
-  // A session/conversation always opens on Chat, regardless of which tab
-  // the click came from — the Sessions panel is visible on every tab, so
-  // clicking a row while on Work must still land in the actual
-  // conversation. `?thread=` on the chat route is what ChatTab's own
-  // key={threadId} remount and ChatThreadSearchParamBridge (below) key off.
-  const threadHref = useCallback(
-    (id: string) => `${tabHref("chat")}?${new URLSearchParams({ thread: id }).toString()}`,
-    [tabHref],
-  );
 
   // Esc returns to wherever the user came from (browser back) — not a
   // hardcoded destination, so the flat /agents list, a project's list, or
@@ -1174,120 +1133,27 @@ export function FleetAgentDetail({
       ))}
     </PanelSection>
   );
-  // Part 2 — "instead of this right panel we must have sessions... at the
-  // top... just like what we have right now, and below we are going to have
-  // session histories." Properties (above) is unchanged; this is the new
-  // region below it, in the SAME panel — one drawer, two stacked sections,
-  // never two separate panels. Newest first (useAgentConversations already
-  // sorts that way), a readable title + relative timestamp per row, the
-  // open conversation visibly marked, and a one-click way to start a new
-  // one — the bar the founder named explicitly: "just like Claude's own
-  // conversation list." `.fleet-agent-sessions` gets its OWN scroll (see
-  // fleet-theme.css) so a long history never drags the Properties section
-  // above it out of view.
-  // Minted ONCE per mount, never inline in the JSX: an href built from
-  // `newAgentThreadId(...)` at render time is a DIFFERENT URL on every
-  // render, and Next prefetches Link hrefs — so each poll-driven re-render
-  // fired a fresh `?thread=<new id>` RSC prefetch, dozens per minute,
-  // filling the network log with aborted requests. Observed live on the
-  // founder's own account while diagnosing a wedged send. Clicking twice
-  // before navigating reuses one id, which lands on the same empty thread —
-  // exactly what a person expects two "New chat" clicks to mean.
-  //
-  // `newAgentThreadId` is Date.now()+Math.random() — genuinely fresh on
-  // every call, which is exactly why seeding the memo directly with it was
-  // wrong: a Client Component's render function runs once on the SERVER
-  // and once again on the CLIENT during hydration, two separate JS
-  // executions sharing no state, so the memo minted a DIFFERENT id each
-  // time and React threw a hydration-mismatch console error on every load
-  // (server href vs. client's first-render href disagreeing on the
-  // trailing thread-id token). This is still a real, cmd-clickable
-  // `<Link>` (this app's own "primary navigation is real links" rule) —
-  // never a button — because the href always resolves to a real, valid
-  // thread URL. What changes is WHEN the genuinely-random id is minted:
-  // `useState`'s initializer seeds a deterministic placeholder
-  // (`defaultAgentThreadId`, plain string interpolation, identical on
-  // server and first client render — nothing to disagree on at hydration
-  // time), and the effect below swaps in the real, never-reused id right
-  // after mount, client-side only. Effects fire synchronously right after
-  // the commit, well before any human has a chance to click, so in
-  // practice the href a person actually sees and clicks is always the
-  // fresh one. Re-fires only when `agentId` itself changes (this
-  // component is not remounted on an in-place agent switch), never on the
-  // poll-driven re-renders that produced the prefetch-spam bug above —
-  // `freshThreadId` is state, not a value recomputed every render.
-  const [freshThreadId, setFreshThreadId] = useState(() => defaultAgentThreadId(agentId));
-  useEffect(() => {
-    setFreshThreadId(newAgentThreadId(agentId));
-  }, [agentId]);
-  const nextNewThreadHref = useMemo(
-    () => threadHref(freshThreadId),
-    [freshThreadId, threadHref],
-  );
-
-  const sessionsContent = (
-    <PanelSection
-      title="Sessions"
-      className="fleet-agent-sessions"
-      action={
-        <Link
-          href={nextNewThreadHref}
-          replace
-          className="fleet-icon-btn"
-          aria-label="New chat"
-          title="New chat"
-        >
-          <SquarePen size={13} strokeWidth={1.75} />
-        </Link>
-      }
-    >
-      {conversations.length === 0 ? (
-        <div className="fleet-panel-empty">No conversations yet.</div>
-      ) : (
-        <div className="fleet-agent-sessions-list" role="list">
-          {conversations.map((c) => {
-            const isActive = c.id === threadId;
-            return (
-              <Link
-                key={c.id}
-                href={threadHref(c.id)}
-                replace
-                role="listitem"
-                className={`fleet-sage-history-row${isActive ? " is-active" : ""}`}
-                aria-current={isActive ? "true" : undefined}
-              >
-                <span className="fleet-sage-history-row-title">{c.title}</span>
-                <span className="fleet-sage-history-row-time">
-                  {isActive ? "Current" : timeAgo(c.lastActivityAt)}
-                </span>
-              </Link>
-            );
-          })}
-        </div>
-      )}
-    </PanelSection>
-  );
+  // The old "Sessions" section here (a second, owner-only conversation list
+  // with its own "New chat" control) is GONE, not merely hidden — it was
+  // the picker for the composer's own private test threads
+  // (useAgentConversations filtered to the signed-in owner's turns only),
+  // and there is no composer left to open a thread into. The single
+  // observation view below (WorkTab) already IS a conversation picker — its
+  // own left-hand "Work stream" list is every REAL conversation this agent
+  // has had, across every channel, not just the owner's web test chats — so
+  // this panel would have been a second, narrower picker sitting on top of
+  // a better one (this codebase's own standing rule: "only ONE surface may
+  // be the picker at a time"). Properties (above) is the whole panel now.
   const inner = (
     <>
-      {/* Reads the `?thread=` URL param and keeps `threadId` (above) in
-          sync — page-level now, not scoped to ChatTab, since the Sessions
-          panel below needs to know the open conversation on every tab, not
-          just while Chat is active. Isolated under its own Suspense
-          boundary (useSearchParams bails the calling tree out to the
-          nearest one during prerender) so this doesn't drag the whole page
-          into it. */}
-      <Suspense fallback={null}>
-        <ChatThreadSearchParamBridge onChange={onThreadParamChange} />
-      </Suspense>
       {/* ONE header, every tab — not a breadcrumb, not a Chat|Work tab
           strip, not a separate Configure button, and not a second "Chat
           with this agent" control. The shell's own breadcrumb topbar is
           suppressed for every route under an agent's detail surface (see
           FleetContentFrame.tsx's AGENT_DETAIL_ROUTE), so this is the page's
           only header, not a second one stacked above an emptied-out first.
-          See AgentDetailHeader's own block comment for why Work is a
-          persistent header control while Sessions/Configure/Stop live in
-          the "⋯" menu. */}
+          See AgentDetailHeader's own block comment for why the persistent
+          "Work" button is gone. */}
       <AgentDetailHeader
         workspaceId={workspaceId}
         agentId={agentId}
@@ -1295,74 +1161,47 @@ export function FleetAgentDetail({
         agentLabel={agent?.label || "Unnamed agent"}
         statusTone={status.tone}
         statusLabel={status.label}
-        activeTab={activeTab}
         sheetOpen={sheetOpen}
         backHref={`/w/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(projectId)}`}
         backLabel={projectName || "Project"}
-        chatHref={tabHref("chat")}
-        workHref={tabHref("work")}
         configureHref={tabHref(sheetOpen ? activeTab : CONFIGURE_GROUPS[0].tabs[0])}
         profileHref={tabHref(profileOpen ? activeTab : defaultAgentProfileSegment(isMaster))}
-        onOpenSessions={() => setPropertiesOpen(true)}
+        onOpenProperties={() => setPropertiesOpen(true)}
         onAgentChanged={onRenamed}
       />
 
-      {/* The relative anchor the Sessions overlay below floats against —
+      {/* The relative anchor the Properties overlay below floats against —
           .fleet-detail-body is this container's only normal-flow child and
           always renders at full width, whether the overlay (an absolutely-
           positioned child, out of flow entirely) is open or closed. Same
           contract as the list pages' .fleet-content-with-panel. */}
       <div className="fleet-detail-columns">
         <div className="fleet-detail-body">
-          {/* Only the two top-level tabs (Chat, Work) render here now. The
-              other nine render inside the Configure sheet below —
-              configureSheet — same components, same props, moved rather
-              than duplicated. */}
-          {activeTab === "work" && <WorkTab workspaceId={workspaceId} agentId={agentId} agent={agent} onAgentChanged={onRenamed} />}
-          {/* ChatTab stays MOUNTED on every tab, hidden (not removed) when
-              a different one is active — never conditionally rendered like
-              WorkTab above. Founder-observed bug: clicking Work (or
-              Configure) mid-turn used to unmount ChatTab outright, which
-              silently threw away everything local to that turn — the
-              in-flight send()'s streamed reply, its own 90s watchdog, and
-              the draft the founder had just typed ("he came back,
-              re-pasted his message"). Navigating away from a live turn
-              must not silently discard the UI's own record of it (this
-              file's own hard constraint).
-
-              The hide/show used to be a bare wrapper `<div style={{display:
-              "none"}}>` around ChatTab — which put a class-less div between
-              `.fleet-detail-body` and `.fleet-agent-chat-panel`, breaking
-              BOTH of fleet-theme.css's `.fleet-detail-body > .fleet-agent-
-              chat-panel` rules (the `height:100%` chain that bounds the
-              internal message-list scroller, and the width-cap opt-out).
-              With no bounded height, `.fleet-sage-chat-list`'s own
-              `overflow-y:auto` never had anything to scroll — it just grew
-              to fit ALL of its content, so `.fleet-detail-body` (the whole
-              page) became the real scroller instead, landing on the OLDEST
-              message with the composer buried ~12,000px below the fold.
-              Measured on production, see agent-chat-scroll-follow.ts's own
-              header. Fixed by keeping `.fleet-agent-chat-panel` — inside
-              ChatTab itself — as `.fleet-detail-body`'s direct child again,
-              and passing `hidden` down as a prop instead of an ancestor
-              wrapper; ChatTab applies `display:none` to that same div, and
-              AgentChat reads the same flag to skip touching scrollTop while
-              its pane has zero real dimensions (see AgentChat's own
-              scroll-follow effect). */}
-          <ChatTab
-            key={agentId}
-            workspaceId={workspaceId}
-            agentId={agentId}
-            agent={agent}
-            threadId={threadId}
-            hidden={activeTab !== "chat"}
-            onTurnComplete={refreshConversations}
-            onAgentSaved={onRenamed}
-          />
+          {/* "chat" is this agent's front door and "work" is kept only as a
+              dead-but-live legacy URL (same treatment this codebase already
+              gives /agents, /conversations — see CLAUDE.md) — both render
+              the SAME read-only observation surface, never a composer. No
+              hidden-mount trick is needed here the way ChatTab used to need
+              one: there is no local in-flight send state left to protect
+              (no draft, no watchdog, nothing this component owns that the
+              turn depends on) — the turn runs and persists server-side
+              regardless of whether this is mounted, so it's fine for
+              WorkTab to unmount like any other tab when Configure/Profile
+              cover it. onSelectThread just mirrors WorkTab's own selection
+              up to `threadId` so the Profile sheet's Files pane (below)
+              can show files for whichever real conversation is on screen. */}
+          {(activeTab === "chat" || activeTab === "work") && (
+            <WorkTab
+              workspaceId={workspaceId}
+              agentId={agentId}
+              agent={agent}
+              onAgentChanged={onRenamed}
+              onSelectThread={setThreadId}
+            />
+          )}
         </div>
-        <FleetRightPanel open={propertiesOpen} onClose={() => setPropertiesOpen(false)} ariaLabel="Sessions">
+        <FleetRightPanel open={propertiesOpen} onClose={() => setPropertiesOpen(false)} ariaLabel="Properties">
           {propertiesContent}
-          {sessionsContent}
         </FleetRightPanel>
       </div>
     </>
@@ -1532,7 +1371,15 @@ export function FleetAgentDetail({
                 </div>
                 <div className="agent-profile-files-pane">
                   <h3 className="agent-profile-files-heading">Files</h3>
-                  <ProfileFilesSection workspaceId={workspaceId} threadId={threadId} />
+                  {/* threadId now tracks whichever real conversation is
+                      selected in the observation view below (see WorkTab's
+                      onSelectThread) — null only until that view has loaded
+                      at least one conversation to select. */}
+                  {threadId ? (
+                    <ProfileFilesSection workspaceId={workspaceId} threadId={threadId} />
+                  ) : (
+                    <p className="agent-profile-files-loading" style={{ opacity: 0.7 }}>No files yet.</p>
+                  )}
                 </div>
               </div>
             )}
@@ -1951,91 +1798,6 @@ function ScheduleSection({ workspaceId, agentId }: { workspaceId: string; agentI
         </div>
       )}
       {!creating && error && <p className="fleet-channel-expand-error" style={{ marginTop: 8 }}>{error}</p>}
-    </div>
-  );
-}
-
-// ── Chat ────────────────────────────────────────────────────────────────────
-
-// Runs as this specific agent — its own persona, model binding, and memory
-// scope — over a per-agent thread, the same convention channel-bound turns
-// use. See AgentChat's context_hints.metadata.active_agent_install_id, read
-// by specialist_runtime_context.resolve_specialist_runtime_context.
-//
-// THREAD IS STATE, LIVING ONE LEVEL UP NOW
-// ------------------------------------------
-// Used to be the single permanent id `thread_agent_{agentId}`
-// (defaultAgentThreadId) forever — one conversation per agent, with no way
-// to leave a bad one behind. A fabricated turn recorded on it stayed in
-// every future turn's history as established fact, with no escape. New
-// chat mints a genuinely different id (newAgentThreadId — never the same id
-// with history hidden). The state itself (threadId, the conversation list,
-// the URL sync) now lives in FleetAgentDetail, not here — Part 2 made the
-// Sessions panel the one place conversations are started and browsed, and
-// that panel is visible on every tab, not just Chat, so the state had to
-// move up. This component just renders whatever thread it's handed.
-//
-// THREAD IS A URL PARAM, NOT JUST COMPONENT STATE
-// -------------------------------------------------
-// Session rows are real `<a href>` links (cmd-click/middle-click must open
-// a new tab on that exact conversation — this codebase's own "primary
-// navigation is real links" rule), so the open thread has to be something
-// a URL can name. `?thread=<id>` on the chat route does that (see
-// FleetAgentDetail's threadHref); ChatThreadSearchParamBridge below keeps
-// FleetAgentDetail's threadId state in sync with it.
-function ChatThreadSearchParamBridge({ onChange }: { onChange: (thread: string | null) => void }) {
-  // Isolated in its own component under a local Suspense boundary (mirrors
-  // FleetTabsProvider's SearchParamsBridge in FleetTabs.tsx) — calling
-  // useSearchParams() bails the calling tree out to its nearest Suspense
-  // boundary during prerender, so it's called HERE, under a boundary that
-  // renders nothing, rather than dragging the whole page into one.
-  const searchParams = useSearchParams();
-  const thread = searchParams.get("thread");
-  useEffect(() => {
-    onChange(thread);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [thread]);
-  return null;
-}
-
-function ChatTab({
-  workspaceId, agentId, agent, threadId, hidden, onTurnComplete, onAgentSaved,
-}: {
-  workspaceId: string;
-  agentId: string;
-  agent: FleetAgent | null;
-  threadId: string;
-  /** True while a different top-level tab is showing — this div stays
-   *  mounted (see the caller's own comment on why) and applies
-   *  `display:none` to itself directly, rather than an ancestor wrapper
-   *  doing it, so `.fleet-agent-chat-panel` stays `.fleet-detail-body`'s
-   *  direct child and fleet-theme.css's height/width rules for it keep
-   *  matching. Forwarded into AgentChat too, so its own scroll-follow
-   *  effect can skip reading/writing scrollTop while this pane has zero
-   *  real dimensions. */
-  hidden?: boolean;
-  onTurnComplete?: () => void;
-  onAgentSaved?: () => void;
-}) {
-  const label = agent?.label || "this agent";
-
-  return (
-    <div className="fleet-agent-chat-panel" style={hidden ? { display: "none" } : undefined}>
-      <AgentChat
-        key={threadId}
-        workspaceId={workspaceId}
-        threadId={threadId}
-        agentInstallId={agentId}
-        agent={agent}
-        emptyIcon={MessageSquare}
-        emptyTitle={`Message ${label}`}
-        emptyBody={`Your owner test chat with ${label} — full access, not what a real customer would see.`}
-        placeholder={`Message ${label}…`}
-        sourceTag="fleet_agent_chat"
-        paneHidden={hidden}
-        onTurnComplete={onTurnComplete}
-        onAgentSaved={onAgentSaved}
-      />
     </div>
   );
 }
