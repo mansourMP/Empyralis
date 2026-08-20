@@ -404,6 +404,12 @@ def require_admin_api_key(
         "owner",
     )
 
+# Sent on every http_json_request call -- see the User-Agent note inside it.
+# A real product identifier, not a browser impersonation: the goal is to stop
+# looking like an unidentified script, not to evade a bot check.
+USER_AGENT = "Empyralis/1.0 (+https://empyralis.ai)"
+
+
 def http_json_request(
     url: str,
     *,
@@ -413,6 +419,20 @@ def http_json_request(
     timeout: int = 30,
 ) -> Dict[str, Any]:
     request_headers = dict(headers or {})
+    # urllib's default User-Agent is "Python-urllib/3.x", which Cloudflare
+    # bans outright as a bot signature -- it answers 403 with the body
+    # "error code: 1010" ("banned your access based on your browser's
+    # signature") BEFORE the request ever reaches the origin API. Observed
+    # live 2026-08-20 against api.resend.com: preflight's email liveness
+    # check reported "PLATFORM EMAIL PROVIDER KEY DEAD -- rotate or restore
+    # the key", while the SAME key sent mail fine through the product's own
+    # httpx path and through curl. The advice would have had an operator
+    # revoke a working key to fix a problem in our own HTTP client.
+    #
+    # Any Cloudflare-fronted API this function talks to is exposed to the
+    # same block, and it presents as an auth failure rather than as a
+    # transport one -- so identify ourselves. Callers may still override.
+    request_headers.setdefault("User-Agent", USER_AGENT)
     body: Optional[bytes] = None
     verb = (method or ("POST" if payload is not None else "GET")).upper()
     egress_policy.enforce_outbound_request(url=url, method=verb)
