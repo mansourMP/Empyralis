@@ -5,7 +5,8 @@ import { useParams, useRouter } from "next/navigation";
 
 import { resolveAgentProjectId, useFleetAgents, useFleetProjects } from "@/lib/workspace/fleet/fleet-data";
 import { breadcrumbCount, findSageAgent } from "@/lib/workspace/fleet/fleet-presentation";
-import { createAgentQuickly, quickCreateAgentChatPath } from "@/lib/workspace/fleet/agent-quick-create";
+import { quickCreateAgentChatPath } from "@/lib/workspace/fleet/agent-quick-create";
+import { AgentCreateCard } from "@/lib/workspace/fleet/AgentCreateCard";
 import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
 import { FleetListSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import { HeaderAction, useBreadcrumbBadge } from "@/lib/workspace/fleet/Breadcrumbs";
@@ -95,38 +96,31 @@ export default function AgentsPage() {
     if (!loading && soloHref && !suppressSoloRedirect) router.replace(soloHref);
   }, [loading, soloHref, suppressSoloRedirect, router]);
 
-  const [creatingAgent, setCreatingAgent] = useState(false);
-  const [createAgentError, setCreateAgentError] = useState<string | null>(null);
-
-  // Zero-decision create (2026-08-19) — replaces the old FleetCreateAgentWizard
-  // modal everywhere it was reachable from, this page included. See
-  // agent-quick-create.ts for why every field the wizard used to ask for is
-  // safe to default silently; every other Configure tab (Model, Hardware,
-  // Channels, Connectors) is fully functional the instant the agent exists.
-  async function createNewAgent() {
-    if (creatingAgent) return;
-    setCreatingAgent(true);
-    setCreateAgentError(null);
-    try {
-      const { agentId, projectId } = await createAgentQuickly(workspaceId, undefined, projects);
-      router.push(quickCreateAgentChatPath({ workspaceId, projectId, agentId }));
-    } catch (e) {
-      setCreateAgentError(e instanceof Error ? e.message : "Could not create the agent.");
-      setCreatingAgent(false);
-    }
+  // AgentCreateCard (2026-08-20) — the founder's correction to the old
+  // zero-decision instant create (see agent-quick-create.ts's own
+  // "CORRECTION, 2026-08-20" header for the full quote): "New agent" opens
+  // ONE card showing name/model/hardware/project pre-filled, rather than
+  // creating on the click itself.
+  const [cardOpen, setCardOpen] = useState(false);
+  function openCreateCard() {
+    setCardOpen(true);
+  }
+  function handleAgentCreated(result: { agentId: string; projectId: string }) {
+    setCardOpen(false);
+    router.push(quickCreateAgentChatPath({ workspaceId, projectId: result.projectId, agentId: result.agentId }));
   }
 
-  // Onboarding hand-off: /agents?new=1 creates straight away, no
-  // intermediate screen. Read the flag client-side (no useSearchParams →
-  // no Suspense boundary needed), consume it once, and clean the URL so a
-  // refresh doesn't fire a second create.
+  // Onboarding hand-off: /agents?new=1 opens the card straight away, no
+  // extra click. Read the flag client-side (no useSearchParams → no
+  // Suspense boundary needed), consume it once, and clean the URL so a
+  // refresh doesn't reopen it.
   const consumedNew = useRef(false);
   useEffect(() => {
     if (consumedNew.current) return;
     if (new URLSearchParams(window.location.search).get("new") === "1") {
       consumedNew.current = true;
       router.replace(`${base}/agents`);
-      void createNewAgent();
+      openCreateCard();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router, base]);
@@ -165,11 +159,10 @@ export default function AgentsPage() {
         <button
           type="button"
           className={`fleet-btn${agents.length === 0 ? " fleet-btn--accent" : " fleet-btn--accent-fill"}`}
-          onClick={createNewAgent}
-          disabled={creatingAgent}
+          onClick={openCreateCard}
         >
           <span className="fleet-btn-plus">+</span>
-          {creatingAgent ? "Creating…" : "New agent"}
+          New agent
         </button>
       </HeaderAction>
 
@@ -179,15 +172,11 @@ export default function AgentsPage() {
         ) : error && agents.length === 0 ? (
           <FleetSurfaceError title="Couldn’t load agents" message={error} onRetry={refresh} />
         ) : agents.length === 0 ? (
-          <>
-            <FirstAgentEmpty
-              title="No agents yet"
-              desc="Agents do the work — they handle customer chats, run tasks, and use your tools. Create your first one to get started."
-              onCreate={createNewAgent}
-              busy={creatingAgent}
-            />
-            {createAgentError && <p className="fleet-channel-expand-error">{createAgentError}</p>}
-          </>
+          <FirstAgentEmpty
+            title="No agents yet"
+            desc="Agents do the work — they handle customer chats, run tasks, and use your tools. Create your first one to get started."
+            onCreate={openCreateCard}
+          />
         ) : (
           // 2+ agents: agents/layout.tsx's own list pane (beside this pane,
           // not stacked above or inside it) is the browse surface now —
@@ -198,6 +187,15 @@ export default function AgentsPage() {
           <div className="fleet-project-agents-placeholder">Select a conversation to start chatting.</div>
         )}
       </div>
+
+      {cardOpen && (
+        <AgentCreateCard
+          workspaceId={workspaceId}
+          projects={projects}
+          onClose={() => setCardOpen(false)}
+          onCreated={handleAgentCreated}
+        />
+      )}
     </main>
   );
 }

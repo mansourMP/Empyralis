@@ -1,4 +1,34 @@
 /**
+ * CORRECTION, 2026-08-20 (two passes) — the header below described a
+ * genuinely zero-field, zero-screen create ("the moment you press plus
+ * everything is going to be created"). The founder called that an
+ * over-correction: *"it doesn't mean the moment you press plus everything
+ * is going to be created. It shouldn't be like this. What about the
+ * name?"* Every "New agent" entry point now opens AgentCreateCard.tsx — ONE
+ * card, not the old 4-step wizard.
+ *
+ * That card's FIRST draft (same day) showed name/model/hardware/project,
+ * all pre-filled and editable. A SECOND correction landed before it ever
+ * shipped: the founder settled that real conversation happens on a
+ * channel, never inside this platform, which reframes model/hardware/
+ * memory as CONFIGURATION seen after the agent exists, not questions asked
+ * at creation — and that project scoping is no longer a decision agents
+ * make at all ("project and agents are completely independent"). So the
+ * card that actually shipped asks for exactly two things: name, and an
+ * optional system prompt (his own example: *"the name could be 'YouTube
+ * content creation agent'"*). See AgentCreateCard.tsx's own header for
+ * the full quotes and reasoning.
+ *
+ * This module's create call is still the shared submit path (see
+ * createAgentQuickly's own updated doc comment below) — only the framing
+ * above is what got walked back twice. `instructions` (below) is the
+ * card's own system-prompt field; `project_id` still has to reach the
+ * request (a required backend field today) but is resolved silently via
+ * resolveQuickCreateProjectId, never rendered.
+ *
+ * Original header, kept for the capability_preset/purpose_preset/audience
+ * reasoning, which is still unchanged:
+ * ────────────────────────────────────────
  * Zero-decision agent creation — the founder's own Telegram framing:
  * *"if I simply go to Telegram, it's just so fucking perfect... you don't
  * configure a bot in order to talk to it."* Landed 2026-08-19, replacing
@@ -83,6 +113,7 @@ import { refreshFleetAgents, resolveAgentProjectId } from "./fleet-data";
 
 export type QuickCreateAgentPayload = {
   name: string;
+  instructions: string;
   capability_preset: string;
   project_id: string;
   purpose_preset: string;
@@ -103,13 +134,22 @@ export function resolveQuickCreateProjectId(
   return resolveAgentProjectId(currentProjectId, projects);
 }
 
-/** The POST /fleet/agents body for a zero-decision create. A pure function
- *  of the resolved project id alone — everything else is a fixed, safe
- *  default (see this module's header comment for why each one is safe to
- *  omit a screen for). */
-export function buildQuickCreateAgentPayload(projectId: string): QuickCreateAgentPayload {
+/** The POST /fleet/agents body. `name` defaults to "" (the server's own
+ *  suggested-name fallback) when omitted — AgentCreateCard.tsx always
+ *  passes the resolved, possibly-edited name explicitly; a blank string
+ *  here is only ever reached by a caller that skips the card entirely.
+ *  `instructions` is the card's own optional system-prompt field — an
+ *  empty string is a legitimate choice, not a missing one. Everything
+ *  else is the fixed, safe default this module's header comment
+ *  explains. */
+export function buildQuickCreateAgentPayload(
+  projectId: string,
+  name: string = "",
+  instructions: string = "",
+): QuickCreateAgentPayload {
   return {
-    name: "",
+    name,
+    instructions,
     capability_preset: "standard",
     project_id: projectId,
     purpose_preset: "internal_assistant",
@@ -139,17 +179,19 @@ export function quickCreateAgentChatPath(opts: {
     : `${base}/agents`;
 }
 
-/** The ONE network call this whole flow needs — POST .../fleet/agents with
- *  buildQuickCreateAgentPayload's fixed body, resolving the project first
- *  via resolveQuickCreateProjectId so every caller (rail, command palette,
- *  workspace home, a project's own empty state) creates through the exact
- *  same path instead of five independently-drifting fetch calls. Not a
- *  hook — every call site here is a one-shot action (a click), never
- *  something a component needs to re-render against. Navigation is the
- *  CALLER's job (quickCreateAgentChatPath gives it the URL), because where
- *  "New agent" is invoked from — and therefore what should happen to the
- *  screen the person was already looking at — differs by caller in a way
- *  this function has no business deciding.
+/** The ONE network call agent creation needs — POST .../fleet/agents,
+ *  resolving the project first via resolveQuickCreateProjectId so every
+ *  caller creates through the exact same path instead of independently-
+ *  drifting fetch calls. `name` is AgentCreateCard.tsx's own resolved
+ *  name (typed, or the suggested-name fallback if nothing was typed —
+ *  see agent-create-card.ts's resolveAgentCreateName); omitted, it falls
+ *  through to the server's own blank-name suggestion pool, same as before
+ *  the card existed. Not a hook — every call site here is a one-shot
+ *  action (a click), never something a component needs to re-render
+ *  against. Navigation is the CALLER's job (quickCreateAgentChatPath gives
+ *  it the URL), because where "New agent" is invoked from — and therefore
+ *  what should happen to the screen the person was already looking at —
+ *  differs by caller in a way this function has no business deciding.
  *
  *  It DOES do one more thing before returning, and it is load-bearing:
  *  awaits refreshFleetAgents. Found live 2026-08-19 — without it, the very
@@ -169,13 +211,15 @@ export async function createAgentQuickly(
   workspaceId: string,
   currentProjectId: string | undefined,
   projects: FleetProject[],
+  name: string = "",
+  instructions: string = "",
 ): Promise<{ agentId: string; projectId: string }> {
   const projectId = resolveQuickCreateProjectId(currentProjectId, projects);
   const res = await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents`, {
     method: "POST",
     credentials: "include",
     headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
-    body: JSON.stringify(buildQuickCreateAgentPayload(projectId)),
+    body: JSON.stringify(buildQuickCreateAgentPayload(projectId, name, instructions)),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data?.ok === false) {
