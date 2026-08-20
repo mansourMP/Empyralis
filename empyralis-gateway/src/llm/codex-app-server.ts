@@ -44,14 +44,21 @@ export interface CodexAppServerParams {
  *  mode/plan this box's Codex is logged in under; the server computes this
  *  itself, we just relay it). Field names match the protocol's own `Model`
  *  type (see codex app-server generate-ts's v2/Model.ts) minus the parts we
- *  don't use (reasoning-effort options, service tiers, upgrade metadata) —
- *  never hand-typed, always this shape or nothing. */
+ *  don't use (service tiers, upgrade metadata) — never hand-typed, always
+ *  this shape or nothing. Includes the live reasoning-effort catalog
+ *  (defaultReasoningEffort / supportedReasoningEfforts) — this varies per
+ *  model and per account (verified live: gpt-5.6-terra offers a distinct
+ *  set from gpt-5.6-luna, including "ultra", a level absent from every
+ *  static table and every doc page), so it must be relayed from the RPC
+ *  itself rather than transcribed once and left to rot. */
 export interface CodexModelListEntry {
   id: string;
   displayName: string;
   description: string;
   hidden: boolean;
   isDefault: boolean;
+  defaultReasoningEffort: string;
+  supportedReasoningEfforts: { reasoningEffort: string; description: string }[];
 }
 
 export interface CodexModelListResult {
@@ -417,10 +424,30 @@ export class CodexAppServerDaemon {
         description: String(m.description || ""),
         hidden: Boolean(m.hidden),
         isDefault: Boolean(m.isDefault),
+        defaultReasoningEffort: String(m.defaultReasoningEffort || ""),
+        supportedReasoningEfforts: parseSupportedReasoningEfforts(m.supportedReasoningEfforts),
       }))
       .filter((m) => m.id);
     return { authMethod, models };
   }
+}
+
+/** codex app-server's `supportedReasoningEfforts` is per-model and per-
+ *  account (verified live: distinct sets for gpt-5.6-terra vs gpt-5.6-luna,
+ *  including levels like "ultra" that exist in no doc and no static table
+ *  here) — so this parses defensively rather than asserting a shape a future
+ *  catalog change could break. A missing/malformed entry degrades to an
+ *  empty array, never a throw; a malformed individual item is dropped, not
+ *  the whole list. */
+export function parseSupportedReasoningEfforts(raw: unknown): { reasoningEffort: string; description: string }[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((e): e is Record<string, unknown> => !!e && typeof e === "object")
+    .map((e) => ({
+      reasoningEffort: String(e.reasoningEffort || ""),
+      description: String(e.description || ""),
+    }))
+    .filter((e) => e.reasoningEffort);
 }
 
 function extractTurnText(turnRes: Record<string, unknown>): string {

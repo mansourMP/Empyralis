@@ -338,6 +338,8 @@ export class GatewayLLMRuntime {
         description: m.description,
         hidden: m.hidden,
         is_default: m.isDefault,
+        default_reasoning_effort: m.defaultReasoningEffort,
+        supported_reasoning_efforts: m.supportedReasoningEfforts,
       })),
     };
   }
