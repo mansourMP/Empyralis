@@ -5243,6 +5243,101 @@ name, model, placement, "tons of things") measured against how effortless
 adding a bot in Telegram is. Reducing that is real work, not polish — but it
 sits behind the reliability contract too.
 
+## "Paste your token, done" was UNREACHABLE, and the setup screen was never the bug (2026-08-20)
+
+**Verdict: `sage_telegram_hosted` — the hardware-free, paste-a-BotFather-
+token Telegram lane the founder was literally describing when he said "go to
+Telegram, paste your token, and it works" — had been silently hidden from
+the Channels grid since 2026-08-14, replaced by the hardware-bound OpenClaw
+Telegram card. Fixed on `feat/seamless-telegram-setup`.**
+
+```
+BEFORE (main, 2026-08-14 through 2026-08-20)   AFTER
+  Channels tab → "Telegram" → "Needs Gateway"    Channels tab → "Telegram"
+  → banner: "This agent has no computer of        → "Set up" → straight into
+    its own yet — set one up on the Hardware       "Paste the token BotFather
+    tab first…"                                    gave you… [Save token]"
+  DEAD END for every cloud-only agent              real Telegram getMe() call,
+  (the vast majority)                              verified live
+```
+
+The setup FORM itself (`hosted_bot_provisioning_service.assign_byo_bot` /
+the byo_bot door in `channel-doors.ts`) was already close to the founder's
+ask — single field, synchronous validate-and-save, no hardware column on
+its door. It was simply never reachable: `channel-platform.ts`'s
+`planUnifiedChannelGrid` (landed the same day as the OpenClaw cutover, to
+fix an unrelated "Telegram card shown twice" bug) resolves ONE-PLATFORM-
+ONE-CARD collisions by keeping whichever card the transport actively
+carries — and `openclaw_channel_registry.OPENCLAW_CUT_OVER_CHANNEL_IDS`
+listed bare platform token `"telegram"`, meant only to retire the deleted
+gramjs PERSONAL-account lane, but token collisions are per PLATFORM not per
+LANE, so it also swept away the unrelated, still-live `sage_telegram_hosted`
+STUDIO_CHANNEL_ROADMAP bot lane. The exact "force an agent to acquire
+hardware it does not need, for a channel that already works" regression
+this same file already names as the reason discord/slack/sms stay
+first-party — applied to Telegram by omission, not by decision. Caught only
+by driving the REAL rendered Channels tab in a browser on a disposable
+stack; a code reading of `hosted_bot_provisioning_service.py` alone (which
+is what this task started from) would never have surfaced it, since that
+file was completely correct in isolation.
+
+Fixed at the root (`openclaw_channel_registry.py`: telegram removed from
+`OPENCLAW_CUT_OVER_CHANNEL_IDS`, joining discord/slack/sms) plus a second,
+structural layer in `channel-platform.ts`
+(`hasProtectedHardwareFreeLane` — any first-party channel id ending
+`_hosted`/`_official` is now NEVER dropped for a transported collision,
+regardless of backend cutover state) so a future active-catalog regression
+cannot silently reintroduce the same trap. `openclaw_telegram` itself is
+untouched — declared, provisionable, still reachable by a customer who
+deliberately wants Telegram bundled with their other OpenClaw channels on
+one box — it just stopped being the DEFAULT, ADVERTISED implementation.
+
+**A second, independent gap closed the same session: BYO-bot channels
+(Telegram, and — confirmed, not yet fixed — WeChat Official) had NO owner-
+recognition path at all**, because `command_registry._is_sender_owner` /
+`sage_agent_runtime_service._resolve_channel_sender_class` both read
+`personal_channels_repository`'s pairing-login table exclusively, and a
+BYO bot has no pairing step — you prove control by pasting a token, not by
+a phone/QR login. Net effect: EVERY sender on a BYO Telegram bot, the
+workspace owner included, was permanently classified "audience" — no
+shell/hardware/memory_write tools, and `/config /mcp /plugins /debug /bash`
+silently unreachable, forever, for anyone. Fixed with
+`personal_channels_repository.claim_channel_owner_identity_if_unclaimed`:
+the first PRIVATE (never group) message on a fresh BYO binding claims
+workspace-wide owner recognition for that channel family, one-shot — a
+later sender can never displace an already-claimed identity, so a stranger
+who messages the bot after the real owner cannot inherit tool authority.
+Safe because `assign_byo_bot`/its siblings already require
+`minimum_role="owner"` to create the binding in the first place — the
+claim only extends authority the web session already proved, using the
+SAME table/read path the two authority functions already trust, never a
+fourth source. Reuses the existing `personal_channel_telegram_states`
+table under a dedicated `channel_key` ("telegram_agent_byo") and sentinel
+`gateway_id` ("byo") rather than inventing new schema.
+
+Also fixed in the same pass, smaller: `assign_byo_bot` used to swallow
+every Telegram `setWebhook` failure into `webhook_set: False` while still
+returning `ok: True` and writing an ENABLED binding — so "Bot token saved
+— this agent's own bot is live" could be shown for a bot that could never
+receive a message (a deployment missing its public base URL, or a
+transient Telegram-side error). Now retries once, then raises and rolls
+back the credential rather than lying — the existing frontend error path
+(`byoBotError`) picks it up for free, no FleetAgentDetail.tsx edit needed.
+
+**Generalizes, not Telegram-special-cased.** The door pattern
+(`CHANNEL_DOORS`, one paste-a-token field, synchronous validate-and-save)
+already covers Discord/WeChat identically. `hasProtectedHardwareFreeLane`
+is keyed on the LANE SUFFIX (`_hosted`/`_official`), not a channel id, so
+it already also protects `wechat_official`. `claim_channel_owner_identity_
+if_unclaimed` is parameterized (`channel_key`/`gateway_id`/`agent_id`/
+`provider`) and ready to wire into WeChat Official's inbound path — which
+has the identical gap, confirmed by code reading, NOT fixed this pass
+(would need tracing wechat_official_service.py's own inbound entry point,
+flagged rather than done blind). Discord's inbound routing was not located
+in this pass at all (no `dispatch_sage_reply_safe` call site found in
+`discord_bot_provisioning_service.py`) — whether it shares the gap is
+unknown, not assumed either way.
+
 ## The streaming bug CAUSED the durability bug (2026-08-19)
 
 Founder hit this live: sent a long message, navigated to another tab, the

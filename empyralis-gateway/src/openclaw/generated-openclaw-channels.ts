@@ -5692,7 +5692,6 @@ export const GENERATED_OPENCLAW_ACTIVE_CHANNEL_IDS: readonly string[] = [
   "qqbot",
   "signal",
   "synology-chat",
-  "telegram",
   "tlon",
   "twitch",
   "wecom",
@@ -5708,5 +5707,6 @@ export const GENERATED_OPENCLAW_ACTIVE_CHANNEL_IDS: readonly string[] = [
 export const GENERATED_OPENCLAW_SUPERSEDED_CHANNEL_IDS: readonly string[] = [
   "discord",
   "slack",
-  "sms"
+  "sms",
+  "telegram"
 ] as const;

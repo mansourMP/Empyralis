@@ -174,7 +174,7 @@ class GroupPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         store = _FakeAgentInstallStore()
         store.installs["agent-1"] = {
             "group_policy": {
-                _cut_over_channel_key("telegram"): {
+                _cut_over_channel_key("signal"): {
                     "mode": "open", "allowlist": [], "require_mention": True,
                 }
             }
@@ -182,21 +182,21 @@ class GroupPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         with _patch_agent_install_store(store):
             blocked = await personal_channels_service._enforce_group_policy(
                 registration=self.registration,
-                channel_key=_cut_over_channel_key("telegram"),
+                channel_key=_cut_over_channel_key("signal"),
                 agent_id="agent-1",
                 message={"is_group": True, "is_mentioned": False, "is_reply_to_sage": False},
                 remote_jid="-100555",
             )
             mentioned = await personal_channels_service._enforce_group_policy(
                 registration=self.registration,
-                channel_key=_cut_over_channel_key("telegram"),
+                channel_key=_cut_over_channel_key("signal"),
                 agent_id="agent-1",
                 message={"is_group": True, "is_mentioned": True, "is_reply_to_sage": False},
                 remote_jid="-100555",
             )
             replied = await personal_channels_service._enforce_group_policy(
                 registration=self.registration,
-                channel_key=_cut_over_channel_key("telegram"),
+                channel_key=_cut_over_channel_key("signal"),
                 agent_id="agent-1",
                 message={"is_group": True, "is_mentioned": False, "is_reply_to_sage": True},
                 remote_jid="-100555",
@@ -210,7 +210,7 @@ class GroupPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         store = _FakeAgentInstallStore()
         store.installs["agent-2"] = {
             "group_policy": {
-                _cut_over_channel_key("telegram"): {
+                _cut_over_channel_key("signal"): {
                     "mode": "disabled", "allowlist": [], "require_mention": False,
                 }
             }
@@ -218,7 +218,7 @@ class GroupPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         with _patch_agent_install_store(store):
             decision = await personal_channels_service._enforce_group_policy(
                 registration=self.registration,
-                channel_key=_cut_over_channel_key("telegram"),
+                channel_key=_cut_over_channel_key("signal"),
                 agent_id="agent-2",
                 # Even an explicit @mention must not save it -- disabled
                 # means disabled, independent of the mention axis.
@@ -232,7 +232,7 @@ class GroupPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         store = _FakeAgentInstallStore()
         store.installs["agent-3"] = {
             "group_policy": {
-                _cut_over_channel_key("telegram"): {
+                _cut_over_channel_key("signal"): {
                     "mode": "allowlist", "allowlist": ["-100555"], "require_mention": False,
                 }
             }
@@ -240,14 +240,14 @@ class GroupPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         with _patch_agent_install_store(store):
             allowed = await personal_channels_service._enforce_group_policy(
                 registration=self.registration,
-                channel_key=_cut_over_channel_key("telegram"),
+                channel_key=_cut_over_channel_key("signal"),
                 agent_id="agent-3",
                 message={"is_group": True, "is_mentioned": False, "is_reply_to_sage": False},
                 remote_jid="-100555",
             )
             blocked = await personal_channels_service._enforce_group_policy(
                 registration=self.registration,
-                channel_key=_cut_over_channel_key("telegram"),
+                channel_key=_cut_over_channel_key("signal"),
                 agent_id="agent-3",
                 message={"is_group": True, "is_mentioned": False, "is_reply_to_sage": False},
                 remote_jid="-100999",
@@ -263,7 +263,7 @@ class GroupPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         store = _FakeAgentInstallStore()
         store.installs["agent-4"] = {
             "group_policy": {
-                _cut_over_channel_key("telegram"): {
+                _cut_over_channel_key("signal"): {
                     "mode": "allowlist", "allowlist": ["-100555"], "require_mention": True,
                 }
             }
@@ -271,7 +271,7 @@ class GroupPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         with _patch_agent_install_store(store):
             decision = await personal_channels_service._enforce_group_policy(
                 registration=self.registration,
-                channel_key=_cut_over_channel_key("telegram"),
+                channel_key=_cut_over_channel_key("signal"),
                 agent_id="agent-4",
                 message={"is_group": True, "is_mentioned": False, "is_reply_to_sage": False},
                 remote_jid="-100555",
@@ -309,7 +309,7 @@ class GroupPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         )
         resolved_but_uninstalled_default = await personal_channels_service._load_agent_group_policy_config(
             tenant_id="t", workspace_id="w", agent_id="never-installed-agent",
-            channel_key=_cut_over_channel_key("telegram"),
+            channel_key=_cut_over_channel_key("signal"),
         )
         self.assertEqual(unresolved_identity_default["mode"], "disabled")
         self.assertTrue(unresolved_identity_default["require_mention"])
@@ -424,7 +424,7 @@ class RequireMentionRestoresOldGateIntegrationTests(unittest.IsolatedAsyncioTest
         # deleted by commit 6b2baf97e -- the full OpenClaw cutover, 2026-08-14.
         # The gate under test (_enforce_group_policy + require_mention) is the
         # same one, on the handler that actually serves Telegram now.
-        self.channel_key = _cut_over_channel_key("telegram")
+        self.channel_key = _cut_over_channel_key("signal")
         self.spec = personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS[self.channel_key]
         self.store = _FakeAgentInstallStore()
         self.store.installs["agent-req-mention"] = {

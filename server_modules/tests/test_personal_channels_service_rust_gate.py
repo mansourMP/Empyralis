@@ -36,12 +36,17 @@ from unittest.mock import AsyncMock, patch
 from server_modules import personal_channels_service
 
 
-# The five platforms OPENCLAW_CUT_OVER_CHANNEL_IDS moved onto the transport.
+# The platforms OPENCLAW_CUT_OVER_CHANNEL_IDS moved onto the transport.
 # Resolved against the live registry so a rename upstream fails HERE rather
 # than silently testing a channel key nothing routes any more.
+#
+# telegram REMOVED 2026-08-20 (feat/seamless-telegram-setup): it is no
+# longer cut over — see openclaw_channel_registry.py's own "CORRECTION,
+# 2026-08-20" comment. openclaw_telegram is declared but no longer an
+# active personal channel, so LOCAL_BRIDGE_PERSONAL_CHANNELS no longer
+# carries it.
 _CUT_OVER_CHANNEL_KEYS = (
     "openclaw_whatsapp",
-    "openclaw_telegram",
     "openclaw_signal",
     "openclaw_imessage",
 )

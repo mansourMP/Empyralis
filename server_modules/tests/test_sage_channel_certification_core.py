@@ -40,7 +40,15 @@ from server_modules.sage_agent_runtime_contract import SageTurnResult
 # assertion is unchanged except the expected `channel_origin`, which is the
 # thing that genuinely moved.
 _WHATSAPP_CHANNEL_KEY = f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}whatsapp"
-_TELEGRAM_CHANNEL_KEY = f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}telegram"
+# REPOINTED AGAIN, 2026-08-20 (feat/seamless-telegram-setup): telegram is no
+# longer an OpenClaw-active personal-gateway channel at all — see
+# openclaw_channel_registry.py's own "CORRECTION, 2026-08-20" comment.
+# sage_telegram_hosted is what a real Telegram message routes through now,
+# and it does not cross this bridge. The "Telegram" test class below is
+# actually exercising the generic personal-gateway inbound-context path
+# (same as personal_channel_sage_bridge_service's own tests), which any live
+# OpenClaw-transported channel proves identically.
+_TELEGRAM_CHANNEL_KEY = f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}signal"
 
 
 def _build_personal_reply(channel_key, label, **kwargs):

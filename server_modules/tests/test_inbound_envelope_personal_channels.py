@@ -37,9 +37,17 @@ from server_modules.command_registry import ProcessedMessage
 from server_modules.inbound_envelope import SurfaceKind
 
 
-# The live Telegram key, from the registry. See _NON_OWNER_BRANCH_REGRESSION
-# below for why the per-platform builder these tests used to call is gone.
-_TELEGRAM_CHANNEL_KEY = f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}telegram"
+# A live OpenClaw personal-gateway channel key, from the registry. See
+# _NON_OWNER_BRANCH_REGRESSION below for why the per-platform builder these
+# tests used to call is gone.
+#
+# NOT telegram, as of 2026-08-20 (feat/seamless-telegram-setup): telegram is
+# no longer OpenClaw-active — see openclaw_channel_registry.py's own
+# "CORRECTION, 2026-08-20" comment. This constant (and the "_telegram_..."
+# naming below) predates that; every test here is actually about the generic
+# envelope/command-gate path, which any live OpenClaw-transported channel
+# exercises identically.
+_TELEGRAM_CHANNEL_KEY = f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}signal"
 
 
 def _telegram_reply_async(**kwargs):
@@ -344,7 +352,7 @@ class EnvelopeHeaderReachesHandleSageChatTests(_EnvelopeEndToEndTestCase):
         self.assertEqual(result["text"], "sure thing")
         handle_mock.assert_called_once()
         sent_message = handle_mock.call_args.kwargs["message"]
-        self.assertTrue(sent_message.startswith("[Telegram"), sent_message)
+        self.assertTrue(sent_message.startswith("[Signal"), sent_message)
         self.assertIn("your owner Mansur", sent_message)
         self.assertIn("talking to you directly", sent_message)
         self.assertIn("remind me to call mom", sent_message)
@@ -375,7 +383,7 @@ class EnvelopeHeaderReachesHandleSageChatTests(_EnvelopeEndToEndTestCase):
 
         self.assertEqual(result["text"], "'Posle' means 'later'.")
         sent_message = handle_mock.call_args.kwargs["message"]
-        self.assertTrue(sent_message.startswith("[Telegram"), sent_message)
+        self.assertTrue(sent_message.startswith("[Signal"), sent_message)
         self.assertIn('group "Family"', sent_message)
         self.assertIn("NOT your owner", sent_message)
         self.assertIn("Posle", sent_message)

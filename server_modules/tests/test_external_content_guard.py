@@ -60,8 +60,15 @@ class ExternalContentGuardTests(unittest.TestCase):
         with it, so the helper raised here instead of asserting anything about
         metadata. Both the key and the expected provider now come from the
         lane contract itself rather than being typed, so this cannot go stale
-        the same way twice."""
-        channel_key = f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}telegram"
+        the same way twice.
+
+        Platform is "signal", not "telegram" — telegram is no longer a
+        personal-gateway channel as of 2026-08-20 (feat/seamless-telegram-
+        setup; see openclaw_channel_registry.py's own "CORRECTION,
+        2026-08-20" comment). This test is about the generic helper, not
+        about any one platform, so any still-cut-over platform proves the
+        same thing."""
+        channel_key = f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}signal"
         spec = channel_lane_contract_service.assert_personal_gateway_channel(channel_key)
 
         guarded = channel_lane_contract_service.guard_personal_gateway_inbound_message(

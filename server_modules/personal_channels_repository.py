@@ -871,6 +871,104 @@ def list_owner_linked_channel_identities_for_workspace(
     return linked
 
 
+def claim_channel_owner_identity_if_unclaimed(
+    *,
+    gateway_id: str,
+    channel_key: str,
+    agent_id: str,
+    tenant_id: str,
+    workspace_id: str,
+    sender_id: str,
+    provider: str,
+    db_path: Optional[Path | str] = None,
+) -> bool:
+    """First-contact ownership claim for a channel family that has no
+    pairing/login step of its own (a BYO bot: the customer proves control by
+    pasting a real BotFather/etc token, never by a phone/QR login this table
+    otherwise records).
+
+    Writes a row into the SAME table `list_owner_linked_channel_identities_
+    for_workspace` already reads (this function does not add a fourth
+    identity source; it is one more genuine writer of the same authoritative
+    one), but ONLY the first time — checked and inserted under `_DB_LOCK` so
+    two near-simultaneous first messages cannot both win. Every row already
+    written for this WORKSPACE + CHANNEL_KEY (across every gateway_id/
+    agent_id — a BYO channel's bot can only ever have been created by the
+    workspace OWNER, since assign_byo_bot/assign_agent_discord etc. all
+    require minimum_role="owner", so a second bot's binding is still the
+    same person in the overwhelming case) counts, not just this row's own
+    key, or a second BYO bot in the same workspace would silently reset who
+    is recognized as owner.
+
+    Returns True if `sender_id` is (now, or already) the claimed identity;
+    False if a DIFFERENT sender already holds the claim — the caller must
+    never treat False as "try again", it means someone else got here first
+    and this sender is correctly not the owner.
+
+    Deliberately ONE-SHOT: unlike upsert_telegram_state, a claim already
+    held by a different sender is never overwritten by a later message.
+    Owner recognition must not silently migrate to whoever messaged last —
+    that would let a stranger who messages the bot after the real owner
+    inherit tool authority the real owner already established. Reconnecting
+    the bot (assign_byo_bot again) is the only sanctioned way to reset a
+    claim — see that function's own docstring.
+    """
+    clean_sender = str(sender_id or "").strip()
+    if not clean_sender:
+        return False
+    now_iso = _utc_now_iso()
+    with _DB_LOCK:
+        connection = _connect(db_path)
+        try:
+            existing = connection.execute(
+                """
+                SELECT linked_user_id FROM personal_channel_telegram_states
+                WHERE workspace_id = ? AND channel_key = ?
+                  AND linked_user_id IS NOT NULL AND linked_user_id != ''
+                ORDER BY updated_at ASC
+                """,
+                (str(workspace_id or "").strip(), str(channel_key or "").strip()),
+            ).fetchall()
+            for row in existing:
+                held = str(row["linked_user_id"] or "").strip()
+                if held:
+                    return held == clean_sender
+            normalized_agent_id = _norm_agent_id(agent_id)
+            connection.execute(
+                """
+                INSERT INTO personal_channel_telegram_states (
+                    gateway_id, channel_key, agent_id, tenant_id, workspace_id, user_id, provider,
+                    status, login_hint, linked_user_id, linked_username, linked_phone,
+                    linked_name, connected_at, last_event_at, metadata, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'connected', NULL, ?, NULL, NULL, NULL, ?, ?, '{}', ?, ?)
+                ON CONFLICT(gateway_id, channel_key, agent_id) DO UPDATE SET
+                    linked_user_id=excluded.linked_user_id,
+                    status=excluded.status,
+                    connected_at=excluded.connected_at,
+                    last_event_at=excluded.last_event_at,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    str(gateway_id or "").strip(),
+                    str(channel_key or "").strip(),
+                    normalized_agent_id,
+                    str(tenant_id or "").strip(),
+                    str(workspace_id or "").strip(),
+                    clean_sender,
+                    str(provider or "").strip(),
+                    clean_sender,
+                    now_iso,
+                    now_iso,
+                    now_iso,
+                    now_iso,
+                ),
+            )
+            connection.commit()
+            return True
+        finally:
+            connection.close()
+
+
 def record_inbound_message(
     *,
     gateway_id: str,
