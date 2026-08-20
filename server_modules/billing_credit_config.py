@@ -264,3 +264,49 @@ def credits_for_byo_usage_cost_usd(provider_reported_cost_usd: Any) -> float:
         return 0.0
     billed_usd = billed_cost_usd_for_byo_usage(raw)
     return round(billed_usd * HOSTED_SAGE_AI_CREDITS_PER_USD, 6)
+
+
+# ── 6. PLAN LIMITS (not the credit economy — the resource caps) ─────────
+#
+# These are here rather than beside the code that enforces them for the
+# reason this module's own header already states: a number governing "how
+# much of X does a workspace get" is tuned in ONE file, never hardcoded at
+# the call site. Two dials today, both with an ``EMPYRALIS_*`` override so
+# ops can retune without a code change.
+#
+# WHY THESE TWO AND NOT A PROJECT/DOCUMENT/TASK COUNT: bytes on disk and
+# member seats have a real marginal cost per unit. A project row and a
+# document row do not — and CLAUDE.md's positioning entry is explicit that
+# context (projects, documents, tasks) is the product and is NEVER the
+# paywall. Capping a row count would be charging for the thing being sold.
+#
+# The storage cap is applied PER PROJECT (founder's decision), against the
+# byte totals ``workspace_storage_service`` accounts for. See that module's
+# docstring for exactly which bytes are counted and which are deliberately
+# not.
+
+# Bytes of stored files one project may hold. 1 GiB. A single file is
+# separately capped at ``upload_content_policy.MAX_UPLOAD_BYTES`` (32MB), so
+# this is a total, not a per-file ceiling.
+PROJECT_STORAGE_CAP_BYTES = _env_positive_int(
+    "EMPYRALIS_PROJECT_STORAGE_CAP_BYTES",
+    1024 * 1024 * 1024,
+)
+
+# Active members one workspace may hold, INCLUDING its owner. Default 10.
+WORKSPACE_MEMBER_LIMIT = _env_positive_int(
+    "EMPYRALIS_WORKSPACE_MEMBER_LIMIT",
+    10,
+)
+
+
+def project_storage_cap_bytes() -> int:
+    """Read through a function, never the constant directly, so a test (or a
+    future per-tier lookup) has ONE place to intercept."""
+    return int(PROJECT_STORAGE_CAP_BYTES)
+
+
+def workspace_member_limit() -> int:
+    """Same posture as ``project_storage_cap_bytes`` — one interception
+    point for the number, so no call site grows its own copy."""
+    return int(WORKSPACE_MEMBER_LIMIT)

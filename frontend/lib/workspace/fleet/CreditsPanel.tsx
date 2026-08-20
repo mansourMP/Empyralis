@@ -8,7 +8,12 @@ import { useBillingSummary, planUpgradeControl, resolvePlanDisplayLabel, startPl
 import { MultiSeriesChart, type ChartSeries } from "./fleet-sparkline";
 import { FleetSurfaceError } from "./fleet-states";
 
-const TOP_UP_PRESETS_USD = [5, 10, 25];
+// Every preset must be >= the server's own floor
+// (billing_service._MIN_CREDIT_PURCHASE_USD, $10). A $5 button that the
+// backend answers 400 to is a dead control -- it renders, it is clickable,
+// and it can only fail. The floor is $10 because Polar charges a fixed 50c
+// plus 5% per transaction, so anything smaller loses most of itself to fees.
+const TOP_UP_PRESETS_USD = [10, 25, 50];
 
 function dateKey(iso: string | null): string {
   return (iso || "").slice(0, 10);
@@ -56,7 +61,7 @@ export function CreditsPanel({ workspaceId }: { workspaceId: string }) {
   const { history, loading: historyLoading, error: historyError, refresh: refreshHistory } = useCreditUsageHistory(workspaceId, 200);
   const { summary: billingSummary } = useBillingSummary(workspaceId);
 
-  const [amountUsd, setAmountUsd] = useState<number>(10);
+  const [amountUsd, setAmountUsd] = useState<number>(TOP_UP_PRESETS_USD[0]);
   const [topUpState, setTopUpState] = useState<"idle" | "starting" | "not_configured" | "error">("idle");
   const [topUpMessage, setTopUpMessage] = useState<string | null>(null);
   const [planActionState, setPlanActionState] = useState<"idle" | "starting" | "not_configured" | "error">("idle");

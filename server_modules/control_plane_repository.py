@@ -1006,6 +1006,47 @@ CREATE TABLE IF NOT EXISTS agent_private_memory_note_revisions (
 CREATE INDEX IF NOT EXISTS idx_agent_private_memory_note_revisions_note
     ON agent_private_memory_note_revisions(tenant_id, workspace_id, note_id, revision_number DESC);
 
+-- Stored-object byte ledger (feat/storage-accounting-and-caps): the count
+-- behind the per-project storage cap. One row per file actually written to
+-- disk, so "how much space does this project use" is a SUM over rows rather
+-- than a denormalised counter that can drift away from the files it claims
+-- to describe. See server_modules/workspace_storage_service.py for exactly
+-- which surfaces are enrolled and which bytes are deliberately not counted
+-- (project document bodies are TEXT in Postgres and are NOT storage for
+-- this purpose -- context is the product, never the paywall).
+--
+-- project_id is TEXT NOT NULL DEFAULT '' and NOT a foreign key, on purpose:
+-- '' is a real bucket meaning "not attributable to a project" (the only
+-- upload route in the product today is workspace-scoped and carries no
+-- project_id at all), and a REFERENCES projects(id) would forbid that row
+-- outright. Both bucket kinds are capped by the same number, so the empty
+-- bucket is never a way around the cap.
+--
+-- DDL ONLY -- no DML anywhere in this block, and there is nothing to
+-- backfill: a ledger of objects written from this commit forward starts
+-- correctly empty, and inventing historical rows would report usage nobody
+-- can trace to a file. That also keeps this table clear of the
+-- backfill-under-RLS trap this file documents twice above (a DML statement
+-- here runs as the non-superuser app role with no scope GUCs set and
+-- silently addresses zero rows).
+CREATE TABLE IF NOT EXISTS workspace_storage_objects (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    project_id TEXT NOT NULL DEFAULT '',
+    surface TEXT NOT NULL,
+    object_key TEXT NOT NULL,
+    byte_size BIGINT NOT NULL DEFAULT 0,
+    filename TEXT NULL,
+    content_type TEXT NULL,
+    created_by TEXT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (workspace_id, surface, object_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_storage_objects_bucket
+    ON workspace_storage_objects(tenant_id, workspace_id, project_id);
+
 -- Bug reports (MAN-106): a small, honest "report an issue" entry point
 -- reachable from anywhere in the product via a rail icon button (see
 -- frontend/lib/workspace/fleet/BugReportButton.tsx). Deliberately NOT a

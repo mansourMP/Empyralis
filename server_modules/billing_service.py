@@ -349,7 +349,17 @@ def _polar_plan_checkout_configured() -> bool:
     return polar_client.polar_configured() and any(_polar_plan_product_map().values())
 
 
-_MIN_CREDIT_PURCHASE_USD = 1.0
+# $10, not $1. Polar (the merchant of record -- see CLAUDE.md's processor
+# entry for why it is Polar and not Stripe) charges a FIXED 50c plus 5% per
+# transaction, so a $1 top-up hands 55c of every dollar to fees and credits
+# the workspace with the rest. A floor below ~$10 is not a small purchase,
+# it is a purchase that mostly is not one. At $10 the same fee is 10%.
+#
+# Keep this and the frontend's own top-up presets in step
+# (frontend/lib/workspace/fleet/CreditsPanel.tsx TOP_UP_PRESETS_USD): a
+# preset the server refuses is a dead control, which is exactly what the $5
+# button became the moment this moved.
+_MIN_CREDIT_PURCHASE_USD = 10.0
 _MAX_CREDIT_PURCHASE_USD = 500.0
 
 
@@ -872,7 +882,14 @@ def create_credit_purchase_checkout_session(
 ) -> Dict[str, Any]:
     parsed = _coerce_float(amount_usd)
     if parsed is None or parsed < _MIN_CREDIT_PURCHASE_USD:
-        raise HTTPException(status_code=400, detail="Credit purchase amount must be at least $1.")
+        # Derived from the constant, never a second literal -- a hardcoded
+        # "$1" in the sentence is how a limit and the message describing it
+        # drift apart, and the person reading it is the one who pays for
+        # that.
+        raise HTTPException(
+            status_code=400,
+            detail=f"Credit purchase amount must be at least ${_MIN_CREDIT_PURCHASE_USD:.0f}.",
+        )
     amount_usd = min(_MAX_CREDIT_PURCHASE_USD, round(float(parsed), 2))
     unit_amount_cents = int(round(amount_usd * 100))
     summary = workspace_billing_summary_for_workspace_id(workspace_id)
