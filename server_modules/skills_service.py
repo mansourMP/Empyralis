@@ -6840,20 +6840,40 @@ def execute_single_direct_tool_call(
         _caller_tenant_id = _tenant_id_from_direct_tool_context(session_ctx)
         if not _caller_agent_id:
             raise RuntimeError(f"Tool 'project_task__{action_id}' requires a resolvable agent identity.")
-        _caller_project_id = callbacks.run_async_tool_call(
-            _project_tasks.agent_project_id(
-                tenant_id=_caller_tenant_id, workspace_id=workspace_id, agent_id=_caller_agent_id,
+        # feat/agent-context-grant: the boundary is this agent's CONTEXT
+        # GRANT, not "the one project it happens to live in" (CLAUDE.md,
+        # founder 2026-08-20 -- an agent built for someone else's business
+        # must reach none of the owner's own context). An install with NO
+        # grant recorded resolves to exactly its old home project, so every
+        # pre-existing agent behaves identically; a read that fails resolves
+        # to nothing at all, never back to the wider pre-grant reach.
+        from server_modules import agent_context_grant_service as _grants
+
+        _grant = callbacks.run_async_tool_call(
+            _grants.resolve_agent_project_grant(
+                tenant_id=_caller_tenant_id, workspace_id=workspace_id, agent_install_id=_caller_agent_id,
             )
         )
-        if not _caller_project_id:
+        _caller_project_ids = list(_grant.project_ids)
+        _caller_project_id = _grant.write_project_id
+        if not _caller_project_ids:
             raise RuntimeError(
-                f"Tool 'project_task__{action_id}' is unavailable: this agent has no project, so it has no task board."
+                f"Tool 'project_task__{action_id}' is unavailable: "
+                + _grants.ambiguous_write_target_message(_grant, noun="task board")
             )
+
+        def _require_write_project(action: str) -> str:
+            if not _caller_project_id:
+                raise RuntimeError(
+                    f"Tool 'project_task__{action}' is unavailable: "
+                    + _grants.ambiguous_write_target_message(_grant, noun="task")
+                )
+            return _caller_project_id
 
         def _task_in_own_project(task: Optional[Dict[str, Any]], task_id: str) -> Dict[str, Any]:
             if task is None:
                 raise RuntimeError(f"Task '{task_id}' not found in your project.")
-            if str(task.get("project_id") or "") != _caller_project_id:
+            if str(task.get("project_id") or "") not in _caller_project_ids:
                 raise RuntimeError(f"Task '{task_id}' belongs to a different project — not visible to this agent.")
             return task
 
@@ -6866,7 +6886,7 @@ def execute_single_direct_tool_call(
                     _project_tasks.create_task(
                         tenant_id=_caller_tenant_id,
                         workspace_id=workspace_id,
-                        project_id=_caller_project_id,
+                        project_id=_require_write_project("create"),
                         title=title,
                         description=str(argument_payload.get("description") or ""),
                         due_at=argument_payload.get("due_at"),
@@ -6881,16 +6901,22 @@ def execute_single_direct_tool_call(
 
         if action_id == "list":
             status = str(argument_payload.get("status") or "").strip() or None
-            tasks_rows = callbacks.run_async_tool_call(
-                _project_tasks.list_my_tasks(
-                    tenant_id=_caller_tenant_id,
-                    workspace_id=workspace_id,
-                    agent_id=_caller_agent_id,
-                    project_id=_caller_project_id,
-                    status=status,
-                    sort=argument_payload.get("sort"),
-                )
-            )
+            # One call per GRANTED project, never one call with no project
+            # filter: list_my_tasks' project_id is the scope, so widening it
+            # to "unset" would be the fail-open `WHERE ($1 = '' OR ...)`
+            # shape CLAUDE.md already records. A grant is a handful of ids.
+            tasks_rows: List[Dict[str, Any]] = []
+            for _scoped_project_id in _caller_project_ids:
+                tasks_rows.extend(callbacks.run_async_tool_call(
+                    _project_tasks.list_my_tasks(
+                        tenant_id=_caller_tenant_id,
+                        workspace_id=workspace_id,
+                        agent_id=_caller_agent_id,
+                        project_id=_scoped_project_id,
+                        status=status,
+                        sort=argument_payload.get("sort"),
+                    )
+                ) or [])
             return json.dumps({"ok": True, "tasks": tasks_rows}, ensure_ascii=False)
 
         if action_id == "get":
@@ -7065,12 +7091,17 @@ def execute_single_direct_tool_call(
                 _project_tasks.get_task(tenant_id=_caller_tenant_id, workspace_id=workspace_id, task_id=task_id)
             )
             _task_in_own_project(existing, task_id)
-            target_project_id = callbacks.run_async_tool_call(
-                _project_tasks.agent_project_id(
-                    tenant_id=_caller_tenant_id, workspace_id=workspace_id, agent_id=target_agent_id,
+            # feat/agent-context-grant: the TARGET must be granted THIS
+            # TASK'S project, not merely have a home project the caller can
+            # also reach. Handing work to an agent that cannot open the
+            # project it lives in produces a task nobody can ever work.
+            _task_project_id = str((existing or {}).get("project_id") or "")
+            _target_grant = callbacks.run_async_tool_call(
+                _grants.resolve_agent_project_grant(
+                    tenant_id=_caller_tenant_id, workspace_id=workspace_id, agent_install_id=target_agent_id,
                 )
             )
-            if target_project_id != _caller_project_id:
+            if _task_project_id not in _target_grant.project_ids:
                 raise RuntimeError(
                     f"Agent '{target_agent_id}' is not in your project — cannot assign this task to it."
                 )
@@ -7359,20 +7390,36 @@ def execute_single_direct_tool_call(
         _caller_tenant_id = _tenant_id_from_direct_tool_context(session_ctx)
         if not _caller_agent_id:
             raise RuntimeError(f"Tool 'goal__{action_id}' requires a resolvable agent identity.")
-        _caller_project_id = callbacks.run_async_tool_call(
-            _project_tasks.agent_project_id(
-                tenant_id=_caller_tenant_id, workspace_id=workspace_id, agent_id=_caller_agent_id,
+        # feat/agent-context-grant: same boundary as project_task__* above --
+        # the agent's CONTEXT GRANT, resolved server-side, never a project
+        # id the model supplies.
+        from server_modules import agent_context_grant_service as _grants
+
+        _grant = callbacks.run_async_tool_call(
+            _grants.resolve_agent_project_grant(
+                tenant_id=_caller_tenant_id, workspace_id=workspace_id, agent_install_id=_caller_agent_id,
             )
         )
-        if not _caller_project_id:
+        _caller_project_ids = list(_grant.project_ids)
+        _caller_project_id = _grant.write_project_id
+        if not _caller_project_ids:
             raise RuntimeError(
-                f"Tool 'goal__{action_id}' is unavailable: this agent has no project, so it has no goals."
+                f"Tool 'goal__{action_id}' is unavailable: "
+                + _grants.ambiguous_write_target_message(_grant, noun="goal list")
             )
+
+        def _require_write_project(action: str) -> str:
+            if not _caller_project_id:
+                raise RuntimeError(
+                    f"Tool 'goal__{action}' is unavailable: "
+                    + _grants.ambiguous_write_target_message(_grant, noun="goal")
+                )
+            return _caller_project_id
 
         def _goal_in_own_project(goal: Optional[Dict[str, Any]], goal_id: str) -> Dict[str, Any]:
             if goal is None:
                 raise RuntimeError(f"Goal '{goal_id}' not found in your project.")
-            if str(goal.get("project_id") or "") != _caller_project_id:
+            if str(goal.get("project_id") or "") not in _caller_project_ids:
                 raise RuntimeError(f"Goal '{goal_id}' belongs to a different project — not visible to this agent.")
             return goal
 
@@ -7381,13 +7428,16 @@ def execute_single_direct_tool_call(
             if not goal_text:
                 raise RuntimeError("Tool 'goal__create' requires goal_text.")
             target_agent_id = str(argument_payload.get("agent_id") or "").strip() or _caller_agent_id
+            _goal_project_id = _require_write_project("create")
             if target_agent_id != _caller_agent_id:
-                target_project_id = callbacks.run_async_tool_call(
-                    _project_tasks.agent_project_id(
-                        tenant_id=_caller_tenant_id, workspace_id=workspace_id, agent_id=target_agent_id,
+                # Same rule as project_task__assign: the TARGET must be
+                # granted the project this goal will live in.
+                _target_grant = callbacks.run_async_tool_call(
+                    _grants.resolve_agent_project_grant(
+                        tenant_id=_caller_tenant_id, workspace_id=workspace_id, agent_install_id=target_agent_id,
                     )
                 )
-                if target_project_id != _caller_project_id:
+                if _goal_project_id not in _target_grant.project_ids:
                     raise RuntimeError(
                         f"Agent '{target_agent_id}' is not in your project — cannot create a goal for it."
                     )
@@ -7396,7 +7446,7 @@ def execute_single_direct_tool_call(
                     _goals.create_goal(
                         tenant_id=_caller_tenant_id,
                         workspace_id=workspace_id,
-                        project_id=_caller_project_id,
+                        project_id=_goal_project_id,
                         agent_id=target_agent_id,
                         goal_text=goal_text,
                         title=str(argument_payload.get("title") or ""),
@@ -7412,14 +7462,18 @@ def execute_single_direct_tool_call(
 
         if action_id == "list":
             status = str(argument_payload.get("status") or "").strip() or None
-            rows = callbacks.run_async_tool_call(
-                _goals.list_goals(
-                    tenant_id=_caller_tenant_id,
-                    workspace_id=workspace_id,
-                    project_id=_caller_project_id,
-                    status=status,
-                )
-            )
+            # One call per GRANTED project -- same reasoning as
+            # project_task__list above.
+            rows: List[Dict[str, Any]] = []
+            for _scoped_project_id in _caller_project_ids:
+                rows.extend(callbacks.run_async_tool_call(
+                    _goals.list_goals(
+                        tenant_id=_caller_tenant_id,
+                        workspace_id=workspace_id,
+                        project_id=_scoped_project_id,
+                        status=status,
+                    )
+                ) or [])
             return json.dumps({"ok": True, "goals": [_goals.goal_view(row) for row in rows]}, ensure_ascii=False)
 
         if action_id == "get":

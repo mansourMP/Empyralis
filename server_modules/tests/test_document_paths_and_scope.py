@@ -119,24 +119,42 @@ class ListDocumentsScopeFailsClosedTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AgentDocumentScopeResolverTests(unittest.IsolatedAsyncioTestCase):
-    """The seam MAN-357 rewrites. Behaviour asserted, not implementation."""
+    """The seam MAN-357 rewrites -- and it HAS been rewritten now
+    (feat/agent-context-grant): the resolver asks
+    agent_context_grant_service, not project_tasks_service.agent_project_id.
+    These tests were re-pointed at that producer rather than weakened; the
+    behaviours they assert (one query, legacy unchanged, fail closed, the
+    Operator's per-user fallback) are byte-for-byte the same claims."""
 
-    async def test_a_specialist_reads_and_writes_its_own_project_in_one_query(self):
+    @staticmethod
+    def _patch_grant(result_or_error):
+        """Stand in for the ONE row read the resolver makes."""
+        import server_modules.agent_context_grant_service as grants
+
         calls = []
 
-        async def fake_agent_project_id(*, tenant_id, workspace_id, agent_id):
-            calls.append(agent_id)
-            return "proj-1"
+        async def fake(*, tenant_id, workspace_id, agent_install_id):
+            calls.append(agent_install_id)
+            if isinstance(result_or_error, Exception):
+                raise result_or_error
+            return result_or_error
 
-        import server_modules.project_tasks_service as tasks
-        original = tasks.agent_project_id
-        tasks.agent_project_id = fake_agent_project_id
+        return grants, fake, calls
+
+    async def test_a_specialist_reads_and_writes_its_own_project_in_one_query(self):
+        import server_modules.agent_context_grant_service as grants
+
+        grants_mod, fake, calls = self._patch_grant(
+            grants.AgentProjectGrant(["proj-1"], "proj-1", grants.STATUS_LEGACY)
+        )
+        original = grants_mod.resolve_agent_project_grant
+        grants_mod.resolve_agent_project_grant = fake
         try:
             got = await scope_service.resolve_agent_document_project_scope(
                 tenant_id="t", workspace_id="w", agent_install_id="agent-1", user_id="user-1",
             )
         finally:
-            tasks.agent_project_id = original
+            grants_mod.resolve_agent_project_grant = original
         self.assertEqual(got.project_ids, ["proj-1"])
         self.assertEqual(got.own_project_id, "proj-1")
         self.assertEqual(
@@ -147,44 +165,120 @@ class AgentDocumentScopeResolverTests(unittest.IsolatedAsyncioTestCase):
     async def test_an_agent_with_no_project_and_no_user_gets_nothing(self):
         """Fails CLOSED. The Operator with no resolvable human must not
         inherit the workspace."""
-        async def fake_agent_project_id(**_kwargs):
-            return None
+        import server_modules.agent_context_grant_service as grants
 
-        import server_modules.project_tasks_service as tasks
-        original = tasks.agent_project_id
-        tasks.agent_project_id = fake_agent_project_id
+        grants_mod, fake, _calls = self._patch_grant(
+            grants.AgentProjectGrant([], "", grants.STATUS_LEGACY)
+        )
+        original = grants_mod.resolve_agent_project_grant
+        grants_mod.resolve_agent_project_grant = fake
         try:
             got = await scope_service.resolve_agent_document_project_scope(
                 tenant_id="t", workspace_id="w", agent_install_id="agent-1", user_id="",
             )
         finally:
-            tasks.agent_project_id = original
+            grants_mod.resolve_agent_project_grant = original
         self.assertEqual(got.project_ids, [])
         self.assertEqual(got.own_project_id, "", "no own project means writes stay refused")
 
     async def test_the_operator_inherits_the_asking_persons_projects_and_may_not_write(self):
         """The whole point of 'connected by default': an install with no
-        project of its own reads what the PERSON could open, and nothing
-        wider -- and still cannot write, because there is no single target."""
-        async def fake_agent_project_id(**_kwargs):
-            return None
+        project of its own AND NO GRANT reads what the PERSON could open,
+        and nothing wider -- and still cannot write, because there is no
+        single target. Unchanged by the grant: the Operator carries none."""
+        import server_modules.agent_context_grant_service as grants
 
         async def fake_visible(*, tenant_id, workspace_id, user_id):
             return ["proj-a", "proj-b"]
 
-        import server_modules.project_tasks_service as tasks
-        original = tasks.agent_project_id
+        grants_mod, fake, _calls = self._patch_grant(
+            grants.AgentProjectGrant([], "", grants.STATUS_LEGACY)
+        )
+        original = grants_mod.resolve_agent_project_grant
         original_visible = scope_service._project_ids_visible_to_user
-        tasks.agent_project_id = fake_agent_project_id
+        grants_mod.resolve_agent_project_grant = fake
         scope_service._project_ids_visible_to_user = fake_visible
         try:
             got = await scope_service.resolve_agent_document_project_scope(
                 tenant_id="t", workspace_id="w", agent_install_id="agent-1", user_id="user-1",
             )
         finally:
-            tasks.agent_project_id = original
+            grants_mod.resolve_agent_project_grant = original
             scope_service._project_ids_visible_to_user = original_visible
         self.assertEqual(got.project_ids, ["proj-a", "proj-b"])
+        self.assertEqual(got.own_project_id, "")
+
+    async def test_a_GRANT_decides_and_the_asking_person_never_widens_it(self):
+        """THE founder's case (CLAUDE.md 2026-08-20): an agent built for
+        someone else's business, opened by the workspace OWNER, still reaches
+        only what it was granted -- never the owner's own projects."""
+        import server_modules.agent_context_grant_service as grants
+
+        async def fake_visible(*, tenant_id, workspace_id, user_id):
+            raise AssertionError("a granted agent must never consult the person's own reach")
+
+        grants_mod, fake, _calls = self._patch_grant(
+            grants.AgentProjectGrant(["proj-fathers-business"], "proj-fathers-business", grants.STATUS_GRANT)
+        )
+        original = grants_mod.resolve_agent_project_grant
+        original_visible = scope_service._project_ids_visible_to_user
+        grants_mod.resolve_agent_project_grant = fake
+        scope_service._project_ids_visible_to_user = fake_visible
+        try:
+            got = await scope_service.resolve_agent_document_project_scope(
+                tenant_id="t", workspace_id="w", agent_install_id="agent-1", user_id="owner-1",
+            )
+        finally:
+            grants_mod.resolve_agent_project_grant = original
+            scope_service._project_ids_visible_to_user = original_visible
+        self.assertEqual(got.project_ids, ["proj-fathers-business"])
+
+    async def test_an_EMPTY_grant_is_none_and_never_falls_back_to_the_person(self):
+        """"Granted nothing" is a real answer. It must not decay into the
+        pre-grant per-user reach, which is the whole bug being closed."""
+        import server_modules.agent_context_grant_service as grants
+
+        async def fake_visible(*, tenant_id, workspace_id, user_id):
+            raise AssertionError("an explicitly empty grant must not consult the person's own reach")
+
+        grants_mod, fake, _calls = self._patch_grant(
+            grants.AgentProjectGrant([], "", grants.STATUS_GRANT)
+        )
+        original = grants_mod.resolve_agent_project_grant
+        original_visible = scope_service._project_ids_visible_to_user
+        grants_mod.resolve_agent_project_grant = fake
+        scope_service._project_ids_visible_to_user = fake_visible
+        try:
+            got = await scope_service.resolve_agent_document_project_scope(
+                tenant_id="t", workspace_id="w", agent_install_id="agent-1", user_id="owner-1",
+            )
+        finally:
+            grants_mod.resolve_agent_project_grant = original
+            scope_service._project_ids_visible_to_user = original_visible
+        self.assertEqual(got.project_ids, [])
+        self.assertEqual(got.own_project_id, "")
+
+    async def test_an_unreadable_grant_fails_closed_not_back_to_legacy(self):
+        """UNAVAILABLE is neither "granted nothing" nor "no grant recorded".
+        It must never buy back the wider pre-grant reach."""
+        import server_modules.agent_context_grant_service as grants
+
+        async def fake_visible(*, tenant_id, workspace_id, user_id):
+            raise AssertionError("an unreadable grant must not consult the person's own reach")
+
+        grants_mod, fake, _calls = self._patch_grant(grants.UNAVAILABLE_GRANT)
+        original = grants_mod.resolve_agent_project_grant
+        original_visible = scope_service._project_ids_visible_to_user
+        grants_mod.resolve_agent_project_grant = fake
+        scope_service._project_ids_visible_to_user = fake_visible
+        try:
+            got = await scope_service.resolve_agent_document_project_scope(
+                tenant_id="t", workspace_id="w", agent_install_id="agent-1", user_id="owner-1",
+            )
+        finally:
+            grants_mod.resolve_agent_project_grant = original
+            scope_service._project_ids_visible_to_user = original_visible
+        self.assertEqual(got.project_ids, [])
         self.assertEqual(got.own_project_id, "")
 
 

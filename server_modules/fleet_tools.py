@@ -2619,6 +2619,7 @@ async def fleet_create_agent(
         _project_id = str(project_id or "").strip()
         if agent_id:
             try:
+                from server_modules import agent_context_grant_service as _context_grants
                 from server_modules import projects_repository as _projects
                 if not _project_id:
                     # agent_label, not the raw `name` param — `name` is empty
@@ -2640,6 +2641,27 @@ async def fleet_create_agent(
                         install_id=agent_id,
                         project_id=_project_id,
                     )
+                # feat/agent-context-grant (CLAUDE.md, founder 2026-08-20):
+                # a new agent's context is GRANTED, and the grant is written
+                # at creation so it is EXPLICIT from the first turn -- an
+                # install with no grant recorded means "predates the grant"
+                # and gets the old workspace-membership behaviour, which is
+                # exactly what a brand-new agent must NOT get.
+                #
+                # What is granted is the ONE project this agent was just
+                # placed in -- the owner's own pick in the wizard, or the
+                # private project we just created for it. Nothing else, ever,
+                # without a deliberate act in Configure -> Context. This is
+                # the whole point: an agent built for someone else's business
+                # reaches none of the owner's own projects, on day one.
+                await repo.update_workspace_agent_install(
+                    agent_id,
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    metadata={
+                        _context_grants.GRANT_METADATA_KEY: [_project_id] if _project_id else [],
+                    },
+                )
             except Exception:
                 pass
     except Exception as exc:

@@ -1,16 +1,18 @@
 """Which projects' documents a turn may read -- ONE function, on purpose.
 
-THIS MODULE EXISTS TO BE REWRITTEN. MAN-357 ("the agent is a principal, not
-a caged resource") makes an agent a workspace-level thing that CONNECTS to
-projects, replacing today's single `workspace_agent_installs.project_id`
-scalar with a real many-to-many. When that lands, the only thing that has to
-change is the body of `resolve_agent_document_project_scope` below --
-nothing else in the documents feature reads `project_id` off an install.
-That is the entire reason this is a resolver and not an inlined column read
-at each call site: a hard-coded scalar read repeated across the document
-tools is precisely the work that would have to be found and undone, and
-CLAUDE.md's own record is full of what happens when a rule lives at N call
-sites instead of on a narrow waist.
+THAT REWRITE HAPPENED (feat/agent-context-grant, 2026-08-20). This module
+predicted it in its own header and it landed exactly here: the many-to-many
+is `agent_context_grant_service` (install_metadata["context_project_ids"]),
+and this resolver now asks it FIRST. Nothing else in the documents feature
+changed, which is the entire reason this was a resolver instead of an
+inlined `project_id` read at each call site.
+
+The pre-grant behaviour is still below it, verbatim, and is still reached --
+by every install that carries NO grant (the founder's own 13 live agents,
+and the workspace-level Operator, whose per-user fallback is a separate
+founder decision this must not quietly overturn). See
+agent_context_grant_service's docstring for why "no grant recorded" and
+"granted nothing" are different facts.
 
 FAIL CLOSED. Every path that cannot establish a scope returns an EMPTY list,
 never "everything". An empty list is a real answer -- "this turn may read no
@@ -82,27 +84,33 @@ async def resolve_agent_document_project_scope(
     if not resolved_tenant_id or not resolved_workspace_id:
         return DocumentScope([], "")
 
-    from server_modules import project_tasks_service as _tasks
+    from server_modules import agent_context_grant_service as _grants
 
-    own_project_id = ""
     if resolved_install_id:
-        try:
-            own_project_id = str(await _tasks.agent_project_id(
-                tenant_id=resolved_tenant_id,
-                workspace_id=resolved_workspace_id,
-                agent_id=resolved_install_id,
-            ) or "").strip()
-        except Exception:
-            logger.exception(
-                "document scope: agent_project_id failed workspace=%s agent=%s",
-                resolved_workspace_id, resolved_install_id,
-            )
+        # STILL ONE QUERY. resolve_agent_project_grant reads `metadata` and
+        # `project_id` off the same row agent_project_id used to read on its
+        # own, so the grant did not cost this module a second lookup -- it
+        # replaced the lookup it already had.
+        grant = await _grants.resolve_agent_project_grant(
+            tenant_id=resolved_tenant_id,
+            workspace_id=resolved_workspace_id,
+            agent_install_id=resolved_install_id,
+        )
+        if grant.status == _grants.STATUS_GRANT:
+            # An explicit grant DECIDES, and it decides both answers. It is
+            # never widened by the person asking: the founder's case is an
+            # agent built for someone else's business, and "the owner is
+            # standing here" must not be a way past that.
+            return DocumentScope(list(grant.project_ids), grant.write_project_id)
+        if grant.status == _grants.STATUS_UNAVAILABLE:
+            # Could not tell. Fail closed -- never fall through to the wider
+            # pre-grant path, which is exactly what a grant we could not
+            # read would be silently undoing.
             return DocumentScope([], "")
-        if own_project_id:
-            # A specialist: reads and writes are the same one project.
-            # Resolved with ONE query -- the read scope is not a second
-            # lookup of a fact already in hand.
-            return DocumentScope([own_project_id], own_project_id)
+        if grant.write_project_id:
+            # LEGACY, and it is byte-for-byte the pre-grant behaviour: an
+            # install with its own project reads and writes exactly that one.
+            return DocumentScope([grant.write_project_id], grant.write_project_id)
 
     # No project of its own -> the asking person's own reach. Without a
     # resolved human there is nothing to inherit, so: nothing.

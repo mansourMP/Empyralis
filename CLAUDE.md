@@ -100,14 +100,79 @@ DONE   frontend/lib/workspace/fleet/project-views.ts
          PROJECT_TAB_VIEWS = ["tasks", "documents"]     Agents gone from projects
 DONE   frontend/lib/workspace/fleet/primary-rail-nav.ts
          RAIL_ITEMS = Inbox · My work · Projects · Agents · Context
-NOT BUILT  the grant itself. Verified by grep 2026-08-20: no allowed_project /
-         project_grant / agent_project_access anywhere. An agent reaches
-         projects through WORKSPACE MEMBERSHIP today, so an agent made for an
-         outside business CAN read the owner's tasks and documents right now.
-         `_enforce_agent_project_access` (routes_fleet.py) is NOT this — it
-         governs which PEOPLE may reach an agent, not which PROJECTS an agent
-         may reach.
+DONE   the grant itself — `feat/agent-context-grant`, 2026-08-20. See the
+         section "The grant is metadata, and ABSENT is not EMPTY" below.
+         `_enforce_agent_project_access` (routes_fleet.py) is still NOT this
+         — it governs which PEOPLE may reach an agent, not which PROJECTS an
+         agent may reach. The two are separate gates and both are live.
 ```
+
+## The grant is metadata, and ABSENT is not EMPTY (2026-08-20)
+
+**Storage is `workspace_agent_installs.metadata["context_project_ids"]`,
+and the choice is load-bearing rather than lazy: the grant needs THREE
+states and a JSON value expresses all three without a second flag column,
+which a join table cannot.**
+
+```
+key ABSENT   ->  LEGACY   predates the grant. Behaves EXACTLY as before (its
+                          one home project; the Operator's per-user fallback).
+                          The founder's 13 live agents are all here. Silently
+                          revoking them would be worse than the bug being fixed.
+[]           ->  NONE     granted nothing. A REAL answer, not an absence.
+                          Written explicitly at agent creation.
+["p1","p2"]  ->  THOSE    and only those. The home-project column never widens it.
+error/no row ->  UNAVAILABLE  no reach at all. NEVER falls back to legacy —
+                          a grant we could not read must not buy back the
+                          wider pre-grant behaviour.
+```
+
+Pool-is-None (SQLite fallback) is deliberately LEGACY, not unavailable: it
+is not an error, it is a deployment carrying no grant information at all,
+and calling it an error would take documents away from the Operator there
+for no security gain.
+
+**THE MODEL CANNOT WIDEN ITS OWN GRANT, and that is why this is NOT a
+`fleet_configure_agent` patch key.** `fleet__configure_agent` /
+`empyralis_configure_agent` are callable BY AN AGENT; a grant a model can
+patch is not a boundary. The only writer is the owner-gated
+`PUT /api/w/{ws}/fleet/agents/{id}/context-projects`, plus agent creation's
+own default. `test_agent_context_grant.py` asserts both structurally (the
+key is absent from `_ALLOWED_CONFIGURE_KEYS`; an AST sweep of every
+`server_modules/*.py` finds the key used as a dict key in exactly two
+files) — a behavioural test can only cover the write paths that exist today.
+
+**Placement at creation IS the grant, and it is the only thing inherited.**
+`fleet_create_agent` stamps `[the project it was just placed in]` — the
+owner's own pick in the wizard, or the private project we just created for
+it. Not `[]`: a brand-new agent with an empty grant has a task board that
+refuses everything, which is a dead control. Not absent either: absent means
+"predates the grant" and would hand a NEW agent the old behaviour.
+
+**READ MANY, WRITE ONE — the shape `DocumentScope` already had, now shared.**
+`project_ids` is the read reach; `write_project_id` is the ONE project a new
+task/document goes in — the home project when it is granted, the single
+granted project when there is only one, otherwise `""` and the create tools
+refuse by NAMING the ambiguity. Never pick a winner silently; that is the
+multi-agent provisioning-clobber shape this file already records.
+
+Enforced on `_PROJECT_SCOPED_CONNECTOR_IDS` (`project_task__*`,
+`document__*`, `goal__*`) at BOTH ends: `_resolve_specialist_toolset` now
+carries `toolset["project_ids"]` (resolved from the install bundle already
+in hand — zero extra queries) so an ungranted agent is never offered the
+tools, and each dispatch re-resolves server-side so a stale prompt cannot
+act. `list` issues ONE query per granted project rather than one unscoped
+query — the fail-open `WHERE ($1 = '' OR ...)` family is banned here too.
+
+Still open, found and NOT fixed: `fleet__get_project_activity` (operator-only)
+still takes a `project_id` straight off the model's arguments and reads that
+project's activity ledger — allowlisted by name in
+`test_agent_context_grant.py` with a written verdict, so a NEW one fails the
+test. `connectors_actions._resolve_agent_project_id` /
+`routes_connections._resolve_agent_project_id` still read the home-project
+column for CREDENTIAL ownership, which is a different question and was left
+alone.
+
 
 Do not re-nest agents under projects, do not add an Agents tab to a project,
 and do not treat workspace membership as the context boundary. The grant is

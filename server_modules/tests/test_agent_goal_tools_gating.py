@@ -37,7 +37,11 @@ class GoalConnectorMembershipTests(unittest.TestCase):
     def test_specialist_tool_allowed_grants_goal_by_membership_not_connector(self):
         ts_member = {
             "core": set(), "tools": set(), "connectors": set(),  # "goal" never bound
-            "raw_tool_toggles": {}, "capability_providers": frozenset(), "project_id": "proj-1",
+            "raw_tool_toggles": {}, "capability_providers": frozenset(),
+            # feat/agent-context-grant: "project_ids" is the agent's context
+            # grant and is what the gate asks; "project_id" is now only the
+            # write target. Production sets both from one resolver.
+            "project_id": "proj-1", "project_ids": ["proj-1"],
         }
         for tool_name in ("goal__create", "goal__list", "goal__get", "goal__update"):
             with self.subTest(tool_name=tool_name):
@@ -48,7 +52,8 @@ class GoalConnectorMembershipTests(unittest.TestCase):
         agent with no project.'"""
         ts_no_project = {
             "core": set(), "tools": set(), "connectors": set(),
-            "raw_tool_toggles": {}, "capability_providers": frozenset(), "project_id": "",
+            "raw_tool_toggles": {}, "capability_providers": frozenset(),
+            "project_id": "", "project_ids": [],
         }
         for tool_name in ("goal__create", "goal__list", "goal__get", "goal__update"):
             with self.subTest(tool_name=tool_name):
@@ -61,11 +66,11 @@ class GoalConnectorMembershipTests(unittest.TestCase):
                 self.connector_id = connector
 
         registry = [_Entry("goal__list", "goal"), _Entry("slack__post", "slack")]
-        ts_member = {"core": set(), "tools": set(), "connectors": set(), "project_id": "proj-1"}
+        ts_member = {"core": set(), "tools": set(), "connectors": set(), "project_id": "proj-1", "project_ids": ["proj-1"]}
         kept = sage._filter_registry_for_specialist(registry, ts_member)
         self.assertEqual([e.tool_name for e in kept], ["goal__list"])
 
-        ts_no_project = {"core": set(), "tools": set(), "connectors": set(), "project_id": ""}
+        ts_no_project = {"core": set(), "tools": set(), "connectors": set(), "project_id": "", "project_ids": []}
         kept_none = sage._filter_registry_for_specialist(registry, ts_no_project)
         self.assertEqual(kept_none, [])
 
