@@ -5315,6 +5315,94 @@ live `tool_progress` streaming is verified by code plus unit tests only —
 the verification prompts never triggered a tool call, so nobody has watched
 a tool step stream in real time.
 
+## Chat landed on the OLDEST message, composer buried 12,000px down — and "ChatTab stays MOUNTED" is false for a real tab click (2026-08-20)
+
+**Verdict: fixed the visible bug (opens at the newest message, composer
+pinned). Found, while verifying, that the SAME-DAY "keep ChatTab mounted
+across tabs" fix (`e6e268d2`) does not do what its own comment claims for
+the way a person actually navigates — clicking the real `<Link>` between
+Chat and Work. Not reverted, not touched — routed around, and recorded here
+because the next agent will otherwise trust that comment.**
+
+```
+BEFORE (measured on production)          AFTER
+.fleet-detail-body  scrollTop 0          .fleet-detail-body  scrollTop 0
+  scrollHeight 12,979  ← the PAGE          scrollHeight == clientHeight
+  scrolls, lands on message #1              ← nothing to scroll, bounded
+.fleet-sage-chat-list (meant to           .fleet-sage-chat-list is the
+  scroll internally) never bounded,          REAL scroller, lands exactly
+  grew to fit ALL content                    at scrollHeight-clientHeight
+composer position:relative, y≈12,928      composer flex-shrink:0, always
+  ← 12,300px below the fold, unreachable      on screen, never in the flow
+```
+
+**Root cause: `e6e268d2` wrapped ChatTab in a bare, class-less
+`<div style={{display:"none"}}>`.** That div sits BETWEEN `.fleet-detail-
+body` and `.fleet-agent-chat-panel`, so `.fleet-detail-body > .fleet-agent-
+chat-panel` in fleet-theme.css never matched again — the direct-child
+selector that hands the panel its `height:100%` chain (which is what
+bounds `.fleet-sage-chat-list`'s own `overflow-y:auto`) AND the one that
+opts it out of the 820px reading-column cap. With no bounded height,
+`.fleet-sage-chat-list` just grew to fit its whole 12,979px of content, so
+`.fleet-detail-body` — the page itself — became the real scroller. Fixed
+by deleting the wrapper: `ChatTab` now applies `display:none` to its OWN
+root div (`.fleet-agent-chat-panel` stays `.fleet-detail-body`'s direct
+child), taking a `hidden` prop instead of being wrapped by one.
+
+**The scroll-follow behaviour itself lives in
+`agent-chat-scroll-follow.ts`** (pure, tested — `isNearBottom`/
+`shouldSnapChatToBottom`), landing-on-open plus "auto-follow only while
+already at the bottom, never yank a reader back down mid-read" — the same
+house pattern as `agent-count-shape.ts`/`channel-doors.ts`.
+
+**Two things only running it revealed, both now guarded in
+AgentChat.tsx's own comments:**
+- **A `display:none` element's `scrollTop` gets DISCARDED by Chromium**
+  (reset to 0), and that reset itself fires a genuine `scroll` event with
+  EVERY metric at 0 (scrollTop/scrollHeight/clientHeight). `isNearBottom`
+  reads 0-0-0=0 as "at the bottom" — so the scroll listener has to drop any
+  read where `clientHeight === 0`, or hiding the pane silently corrupts
+  "was this reader following" the instant it happens.
+- **A restore attempt can race the thread's own load.** Coming back to
+  Chat, the first layout-effect run can land while `loading` is still true
+  (skeleton height, scrollHeight===clientHeight) — writing the remembered
+  scrollTop there gets CLAMPED to 0 by the browser (nothing to scroll to
+  yet), and if the "just became visible" flag is consumed on that first
+  attempt, the real restore never gets a second try once content actually
+  loads. Fixed by gating the whole effect on `!loading`.
+
+**The bigger finding: `.fleet-agent-chat-panel` is NOT staying mounted
+across a Chat<->Work tab switch, contrary to `e6e268d2`'s own comment
+("ChatTab stays MOUNTED on every tab, hidden (not removed)").** Proven,
+not inferred: typed a draft into the composer, clicked the real `<a
+href=".../work">`, clicked back to `.../chat` — the draft was gone. A
+component that truly stayed mounted cannot lose local `useState`. Root
+cause: `agents/[agentId]/[tab]/page.tsx` has no `layout.tsx` above it, and
+Chat/Work are different values of the `[tab]` ROUTE segment — Next's App
+Router remounts the page-level component tree (`FleetAgentDetail` and
+everything under it, confirmed via a mount-effect counter, isolated from
+React StrictMode's dev-only double-invoke by re-testing against a real
+`next build && next start`) on every such navigation. The `display:none`
+wrapper this fix started from was never going to preserve anything for
+THIS navigation path — CSS visibility is irrelevant to a component that
+gets destroyed and recreated one level up.
+
+This means the draft-loss and in-flight-turn-loss bugs `e6e268d2` set out
+to fix are NOT fixed for a real Chat<->Work click today — only for
+whatever narrower interaction (if any) that fix was actually verified
+against. Not chased further or fixed here — restructuring
+`agents/[agentId]/` into a `layout.tsx` + thin `page.tsx` is a real,
+separate body of work with its own blast radius (breadcrumbs, `useParams`
+usage, the Sessions panel's own state), and this session's job was scroll
+position, not that architecture. **Scroll position itself does not depend
+on the mounted-across-tabs premise being true**: `CHAT_SCROLL_MEMORY`
+(module-scope, keyed by `threadId`, in AgentChat.tsx) survives a real
+remount the same as it would survive a genuine hide/show, which is why
+"switch to Work and back" is verified working above despite this. Anyone
+picking up the mounted-across-tabs work should re-verify it against a real
+`<Link>` click between routed tabs, not just a same-render `activeTab`
+state flip.
+
 ## Performance: measure from a CUSTOMER's seat, not the founder's (2026-08-19)
 
 **A 26-second agent turn was investigated as a code problem. It is a

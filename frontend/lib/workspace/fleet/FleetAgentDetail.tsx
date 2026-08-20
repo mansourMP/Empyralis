@@ -1350,24 +1350,37 @@ export function FleetAgentDetail({
               the draft the founder had just typed ("he came back,
               re-pasted his message"). Navigating away from a live turn
               must not silently discard the UI's own record of it (this
-              file's own hard constraint), and a `display:none` wrapper is
-              the smallest change that satisfies it — the turn keeps
-              streaming in the background exactly as it would have on Chat,
-              and returning to Chat shows it mid-flight rather than
-              re-fetching a possibly-incomplete thread from scratch. It
-              also removes the remount-triggered skeleton for this exact
-              navigation path: nothing to reload if nothing ever unmounted. */}
-          <div style={activeTab === "chat" ? undefined : { display: "none" }}>
-            <ChatTab
-              key={agentId}
-              workspaceId={workspaceId}
-              agentId={agentId}
-              agent={agent}
-              threadId={threadId}
-              onTurnComplete={refreshConversations}
-              onAgentSaved={onRenamed}
-            />
-          </div>
+              file's own hard constraint).
+
+              The hide/show used to be a bare wrapper `<div style={{display:
+              "none"}}>` around ChatTab — which put a class-less div between
+              `.fleet-detail-body` and `.fleet-agent-chat-panel`, breaking
+              BOTH of fleet-theme.css's `.fleet-detail-body > .fleet-agent-
+              chat-panel` rules (the `height:100%` chain that bounds the
+              internal message-list scroller, and the width-cap opt-out).
+              With no bounded height, `.fleet-sage-chat-list`'s own
+              `overflow-y:auto` never had anything to scroll — it just grew
+              to fit ALL of its content, so `.fleet-detail-body` (the whole
+              page) became the real scroller instead, landing on the OLDEST
+              message with the composer buried ~12,000px below the fold.
+              Measured on production, see agent-chat-scroll-follow.ts's own
+              header. Fixed by keeping `.fleet-agent-chat-panel` — inside
+              ChatTab itself — as `.fleet-detail-body`'s direct child again,
+              and passing `hidden` down as a prop instead of an ancestor
+              wrapper; ChatTab applies `display:none` to that same div, and
+              AgentChat reads the same flag to skip touching scrollTop while
+              its pane has zero real dimensions (see AgentChat's own
+              scroll-follow effect). */}
+          <ChatTab
+            key={agentId}
+            workspaceId={workspaceId}
+            agentId={agentId}
+            agent={agent}
+            threadId={threadId}
+            hidden={activeTab !== "chat"}
+            onTurnComplete={refreshConversations}
+            onAgentSaved={onRenamed}
+          />
         </div>
         <FleetRightPanel open={propertiesOpen} onClose={() => setPropertiesOpen(false)} ariaLabel="Sessions">
           {propertiesContent}
@@ -2113,19 +2126,28 @@ function ChatThreadSearchParamBridge({ onChange }: { onChange: (thread: string |
 }
 
 function ChatTab({
-  workspaceId, agentId, agent, threadId, onTurnComplete, onAgentSaved,
+  workspaceId, agentId, agent, threadId, hidden, onTurnComplete, onAgentSaved,
 }: {
   workspaceId: string;
   agentId: string;
   agent: FleetAgent | null;
   threadId: string;
+  /** True while a different top-level tab is showing — this div stays
+   *  mounted (see the caller's own comment on why) and applies
+   *  `display:none` to itself directly, rather than an ancestor wrapper
+   *  doing it, so `.fleet-agent-chat-panel` stays `.fleet-detail-body`'s
+   *  direct child and fleet-theme.css's height/width rules for it keep
+   *  matching. Forwarded into AgentChat too, so its own scroll-follow
+   *  effect can skip reading/writing scrollTop while this pane has zero
+   *  real dimensions. */
+  hidden?: boolean;
   onTurnComplete?: () => void;
   onAgentSaved?: () => void;
 }) {
   const label = agent?.label || "this agent";
 
   return (
-    <div className="fleet-agent-chat-panel">
+    <div className="fleet-agent-chat-panel" style={hidden ? { display: "none" } : undefined}>
       <AgentChat
         key={threadId}
         workspaceId={workspaceId}
@@ -2137,6 +2159,7 @@ function ChatTab({
         emptyBody={`Your owner test chat with ${label} — full access, not what a real customer would see.`}
         placeholder={`Message ${label}…`}
         sourceTag="fleet_agent_chat"
+        paneHidden={hidden}
         onTurnComplete={onTurnComplete}
         onAgentSaved={onAgentSaved}
       />
