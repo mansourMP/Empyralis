@@ -33,10 +33,15 @@ const keys = RAIL_ITEMS.map((i) => i.key);
 assert(keys.includes("inbox"), "Inbox is a rail destination");
 assert(keys.includes("my-work"), "My work is a rail destination — 'what is assigned to me, across every project'");
 assert(keys.includes("projects"), "Projects is a rail destination — the spine");
-// Context aggregates workspace DATA (documents), like Projects — never
-// agents — so it does not reach past the project boundary the
-// project-as-spine rule is about. See primary-rail-nav.ts's header.
-assert(keys.includes("context"), "Context is a rail destination — every document in the workspace, one tree");
+// CONTEXT WAS REMOVED FROM THE RAIL, 2026-08-20 (founder). This assertion is
+// INVERTED, not deleted, so nobody re-adds the row believing it was simply
+// forgotten. Documents live inside their project (project-views.ts's
+// Tasks · Documents) and always did; /context is a cross-project LENS over
+// them, and a lens does not earn a permanent slot beside the surfaces that
+// ARE the work. Founder: "tasks and documents actually inside this good area
+// which I like, it's already correct." The /context ROUTE stays live and
+// unlinked -- same treatment as /agents, /conversations and /people.
+assert(!keys.includes("context"), "Context is NOT a rail destination -- documents live in their project; /context is a lens");
 
 // The rail holds WORK only (founder, 2026-08-16). Settings had two doors —
 // a rail row and an account-menu row — and the rail one didn't earn its
@@ -58,7 +63,7 @@ assert(!keys.includes("conversations"), "Conversations is NOT a rail destination
 // unused top-level surface is what "a surface must earn its place" is about.
 assert(!keys.includes("activity"), "Activity is deliberately NOT a rail destination");
 
-assert(keys.length === 5, `exactly five destinations, got ${keys.length} (${keys.join(", ")})`);
+assert(keys.length === 4, `exactly four destinations, got ${keys.length} (${keys.join(", ")})`);
 
 // Order is the reading order of the founder's own approved sketch: what
 // needs me, then what is mine, then where the work lives and who does it.
@@ -66,7 +71,7 @@ assert(RAIL_ITEMS[0]?.key === "inbox", "Inbox is the first rail row");
 assert(RAIL_ITEMS[1]?.key === "my-work", "My work is the second rail row");
 assert(RAIL_ITEMS[2]?.key === "projects", "Projects is the third rail row");
 assert(RAIL_ITEMS[3]?.key === "agents", "Agents is the fourth rail row");
-assert(RAIL_ITEMS[4]?.key === "context", "Context is the fifth rail row");
+assert(RAIL_ITEMS[4] === undefined, "there is no fifth rail row -- Context was removed 2026-08-20");
 
 // ── Aggregation tagging ───────────────────────────────────────────────────
 assert(RAIL_ITEMS.find((i) => i.key === "inbox")?.aggregatesAgents === true, "Inbox is tagged as an agent-aggregating surface");
@@ -88,7 +93,7 @@ assert(
 // agents must not invent a second list that could drift from RAIL_ITEMS.
 const hidden = visibleRailItems(true);
 assert(
-  hidden.map((i) => i.key).join(",") === "my-work,projects,context",
+  hidden.map((i) => i.key).join(",") === "my-work,projects",
   `at zero agents both Inbox and Agents hide, got ${hidden.map((i) => i.key).join(",")}`,
 );
 const shown = visibleRailItems(false);

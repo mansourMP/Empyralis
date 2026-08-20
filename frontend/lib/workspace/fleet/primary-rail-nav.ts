@@ -1,4 +1,4 @@
-import { Bot, FolderKanban, Inbox, Library, ListChecks, type LucideIcon } from "lucide-react";
+import { Bot, FolderKanban, Inbox, ListChecks, type LucideIcon } from "lucide-react";
 
 /**
  * The primary rail's destinations — pulled into its own pure,
@@ -125,7 +125,18 @@ export const RAIL_ITEMS: RailNavItem[] = [
   { key: "my-work", label: "My work", segment: "my-work", icon: ListChecks, chord: "m" },
   { key: "projects", label: "Projects", segment: "projects", icon: FolderKanban, chord: "p" },
   { key: "agents", label: "Agents", segment: "agents", icon: Bot, chord: "a", aggregatesAgents: true },
-  { key: "context", label: "Context", segment: "context", icon: Library, chord: "c" },
+  // CONTEXT REMOVED FROM THE RAIL, 2026-08-20. Founder: "all we have to do
+  // is to just remove this context button on this left rail... tasks and
+  // documents actually inside this good area which I like, it's already
+  // correct". Documents live INSIDE their project (project-views.ts's
+  // Tasks · Documents) and always did; /context was a cross-project LENS
+  // over them. A lens does not earn a permanent rail slot beside the four
+  // surfaces that are the work itself -- "a surface must earn its place".
+  //
+  // The /context ROUTE stays live and unlinked, the same treatment this
+  // file already documents for /agents, /conversations and /people:
+  // deleting it strands bookmarks, and next.config LEGACY_REDIRECTS has
+  // made a real page unreachable here before.
 ];
 
 /** The rail items actually shown — `hideAggregations` true at
