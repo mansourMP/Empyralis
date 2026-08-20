@@ -16,6 +16,7 @@ import {
   watchExternalAuthCompletion,
 } from '@/lib/auth/auth-client';
 import { GoogleProviderIcon } from '@/lib/auth/auth-provider-icons';
+import { safeNextPath } from '@/lib/auth/login-next';
 import { AppButton, AppInput } from '@/lib/ui/primitives';
 
 function authErrorCopy(error: string): string {
@@ -90,13 +91,6 @@ function AuthErrorNotice({ title, message }: { title: string; message: string })
   );
 }
 
-function safeNextPath(rawNext: string): string {
-  const trimmed = rawNext.trim();
-  if (!trimmed || !trimmed.startsWith('/') || trimmed.startsWith('//') || trimmed.includes('\\')) {
-    return '/';
-  }
-  return trimmed;
-}
 
 function LoginPageContent() {
   const searchParams = useSearchParams();

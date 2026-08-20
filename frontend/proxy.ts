@@ -7,6 +7,7 @@ import {
   buildContentSecurityPolicy,
   generateNonce,
 } from '@/lib/security/content-security-policy';
+import { REQUEST_PATHNAME_HEADER } from '@/lib/auth/login-next';
 
 const AUTH_ACCESS_COOKIE_NAME = 'empyralis_access_token';
 const AUTH_REFRESH_COOKIE_NAME = 'empyralis_refresh_token';
@@ -162,6 +163,14 @@ function cspRequestHeaders(request: NextRequest, nonce: string, csp: string): He
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set(CSP_NONCE_REQUEST_HEADER, nonce);
   requestHeaders.set(CSP_RESPONSE_HEADER, csp);
+  // MAN-358: Next.js gives a server component no way to read the path it is
+  // rendering, and `(account)/layout.tsx` needs it to send a signed-out
+  // visitor back to the deep link they tapped instead of the workspace root.
+  // Set here rather than on each branch because every return path in
+  // `proxy()` builds its request headers through this one function -- the
+  // same narrow-waist reasoning as the CSP nonce two lines up. `set`, never
+  // `append`, so a client-supplied header of this name is overwritten.
+  requestHeaders.set(REQUEST_PATHNAME_HEADER, `${request.nextUrl.pathname}${request.nextUrl.search}`);
   return requestHeaders;
 }
 

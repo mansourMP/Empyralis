@@ -6638,6 +6638,96 @@ attachment, so `forget_stored_object` exists (a reservation without a release
 is how a counter becomes monotonic) with one caller: the rollback when the
 file write fails after the ledger row committed.
 
+## Deep links: one builder, and NO link beats a broken one (2026-08-20, MAN-358)
+
+**Chat left the platform, so a link in the channel message is the ONLY way
+the work an agent did is reachable from the conversation.** "I created GEN-12
+for you" has to be tappable in Telegram/Slack or the task it names is
+unreachable from where people actually talk.
+
+```
+project_task__create / document__write            skills_service dispatch
+   │  the task/document dict, inside the block that already
+   │  resolved the agent's CONTEXT GRANT
+   ▼
+deep_link_service.annotate_task / annotate_document        ← the ONE builder
+   │  adds "url" + "display_id" (GEN-12).  KEY ABSENT, never "" ,
+   │  when there is no origin or no id — a model cannot interpolate
+   │  an absent key into a sentence
+   ▼
+tool result JSON  ─▶ the model  ─▶ _deep_link_guidance() says pass it on
+   ▼
+the agent's own reply  ─▶ Telegram / Slack / any channel
+```
+
+**There is deliberately NO channel-side link rewriter.** A per-channel builder
+would be "channels is ONE system" broken, and it would have to re-derive an
+identity the tool layer already holds. Both platforms auto-link a bare URL, so
+no per-channel formatting exists either.
+
+**The origin comes from `cloud_cutover_config.resolve_public_frontend_origin`
+— the SAME resolution `workspace_invite_email_service` uses for the
+/join/{token} link that demonstrably works in production — with
+`allow_dev_fallback=False`.** That argument is load-bearing, not a detail:
+the shared resolver's dev fallback is `http://127.0.0.1:3000`, correct for a
+developer's browser and a LIE in a Telegram message. `webhook_base_url()`'s
+`ORION_TELEGRAM_AUTOPILOT_PUBLIC_BASE_URL`/`EMPYRALIS_PUBLIC_BASE_URL`/
+`PUBLIC_BASE_URL` list is a THIRD env-var list (connectors_actions has a
+fourth); a fifth was not added.
+
+**Measured, not assumed — the redactor decides whether a link survives at
+all.** `secret_redaction_service.redact_text` runs on every visible reply and
+every persisted assistant turn:
+
+```
+https://empyralis.ai/w/ws_…/projects/proj_…/tasks/task_69d6…   survives intact
+http://localhost:3000/w/ws_…/…/tasks/task_69d6…    'http://localhost:[redacted-secret]'
+```
+
+A dotless host is not URL-ish to `_URLISH_TOKEN_PATTERN`, so the high-entropy
+sweep eats the whole path. That is a SECOND, independent reason the loopback
+fallback must never reach a channel, and both halves are pinned by a test.
+
+**`display_id` has no hex-slice fallback, on purpose.** The frontend's
+`taskDisplayId` falls back to a uuid slice so a table cell is never blank;
+here the value goes into a sentence an agent writes to a person, and "task
+69D656" is a uuid fragment dressed up as an identifier. Empty means the agent
+says what it did without naming an identifier that means nothing.
+
+**Signed-out landing was the other half, and it was a real dead end.**
+`(account)/layout.tsx` did a bare `redirect('/login')` — every deep link a
+reader tapped without a session in that browser signed them in and dropped
+them on the workspace root, destination discarded. `?next=` already existed on
+/login, /signup and /verify-email, along with three byte-identical private
+`safeNextPath` copies each commented "mirrors the others"; they are now one
+`lib/auth/login-next.ts`. The path reaches a SERVER layout through
+`proxy.ts`'s `REQUEST_PATHNAME_HEADER` (Next exposes no other way to read it
+there), set inside `cspRequestHeaders` — the one function every return path in
+`proxy()` already goes through, same narrow-waist reasoning as the CSP nonce
+beside it — with `set`, never `append`, so a client-supplied header of that
+name is overwritten and `safeNextPath` is the backstop for the asset paths the
+proxy matcher skips.
+
+Verified LIVE against a real `next dev --webpack` with a 401-stub control
+plane: `/w/{ws}/projects/{p}/tasks/{t}` → `307 /login?next=%2Fw%2F…%2Ftasks%2F…`,
+query strings preserved. **Not verified live: a real message arriving in a
+real Telegram chat** — that needs a real bot credential and was not attempted;
+everything up to "the URL is in the tool result the model composes from" is
+proven by the real unmocked dispatch.
+
+Two guards worth knowing about. `test_deep_link_service.py` checks each route
+template against the REAL `frontend/app/(account)/...` directory tree (expected
+set and actual set from different places) and asserts none of them is a
+`next.config` redirect SOURCE — a redirect resolves ahead of the router, so
+such a rule would silently send every deep link somewhere else. And
+`test_deep_link_tool_results.py` AST-scans both dispatch blocks: a new
+`project_task__*`/`document__*` action that forgets the annotator compiles,
+runs, returns a valid result, and is silently unlinkable.
+
+Not done, deliberately: the MCP tools (`empyralis_create_task` and friends)
+still return unlinked objects — a different audience (external agents) and a
+separate decision.
+
 ## OPEN FOUNDER DECISIONS — unresolved, do not guess (2026-08-20)
 
 These are questions the founder has raised MORE THAN ONCE and has not yet

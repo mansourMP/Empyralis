@@ -15,18 +15,9 @@ import {
   verificationDeliveryNotice,
   type VerificationDelivery,
 } from '@/lib/auth/verification-delivery';
+import { safeNextPath } from '@/lib/auth/login-next';
 import { AppButton, AppInput } from '@/lib/ui/primitives';
 
-// Mirrors signup's/login's own safeNextPath (frontend/app/signup/page.tsx,
-// frontend/app/login/page.tsx) -- only ever a same-origin, path-relative
-// redirect, never an absolute/protocol-relative URL.
-function safeNextPath(rawNext: string): string {
-  const trimmed = rawNext.trim();
-  if (!trimmed || !trimmed.startsWith('/') || trimmed.startsWith('//') || trimmed.includes('\\')) {
-    return '/';
-  }
-  return trimmed;
-}
 
 function verifyErrorCopy(error: string): string {
   const normalized = error.trim().toLowerCase();
