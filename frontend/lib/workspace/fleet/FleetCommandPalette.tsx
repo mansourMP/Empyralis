@@ -62,10 +62,15 @@ const AGENT_DETAIL_RE = /^\/w\/[^/]+\/projects\/([^/]+)\/agents\/([^/]+)\/([^/]+
 // silently did nothing useful — picking it just bounced back to Chat with
 // no explanation — for as long as it sat here unnoticed. "general" is what
 // Overview's surviving contents (name/persona/schedule) actually moved to.
+//
+// "work" is gone the same way, 2026-08-20 — it rendered the exact same
+// observation view as "chat" (FleetAgentDetail's Work button was removed
+// entirely; see that file's own top-of-file note), so offering it here as
+// a second, distinct destination would have been the identical dead-entry
+// shape Overview already was.
 const AGENT_TABS: { id: string; label: string; icon: LucideIcon }[] = [
   { id: "chat", label: "Chat", icon: MessageSquare },
   { id: "general", label: "General", icon: LayoutGrid },
-  { id: "work", label: "Work", icon: Inbox },
   { id: "channels", label: "Channels", icon: Radio },
   { id: "connectors", label: "Connectors", icon: Plug },
   { id: "tools", label: "Tools", icon: Wrench },

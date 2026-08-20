@@ -36,10 +36,19 @@ import { StatusDot } from "../fleet-indicators";
 import { CHANNEL_ICONS, CONNECTOR_ICONS, channelIconSrc } from "../fleet-icons";
 
 /**
- * WORK tab — the agent's control + observability backbone: a control bar
- * (identity/status + Pause/Stop), a today metrics strip, then a two-pane
- * split — a "work stream" list of this agent's conversations (left) and the
- * selected one's live activity timeline (right).
+ * The agent detail page's ONLY content — read-only observation, not a
+ * "Work" tab beside a "Chat" one anymore. 2026-08-20: the platform is not a
+ * chat product (founder: "messaging would never be done inside this
+ * platform... go to Telegram and speak with the agent inside that
+ * channel"), so FleetAgentDetail renders this component for BOTH the
+ * "chat" and legacy "work" tab ids — there is nothing left to switch
+ * between. A two-pane split: a "work stream" list of this agent's real
+ * conversations, across every channel (left), and the selected one's live
+ * activity timeline (right) — channel, agent output, tool calls, and
+ * step-by-step work in progress, streamed live via SSE while a turn is
+ * still running. No composer, no send, no way to type to the agent from
+ * here — control happens over the channel itself (a /command sent where
+ * the conversation is actually happening), never from this screen.
  *
  * Data sources, all real:
  *  - Conversation list + transcript content: /api/threads (unchanged from
@@ -788,6 +797,7 @@ export function WorkTab({
   agentId,
   agent,
   onAgentChanged,
+  onSelectThread,
 }: {
   workspaceId: string;
   agentId: string;
@@ -797,6 +807,16 @@ export function WorkTab({
    *  StopAgentControl as onSaved/onChanged, so Pause/Stop reflect instantly
    *  instead of waiting out the next 30s agents poll. */
   onAgentChanged?: () => void;
+  /** Fired whenever the LEFT list's own selection changes — by a click, or
+   *  by auto-selecting the newest conversation on first load. This
+   *  component owns the selection outright (no controlled-prop pass-in);
+   *  a caller that needs to know "which real conversation is on screen
+   *  right now" (FleetAgentDetail's Profile > Files pane, since a
+   *  conversation's attachments live on ITS thread) just observes it here
+   *  instead of a second, competing picker existing anywhere else — see
+   *  this component's own module comment on why there is exactly one
+   *  session picker now, not two. */
+  onSelectThread?: (threadId: string) => void;
 }) {
   const url = `/api/threads?workspace_id=${encodeURIComponent(workspaceId)}&agent_id=${encodeURIComponent(agentId)}&include_turns=true&limit=100`;
   const agentName = agent?.label || "This agent";
@@ -807,6 +827,11 @@ export function WorkTab({
   const [selected, setSelected] = useState<string | null>(null);
   const [seen, setSeen] = useState<Record<string, string>>({});
   const firstLoadRef = useRef(true);
+
+  useEffect(() => {
+    if (selected) onSelectThread?.(selected);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected]);
 
   const loadThreads = useCallback(async () => {
     try {

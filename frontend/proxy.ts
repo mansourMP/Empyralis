@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 
+import { singleFlightedProxyRefresh } from '@/lib/auth/proxy-refresh-single-flight';
 import {
   CSP_NONCE_REQUEST_HEADER,
   CSP_RESPONSE_HEADER,
@@ -194,25 +195,33 @@ export async function proxy(request: NextRequest) {
   }
 
   try {
-    const refreshResponse = await fetch(`${upstreamBaseUrl}/api/v1/auth/refresh`, {
-      method: 'POST',
-      cache: 'no-store',
-      headers: {
-        accept: 'application/json',
-        'content-type': 'application/json',
-        cookie: request.headers.get('cookie') || '',
-        [AUTH_CSRF_HEADER_NAME]: csrfToken,
-        'x-forwarded-host': request.headers.get('host') || '',
-        'x-forwarded-proto': request.nextUrl.protocol.replace(':', '') || 'http',
-      },
-      body: JSON.stringify({ channel: 'web' }),
+    // Single-flighted per refresh-token value — see
+    // lib/auth/proxy-refresh-single-flight.ts's own header comment for why:
+    // concurrent qualifying GETs (RSC prefetches, router.refresh() polls,
+    // several near-simultaneous navigations) all carry the same
+    // pre-rotation cookie and would otherwise each independently race the
+    // backend's single-use refresh-token rotation.
+    const setCookieHeaders = await singleFlightedProxyRefresh(refreshToken, async () => {
+      const refreshResponse = await fetch(`${upstreamBaseUrl}/api/v1/auth/refresh`, {
+        method: 'POST',
+        cache: 'no-store',
+        headers: {
+          accept: 'application/json',
+          'content-type': 'application/json',
+          cookie: request.headers.get('cookie') || '',
+          [AUTH_CSRF_HEADER_NAME]: csrfToken,
+          'x-forwarded-host': request.headers.get('host') || '',
+          'x-forwarded-proto': request.nextUrl.protocol.replace(':', '') || 'http',
+        },
+        body: JSON.stringify({ channel: 'web' }),
+      });
+
+      if (!refreshResponse.ok) {
+        return [];
+      }
+      return readSetCookieHeaders(refreshResponse.headers);
     });
 
-    if (!refreshResponse.ok) {
-      return nextWithCsp();
-    }
-
-    const setCookieHeaders = readSetCookieHeaders(refreshResponse.headers);
     if (setCookieHeaders.length === 0) {
       return nextWithCsp();
     }

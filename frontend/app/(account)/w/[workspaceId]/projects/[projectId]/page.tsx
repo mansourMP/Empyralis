@@ -48,7 +48,8 @@ import {
   type TaskViewOptions as TaskViewOptionsState,
 } from "@/lib/workspace/fleet/task-view-options";
 import { FleetRightPanel, PanelSection, PanelRow, PanelRowsSkeleton } from "@/lib/workspace/fleet/FleetRightPanel";
-import { createAgentQuickly, quickCreateAgentChatPath } from "@/lib/workspace/fleet/agent-quick-create";
+import { quickCreateAgentChatPath } from "@/lib/workspace/fleet/agent-quick-create";
+import { AgentCreateCard } from "@/lib/workspace/fleet/AgentCreateCard";
 import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
 import { FleetBoardSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import { PROJECT_TAB_LABEL, PROJECT_TAB_VIEWS } from "@/lib/workspace/fleet/project-views";
@@ -216,30 +217,25 @@ export default function ProjectDetailPage() {
 
   const projectBase = `${base}/projects/${encodeURIComponent(projectId)}`;
 
-  const [creatingAgent, setCreatingAgent] = useState(false);
-  const [createAgentError, setCreateAgentError] = useState<string | null>(null);
+  const [agentCardOpen, setAgentCardOpen] = useState(false);
   // Properties drawer — closed by default, an overlay over the sheet.
   const [panelOpen, setPanelOpen] = useState(false);
 
-  // Zero-decision create (2026-08-19) — replaces the old FleetCreateAgentWizard
-  // modal here entirely. Opened from inside a project, so the project is
-  // already implicit — resolveQuickCreateProjectId (via createAgentQuickly)
-  // takes THIS project id as the current one, the same default the old
-  // wizard's initialProjectId prop gave it, just without a screen asking to
-  // confirm what is already obvious from context. See agent-quick-create.ts
-  // for why every other field the wizard used to ask for is safe to default
-  // silently.
-  async function createNewAgent() {
-    if (creatingAgent) return;
-    setCreatingAgent(true);
-    setCreateAgentError(null);
-    try {
-      const { agentId, projectId: landedProjectId } = await createAgentQuickly(workspaceId, projectId, projects);
-      router.push(quickCreateAgentChatPath({ workspaceId, projectId: landedProjectId, agentId }));
-    } catch (e) {
-      setCreateAgentError(e instanceof Error ? e.message : "Could not create the agent.");
-      setCreatingAgent(false);
-    }
+  // AgentCreateCard (2026-08-20) — see agent-quick-create.ts's own
+  // "CORRECTION, 2026-08-20" header for why this opens a card rather than
+  // creating on the click itself, and AgentCreateCard.tsx's own header for
+  // the SECOND correction the same day: the card asks only for a name and
+  // an optional system prompt now — project is no longer a UI decision at
+  // all ("project and agents are completely independent"). Passing
+  // `currentProjectId` here only silently seeds the still-required backend
+  // field via resolveQuickCreateProjectId, exactly as before; nothing about
+  // it is shown or asked.
+  function openCreateCard() {
+    setAgentCardOpen(true);
+  }
+  function handleAgentCreated(result: { agentId: string; projectId: string }) {
+    setAgentCardOpen(false);
+    router.push(quickCreateAgentChatPath({ workspaceId, projectId: result.projectId, agentId: result.agentId }));
   }
   // Agents | Tasks | Documents — a real ROUTE per view (`${projectBase}/agents`,
   // `${projectBase}/tasks`, `${projectBase}/documents`), not component state.
@@ -605,10 +601,9 @@ export default function ProjectDetailPage() {
           <button
             type="button"
             className={`fleet-btn${inProject.length === 0 ? " fleet-btn--accent" : " fleet-btn--accent-fill"}`}
-            onClick={createNewAgent}
-            disabled={creatingAgent}
+            onClick={openCreateCard}
           >
-            <span className="fleet-btn-plus">+</span> {creatingAgent ? "Creating…" : "New agent"}
+            <span className="fleet-btn-plus">+</span> New agent
           </button>
         ) : view === "tasks" ? (
           <button
@@ -949,15 +944,11 @@ export default function ProjectDetailPage() {
           ) : agentsError && inProject.length === 0 ? (
             <FleetSurfaceError title="Couldn’t load agents" message={agentsError} onRetry={refresh} />
           ) : inProject.length === 0 ? (
-            <>
-              <FirstAgentEmpty
-                title="No agents in this project"
-                desc="Create one — it’ll be assigned here."
-                onCreate={createNewAgent}
-                busy={creatingAgent}
-              />
-              {createAgentError && <p className="fleet-channel-expand-error">{createAgentError}</p>}
-            </>
+            <FirstAgentEmpty
+              title="No agents in this project"
+              desc="Create one — it’ll be assigned here."
+              onCreate={openCreateCard}
+            />
           ) : soloAgent ? (
             // The redirect effect above is already firing — this is the one
             // paint before it commits, same quiet-state convention the
@@ -1044,6 +1035,16 @@ export default function ProjectDetailPage() {
           projectName={project?.name}
           onClose={() => setDocumentComposerOpen(false)}
           onCreated={() => { setDocumentComposerOpen(false); refreshDocuments(); }}
+        />
+      )}
+
+      {agentCardOpen && (
+        <AgentCreateCard
+          workspaceId={workspaceId}
+          currentProjectId={projectId}
+          projects={projects}
+          onClose={() => setAgentCardOpen(false)}
+          onCreated={handleAgentCreated}
         />
       )}
     </main>

@@ -3266,6 +3266,92 @@ don't go through `WorkspaceTransportAdapter` at all) with a refresh-and-retry-
 once on 401 — the other ~33 raw `fetch()` call sites in `fleet-data.ts` and
 elsewhere do NOT have this yet; same gap, separate cleanup.
 
+**CORRECTION, 2026-08-20 — that "~33 raw fetch() in fleet-data.ts" gap is
+CLOSED and this paragraph was stale.** Measured directly: `fleet-data.ts`
+has 36 `fleetAuthorizedFetch(` calls and zero raw `fetch(` call sites today.
+`lib/workspace/authorized-fetch-drift.test.ts`'s own header comment confirms
+the fuller sweep this paragraph called "separate cleanup" actually
+happened — fleet-data.ts's ~33 plus 96 more across 38 other client files,
+all routed through the same `fleetAuthorizedFetch`/`auth-client.refresh()`
+mechanism — and that test now runs in `npm run test:unit`, scanning every
+`.ts`/`.tsx` under `frontend/lib` and `frontend/app` for a raw `fetch(` not
+wrapped or explicitly allowlisted with a reason, so this specific gap cannot
+reopen silently.
+
+**A DIFFERENT, un-covered instance of the identical race survived at a
+layer that drift test cannot see, and it is the one that actually produced
+"every fleet call 401s, refresh 400s, session never recovers" — MAN-355-ish,
+fixed same day as this correction (`fix/session-death-401-storm`).**
+`authorized-fetch-drift.test.ts` only scans `lib/` and `app/` (browser-side
+client code); `frontend/proxy.ts` lives at the frontend root and was never
+in scope. `proxy.ts` makes its OWN inline call to
+`POST /api/v1/auth/refresh` — proactively, server-side, on ordinary GET
+navigations whose access-token cookie is near expiry — completely
+uncoordinated with `auth-client.ts`'s single-flighted `refresh()` this
+entry describes above, because it runs in the Next.js SERVER process, a
+different execution context than the browser JS that single-flight lives
+in. Concurrent qualifying GETs (RSC prefetches, `router.refresh()` polls,
+several near-simultaneous navigations — routine, not contrived) each
+independently raced the backend's single-use refresh-token rotation.
+Reproduced live against a disposable stack with an accelerated
+access-token TTL: a burst of 5 concurrent qualifying GETs produced 1
+winning refresh (200) and 4 losing ones (401 "Refresh token was already
+used by a concurrent request"), and under sustained concurrency the
+resulting call volume tripped the backend's own `limit_refresh_requests`
+rate limiter — captured directly, >60s of relapsing 401→(401/429)→401
+cycles on real endpoints (`/api/v1/auth/account-shell`,
+`/api/workspaces/.../bootstrap`). Fixed the same way MAN-324 fixed the
+browser side: single-flighted, but keyed by the refresh-token cookie VALUE
+rather than a single global lock (`lib/auth/proxy-refresh-single-flight.ts`)
+so concurrent requests for the SAME session collapse into one upstream
+call while different sessions on the same Next.js process stay
+independent. Verified red-before-green: the same 5-way burst that produced
+1×200+4×401 before the fix produces exactly 1×200 after it, across
+repeated bursts, with zero 401s and zero 429s. This coordinates every
+request landing on ONE Next.js server process — production today is a
+single VPS, so this closes the race that actually occurs; it does not
+coordinate across a future horizontally-scaled deployment, which would
+need a cross-process lock (Redis, or similar) if that topology ever ships.
+**BLAST RADIUS — this races on DEV/LOCAL stacks and is DEAD on
+empyralis.ai today. Measured, not reasoned.** The fixing pass reported
+"production is affected" on the grounds that `proxy.ts` ships
+unconditionally with no `NODE_ENV` gate. That much is true and the race
+is real, but it stops one line earlier than that reasoning goes:
+
+```
+proxy()  ... if (!csrfToken || !upstreamBaseUrl) return nextWithCsp();
+                                └── controlPlaneBaseUrl() decides this
+
+controlPlaneBaseUrl(env)
+  isCloudEnvironment  = EMPYRALIS_DEPLOY_ENV|NODE_ENV in {production,prod,staging}
+  if cloud AND (protocol !== 'https:' OR host is loopback) ─▶ return ''
+
+empyralis.ai TODAY (read off the box, 2026-08-20):
+  NODE_ENV=production · EMPYRALIS_DEPLOY_ENV=production
+  frontend/.env.local  EMPYRALIS_API_URL=http://127.0.0.1:8001   ← http, loopback
+  ─▶ controlPlaneBaseUrl() == ""  ─▶ the refresh block NEVER RUNS
+```
+
+Confirmed by running `proxy.ts`'s OWN `controlPlaneBaseUrl` source against
+production's real env values: returns `""`. A local/dev stack is not a
+cloud environment, so the same call returns `http://127.0.0.1:8001` and
+the path IS live — which is exactly where the storm was observed (the
+original report says "reproduced in a real browser against a **disposable
+local stack**"). So the practical impact today is on AGENT TEST SESSIONS,
+not on customers, and it has been quietly poisoning them.
+
+**The second finding is the one worth acting on: proxy.ts's entire
+proactive server-side refresh is DEAD CODE on production** — the
+"built, tested, and never wired" shape, except it is wired and
+config-disabled. Production relies solely on the browser-side refresh
+path. Whether that is intended (the single-VPS deploy fronts both from
+one nginx, so a loopback backend URL is the natural configuration) or an
+accident of `isCloudEnvironment`'s https rule meeting a loopback URL is
+an open question — and note the direction of the trap: pointing
+`EMPYRALIS_API_URL` at an https hostname to "fix" the dead feature turns
+this race ON in production the same day. Merge order matters; the
+single-flight fix must be in place first, and it is.
+
 **Testing RLS locally means a non-superuser role, and `REASSIGN OWNED BY`
 run once affects every database in the cluster, not just the one you're
 connected to.** Discovered 2026-08-13 during the cross-tenant-authz security
@@ -3858,7 +3944,31 @@ import workspace code).
 symlinks, and nothing says so.** `venv/`, `empyralis-runtime-kernel/target/`
 and `frontend/node_modules/` are untracked build artifacts that live only in
 the primary checkout, so `start-e2e-backend.sh` refuses to boot in a fresh
-worktree. Symlink all three from `/Users/mansur/empyralis`. Two more traps
+worktree.
+
+**Symlink `venv/` and `empyralis-runtime-kernel/target/` — but NOT
+`frontend/node_modules/`.** That third one was the standing advice here
+and it is WRONG under Turbopack, which is what `npm run dev` uses.
+`frontend/next.config.ts` pins `turbopack: { root: path.join(__dirname,
+'..') }` (added to fix a different root-inference bug involving the Tauri
+manifest at the repo root). A `frontend/node_modules` symlink pointing at
+the PRIMARY checkout resolves outside that pinned root, and Turbopack
+refuses at startup:
+
+```
+Error [TurbopackInternalError]: Symlink [project]/frontend/node_modules
+is invalid, it points out of the filesystem root
+```
+
+Worse, the obvious workaround also fails: `cp -R` of the primary tree
+carries its own internal self-referential symlink, so the copy is
+rejected too. Options that actually work, in order: run a real
+`npm ci`/`npm install` inside the worktree (slow but correct); or use the
+webpack dev server (`npm run dev:e2e`, which passes `--webpack`) where
+the symlink is fine; or hardlink-copy rather than symlink. Reported live
+from two independent worktrees on 2026-08-20.
+
+Two more traps
 in the same 20 minutes: preflight reports the kernel binary as STALE purely
 because a fresh checkout's mtimes are newer than the binary (`diff -r` the
 `src/` trees first — if identical, the staleness is mtime-only and
@@ -5823,6 +5933,266 @@ The ordering to apply, for any capability question:
 All four BYO runtimes (`codex`, `claude`, `cursor-agent`, `grok`) are
 installed on the founder's machine and can be probed directly. Before
 writing a capability table for any of them, run the binary and ask it.
+
+## THE PLATFORM IS NOT A CHAT PRODUCT (2026-08-20) — settled
+
+**Conversation happens in channels. Never in the web UI.** Founder, verbatim
+and emphatic: *"messaging would never be done inside this platform. I'm
+strictly going to prohibit that and nobody is going to use that... you want
+to speak and have an agent, go set it up, go to Telegram and speak with the
+agent inside that channel. We are not going to try to be a channel."*
+
+```
+WHAT THE PLATFORM IS              WHAT IT IS NOT
+  context layer                     a chat UI
+    tasks + documents,              a Telegram competitor
+    GitHub/Linear-grade             a place you spend time in
+  agent configuration
+    hardware, model, memory,      HOW YOU TALK TO AN AGENT
+    tools, MCP                      Telegram / WhatsApp / iMessage
+  observation                       /commands inside the channel
+    what is it doing,
+    is it healthy
+```
+
+The strategic argument, and it is the load-bearing one: every hour spent on
+in-platform chat competes with Telegram, Claude and ChatGPT on THEIR
+strongest surface with none of their distribution. Poke (raised ~$20M) is
+the reference — it deliberately pushes users to iMessage rather than
+building its own chat, and reached the App Store as an agent platform.
+
+**Consequences, all settled by the founder in the same conversation:**
+
+- **No message composer anywhere in the platform.** The agent detail
+  surface is READ-ONLY: which channel each inbound message came from, the
+  agent's output, tool calls, plan steps, live work. Session name and
+  history on top. You watch; you never type.
+- **Keep the live streaming of tool calls and reasoning.** That is the
+  reason to open the platform at all. Removing chat must not remove it.
+- **The "Work" button/tab is removed.** Attribution belongs on the TASK and
+  DOCUMENT surfaces instead — which agent created, updated, commented,
+  completed — not behind a separate tab.
+- **Agent creation is name + optional system prompt. Nothing else.**
+  Model/hardware/memory/tools are configuration seen and edited afterwards,
+  never questions at creation.
+- **An agent may exist unpaired**, showing as not-yet-reachable. A channel
+  is not required to create one.
+- **Agents belong to the WORKSPACE, not to a project.** *"project and
+  agents are completely independent — let's stop creating agents inside
+  this specific project, let's get rid of that entirely."* This resolves
+  the open question previously recorded below.
+- **Telegram is the recommended channel** and must be presented first, with
+  a "Recommended" marker, wherever channels are set up.
+
+**A verified fact that makes the no-hardware case a non-issue:** documents
+and tasks do NOT go through git or hardware. `document__write/__edit/__read/
+__list` and the 14 `project_task__*` tools write to
+`project_documents_repository` / the tasks store in Postgres, with real
+revision history, and never touch a gateway. So a cloud-only agent with no
+hardware can already fully create and edit documents and tasks. Hardware is
+required only for SHELL and FILESYSTEM work — which is the correct
+boundary, and is the same model ChatGPT/Claude use. This is already built;
+it was simply never presented as the feature it is.
+
+**The internal-MCP idea the founder described already exists too:** agents
+natively hold 14 task tools and 4 document tools over the workspace's own
+data. "Go check this project" works with no connector registration and no
+re-authenticating Notion/Linear inside the agent.
+
+**The risk to hold in mind, stated once so it is not forgotten:** with chat
+gone, CHANNEL SETUP BECOMES THE CRITICAL PATH. A new customer gets zero
+value until a channel works. On 2026-08-20 that path was found to be a dead
+end for every cloud-only agent (see the Telegram entry). It must be
+flawless, not merely fixed. The zero-friction path already exists — the
+hosted bot, "no BotFather, no token" — and belongs immediately after agent
+creation.
+
+## The platform is not a chat product — the composer is gone (2026-08-20)
+
+**Settled, not open.** Founder, verbatim: *"messaging would never be done
+inside this platform. I'm strictly going to prohibit that and nobody is
+going to use that... you want to speak and have an agent, go set it up, go
+to Telegram and speak with the agent inside that channel. We are not going
+to try to be a channel."* And on what stays: *"we will only show what kind
+of messages had been going from which channel, and agent's output and its
+tools and other things in the process, but you wouldn't be able to speak
+with the agent."*
+
+```
+BEFORE                                AFTER
+Chat tab   composer, send, history      ONE surface, both old tab ids:
+Work tab   read-only activity view      channel · agent output · tool
+  ↑ two competing header controls       calls/plan steps · LIVE via SSE
+                                         NO composer, NO send, anywhere
+```
+
+`FleetAgentDetail.tsx`'s "chat" tab (the agent's front door) no longer
+mounts `AgentChat` (the composer). It and the legacy "work" tab id now
+render the SAME component — `tabs/WorkTab.tsx`, left unrenamed on purpose
+(its own header comment explains why: the file is a genuine cross-
+reference target for `ConversationsView.tsx`'s shared `.fleet-work-*`
+markup/CSS, ~5 other files cite it by filename, and the founder's objection
+was to the visible "Work" BUTTON, not this internal name). That surface
+already did the real job — per-channel conversation list, live tool/plan
+step streaming over `GET /api/agent-traces/{id}/stream` — so nothing about
+watching an agent work was weakened; only the SECOND, composer-only tab
+was deleted, along with everything that existed solely to serve it:
+`ChatTab`, the owner-only "Sessions" right-panel section (a second,
+narrower conversation picker duplicating WorkTab's own left-hand list —
+this codebase's own "only ONE surface may be the picker at a time" rule),
+"New chat", the `?thread=` URL/localStorage plumbing, and the whole
+`fleet-agent-conversations.ts` module (deleted outright — its sole
+consumer was the thing just removed).
+
+The persistent header "Work" button — founder: *"there is a button that
+was saying Work — I don't really like it, I think it must go"* — is gone;
+the identity link always opens the agent's Profile now (nothing left to
+switch between). The "⋯" menu's "Sessions" item is "Properties"; the right
+panel is Properties only.
+
+**`AgentChat.tsx` and its composer are UNCHANGED** — they remain Sage's own
+workspace-level "Ask AI" console (`SageLauncher.tsx`), a deliberately
+different per-user surface this pass did not touch (CLAUDE.md's own "Ask
+AI is per-user" section). Whether Ask AI is next is an open question for
+the founder, not decided here — do not extend this removal to it on a
+guess.
+
+**Attribution was already fully built, this pass only verified it.** The
+founder's replacement for "watch the conversation": *"all I have to do is
+just check which agent pushed this specific task, or updated or commented
+by this agent, or pushed by this agent when it comes to documents."*
+`TaskDetailView.tsx` already renders real "Created by"/"Completed by" rows
+(`task.created_by`, `task.completed_by_user_id`/`completed_by_agent_id`,
+real avatar+name via `AgentSigil`/`MemberAvatar`) and a per-comment author
+in its Activity feed. `DocumentHistory.tsx` already renders full revision
+authorship (`changed_by_type`: human/agent/external_agent, wired since
+2026-08-12 — see this file's own "built, tested, and never wired" note on
+`empyralis_list_document_revisions`, since fixed). Nothing new was built
+for this — it was reachable and rendering correctly before this pass
+started; this pass only confirmed that by reading the code and does not
+claim to have driven it live against a real agent-authored task/document
+edit.
+
+This is closely related to, but does NOT resolve, item 2 in the section
+immediately below (whether the web UI is a workspace or a setup surface)
+— it removes ONE way people might have spent time in the web UI, on a
+specific and explicit founder instruction, not a general judgment about
+the rest of the surface.
+
+## OPEN FOUNDER DECISIONS — unresolved, do not guess (2026-08-20)
+
+These are questions the founder has raised MORE THAN ONCE and has not yet
+had answered. They are recorded here because holding them in a
+conversation loses them — he has said, correctly, that he raises the same
+problem weeks apart and nothing happens. **If you are working in one of
+these areas, do not pick an answer silently. Surface it.**
+
+### 1. RESOLVED 2026-08-20 — agents belong to the WORKSPACE. See the entry above.
+
+(original question kept for context)
+
+### 1. Does an agent belong to a PROJECT or to the WORKSPACE?
+
+The codebase currently follows BOTH, which is why this keeps resurfacing:
+
+```
+agent-quick-create.ts       cites "an agent belongs to its project and
+                            works only there" as law, resolves a project
+                            silently at creation
+MAN-357 / the rail          agents are a TOP-LEVEL surface
+project tab bar             Agents tab REMOVED (Tasks · Documents only)
+/projects/{id}/agents       route still exists on disk, unlinked
+```
+
+His framing: general-purpose agents and "agents for repetitive work inside
+a project" may be two different things — or the project-level one is
+redundant and should be removed. Unanswered.
+
+Everything downstream depends on this: whether creation asks for a
+project, whether the unlinked project-agents route is deleted, and whether
+"repetitive project work" is a distinct product concept.
+
+### 2. RESOLVED 2026-08-20 — setup + observation, never conversation. See above.
+
+(original question kept for context)
+
+### 2. Is the web UI a WORKSPACE or a SETUP SURFACE?
+
+His words: *"what we're building is not something people are going to
+spend time in within the platform. They're just going to create the agent,
+set up the channel."*
+
+If that is true, the agents list, the workspace home and most of the web
+UI are SETUP surfaces judged by how fast someone gets out of them — not
+daily-use surfaces judged by how much they show. That is a materially
+different design brief from the one most of this UI was built against, and
+it changes what the product's front door should be. Unanswered.
+
+### 3. Purpose / audience (customer-facing vs owner-facing)
+
+Raised THREE times as unnecessary. Removal of the owner-facing SETTING is
+in progress. The open part: `audience` currently gates real tool filtering
+(`audience_tool_filter.filter_tools_for_audience`, live at
+`sage_agent_runtime_service.py:3331`), and his own prior ruling says there
+must be NO tool-authority tiers — access is binary, gated by who can reach
+an agent. Whether "faces the public" should be DERIVED from being wired to
+a public channel (rather than declared) is the unresolved half.
+
+**Process note for whoever reads this:** when the founder raises a
+question that is a product decision rather than a bug, add it here in the
+same turn. Do not answer it with a guess and do not let it live only in
+chat. He has explicitly said the recurrence is the cost he cares about.
+
+## Channels: Telegram + Slack. Discord is OUT. (2026-08-20)
+
+**Founder's decision, final:** *"Slack and Telegram is the way to go.
+Discord I don't really want it if it doesn't work — it's not something
+that I want to have in my platform. Telegram and Slack, that's it."*
+
+The reasoning is the gateway/ban-risk axis, not popularity: these two are
+the channels that work with **no paired hardware**, so a customer never
+runs a gateway and never risks an account ban.
+
+Verified against each vendor's OWN documentation, not inference:
+
+```
+TELEGRAM  webhook (setWebhook). Cloud-side, stateless, nothing held open.
+          Hosted-bot option needs no BotFather and no token at all.
+          Verified live 2026-08-20 (real webhook re-registration + a real
+          message round trip).                                    ✓ primary
+
+SLACK     HTTP Events API — public HTTPS endpoint, must 200 within 3s.
+          Slack's own docs RECOMMEND HTTP over Socket Mode for
+          production, which is the shape already implemented.     ✓ second
+
+DISCORD   ✗ CUT. Its HTTP interactions endpoint receives ONLY slash
+          commands; reading ORDINARY MESSAGES requires a persistent
+          Gateway WebSocket and a long-running process. That means one
+          standing connection PER CUSTOMER BOT held open in the backend
+          — which is a single uvicorn worker on a single vCPU. A standing
+          per-customer cost for a channel the founder does not want.
+          DiscordBotRuntimeService exists and works; it is simply not
+          part of the product direction.
+```
+
+**The two-tier split that must be visible wherever channels are chosen** —
+so nobody picks a channel expecting one-click and hits a hardware wall
+(which is exactly the dead end found live on 2026-08-20):
+
+```
+Works now, nothing to install     Telegram · Slack
+Needs your computer paired        WhatsApp · Signal · iMessage · OpenClaw (~20)
+```
+
+A "recommended" stamp alone is not enough — the split is the honest
+information. The founder also asked for filtering on the channel surface
+along this axis (chat-only vs full-account-control vs hardware-required).
+
+**Standing quality bar, his words:** *"as reasonable as possible and as
+BEASTMODE as possible — not MOST, but beast reasonable things."* Which is
+this file's existing "Best, not most" law with the emphasis on depth: the
+handful of things that ship must be genuinely excellent, not numerous.
+
 ## The codex reasoning-effort chain, wired end to end (2026-08-20)
 
 **The pass above was itself half of the mistake it was trying to fix, and

@@ -11,17 +11,20 @@ import { timeAgo } from "../fleet-presentation";
 /**
  * The Profile sheet's "Files" list — sits below Memory in the same segment
  * (agent-profile-shape.ts's own doc comment has the founder's quote and the
- * reasoning). Reads the SAME thread the open chat is already showing —
- * `GET /api/threads/{threadId}` — rather than any new endpoint; see
- * agent-profile-files.ts's own header for why no per-agent file store
- * exists to build a richer surface on top of.
+ * reasoning). Reads whichever real conversation the observation view
+ * (tabs/WorkTab.tsx) currently has selected — `GET /api/threads/{threadId}`
+ * — rather than any new endpoint; see agent-profile-files.ts's own header
+ * for why no per-agent file store exists to build a richer surface on top
+ * of. `threadId` is FleetAgentDetail's own state, kept in sync with
+ * WorkTab's selection via its `onSelectThread` callback — this file has no
+ * picker of its own (2026-08-20: there is no more owner-only "open chat" to
+ * default to; see WorkTab's own module comment for why there is exactly
+ * one session picker now).
  *
- * Independent fetch, not shared state with ChatTab/AgentChat — the same
- * choice MemoryTab already makes for its own `/memory/tree` read, and for
- * the same reason: this only needs to run while the Profile sheet is open,
- * not on every chat render, and AgentChat.tsx's turn list is not lifted to
- * a parent this file can read without touching that component's own
- * carefully-tuned mount/streaming behavior.
+ * Independent fetch, not shared state with WorkTab — the same choice
+ * MemoryTab already makes for its own `/memory/tree` read: this only needs
+ * to run while the Profile sheet is open, not on every poll of the
+ * observation view underneath it.
  */
 export function ProfileFilesSection({
   workspaceId,
