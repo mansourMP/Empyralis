@@ -6172,6 +6172,88 @@ Ollama's own OpenAI-compat `/v1/chat/completions` reasoning support for
 gpt-oss models is plausible but not verified against Ollama's own docs —
 left in the "no verified wire contract" bucket rather than guessed.
 
+## A `byok_api` AGENT was charged platform credits (2026-08-21)
+
+**Verdict: a `usage_events` row WAS being written for every byok_api turn —
+the recording was never missing. What was wrong is worse: the row said
+`mode="platform_credits"`, and the workspace was DEBITED for tokens the
+customer had already paid their own provider for.**
+
+"Who pays for this turn" has two possible sources. Only one was asked:
+
+```
+WORKSPACE  admin_defaults.sage_ai_provider  -> "byok"      _resolve_turn_payer_mode READ it
+AGENT      model_config.mode == "byok_api"  -> "byok_api"  nothing read it at all
+
+_resolve_agent_cloud_provider(...)  -> (provider, credentials, billing_mode)
+   docstring: "NEVER bill platform credits for a BYOK-bound agent"
+   unit-tested, 4 branches, all correct
+   ONE production call site:
+     provider, credentials, _ = await _resolve_agent_cloud_provider(...)
+                             ^^^ thrown away
+```
+
+So a byok_api agent in an ORDINARY workspace resolved to `platform_credits`.
+`sage_ai_provider` is a *workspace* AI-route default — nobody has to touch it
+to bind ONE agent to its own key — so the ordinary configuration is exactly
+the broken one. Measured live on the pre-fix tree by driving the real turn
+seam (`handle_sage_chat`, production-default SDK engine, real
+`_resolve_agent_cloud_provider`, only the LLM and the ledger faked):
+
+```
+                                     BEFORE                  AFTER
+agent byok_api, plain workspace   mode=platform_credits   mode=byok_api
+                                  DEBIT 10 credits        DEBIT 0
+agent byok_api, workspace BYOK    mode=byok               mode=byok_api
+                                  DEBIT 0                 DEBIT 0
+agent platform_credits            DEBIT 1  (unchanged)    DEBIT 1
+```
+
+**CLAUDE.md's own "built, tested, and never wired" failure mode, on a money
+path — and the schema-shaped variant of it too**: `usage_events_repository.
+_USAGE_MODE_TO_PAYER` already mapped `"byok_api"` -> `"BYOK"`. The READER was
+built for a value no writer had ever produced.
+
+Fixed by giving `_resolve_turn_payer_mode` the second input rather than
+adding a second decision: `agent_billing_mode` (the mode the resolver
+RESOLVED, never the raw `model_config.mode` — the legacy shape, a provider
+with no explicit mode, means byok_api and only the resolver knows that).
+`_meter_and_debit_turn` stays FUSED — this is one more input to the one
+payer question, not a second ledger call and not a BYOK bypass.
+
+Three rules follow. **Precedence runs agent-beats-workspace, but only
+downward**: a non-platform agent mode overrides, an agent declaring
+`platform_credits` does NOT, so a workspace-BYOK route resolves exactly as it
+did before the parameter existed — adding an input must not change an answer
+that was already right. **The set is spelled as what IS platform-paid**
+(`_PLATFORM_PAID_AGENT_MODES = {"platform_credits"}`), so a lane this module
+has never heard of fails CLOSED (no debit) instead of being billed on the
+grounds that nobody taught it otherwise. And **`usd_cost` is still reported
+for a BYOK turn**: it costs the PLATFORM nothing, which is a different fact
+from the tokens being free to produce, and only the `mode` column is allowed
+to carry the difference — the same discipline `_ledger_cli_subscription_turn`
+already keeps with `tokens_known`/`pricing_known`.
+
+Guarded in `test_default_engine_credit_debit.py` (16 new assertions, all red
+before / green after, verified by reverting the production file with
+`git diff` + `checkout` + `apply`, never `git stash`): COUNTS on both sides
+(exactly one `usage_events` row, exactly zero debits — "a row exists" and "no
+debit happened" are each satisfied by the opposite failure), a
+platform_credits control proving the fix did not simply switch debiting off,
+and two AST tests — one banning `provider, credentials, _ = await
+_resolve_agent_cloud_provider(...)` from returning, one requiring EVERY
+`_meter_and_debit_turn` call site to pass the argument, since a second site
+that forgets it silently reverts to the workspace-only answer for whichever
+lane it serves.
+
+**Verified by code reading only, not driven:** the legacy engine's OWN debit
+(`direct_chat_hosted_usage_service`, reached inside
+`stream_provider_backed_direct_chat`) gates on
+`credential_plane != "platform_runtime"` — a different signal that appears to
+already exclude a BYOK key — and `skills_service.py:6211` gates media
+capabilities on `resolution.billing_mode == "platform_credits"`, correctly.
+Neither was exercised live in this pass.
+
 ## BYO subscription: one effort ladder, live model lists, no auth shim (2026-08-20)
 
 **The founder OVERRODE the reasoning-effort picker's `none` branch the day

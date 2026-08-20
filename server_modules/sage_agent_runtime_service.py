@@ -334,21 +334,58 @@ def _turn_credit_idempotency_key(request_id: Any, trace_id: Any) -> str:
     return _coerce_text(request_id) or _coerce_text(trace_id)
 
 
-def _resolve_turn_payer_mode(workspace_record: Any) -> str:
-    """Who pays for this turn: ``platform_credits`` or ``byok``.
+# Billing modes an AGENT can declare on its own model_config that mean "the
+# customer is paying for this turn's tokens, not Empyralis". Kept as a set of
+# what is NOT platform_credits rather than an enumeration, because the
+# question this answers is one-directional: anything that is not positively
+# a platform-paid turn must never draw down platform credits. A mode this
+# module has never heard of therefore fails CLOSED (no debit) rather than
+# billing a customer for a lane nobody has taught it about yet.
+_PLATFORM_PAID_AGENT_MODES = {"platform_credits"}
 
-    A workspace that has configured its OWN ``sage_ai_provider`` in
-    admin_defaults is bringing its own key — its turns run on its own
-    provider account and must NEVER draw down Empyralis platform credits.
-    Anything else (no record, unreadable metadata, empty provider) is a
-    platform-paid turn.
 
-    Extracted from handle_sage_chat's cloud-fallthrough block, which was the
-    only place that made this distinction; the claude_agent_sdk-engine
-    metering call hardcoded ``mode="platform_credits"`` instead and therefore
-    mislabelled every BYOK turn on the production default engine. One
-    implementation now, so the two cannot disagree about who is paying.
+def _resolve_turn_payer_mode(workspace_record: Any, agent_billing_mode: str = "") -> str:
+    """Who pays for this turn: ``platform_credits``, or one of the modes that
+    means the customer does (``byok`` / ``byok_api`` / ``cli_subscription`` /
+    ``local``).
+
+    TWO INDEPENDENT SOURCES, AND THE AGENT WINS. There are two places a
+    "bring your own" decision can be made, and until 2026-08-21 only one of
+    them was consulted here:
+
+        WORKSPACE   admin_defaults.sage_ai_provider  -> "byok"     (was read)
+        AGENT       model_config.mode == "byok_api"  -> "byok_api" (was NOT)
+
+    ``_resolve_agent_cloud_provider`` computes the agent-level answer, its
+    docstring states the rule outright ("NEVER bill platform credits for a
+    BYOK-bound agent"), it is unit-tested — and its returned billing_mode had
+    exactly ONE production call site, which discarded it into ``_``. So a
+    byok_api agent in an ordinary workspace (no sage_ai_provider set — the
+    normal case, since that setting is a *workspace* AI-route default nobody
+    has to touch to bind one agent to its own key) resolved to
+    ``platform_credits`` here and was DEBITED for tokens the customer had
+    already paid their own provider for. Confirmed live before the fix by
+    driving the real turn seam: 10 credits charged, and the usage_events row
+    stamped ``mode="platform_credits"`` — a lie in the one column a future
+    consumption-pricing model has to trust.
+
+    Precedence, and why it is this way round: an agent that declares a
+    non-platform mode wins over the workspace, because it is the more
+    specific statement of who is actually being billed by the provider — the
+    turn literally runs on that agent's own key. An agent that declares
+    ``platform_credits`` (or declares nothing at all) does NOT override, so a
+    workspace-level BYOK setup keeps resolving to ``byok`` exactly as it did
+    before this parameter existed; adding the argument cannot change any
+    answer that was already correct.
+
+    ``agent_billing_mode`` must be the mode ``_resolve_agent_cloud_provider``
+    RESOLVED, never the raw ``model_config.mode`` string: the legacy shape
+    (a provider set with no explicit mode) means byok_api, and only the
+    resolver knows that.
     """
+    agent_mode = _coerce_text(agent_billing_mode).lower()
+    if agent_mode and agent_mode not in _PLATFORM_PAID_AGENT_MODES:
+        return agent_mode
     try:
         from server_modules.workspace_config_schema import (
             workspace_admin_defaults_from_metadata as _admin_defaults,
@@ -413,6 +450,12 @@ async def _meter_and_debit_turn(
     trace_id: str = "",
     metadata: dict[str, Any] | None = None,
     served_model: str | None = None,
+    # The billing mode _resolve_agent_cloud_provider RESOLVED for this
+    # turn's agent ("" for a master/Sage turn, which has no per-agent
+    # model_config). Not the raw model_config.mode — see
+    # _resolve_turn_payer_mode's docstring for why the resolved value is
+    # the only correct source.
+    agent_billing_mode: str = "",
 ) -> dict[str, Any]:
     """Record ONE turn's usage AND debit its credits. The single seam.
 
@@ -446,7 +489,21 @@ async def _meter_and_debit_turn(
 
     BYOK. Debits only when ``_resolve_turn_payer_mode`` says
     ``platform_credits``. A bring-your-own-key turn is metered (the customer
-    still wants to see it) and never charged.
+    still wants to see it) and never charged. That question has TWO inputs —
+    the workspace's own AI-route default AND ``agent_billing_mode``, the
+    per-agent ``model_config.mode`` binding — and for a while only the first
+    was asked, so a ``byok_api`` agent was billed platform credits for tokens
+    the customer had already paid their own provider for. The resolution rule
+    lives in one place, ``_resolve_turn_payer_mode``, never re-derived here.
+
+    RECORDED EVEN WHEN NOTHING IS OWED. Every mode above reaches
+    ``record_usage_from_context`` unconditionally — a turn Empyralis does not
+    bill is still a turn Empyralis orchestrated, and consumption pricing
+    cannot be re-based later onto data nobody collected. ``usd_cost`` for a
+    BYOK turn is what the pricing registry says the tokens are worth, not a
+    fabricated ``$0.00``: it costs the PLATFORM nothing, which is a different
+    fact from costing nothing to produce, and only the ``mode`` column is
+    allowed to carry the difference.
 
     NON-BLOCKING BY CONSTRUCTION. The turn has already produced its reply
     before anything here runs. ``debit_workspace_credits_for_turn_atomic``
@@ -484,7 +541,7 @@ async def _meter_and_debit_turn(
     absence.
     """
     outcome: dict[str, Any] = {
-        "mode": _resolve_turn_payer_mode(workspace_record),
+        "mode": _resolve_turn_payer_mode(workspace_record, agent_billing_mode),
         "usd_cost": None,
         "credits_owed": 0,
         "debit": None,
@@ -5900,6 +5957,22 @@ async def _handle_sage_chat_unguarded(
     # that into (provider, credentials) would be simply wrong.
     _spec_mode = str(getattr(_spec, "mode", "") or "").strip().lower() if _spec is not None else ""
     _spec_provider = str(getattr(_spec, "provider", "") or "").strip() if _spec is not None else ""
+    # WHO PAYS for this turn's tokens, as RESOLVED by the same function that
+    # resolves the provider — never re-derived from _spec_mode here, because
+    # the legacy shape (a provider set with no explicit mode) means byok_api
+    # and only the resolver knows that. "" for a master/Sage turn, which has
+    # no per-agent model_config at all, and for a specialist that never
+    # enters the branch below (nothing configured -> workspace default ->
+    # platform-paid, which is what "" already resolves to downstream).
+    #
+    # This variable exists because its value used to be thrown away: the
+    # call below unpacked it into `_`, so _resolve_agent_cloud_provider's
+    # own documented rule ("NEVER bill platform credits for a BYOK-bound
+    # agent") was computed, returned, and never asked. Read at BOTH
+    # _meter_and_debit_turn call sites in this function — the SDK-engine
+    # action-loop branch and the cloud fallthrough — since a byok_api agent
+    # can reach either depending on model_config.engine.
+    _agent_billing_mode = ""
     if _spec is not None and _spec_mode not in ("local", "cli_subscription") and (_spec_provider or _spec_mode):
         # §25.3/§28.2: this used to swap only the provider LABEL, leaving
         # `credentials` pointed at the workspace's default key -- a
@@ -5915,7 +5988,7 @@ async def _handle_sage_chat_unguarded(
             "provider": _spec_provider,
             "model": str(getattr(_spec, "model", "") or "").strip(),
         }
-        provider, credentials, _ = await _resolve_agent_cloud_provider(
+        provider, credentials, _agent_billing_mode = await _resolve_agent_cloud_provider(
             normalized_workspace_id, _agent_model_config, _spec_install_id,
         )
 
@@ -6999,6 +7072,7 @@ async def _handle_sage_chat_unguarded(
                     run_id=trace_id or None,
                     trace_id=trace_id,
                     metadata=_sdk_usage_metadata,
+                    agent_billing_mode=_agent_billing_mode,
                 )
                 # Surfaced to the customer, not just priced correctly — see
                 # this function's own "surface it" requirement. Read back
@@ -7765,6 +7839,7 @@ async def _handle_sage_chat_unguarded(
             usd_cost=_sage_usd_cost,
             run_id=trace_id or None,
             trace_id=trace_id,
+            agent_billing_mode=_agent_billing_mode,
         )
     except Exception:
         pass
