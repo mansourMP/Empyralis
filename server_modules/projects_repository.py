@@ -1104,14 +1104,15 @@ async def grant_invite_project_access(
     /fleet/projects/{id}/members grant route -- so an invited teammate saw no
     projects at all until someone separately made them a workspace owner.
 
-    Shared by BOTH acceptance paths (routes_workspaces.
-    accept_workspace_invite_route's /join/{token} flow, and
-    auth.accept_workspace_invites_for_user's auto-accept-at-login path) so
-    the validate-then-grant behavior exists exactly once. That matters here
-    specifically: this repo has two independent ways an invite gets accepted,
-    and a hand-duplicated version of this logic in both files is exactly how
-    a fix like this quietly ends up working through the emailed link while
-    still no-op'ing for whoever happens to log in before clicking it.
+    Shared by BOTH acceptance paths, which now both run through
+    routes_workspaces._finalize_workspace_invite_acceptance: the emailed
+    /join/{token} link (POST /workspaces/invites/accept) and the in-app
+    banner's Join button (POST /workspaces/invites/{id}/join). A third,
+    silent path used to exist -- auth.accept_workspace_invites_for_user
+    granted membership on every login and registration -- and it was deleted
+    2026-08-20 because signing in must never change what you are a member of.
+    The validate-then-grant behavior existing exactly once is what keeps a
+    fix here from working on one path and quietly no-op'ing on the other.
 
     Re-validates the project against tenant_id/workspace_id via get_project
     even though create_workspace_invite_route already validated project_id

@@ -36,6 +36,7 @@ import { MutateNetworkError } from "@/lib/workspace/mutation-outcome";
 
 import { useCallback, useEffect, useState } from "react";
 
+import { refresh as refreshAuthSession } from "@/lib/auth/auth-client";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { useAccountShell } from "@/lib/shell/account-shell-context";
 
@@ -291,18 +292,42 @@ export async function fetchMyPendingWorkspaceInviteIds(): Promise<string[]> {
   return items.map((item: any) => String(item?.id || "")).filter(Boolean);
 }
 
+/** Accepting an invite CHANGES the caller's own memberships, and the access
+ *  token carries a `membership_version` claim that auth._validated_bearer_
+ *  context compares against the live one on every request. Granting the
+ *  membership bumps that version, so the token the browser is holding one
+ *  millisecond after a successful accept is stale: the very next call 401s
+ *  and the app bounces to /login — reporting failure immediately after a
+ *  success, which is the exact shape CLAUDE.md's outcome-honesty law forbids.
+ *  Observed live, not reasoned about: POST .../join returned 200 and the
+ *  account-shell fetch behind it returned 401 twice.
+ *
+ *  Re-minting the token here, before anything else reads the session, is the
+ *  whole fix. refresh() is single-flighted in auth-client, so two accepts
+ *  racing share one call. It is best-effort on purpose: the membership is
+ *  already committed server-side, so a failed refresh must never be reported
+ *  as a failed accept — the worst case is one stale-token 401 that the
+ *  ordinary refresh-and-retry path then handles.
+ *
+ *  Shared by BOTH accept paths (the in-app banner and the emailed
+ *  /join/{token} link) rather than copied into each — a second copy is the
+ *  one the next branch forgets. */
+async function refreshSessionAfterMembershipChange(): Promise<void> {
+  try {
+    await refreshAuthSession();
+  } catch {
+    /* see above — the accept already happened */
+  }
+}
+
 /** Accept an invite from the in-app pending-invites list — no signed token
  *  involved (there's no email link here), so the server's whole
  *  authorization story is the caller's authenticated email matching the
  *  invite's own email, exactly like acceptWorkspaceInvite below. */
 export async function joinPendingWorkspaceInvite(inviteId: string): Promise<AcceptInviteResult> {
+  let data: any;
   try {
-    const data = await mutateJson(`/api/workspaces/invites/${encodeURIComponent(inviteId)}/join`, "POST");
-    return {
-      ok: true,
-      workspace_id: String(data?.workspace_id || ""),
-      role: (String(data?.role || "viewer").toLowerCase() as WorkspaceRole),
-    };
+    data = await mutateJson(`/api/workspaces/invites/${encodeURIComponent(inviteId)}/join`, "POST");
   } catch (e) {
     return {
       ok: false,
@@ -310,6 +335,15 @@ export async function joinPendingWorkspaceInvite(inviteId: string): Promise<Acce
       ambiguous: e instanceof MutateNetworkError,
     };
   }
+  // Deliberately OUTSIDE the try above: the membership is already committed
+  // at this point, so nothing after this line may ever be reported as the
+  // join failing.
+  await refreshSessionAfterMembershipChange();
+  return {
+    ok: true,
+    workspace_id: String(data?.workspace_id || ""),
+    role: (String(data?.role || "viewer").toLowerCase() as WorkspaceRole),
+  };
 }
 
 /** Decline is a REAL, recorded state (server: status becomes 'declined'),
@@ -444,13 +478,9 @@ export type AcceptInviteResult =
  *  the route itself gates on the caller's authenticated email matching the
  *  invite's email exactly (accept_workspace_invite_route), not on role. */
 export async function acceptWorkspaceInvite(token: string): Promise<AcceptInviteResult> {
+  let data: any;
   try {
-    const data = await mutateJson("/api/workspaces/invites/accept", "POST", { token });
-    return {
-      ok: true,
-      workspace_id: String(data?.workspace_id || ""),
-      role: (String(data?.role || "viewer").toLowerCase() as WorkspaceRole),
-    };
+    data = await mutateJson("/api/workspaces/invites/accept", "POST", { token });
   } catch (e) {
     return {
       ok: false,
@@ -458,6 +488,13 @@ export async function acceptWorkspaceInvite(token: string): Promise<AcceptInvite
       ambiguous: e instanceof MutateNetworkError,
     };
   }
+  // Outside the try, for the same reason as joinPendingWorkspaceInvite above.
+  await refreshSessionAfterMembershipChange();
+  return {
+    ok: true,
+    workspace_id: String(data?.workspace_id || ""),
+    role: (String(data?.role || "viewer").toLowerCase() as WorkspaceRole),
+  };
 }
 
 /** Best-effort, UNVERIFIED read of the `workspace_id` an invite token
