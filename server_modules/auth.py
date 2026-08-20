@@ -2835,81 +2835,106 @@ def upsert_workspace_membership(user_id: str, workspace_id: str, role: str) -> d
     return {"user_id": clean_user_id, "workspace_id": clean_workspace_id, "role": clean_role}
 
 
-def accept_workspace_invites_for_user(user_id: str, email: str) -> list[dict[str, Any]]:
+def _ensure_personal_workspace_for_user(
+    user_id: str,
+    user: Optional[dict[str, Any]] = None,
+) -> Optional[dict[str, Any]]:
+    """Mint this account's own workspace, but only if it has none at all.
+
+    The counterpart to skipping the signup bootstrap for an invited account
+    (control_plane_repository.create_local_password_account's
+    `bootstrap_personal_workspace=False`): that account deliberately owns no
+    workspace while its invite is still unanswered, so declining it -- or
+    having it revoked or expire -- has to leave the person somewhere. Reuses
+    create_workspace_for_user, the same function POST /workspaces calls, so
+    there is one way a workspace comes into existence rather than two.
+
+    Returns None and never raises when it cannot: a login that got this far
+    already authenticated, and the caller decides what an empty result means.
+    """
     clean_user_id = str(user_id or "").strip()
+    if not clean_user_id:
+        return None
+    if _list_workspace_memberships(clean_user_id):
+        return None
+    record = user if isinstance(user, dict) else _find_user_by_id(clean_user_id)
+    email_token = str((record or {}).get("email") or "").strip().lower()
+    display_label = str((record or {}).get("name") or "").strip()
+    fallback_label = email_token.split("@", 1)[0] if email_token else "My"
+    workspace_name = f"{display_label or fallback_label}'s Workspace".strip()
+    try:
+        created = _control_plane_call(
+            control_plane_repository.create_workspace_for_user(
+                user_id=clean_user_id,
+                tenant_id=None,
+                name=workspace_name,
+                workspace_type="personal",
+                preferred_shell_profile="personal_shell",
+                # The workspace id does not exist until the row does, so the
+                # landing route is stamped in a second step below -- same
+                # value create_local_password_account writes for an ordinary
+                # signup (the bare workspace route, never /agents or /sage).
+                default_route="/",
+            )
+        )
+    except Exception:  # noqa: BLE001 -- an authenticated login must not 500 here
+        LOGGER.exception(
+            "Could not mint a personal workspace for user_id=%s with no memberships.",
+            clean_user_id,
+        )
+        return None
+    if not isinstance(created, dict):
+        return None
+    created_workspace_id = str(created.get("id") or created.get("workspace_id") or "").strip()
+    if created_workspace_id:
+        try:
+            _control_plane_call(
+                control_plane_repository.update_workspace_profile(
+                    created_workspace_id,
+                    {"default_route": f"/w/{created_workspace_id}"},
+                )
+            )
+        except Exception:  # noqa: BLE001 -- cosmetic; the workspace already exists
+            LOGGER.warning(
+                "Minted workspace %s but could not stamp its default route.",
+                created_workspace_id,
+            )
+    _bump_user_identity_versions(clean_user_id, membership=True)
+    return created
+
+
+def pending_workspace_invites_for_user(email: str) -> list[dict[str, Any]]:
+    """Every still-pending workspace invite addressed to this email.
+
+    This REPLACED accept_workspace_invites_for_user (deleted 2026-08-20), which
+    login_user/register_user called to silently GRANT membership for every
+    pending invite matching the caller's email. That is why the founder saw a
+    workspace he had never accepted: "I didn't do anything. I didn't accept.
+    The moment I came to the platform it was just present."
+
+    It also made a control that already exists unreachable —
+    app/(account)/PendingWorkspaceInvitesBanner.tsx renders exactly this list
+    with Join / Decline buttons, and could never show anything, because the
+    auto-accept consumed every invite before the banner could read it. The
+    accept step was built and wired; it was pre-empted.
+
+    Accepting is now only ever an explicit act, through one of the two real
+    accept paths, which share `_finalize_workspace_invite_acceptance`:
+    POST /workspaces/invites/{id}/join (the banner) and
+    POST /workspaces/invites/accept (the emailed /join/{token} link).
+
+    Read-only on purpose: nothing about signing in may change what a person is
+    a member of.
+    """
     email_token = str(email or "").strip().lower()
-    if not clean_user_id or not email_token:
+    if not email_token:
         return []
     invites = _control_plane_call(
         control_plane_repository.list_pending_workspace_invites_for_email(email_token)
     )
     if not isinstance(invites, list):
         return []
-    accepted: list[dict[str, Any]] = []
-    for invite in invites:
-        if not isinstance(invite, dict):
-            continue
-        workspace_id = _normalize_workspace_token(invite.get("workspace_id"), default="")
-        if not workspace_id:
-            continue
-        role = normalize_rbac_role(invite.get("role"), default="member")
-        upsert_workspace_membership(clean_user_id, workspace_id, role)
-
-        # MAN-70/MAN-114 follow-up: this auto-accept-at-login path used to be
-        # the trap -- accept_workspace_invite_route (the emailed /join/{token}
-        # link) is not the only way an invite gets accepted. Whoever happens
-        # to log in with the invited email BEFORE clicking the link gets
-        # their workspace membership granted right here, silently, with no
-        # trip through that route at all. A fix that only patched the route
-        # would work via the link and quietly keep no-op'ing for this path.
-        # grant_invite_project_access is the SAME shared helper the route
-        # calls -- see its docstring in projects_repository.py -- so both
-        # paths validate and grant identically rather than by hand-duplicated
-        # (and driftable) logic in each file. Guarded on project_id being
-        # present before even calling _control_plane_call: the overwhelming
-        # common case is an invite with no project attached, and skipping the
-        # call entirely (rather than letting the no-op happen inside the
-        # coroutine) avoids constructing/awaiting a coroutine for nothing on
-        # every plain workspace invite accepted via login.
-        invite_metadata = invite.get("metadata") if isinstance(invite.get("metadata"), dict) else {}
-        invite_project_id = str(invite_metadata.get("project_id") or "").strip()
-        if invite_project_id:
-            invite_tenant_id = str(invite.get("tenant_id") or "").strip() or workspace_id
-            from server_modules import projects_repository
-
-            _control_plane_call(
-                projects_repository.grant_invite_project_access(
-                    tenant_id=invite_tenant_id,
-                    workspace_id=workspace_id,
-                    user_id=clean_user_id,
-                    metadata=invite_metadata,
-                    added_by=str(invite.get("invited_by_user_id") or "").strip() or None,
-                )
-            )
-
-        invite_id = str(invite.get("id") or "").strip()
-        if invite_id:
-            # Stamp auto_accepted_at_login=True so accept_workspace_invite_route
-            # (server_modules/routes_workspaces.py) can tell "this invite was
-            # already fulfilled as a side effect of my own login, report
-            # success" apart from "this invite is genuinely already used by
-            # someone/something else, reject" -- see accept_workspace_invite's
-            # docstring in control_plane_repository.py for the full picture.
-            _control_plane_call(
-                control_plane_repository.accept_workspace_invite(
-                    invite_id=invite_id,
-                    accepted_by_user_id=clean_user_id,
-                    metadata_patch={"auto_accepted_at_login": True},
-                )
-            )
-        accepted.append(
-            {
-                "invite_id": invite_id or None,
-                "workspace_id": workspace_id,
-                "role": role,
-            }
-        )
-    return accepted
+    return [invite for invite in invites if isinstance(invite, dict)]
 
 
 def _write_workspace_policy(
@@ -5561,6 +5586,25 @@ def register_user(
     created_at = int(time.time())
     user_name = str(name or "").strip() or None
     password_hash = _hash_password(password)
+    # An account signing up BECAUSE it was invited must not also be handed a
+    # workspace of its own. That is the founder's own report: he invited a
+    # second account of his into his existing workspace and "it created the
+    # entire workspace again", listed right beside the real one in the
+    # switcher. Membership in the inviting workspace still requires an
+    # explicit accept, so this account starts with no workspace at all until
+    # it answers -- login tolerates exactly that state (see
+    # _login_payload_for_user) and _ensure_personal_workspace_for_user gives
+    # it one the moment the invite is declined, revoked or expires.
+    signup_invites = pending_workspace_invites_for_user(email_token)
+    invite_home = next(
+        (
+            invite
+            for invite in signup_invites
+            if str(invite.get("workspace_id") or "").strip()
+            and str(invite.get("tenant_id") or "").strip()
+        ),
+        None,
+    )
     control_plane_user = _control_plane_call(
         control_plane_repository.create_local_password_account(
             user_id=user_id,
@@ -5568,6 +5612,9 @@ def register_user(
             display_name=user_name,
             password_hash=password_hash,
             role="owner",
+            tenant_id=str((invite_home or {}).get("tenant_id") or "").strip() or None,
+            workspace_id=str((invite_home or {}).get("workspace_id") or "").strip() or None,
+            bootstrap_personal_workspace=invite_home is None,
         )
     )
     control_plane_user_payload = control_plane_user.get("user") if isinstance(control_plane_user, dict) else {}
@@ -5664,10 +5711,10 @@ def register_user(
     user = _find_user_by_id(user_id)
     if user is None:
         raise HTTPException(status_code=500, detail="Registered user was not persisted.")
-    accept_workspace_invites_for_user(
-        user_id,
-        str(user.get("email") or "").strip().lower() or email_token,
-    )
+    # Deliberately NOT accepting the pending invites here. Signing up is not
+    # accepting -- see pending_workspace_invites_for_user's docstring. The
+    # invite stays pending and PendingWorkspaceInvitesBanner shows it with a
+    # real Join / Decline choice.
     membership_rows = _list_workspace_memberships(user_id)
     workspace_ids = [
         _normalize_workspace_token(item.get("workspace_id"))
@@ -5815,10 +5862,7 @@ def _login_payload_for_user(
     user_id = str(user.get("id") or "").strip()
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid user record.")
-    accept_workspace_invites_for_user(
-        user_id,
-        str(user.get("email") or "").strip().lower(),
-    )
+    user_email = str(user.get("email") or "").strip().lower()
     membership_rows = _list_workspace_memberships(user_id)
     workspace_ids = [
         _normalize_workspace_token(item.get("workspace_id"))
@@ -5826,7 +5870,34 @@ def _login_payload_for_user(
         if isinstance(item, dict) and str(item.get("workspace_id") or "").strip()
     ]
     if not workspace_ids:
-        raise HTTPException(status_code=403, detail="Authenticated user does not have workspace access.")
+        # Three different facts used to share one 403, and one of them is now
+        # an ordinary, expected state rather than an error:
+        #
+        #   pending invite, not yet accepted -> let them IN with no workspace.
+        #       This is an invitee who has not pressed Join yet. Refusing the
+        #       session would lock them out of the only screen that can accept
+        #       it (PendingWorkspaceInvitesBanner), which needs no workspace
+        #       scope at all -- /workspaces/invites/pending and .../join are
+        #       gated on the caller's email, never on membership.
+        #   nothing pending, no membership  -> mint their own workspace.
+        #       They declined, were removed, or their invite was revoked or
+        #       expired. Without this, "decline" would be a one-way door out of
+        #       your own account.
+        #   still nothing after that        -> the original 403 stands.
+        if not pending_workspace_invites_for_user(user_email):
+            recovered = _ensure_personal_workspace_for_user(user_id, user)
+            if recovered:
+                membership_rows = _list_workspace_memberships(user_id)
+                workspace_ids = [
+                    _normalize_workspace_token(item.get("workspace_id"))
+                    for item in membership_rows
+                    if isinstance(item, dict) and str(item.get("workspace_id") or "").strip()
+                ]
+            if not workspace_ids:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Authenticated user does not have workspace access.",
+                )
     effective_role = "viewer"
     for item in membership_rows:
         candidate_role = normalize_rbac_role((item or {}).get("role"), default="viewer")

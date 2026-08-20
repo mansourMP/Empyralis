@@ -1240,8 +1240,8 @@ async def _finalize_workspace_invite_acceptance(invite: Dict[str, Any], user_id:
 
     # MAN-70/MAN-114 follow-up: grant the project this invite carries, if
     # any -- see projects_repository.grant_invite_project_access's docstring
-    # for why this call is shared with auth.accept_workspace_invites_for_user
-    # rather than duplicated. Uses the invite's own tenant_id (falling back
+    # for why this call lives on this one shared tail rather than being
+    # duplicated per accept path. Uses the invite's own tenant_id (falling back
     # to workspace_id, matching _control_plane_tenant_id's convention) --
     # never the accepting caller's -- so this always resolves to the project
     # in the workspace the invite actually belongs to.
@@ -1310,18 +1310,16 @@ async def accept_workspace_invite_route(
     invite_metadata = invite.get("metadata") if isinstance(invite.get("metadata"), dict) else {}
     accepted_by_user_id = str(invite.get("accepted_by_user_id") or "").strip()
 
-    # A user's own login/registration auto-accepts every pending invite that
-    # matches their email (auth.accept_workspace_invites_for_user, called
-    # from auth.login_user/register_user) -- entirely independent of this
-    # token-based flow. That means by the time someone who just signed up
-    # via a /join/{token} link lands back here, the invite this exact token
-    # points at may *already* be 'accepted' -- accepted by them, via their
-    # own login, moments ago. That is a real success, not an invalid invite,
-    # so it must not 404. auto_accepted_at_login is the marker
-    # accept_workspace_invites_for_user stamps for exactly this case; it is
-    # cleared below once this route has acknowledged it, so a genuine repeat
-    # call with the same token (replay) still 404s like any other
-    # already-consumed invite.
+    # BACKWARD COMPATIBILITY ONLY, and nothing produces this state any more.
+    # Until 2026-08-20 a user's own login or registration silently accepted
+    # every pending invite matching their email
+    # (auth.accept_workspace_invites_for_user, deleted -- signing in must not
+    # change what you are a member of), stamping auto_accepted_at_login=True.
+    # An invite consumed that way before its /join/{token} link was ever
+    # clicked is a real success, not an invalid invite, so it must not 404.
+    # Rows written before that deletion can still be in this state, so the
+    # branch stays; it is cleared below once acknowledged, so a genuine
+    # replay of the same token still 404s like any other consumed invite.
     already_confirmed_via_login = (
         invite_status == "accepted"
         and bool(invite_metadata.get("auto_accepted_at_login"))
@@ -1406,8 +1404,7 @@ async def join_pending_workspace_invite_route(
     token, because there is no email link here -- the caller reached this
     invite through their own authenticated session (the pending-invites list
     above), so the same email-match check that guards the token path is the
-    whole authorization story, matching auth.accept_workspace_invites_for_user's
-    (login-triggered auto-accept) security model exactly.
+    whole authorization story.
     """
     auth_module.validate_csrf(request)
     user = auth_module.get_authenticated_user_record(current_user)

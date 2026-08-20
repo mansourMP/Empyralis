@@ -20,35 +20,44 @@ class _FakeAuthConnection:
         return None
 
 
-def test_accept_workspace_invites_for_user_creates_memberships_and_marks_acceptance() -> None:
+def test_signing_in_never_grants_workspace_membership() -> None:
+    """The founder's own report: "I didn't do anything. I didn't accept. The
+    moment I came to the platform it was just present."
+
+    auth.accept_workspace_invites_for_user used to run on every login AND
+    every registration and GRANT membership for every pending invite matching
+    the caller's email. It is deleted. Its replacement,
+    pending_workspace_invites_for_user, only reads -- so this asserts the
+    absence of a writer, which no behavioural test of the remaining code can
+    do on its own.
+    """
+    assert not hasattr(auth, "accept_workspace_invites_for_user")
+
+    granted: list[tuple[str, str, str]] = []
     invites = [
         {"id": "invite-1", "workspace_id": "ws-1", "role": "member"},
         {"id": "invite-2", "workspace_id": "ws-2", "role": "viewer"},
     ]
-    granted_memberships: list[tuple[str, str, str]] = []
-
     with (
-        patch.object(auth, "_control_plane_call", side_effect=[invites, {"id": "invite-1"}, {"id": "invite-2"}]),
-        patch.object(auth.control_plane_repository, "list_pending_workspace_invites_for_email", new=Mock(return_value=None)),
-        patch.object(auth.control_plane_repository, "accept_workspace_invite", new=Mock(return_value=None)),
+        patch.object(auth, "_control_plane_call", return_value=invites),
         patch.object(
             auth,
             "upsert_workspace_membership",
-            side_effect=lambda user_id, workspace_id, role: granted_memberships.append((user_id, workspace_id, role)) or {"user_id": user_id, "workspace_id": workspace_id, "role": role},
+            side_effect=lambda user_id, workspace_id, role: granted.append((user_id, workspace_id, role)),
         ),
+        patch.object(auth.control_plane_repository, "accept_workspace_invite", new=Mock()) as accept_mock,
     ):
-        result = auth.accept_workspace_invites_for_user("user-1", "owner@example.com")
+        result = auth.pending_workspace_invites_for_user("owner@example.com")
 
     assert [item["workspace_id"] for item in result] == ["ws-1", "ws-2"]
-    assert granted_memberships == [
-        ("user-1", "ws-1", "member"),
-        ("user-1", "ws-2", "viewer"),
-    ]
-    assert result[0]["invite_id"] == "invite-1"
-    assert result[1]["invite_id"] == "invite-2"
+    # The two things that must NOT happen: no membership, no invite consumed.
+    assert granted == []
+    accept_mock.assert_not_called()
 
 
-def test_login_user_accepts_pending_workspace_invites_before_resolving_access() -> None:
+def test_login_user_resolves_existing_access_without_touching_invites() -> None:
+    """Logging in reports what you already have. It never changes it -- an
+    already-member caller must not have any invite machinery run at all."""
     user = {"id": "user-1", "email": "owner@example.com", "password_hash": "hash"}
     membership_rows = [
         {"workspace_id": "ws-home", "role": "owner"},
@@ -60,7 +69,9 @@ def test_login_user_accepts_pending_workspace_invites_before_resolving_access() 
         patch.object(auth.control_plane_repository, "get_local_auth_identity_by_email", new=Mock(return_value=None)),
         patch.object(auth, "_control_plane_call", return_value=None),
         patch.object(auth, "_verify_password", return_value=True),
-        patch.object(auth, "accept_workspace_invites_for_user") as accept_mock,
+        patch.object(auth, "pending_workspace_invites_for_user", return_value=[]) as pending_mock,
+        patch.object(auth, "upsert_workspace_membership") as grant_mock,
+        patch.object(auth, "_ensure_personal_workspace_for_user") as mint_mock,
         patch.object(auth, "_list_workspace_memberships", return_value=membership_rows),
         patch.object(auth, "_effective_workspace_access", return_value={"ws-home": {"workspace_id": "ws-home"}, "ws-invited": {"workspace_id": "ws-invited"}}),
         patch.object(auth, "_issue_authenticated_user_payload", return_value={"ok": True}) as issue_mock,
@@ -69,7 +80,11 @@ def test_login_user_accepts_pending_workspace_invites_before_resolving_access() 
         payload = auth.login_user("owner@example.com", "password-123")
 
     assert payload == {"ok": True}
-    accept_mock.assert_called_once_with("user-1", "owner@example.com")
+    grant_mock.assert_not_called()
+    # Nothing about a caller who already has access needs the invite list or
+    # the personal-workspace fallback -- neither is consulted.
+    pending_mock.assert_not_called()
+    mint_mock.assert_not_called()
     assert issue_mock.call_args.kwargs["workspace_access"]["ws-invited"]["workspace_id"] == "ws-invited"
 
 
@@ -96,7 +111,7 @@ def _patched_register_user_dependencies():
         patch.object(auth, "_upsert_user_auth_method_locked"),
         patch.object(auth, "_ensure_user_identity_versions_locked"),
         patch.object(auth, "_find_user_by_id", return_value={"id": "user-1", "email": "owner@example.com"}),
-        patch.object(auth, "accept_workspace_invites_for_user"),
+        patch.object(auth, "pending_workspace_invites_for_user", return_value=[]),
         patch.object(auth, "_list_workspace_memberships", return_value=[{"workspace_id": "ws-home", "role": "owner"}]),
         patch.object(auth, "_effective_workspace_access", return_value={"ws-home": {"workspace_id": "ws-home"}}),
         patch.object(auth, "_issue_authenticated_user_payload", return_value={"ok": True}),
@@ -152,11 +167,11 @@ def test_register_user_signup_survives_email_verification_provider_failure() -> 
     assert payload == {"ok": True, "email_verification": {"status": "failed"}}
 
 
-def test_register_user_accepts_pending_workspace_invites_before_resolving_access() -> None:
-    membership_rows = [
-        {"workspace_id": "ws-home", "role": "owner"},
-        {"workspace_id": "ws-invited", "role": "member"},
-    ]
+def test_register_user_never_accepts_pending_workspace_invites() -> None:
+    """Signing up is not accepting. A brand-new account whose email has a
+    pending invite is registered and left with the invite still pending, so
+    PendingWorkspaceInvitesBanner can offer a real Join / Decline choice."""
+    membership_rows = [{"workspace_id": "ws-home", "role": "owner"}]
 
     with (
         patch.object(auth, "_find_user_by_email", return_value=None),
@@ -175,22 +190,23 @@ def test_register_user_accepts_pending_workspace_invites_before_resolving_access
         patch.object(auth, "_upsert_user_auth_method_locked"),
         patch.object(auth, "_ensure_user_identity_versions_locked"),
         patch.object(auth, "_find_user_by_id", return_value={"id": "user-1", "email": "owner@example.com"}),
-        patch.object(auth, "accept_workspace_invites_for_user") as accept_mock,
+        patch.object(
+            auth,
+            "pending_workspace_invites_for_user",
+            return_value=[{"id": "invite-1", "workspace_id": "ws-invited", "tenant_id": "tenant-invited", "role": "member"}],
+        ),
+        patch.object(auth, "upsert_workspace_membership") as grant_mock,
+        patch.object(auth.control_plane_repository, "accept_workspace_invite", new=Mock()) as accept_mock,
         patch.object(auth, "_list_workspace_memberships", return_value=membership_rows),
         patch.object(
             auth,
             "_effective_workspace_access",
-            return_value={
-                "ws-home": {"workspace_id": "ws-home"},
-                "ws-invited": {"workspace_id": "ws-invited"},
-            },
+            return_value={"ws-home": {"workspace_id": "ws-home"}},
         ),
-        patch.object(auth, "_issue_authenticated_user_payload", return_value={"ok": True}) as issue_mock,
+        patch.object(auth, "_issue_authenticated_user_payload", return_value={"ok": True}),
     ):
         payload = auth.register_user("owner@example.com", "password-123", name="Owner")
 
-    # start_verification is NOT mocked here, so the real one runs and hits an
-    # unconfigured provider under test -- hence "not_configured".
     assert payload == {"ok": True, "email_verification": {"status": "not_configured"}}
-    accept_mock.assert_called_once_with("user-1", "owner@example.com")
-    assert issue_mock.call_args.kwargs["workspace_access"]["ws-invited"]["workspace_id"] == "ws-invited"
+    grant_mock.assert_not_called()
+    accept_mock.assert_not_called()

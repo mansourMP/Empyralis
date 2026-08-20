@@ -26178,3 +26178,122 @@ body[data-theme='dark'] .sage-integration-brand__image[src*='notion.svg'] {
   color: var(--text-primary);
   border-color: var(--text-primary);
 }
+
+/* ── Pending workspace invites ─────────────────────────────────────────
+   app/(account)/PendingWorkspaceInvitesBanner.tsx. Lives here, in the
+   root-layout-global stylesheet, and NOT in fleet-theme.css: fleet-theme is
+   imported by FleetShell only, while this renders above the shell — most
+   importantly on /workspaces/new, where an invitee with no workspace of
+   their own lands. Its previous .fleet-card/.fleet-btn classes resolved to
+   nothing there, so the only control that can accept an invite rendered as
+   unstyled text.
+
+   Both actions stay neutral: Join is not accent-filled, because this can
+   render above a page that already spends its one accent action elsewhere. */
+
+.pending-invite-strip {
+  margin: var(--app-space-4) var(--app-space-6) 0;
+  padding: var(--app-space-3) var(--app-space-4);
+  border: 1px solid var(--app-border-default);
+  border-radius: 12px;
+  background: var(--app-surface-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-2);
+}
+
+.pending-invite-landing {
+  position: fixed;
+  inset: 0;
+  /* Above --z-modal (100) on purpose. A memberless invitee is routed to
+     /workspaces/new, which opens its "Create a workspace" dialog on mount —
+     i.e. the product's answer to "you have no workspace" is to hand them a
+     brand-new one, which is exactly the extra workspace this fix removes.
+     While an invite is unanswered it is the only thing on screen, and
+     Decline is right there as the first-class way past it. */
+  z-index: calc(var(--z-modal) + 10);
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--app-space-6);
+  background: var(--app-bg-page);
+}
+
+.pending-invite-landing__card {
+  width: 100%;
+  max-width: 480px;
+  padding: var(--app-space-8);
+  border-radius: 16px;
+  background: var(--app-surface-2);
+  border: 1px solid var(--app-border-default);
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-4);
+}
+
+.pending-invite__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--app-space-4);
+  flex-wrap: wrap;
+}
+
+.pending-invite-landing__card .pending-invite__row {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.pending-invite__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.pending-invite__title {
+  font-size: var(--app-font-14);
+  font-weight: 600;
+  color: var(--app-text-primary);
+}
+
+.pending-invite-landing__card .pending-invite__title {
+  font-size: var(--app-font-20);
+}
+
+.pending-invite__meta {
+  font-size: var(--app-font-13);
+  color: var(--app-text-secondary);
+}
+
+.pending-invite__actions {
+  display: flex;
+  gap: var(--app-space-2);
+  flex-shrink: 0;
+}
+
+.pending-invite__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--app-border-default);
+  background: var(--app-bg-page);
+  color: var(--app-text-primary);
+  font-size: var(--app-font-13);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 120ms ease-out, border-color 120ms ease-out;
+}
+
+.pending-invite__btn:hover:not(:disabled) {
+  background: var(--app-surface-hover);
+  border-color: var(--app-border-strong);
+}
+
+.pending-invite__btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}

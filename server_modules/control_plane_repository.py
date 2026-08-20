@@ -4782,10 +4782,33 @@ async def create_local_password_account(
     tenant_id: Optional[str] = None,
     workspace_id: Optional[str] = None,
     role: str = "owner",
+    bootstrap_personal_workspace: bool = True,
 ) -> Optional[Dict[str, Any]]:
+    """Create a local password account.
+
+    `bootstrap_personal_workspace=False` is for the ONE case where minting a
+    personal workspace is wrong: an account signing up because it was invited
+    into somebody else's workspace. Before 2026-08-20 that account got a
+    brand-new workspace it never asked for, which the workspace switcher then
+    listed beside the one it was actually invited to -- the founder's own
+    report ("it created the entire workspace again ... I didn't do anything").
+
+    It requires an EXISTING tenant_id/workspace_id, because users.tenant_id /
+    users.workspace_id are NOT NULL and must name real rows; those two columns
+    are the account's *home* seed and are not authoritative for anything (see
+    CLAUDE.md), so pointing them at the inviting workspace is honest -- that is
+    where this account is going. No membership row is written: membership is
+    the invitee's own explicit accept, never a side effect of signing up.
+    """
     normalized_email = str(email or "").strip().lower()
     if not normalized_email:
         return None
+    # Fail SAFE, not closed: a caller that asks to skip the bootstrap without
+    # naming a real home workspace would leave the account with nowhere to
+    # live at all, so the ordinary personal workspace is minted instead.
+    bootstrap_workspace = bool(bootstrap_personal_workspace) or not (
+        str(tenant_id or "").strip() and str(workspace_id or "").strip()
+    )
 
     created_at = _utc_now_ts()
     resolved_user_id = str(user_id or uuid.uuid4()).strip() or str(uuid.uuid4())
@@ -4827,46 +4850,48 @@ async def create_local_password_account(
                         """,
                         (resolved_user_id, normalized_email, display_label or None, password_hash, created_at_ts),
                     )
-                    fallback.execute(
-                        """
-                        INSERT OR REPLACE INTO workspace_registry (
-                            workspace_id, tenant_id, name, workspace_type, metadata_json, created_at, updated_at
-                        ) VALUES (?, ?, ?, 'personal', ?, COALESCE((SELECT created_at FROM workspace_registry WHERE workspace_id = ?), ?), ?)
-                        """,
-                        (
-                            resolved_workspace_id,
-                            resolved_tenant_id,
-                            workspace_name,
-                            _to_json(workspace_metadata, default={}),
-                            resolved_workspace_id,
-                            created_at_ts,
-                            created_at_ts,
-                        ),
-                    )
-                    fallback.execute(
-                        """
-                        INSERT OR REPLACE INTO workspace_memberships (
-                            user_id, workspace_id, role, created_at, updated_at
-                        ) VALUES (
-                            ?, ?, ?, COALESCE((SELECT created_at FROM workspace_memberships WHERE user_id = ? AND workspace_id = ?), ?), ?
+                    if bootstrap_workspace:
+                        fallback.execute(
+                            """
+                            INSERT OR REPLACE INTO workspace_registry (
+                                workspace_id, tenant_id, name, workspace_type, metadata_json, created_at, updated_at
+                            ) VALUES (?, ?, ?, 'personal', ?, COALESCE((SELECT created_at FROM workspace_registry WHERE workspace_id = ?), ?), ?)
+                            """,
+                            (
+                                resolved_workspace_id,
+                                resolved_tenant_id,
+                                workspace_name,
+                                _to_json(workspace_metadata, default={}),
+                                resolved_workspace_id,
+                                created_at_ts,
+                                created_at_ts,
+                            ),
                         )
-                        """,
-                        (
-                            resolved_user_id,
-                            resolved_workspace_id,
-                            str(role or "owner").strip().lower() or "owner",
-                            resolved_user_id,
-                            resolved_workspace_id,
-                            created_at_ts,
-                            created_at_ts,
-                        ),
-                    )
+                        fallback.execute(
+                            """
+                            INSERT OR REPLACE INTO workspace_memberships (
+                                user_id, workspace_id, role, created_at, updated_at
+                            ) VALUES (
+                                ?, ?, ?, COALESCE((SELECT created_at FROM workspace_memberships WHERE user_id = ? AND workspace_id = ?), ?), ?
+                            )
+                            """,
+                            (
+                                resolved_user_id,
+                                resolved_workspace_id,
+                                str(role or "owner").strip().lower() or "owner",
+                                resolved_user_id,
+                                resolved_workspace_id,
+                                created_at_ts,
+                                created_at_ts,
+                            ),
+                        )
                     fallback.commit()
-            await ensure_workspace_billing_defaults(
-                resolved_workspace_id,
-                tenant_id=resolved_tenant_id,
-                billing_email=normalized_email,
-            )
+            if bootstrap_workspace:
+                await ensure_workspace_billing_defaults(
+                    resolved_workspace_id,
+                    tenant_id=resolved_tenant_id,
+                    billing_email=normalized_email,
+                )
             return await get_user_bundle_by_id(resolved_user_id)
         existing_user = await connection.fetchrow(
             """
@@ -4880,35 +4905,36 @@ async def create_local_password_account(
         if existing_user is not None:
             return await get_user_bundle_by_id(str(existing_user["id"]))
 
-        await connection.execute(
-            """
-            INSERT INTO tenants (
-                id, tenant_id, workspace_id, slug, name, status, created_by_user_id, metadata, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, 'active', $6, '{}'::jsonb, $7::timestamptz, $7::timestamptz)
-            """,
-            resolved_tenant_id,
-            resolved_tenant_id,
-            resolved_workspace_id,
-            tenant_slug,
-            tenant_name,
-            resolved_user_id,
-            created_at,
-        )
-        await connection.execute(
-            """
-            INSERT INTO workspaces (
-                id, tenant_id, workspace_id, slug, name, workspace_type, status, created_by_user_id, metadata, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, 'personal', 'active', $6, $7::jsonb, $8::timestamptz, $8::timestamptz)
-            """,
-            resolved_workspace_id,
-            resolved_tenant_id,
-            resolved_workspace_id,
-            workspace_slug,
-            workspace_name,
-            resolved_user_id,
-            _to_json(workspace_metadata, default={}),
-            created_at,
-        )
+        if bootstrap_workspace:
+            await connection.execute(
+                """
+                INSERT INTO tenants (
+                    id, tenant_id, workspace_id, slug, name, status, created_by_user_id, metadata, created_at, updated_at
+                ) VALUES ($1, $2, $3, $4, $5, 'active', $6, '{}'::jsonb, $7::timestamptz, $7::timestamptz)
+                """,
+                resolved_tenant_id,
+                resolved_tenant_id,
+                resolved_workspace_id,
+                tenant_slug,
+                tenant_name,
+                resolved_user_id,
+                created_at,
+            )
+            await connection.execute(
+                """
+                INSERT INTO workspaces (
+                    id, tenant_id, workspace_id, slug, name, workspace_type, status, created_by_user_id, metadata, created_at, updated_at
+                ) VALUES ($1, $2, $3, $4, $5, 'personal', 'active', $6, $7::jsonb, $8::timestamptz, $8::timestamptz)
+                """,
+                resolved_workspace_id,
+                resolved_tenant_id,
+                resolved_workspace_id,
+                workspace_slug,
+                workspace_name,
+                resolved_user_id,
+                _to_json(workspace_metadata, default={}),
+                created_at,
+            )
         await connection.execute(
             """
             INSERT INTO users (
@@ -4936,24 +4962,26 @@ async def create_local_password_account(
             password_hash,
             created_at,
         )
-        await connection.execute(
-            """
-            INSERT INTO workspace_memberships (
-                id, tenant_id, workspace_id, user_id, role, status, metadata, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, 'active', '{}'::jsonb, $6::timestamptz, $6::timestamptz)
-            """,
-            membership_id,
-            resolved_tenant_id,
+        if bootstrap_workspace:
+            await connection.execute(
+                """
+                INSERT INTO workspace_memberships (
+                    id, tenant_id, workspace_id, user_id, role, status, metadata, created_at, updated_at
+                ) VALUES ($1, $2, $3, $4, $5, 'active', '{}'::jsonb, $6::timestamptz, $6::timestamptz)
+                """,
+                membership_id,
+                resolved_tenant_id,
+                resolved_workspace_id,
+                resolved_user_id,
+                str(role or "owner").strip().lower() or "owner",
+                created_at,
+            )
+    if bootstrap_workspace:
+        await ensure_workspace_billing_defaults(
             resolved_workspace_id,
-            resolved_user_id,
-            str(role or "owner").strip().lower() or "owner",
-            created_at,
+            tenant_id=resolved_tenant_id,
+            billing_email=normalized_email,
         )
-    await ensure_workspace_billing_defaults(
-        resolved_workspace_id,
-        tenant_id=resolved_tenant_id,
-        billing_email=normalized_email,
-    )
     return await get_user_bundle_by_id(resolved_user_id)
 
 
@@ -5859,9 +5887,9 @@ async def create_workspace_invite(
     confirm the project exists in this same tenant/workspace before calling
     this (see create_workspace_invite_route); this repository function stays
     a dumb store so it does not need a second Postgres round trip just to
-    re-check what the caller already checked. Both acceptance paths
-    (accept_workspace_invite_route, auth.accept_workspace_invites_for_user)
-    independently re-validate the project against the invite's own
+    re-check what the caller already checked. Both acceptance paths share
+    routes_workspaces._finalize_workspace_invite_acceptance, which
+    re-validates the project against the invite's own
     tenant_id/workspace_id before granting membership -- belt and suspenders
     against a project_id that pointed at a different tenant by the time the
     invite is actually accepted (e.g. the project was deleted, or -- were
@@ -6138,11 +6166,10 @@ async def list_pending_workspace_invites_for_email(email: str) -> List[Dict[str,
             email_token,
         )
     # asyncpg returns jsonb columns as raw text (no codec registered on this
-    # pool) -- decode "metadata" into a real dict here so callers (namely
-    # auth.accept_workspace_invites_for_user, which reads metadata["project_id"]
-    # off this list to grant project access on login-triggered auto-accept)
-    # get the same shape get_workspace_member_invite already normalizes to,
-    # instead of a raw JSON string.
+    # pool) -- decode "metadata" into a real dict here so callers (the
+    # invitee-facing pending-invite list, and auth.pending_workspace_invites_
+    # for_user behind it) get the same shape get_workspace_member_invite
+    # already normalizes to, instead of a raw JSON string.
     result: List[Dict[str, Any]] = []
     for row in rows:
         item = dict(row)
@@ -6321,20 +6348,21 @@ async def accept_workspace_invite(
 
     `metadata_patch`, when given, is shallow-merged into the invite's stored
     metadata (patch keys overwrite existing keys of the same name, everything
-    else is left alone). This is how accept_workspace_invite_route
-    (routes_workspaces.py) and auth.accept_workspace_invites_for_user
-    (server_modules/auth.py) coordinate around the fact that an invite can be
-    accepted through two independent paths for the same invite: explicitly,
-    via the signed /join/{token} link, or implicitly, as a side effect of the
-    invitee simply logging in/registering with the invited email (which
-    auto-accepts every pending invite for that email -- see
-    accept_workspace_invites_for_user's call sites in auth.login_user /
-    auth.register_user). The auto-accept path stamps
-    metadata.auto_accepted_at_login = True; the explicit route recognizes
-    that marker as "this token's invite was already fulfilled by my own
-    login, not by someone else" and reports success instead of a false-
-    negative 404, then clears the marker so a true second call with the same
-    token (replay) still 404s like any other already-consumed invite.
+    else is left alone). Every accept today passes
+    auto_accepted_at_login = False through here, because there is only one
+    kind of accept left: an explicit one, through
+    routes_workspaces._finalize_workspace_invite_acceptance.
+
+    Until 2026-08-20 there was a second, IMPLICIT path --
+    auth.accept_workspace_invites_for_user, called from auth.login_user /
+    auth.register_user, which granted membership for every pending invite
+    matching the caller's email the moment they signed in, and stamped
+    metadata.auto_accepted_at_login = True. It is deleted: signing in must
+    never change what a person is a member of. accept_workspace_invite_route
+    still recognizes that marker on rows written before the deletion (a real
+    success, not a false-negative 404) and clears it once acknowledged, so a
+    true replay of the same token still 404s like any other consumed
+    invite.
     """
     clean_invite_id = str(invite_id or "").strip()
     clean_user_id = str(accepted_by_user_id or "").strip()
