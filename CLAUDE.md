@@ -5847,3 +5847,59 @@ The ordering to apply, for any capability question:
 All four BYO runtimes (`codex`, `claude`, `cursor-agent`, `grok`) are
 installed on the founder's machine and can be probed directly. Before
 writing a capability table for any of them, run the binary and ask it.
+
+## OPEN FOUNDER DECISIONS — unresolved, do not guess (2026-08-20)
+
+These are questions the founder has raised MORE THAN ONCE and has not yet
+had answered. They are recorded here because holding them in a
+conversation loses them — he has said, correctly, that he raises the same
+problem weeks apart and nothing happens. **If you are working in one of
+these areas, do not pick an answer silently. Surface it.**
+
+### 1. Does an agent belong to a PROJECT or to the WORKSPACE?
+
+The codebase currently follows BOTH, which is why this keeps resurfacing:
+
+```
+agent-quick-create.ts       cites "an agent belongs to its project and
+                            works only there" as law, resolves a project
+                            silently at creation
+MAN-357 / the rail          agents are a TOP-LEVEL surface
+project tab bar             Agents tab REMOVED (Tasks · Documents only)
+/projects/{id}/agents       route still exists on disk, unlinked
+```
+
+His framing: general-purpose agents and "agents for repetitive work inside
+a project" may be two different things — or the project-level one is
+redundant and should be removed. Unanswered.
+
+Everything downstream depends on this: whether creation asks for a
+project, whether the unlinked project-agents route is deleted, and whether
+"repetitive project work" is a distinct product concept.
+
+### 2. Is the web UI a WORKSPACE or a SETUP SURFACE?
+
+His words: *"what we're building is not something people are going to
+spend time in within the platform. They're just going to create the agent,
+set up the channel."*
+
+If that is true, the agents list, the workspace home and most of the web
+UI are SETUP surfaces judged by how fast someone gets out of them — not
+daily-use surfaces judged by how much they show. That is a materially
+different design brief from the one most of this UI was built against, and
+it changes what the product's front door should be. Unanswered.
+
+### 3. Purpose / audience (customer-facing vs owner-facing)
+
+Raised THREE times as unnecessary. Removal of the owner-facing SETTING is
+in progress. The open part: `audience` currently gates real tool filtering
+(`audience_tool_filter.filter_tools_for_audience`, live at
+`sage_agent_runtime_service.py:3331`), and his own prior ruling says there
+must be NO tool-authority tiers — access is binary, gated by who can reach
+an agent. Whether "faces the public" should be DERIVED from being wired to
+a public channel (rather than declared) is the unresolved half.
+
+**Process note for whoever reads this:** when the founder raises a
+question that is a product decision rather than a bug, add it here in the
+same turn. Do not answer it with a guess and do not let it live only in
+chat. He has explicitly said the recurrence is the cost he cares about.
