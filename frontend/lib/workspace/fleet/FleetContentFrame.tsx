@@ -27,6 +27,18 @@ import { BreadcrumbLabelProvider, Breadcrumbs, HeaderActionSlotProvider } from "
 // itself), so nothing here loses a destination.
 const AGENT_DETAIL_ROUTE = /^\/w\/[^/]+\/projects\/[^/]+\/agents\/[^/]+\/[^/]+$/;
 
+// The workspace-level twin (2026-08-20 redesign — see
+// agents-conversation-list.ts's header): an agent reached through the
+// workspace Agents list pane at .../agents/{agentId}/{tab}, one path
+// segment shorter (no "projects/{pid}" in front) since this route resolves
+// its project internally instead of carrying it in the URL. Same reasoning
+// as AGENT_DETAIL_ROUTE above — AgentDetailHeader is the only header on any
+// of an agent's own tabs, never stacked under the shell's breadcrumb topbar
+// too. The bare /agents index is NOT matched (only one segment after
+// "agents"), so it keeps its ordinary breadcrumb + "New agent" header
+// action exactly like every other list page.
+const WORKSPACE_AGENT_DETAIL_ROUTE = /^\/w\/[^/]+\/agents\/[^/]+\/[^/]+$/;
+
 /**
  * The content frame for every route that lives directly inside the fleet shell
  * (inbox, projects, agents, hardware, billing, settings, and the routed agent
@@ -69,7 +81,7 @@ export function FleetContentFrame({
 }) {
   const [actionSlot, setActionSlot] = useState<HTMLDivElement | null>(null);
   const pathname = usePathname() || "";
-  const hideTopbarChrome = AGENT_DETAIL_ROUTE.test(pathname);
+  const hideTopbarChrome = AGENT_DETAIL_ROUTE.test(pathname) || WORKSPACE_AGENT_DETAIL_ROUTE.test(pathname);
 
   return (
     <BreadcrumbLabelProvider>

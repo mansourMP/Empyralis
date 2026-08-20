@@ -11,7 +11,8 @@ import { DEFAULT_SETTINGS_SECTION, SETTINGS_SECTIONS, isSettingsSection, type Se
  * So the primary rail has exactly two shapes:
  *
  *   DEFAULT   the flat workspace rail (primary-rail-nav.ts — Inbox, My work,
- *             Projects, Settings). Unchanged; still the 2026-08-15 shape.
+ *             Projects, Agents, Context). Unchanged; still the 2026-08-15
+ *             shape.
  *   SPACE     inside a surface that has its own pick-list, the rail shows
  *             THAT list instead: a "‹ Back" row on top (a real link), then
  *             the space's own destinations. The content pane holds only the
@@ -20,12 +21,12 @@ import { DEFAULT_SETTINGS_SECTION, SETTINGS_SECTIONS, isSettingsSection, type Se
  * This refines — does not reverse — the 2026-08-15 "flat rail" decision.
  * What that decision rejected was the rail changing when you merely OPEN a
  * project (the page's own Tasks/Documents/Agents tabs are the page's job).
- * What tonight's decision adds is: when a surface's whole content used to BE
- * a second nav column — Settings' in-content section sidebar, the project
- * Agents section's in-content agent list — that column belongs in the rail,
- * because it is a picker.
+ * What 2026-08-16 added is: when a surface's whole content used to BE
+ * a second nav column — Settings' in-content section sidebar, a project's
+ * own Agents section's in-content agent list — that column belongs in the
+ * rail, because it is a picker.
  *
- * Three spaces exist:
+ * Two spaces exist:
  *   settings          /w/{id}/settings and beneath. Back → where the person
  *                     came from (workspace root as fallback).
  *   project-agents    /w/{id}/projects/{pid}/agents and beneath. Back → the
@@ -35,40 +36,29 @@ import { DEFAULT_SETTINGS_SECTION, SETTINGS_SECTIONS, isSettingsSection, type Se
  *                     the same 0/1/2+ rule as always, never a second one.
  *                     This module only answers "is this pathname that space";
  *                     the caller composes the count gate.
- *   workspace-agents  /w/{id}/agents (the bare index only — real agent
- *                     pages live under a project's own URL, see below).
- *                     Back → where the person came from, same as settings.
- *                     Added 2026-08-19: the founder moved agents back onto
- *                     the rail — "agents should be just open, not inside
- *                     this specific project... move all those agents under
- *                     one button that would say Agents; the moment I press
- *                     Agents [they] appear on this left rail" — after
- *                     watching Grok's app. Gated the same way as
- *                     project-agents, through workspace-agents-rail-shape.ts's
- *                     showsWorkspaceAgentsRail, except the count is
- *                     WORKSPACE-WIDE (every real agent, across every
- *                     project) rather than one project's own.
  *
- *                     This is deliberately a THIRD, independent kind, not a
- *                     rename or a widening of project-agents: a project's
- *                     own Agents tab still exists and still opens the
- *                     project-agents space, scoped to that project, exactly
- *                     as it always has (CLAUDE.md, "adding a third... reuse
- *                     the mechanism, do not invent a second one" — reuse
- *                     means the SHAPE, not a merge of the two). An agent's
- *                     own chat page still lives at its existing URL
- *                     (…/projects/{pid}/agents/{agentId}/chat — reused
- *                     unchanged, see projectAgentsSpaceLinks), so clicking a
- *                     row in the workspace-agents pick-list navigates OUT of
- *                     this space and, if that agent's own project happens to
- *                     also carry 2+ agents, INTO the project-agents space —
- *                     the same quiet hand-off that already happens today
- *                     when a reader clicks from a project's Agents tab into
- *                     one of many siblings. Nothing under
- *                     /projects/{pid}/agents/… was repointed at this new
- *                     kind: doing that would have changed what
- *                     project-agents already matches, which
- *                     primary-rail-space.test.ts pins byte-for-byte.
+ * CORRECTION, 2026-08-20 — a THIRD space, `workspace-agents`, briefly lived
+ * here (2026-08-19 through 2026-08-20). Pressing the top-level Agents rail
+ * row morphed the WHOLE primary rail into a bare list of agent names —
+ * Inbox/My work/Projects all disappeared while browsing agents. The
+ * founder tried it and rejected it the same session it shipped: "we have
+ * to find a way, some better way to show this agent — not on this left
+ * rail but something else... I really don't like the design of it right
+ * now. But at the same time I should be able to see my conversations."
+ *
+ * The picker moved OFF the primary rail and INTO the content area instead
+ * — a genuine second pane beside the chat (AgentConversationList.tsx,
+ * wired by app/(account)/w/[workspaceId]/agents/layout.tsx), the same
+ * master-detail shape this codebase already uses for Inbox/Work/Memory
+ * (`.fleet-inbox-list` / `.fleet-work-list`, "a hairline-divided list,
+ * never cards... per the Linear reference"). This does NOT reopen the
+ * "rail is where you pick" question: that rule was never "the rail is the
+ * ONLY place a picker may live" — it was "only ONE picker at a time." The
+ * primary rail stops being an agent picker entirely (Agents is now a
+ * normal flat row, exactly like Projects); the content-area pane is the
+ * only surface answering "which agent," never two at once. See
+ * agents-conversation-list.ts for the rest of the reasoning and the
+ * pure sort/filter/preview logic the new pane runs on.
  *
  * Pure and dependency-light (no React, no next/navigation) for the same
  * reason primary-rail-nav.ts and project-agents-rail-shape.ts are: a plain
@@ -90,10 +80,6 @@ export type RailSpace =
       projectId: string;
       /** The agent whose page is open, or null at the bare /agents index. */
       activeAgentId: string | null;
-    }
-  | {
-      kind: "workspace-agents";
-      workspaceId: string;
     };
 
 /** One row of a space's pick-list. Every row is a REAL link — cmd-click and
@@ -115,15 +101,11 @@ const SETTINGS_SPACE_RE = /^\/w\/([^/]+)\/settings(?:\/([^/]+))?(?:\/|$)/;
 
 // Matches /w/{ws}/projects/{pid}/agents, and the agent pages beneath it —
 // the same "…/agents/{agentId}/…" id read ProjectDetailPage's own solo
-// redirect builds hrefs for.
+// redirect builds hrefs for. The workspace-level /w/{ws}/agents tree is
+// DELIBERATELY not matched by anything in this module any more (see this
+// file's own 2026-08-20 correction above) — it is a normal routed page
+// now, not a rail space.
 const PROJECT_AGENTS_SPACE_RE = /^\/w\/([^/]+)\/projects\/([^/]+)\/agents(?:\/([^/]+))?(?:\/|$)/;
-
-// Matches the bare workspace-level /w/{ws}/agents index only — NOT
-// /projects/{pid}/agents/…, which PROJECT_AGENTS_SPACE_RE already owns (see
-// this module's header for why the two are kept disjoint). An agent's own
-// chat page is never reached under this prefix, so there is no third id
-// segment to read here the way project-agents reads activeAgentId.
-const WORKSPACE_AGENTS_SPACE_RE = /^\/w\/([^/]+)\/agents(?:\/|$)/;
 
 /** Which space — if any — the current pathname is inside. Null means the
  *  rail keeps its default flat shape. */
@@ -144,13 +126,6 @@ export function railSpaceFromPathname(pathname: string): RailSpace | null {
       workspaceId: decodeURIComponent(projectAgents[1]),
       projectId: decodeURIComponent(projectAgents[2]),
       activeAgentId: projectAgents[3] ? decodeURIComponent(projectAgents[3]) : null,
-    };
-  }
-  const workspaceAgents = pathname.match(WORKSPACE_AGENTS_SPACE_RE);
-  if (workspaceAgents) {
-    return {
-      kind: "workspace-agents",
-      workspaceId: decodeURIComponent(workspaceAgents[1]),
     };
   }
   return null;
@@ -213,32 +188,6 @@ export function projectAgentsSpaceLinks(
   }));
 }
 
-/** The workspace-agents space's pick-list — one row per real agent in the
- *  WHOLE workspace, across every project, in the caller's given order, each
- *  linking straight into that agent's existing chat URL. Callers resolve
- *  each agent's project id BEFORE calling this (fleet-data.ts's
- *  resolveAgentProjectId, the same fallback an agent's own project_id
- *  already goes through everywhere else it's linked) — this module stays
- *  free of that dependency, same reason it takes plain agent records rather
- *  than importing fleet-data.ts. No row is ever marked active: this space
- *  is only ever entered at the bare /agents index, before any agent has
- *  been picked (see WORKSPACE_AGENTS_SPACE_RE's own comment — the moment a
- *  row is clicked, the pathname leaves this space's territory entirely).
- *  Rows carry no icon, same reason projectAgentsSpaceLinks' don't: the
- *  component renders each agent's own sigil and status. */
-export function workspaceAgentsSpaceLinks(
-  space: Extract<RailSpace, { kind: "workspace-agents" }>,
-  agents: readonly { agent_id: string; label?: string | null; project_id: string }[],
-): RailSpaceLink[] {
-  const base = workspaceRoot(space.workspaceId);
-  return agents.map((agent) => ({
-    key: agent.agent_id,
-    label: agent.label || "Unnamed agent",
-    href: `${base}/projects/${encodeURIComponent(agent.project_id)}/agents/${encodeURIComponent(agent.agent_id)}/chat`,
-    active: false,
-  }));
-}
-
 /**
  * Where the "‹ Back" row points. It is a real link, so this must resolve to
  * a concrete href at render time — never a router.back() that could walk
@@ -254,10 +203,6 @@ export function workspaceAgentsSpaceLinks(
  * belongs to its project, so leaving its space lands on the project that
  * owns it (founder's own back list — "inbox / my work / projects" — is one
  * more hop from there, in the flat rail this returns to).
- *
- * workspace-agents — same `cameFrom` rule as settings, not the project-agents
- * rule: agents are workspace-wide here by the founder's own instruction, so
- * there is no single owning project to fall back to.
  */
 export function spaceBackHref(space: RailSpace, cameFrom: string | null | undefined): string {
   const root = workspaceRoot(space.workspaceId);
