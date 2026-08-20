@@ -104,3 +104,45 @@ export function compareChannelsByPopularity(a: { label: string }, b: { label: st
   if (rankA !== rankB) return rankA < rankB ? -1 : 1;
   return a.label.localeCompare(b.label);
 }
+
+// ── THE ONE RECOMMENDED CHANNEL ─────────────────────────────────────────────
+//
+// The founder's own instruction, recorded in CLAUDE.md ("Channels: Telegram +
+// Slack. Discord is OUT."): Telegram is the recommended channel and must be
+// presented first, with a "Recommended" marker.
+//
+// This is the SAME KIND OF THING as the ranking above, and it is allowed for
+// the same reason: it answers "which of these should a person reach for
+// first", a product judgment that exists in no data we hold — never "which
+// channels exist", which is derived from the transport's own registry
+// precisely because a hand-written one goes stale. The properties that keep it
+// from rotting are identical: it is a PREFIX (a channel missing from it sorts
+// lower, never disappears), it is keyed on the normalised LABEL so both card
+// families reach it, and it names no ids.
+//
+// It does not decide, by itself, that a badge is drawn. The badge is gated on
+// the card's hardware tier as well (channel-hardware-tier.ts's
+// `showsRecommendedBadge`), so a recommendation can never end up sitting on a
+// card that tells a cloud-only agent to go pair a computer first — which is
+// exactly the state Telegram's card was silently in on 2026-08-20.
+export const CHANNEL_RECOMMENDED_KEYS: readonly string[] = ["telegram"];
+
+const RECOMMENDED = new Set(CHANNEL_RECOMMENDED_KEYS);
+
+export function isChannelRecommended(label: string): boolean {
+  return channelPopularityKeys(label).some((key) => RECOMMENDED.has(key));
+}
+
+/** Grid order for the unified channel grid: the recommended channel first,
+ *  then everything else by popularity.
+ *
+ *  Kept as a wrapper over `compareChannelsByPopularity` rather than folded
+ *  into it — the ranking answers "how many people use this" and is read on its
+ *  own elsewhere, while this answers "what should this grid open with". One
+ *  authored recommendation moving does not silently reorder anything else. */
+export function compareChannelsForGrid(a: { label: string }, b: { label: string }): number {
+  const recA = isChannelRecommended(a.label);
+  const recB = isChannelRecommended(b.label);
+  if (recA !== recB) return recA ? -1 : 1;
+  return compareChannelsByPopularity(a, b);
+}

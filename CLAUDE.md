@@ -6772,6 +6772,74 @@ Not proven, and do not claim it: no message was sent from a real Telegram
 account, because that needs the founder's own. Everything up to the
 delivery boundary is verified; the reply leg is verified only by code path.
 
+## The two-tier channel split is DERIVED from the doors (2026-08-21, MAN-359)
+
+**The Channels grid now leads with what a person can connect today, and the
+split is a filter, not a caption.** Chat is gone from the platform, so a
+channel is the only way anyone talks to their agent — "which of these can I
+finish right now" is the first question the grid has to answer.
+
+```
+No computer needed  4   ← DEFAULT VIEW. Telegram (Recommended) · WeChat · Discord · Slack
+Needs a computer   21   ← every transported channel
+All                25   ← hardware-free first, then the rest by popularity
+```
+
+**The tier is a pure function of `ChannelDoor.requiresHardware`, which is set
+in exactly the two places that already existed** — never a fifth hand-copied
+channel list (this surface has shipped four and drifted on all four):
+
+```
+channelHardwareTier(doors)          channel-hardware-tier.ts, pure + tested
+  some real door needs no box  ─▶ hardware_free   ← a platform reachable two
+  every real door needs one    ─▶ needs_hardware     ways belongs in the tier
+  no real door at all          ─▶ unknown            you can ACT on today
+        ▲
+        │ requiresHardware comes from:
+   CHANNEL_DOORS              authored per first-party door (none today)
+   groupTransportedChannels   TRUE for every variant
+```
+
+**That last line is a CORRECTION, and it was understating the truth.** It used
+to read `connect_method === "pairing"`. A `credential` transported channel is
+pasted from here but the paste lands in the transport's config ON the box; the
+catalog is read off a gateway, the write is
+`PUT .../gateways/{id}/channels/{key}/credential`, and `remediationFor(...,
+hasGateway: false)` already answered `needs_hardware` for all of them. Needing
+a box is a property of the LANE, which is exactly why it can be stated once for
+all of them with no per-channel knowledge. A channel the transport ships
+tomorrow is tiered with no edit — asserted with a synthetic channel, the only
+way to prove a derivation is not a disguised list.
+
+**"Recommended" is authored (Telegram, the founder's own instruction) and
+GATED on the tier.** `showsRecommendedBadge(recommended, tier)` returns false
+for anything but `hardware_free`, because on 2026-08-20 Telegram's card
+silently became the hardware-bound transported one — a badge would have been
+sitting on a card telling a cloud-only agent to go buy a computer. It lives in
+the card's ONE secondary line beside "N ways to connect", never a second pill.
+
+**The filter decides its own visibility.** Both tiers populated → the control;
+otherwise no control at all, because a filter that can only show everything is
+a dead control (same call as a rail of one). `unknown` joins neither tier and
+is reachable only under All — a third fact, never folded into either.
+
+**A hardware card opened by a cloud-only agent is no longer a dead end.** It
+was one sentence naming the Hardware tab with nothing to press; it is now the
+fact plus a real `<Link>` to that tab (`hardwareHref`, so cmd-click works),
+and `.fleet-door-unavailable-title` went from offline-RED to amber to match
+the card pill it is the panel behind — "needs a computer" is a setup step, not
+something that is down.
+
+Verified live in a real browser (disposable stack, 1680x1050, both themes):
+default view leads with Telegram + Recommended, "Needs a computer" shows the
+21, and WhatsApp's panel renders "This one needs a computer" plus a working
+link to `.../hardware`. Guarded by
+`frontend/lib/workspace/fleet/channel-hardware-tier.test.ts` (in
+`npm run test:unit`), which drives the REAL doors, the REAL generated manifest
+and the REAL active-channel set, carries canaries for each source, and
+structurally asserts ChannelsTab actually calls all of it — "built, tested,
+and never wired" is the defect this codebase has most of.
+
 ## Channels: Telegram + Slack. Discord is OUT. (2026-08-20)
 
 **Founder's decision, final:** *"Slack and Telegram is the way to go.
