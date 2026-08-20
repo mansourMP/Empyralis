@@ -348,10 +348,9 @@ export async function saveAgentModelConfig(
 // the static MODELS_BY_PROVIDER catalog with an honest note that it may be
 // stale, never a silent, confident-looking empty state.
 
-export type CodexReasoningEffortOption = {
-  reasoningEffort: string;
-  description: string;
-};
+import type { CodexReasoningEffortOption } from "./codex-reasoning-options";
+
+export type { CodexReasoningEffortOption };
 
 export type CodexModelCatalogEntry = {
   id: string;
@@ -362,15 +361,18 @@ export type CodexModelCatalogEntry = {
   /** This model's OWN live reasoning-effort vocabulary and default,
    *  straight from codex app-server's `model/list` RPC (verified live
    *  against a real, authenticated Codex install, 2026-08-20 — levels
-   *  genuinely vary per model, and include values no static table in
-   *  this codebase ever modeled, e.g. "ultra" on gpt-5.6-terra). Empty/
-   *  null until empyralis-gateway/src/llm/codex-app-server.ts +
-   *  runtime.ts forward these two fields (flagged, not yet done — see
-   *  codex_model_catalog_service.py's own comment); the picker falls
-   *  back to CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME.codex until then,
-   *  which is the deliberately-degraded last resort, not the primary
-   *  path. */
-  supportedReasoningEfforts: CodexReasoningEffortOption[];
+   *  genuinely vary per model on ONE account, and include values no
+   *  static table in this codebase ever modeled, e.g. "ultra" on
+   *  gpt-5.6-terra).
+   *
+   *  NULL vs [] IS LOad-BEARING: null means the gateway did not tell us
+   *  (it is too old to forward the field, or the fetch failed) and the
+   *  picker must show its static per-runtime ladder; [] means the model
+   *  positively reports no selectable levels and the picker must not
+   *  render at all. planCodexReasoningPicker (codex-reasoning-options.ts)
+   *  is the one place that distinction is applied — do not re-derive it
+   *  at a call site. */
+  supportedReasoningEfforts: CodexReasoningEffortOption[] | null;
   defaultReasoningEffort: string | null;
 };
 
@@ -433,6 +435,10 @@ export function useCodexModelCatalog(
               description: String(m.description || ""),
               hidden: Boolean(m.hidden),
               isDefault: Boolean(m.is_default),
+              // Absent (or non-array) stays NULL — "the gateway did not
+              // say" — and must never be flattened into the empty array
+              // that means "the model says there are none". See the
+              // CodexModelCatalogEntry field comment above.
               supportedReasoningEfforts: Array.isArray(m.supported_reasoning_efforts)
                 ? m.supported_reasoning_efforts
                     .filter((e: unknown): e is Record<string, unknown> => !!e && typeof e === "object" && typeof (e as Record<string, unknown>).reasoning_effort === "string" && Boolean((e as Record<string, unknown>).reasoning_effort))
@@ -440,7 +446,7 @@ export function useCodexModelCatalog(
                       reasoningEffort: String(e.reasoning_effort),
                       description: String(e.description || ""),
                     }))
-                : [],
+                : null,
               defaultReasoningEffort: typeof m.default_reasoning_effort === "string" && m.default_reasoning_effort
                 ? m.default_reasoning_effort
                 : null,

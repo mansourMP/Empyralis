@@ -58,7 +58,15 @@ export interface CodexModelListEntry {
   hidden: boolean;
   isDefault: boolean;
   defaultReasoningEffort: string;
-  supportedReasoningEfforts: { reasoningEffort: string; description: string }[];
+  /** NULL means "this gateway could not tell you" — the RPC carried no such
+   *  field (an older codex, or a malformed response). An EMPTY ARRAY means
+   *  the model positively reports no selectable levels. Those are different
+   *  facts and must not share one value: the cloud renders a static fallback
+   *  ladder for the first and NO picker at all for the second (a picker whose
+   *  every option the model does not implement is a dead control). See
+   *  codex-reasoning-options.ts's planCodexReasoningPicker, which is the one
+   *  place that distinction is turned into a rendering decision. */
+  supportedReasoningEfforts: { reasoningEffort: string; description: string }[] | null;
 }
 
 export interface CodexModelListResult {
@@ -425,7 +433,7 @@ export class CodexAppServerDaemon {
         hidden: Boolean(m.hidden),
         isDefault: Boolean(m.isDefault),
         defaultReasoningEffort: String(m.defaultReasoningEffort || ""),
-        supportedReasoningEfforts: parseSupportedReasoningEfforts(m.supportedReasoningEfforts),
+        supportedReasoningEfforts: parseSupportedReasoningEffortsOrUnknown(m.supportedReasoningEfforts),
       }))
       .filter((m) => m.id);
     return { authMethod, models };
@@ -448,6 +456,32 @@ export function parseSupportedReasoningEfforts(raw: unknown): { reasoningEffort:
       description: String(e.description || ""),
     }))
     .filter((e) => e.reasoningEffort);
+}
+
+/** The absent-vs-empty distinction `CodexModelListEntry.supported
+ *  ReasoningEfforts` documents, in one place. Returns NULL for "the RPC did
+ *  not tell us" (field absent, or present but so malformed that nothing
+ *  survives parsing) and an ARRAY — possibly empty — for "the RPC answered."
+ *
+ *  Why this is not paranoia: every fleet box still running a gateway built
+ *  before this field was forwarded sends no field at all, so "absent" is the
+ *  MAJORITY live state today, not an edge case. Flattening it to `[]` would
+ *  make every one of those boxes indistinguishable from a model that
+ *  genuinely offers no levels — and the two demand opposite renderings.
+ *
+ *  A non-empty raw array that yields zero valid entries is treated as
+ *  UNKNOWN rather than as "no levels": something was there and we failed to
+ *  understand it, which is not the same as the model saying no. Verified
+ *  live 2026-08-20 against a real authenticated codex app-server: all five
+ *  models return a non-empty array, so `[]` from a modern gateway is
+ *  genuinely exceptional and must never be manufactured by our own parser. */
+export function parseSupportedReasoningEffortsOrUnknown(
+  raw: unknown,
+): { reasoningEffort: string; description: string }[] | null {
+  if (!Array.isArray(raw)) return null;
+  const parsed = parseSupportedReasoningEfforts(raw);
+  if (parsed.length === 0 && raw.length > 0) return null;
+  return parsed;
 }
 
 function extractTurnText(turnRes: Record<string, unknown>): string {

@@ -134,19 +134,37 @@ async def fetch_codex_model_catalog(
         # and the moment the gateway starts forwarding them (see the
         # flagged follow-up for empyralis-gateway/src/llm/codex-app-
         # server.ts + runtime.ts) — no second change needed here.
+        #
+        # ABSENT AND EMPTY ARE DIFFERENT FACTS AND MUST NOT COLLAPSE (2026-08-20).
+        # `None` here means "the gateway did not tell us" — which is the
+        # MAJORITY live state, not an edge case: every fleet box still running
+        # a gateway built before these fields were forwarded sends no key at
+        # all. `[]` means the model positively reports no selectable levels.
+        # The picker renders a static fallback ladder for the first and NO
+        # control at all for the second, so flattening them would either take
+        # the picker away from most of the fleet or leave a dead control on a
+        # model that implements none of its options.
         supported_efforts_raw = m.get("supported_reasoning_efforts")
-        supported_efforts: List[Dict[str, str]] = []
+        supported_efforts: Optional[List[Dict[str, str]]] = None
         if isinstance(supported_efforts_raw, list):
+            parsed: List[Dict[str, str]] = []
             for entry in supported_efforts_raw:
                 if not isinstance(entry, dict):
                     continue
+                # The gateway relays codex's own camelCase key verbatim inside
+                # each entry (runtime.ts snake_cases only the OUTER field), so
+                # both spellings are accepted here on purpose — this is the
+                # seam where the two halves of the chain meet.
                 effort = str(entry.get("reasoning_effort") or entry.get("reasoningEffort") or "").strip()
                 if not effort:
                     continue
-                supported_efforts.append({
+                parsed.append({
                     "reasoning_effort": effort,
                     "description": str(entry.get("description") or ""),
                 })
+            # Something was there and nothing survived parsing: that is
+            # "unintelligible", not "the model says no".
+            supported_efforts = None if (not parsed and supported_efforts_raw) else parsed
         models.append({
             "id": model_id,
             "display_name": str(m.get("display_name") or model_id),
