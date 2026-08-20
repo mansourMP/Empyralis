@@ -63,8 +63,7 @@
   font-size: var(--text-xs);
   font-weight: var(--weight-medium);
   color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
+
 }
 
 .agent-profile-files-loading {

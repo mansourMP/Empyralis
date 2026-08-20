@@ -280,7 +280,19 @@ html[data-theme="light"] {
 
   --text-primary: #18181b;
   --text-secondary: #52525b;
-  --text-muted: #a1a1aa;
+  /* MEASURED, 2026-08-21: #a1a1aa (zinc-400) scored 2.56:1 on --bg-panel
+     (#ffffff) and 2.33:1 on --bg-canvas (#f4f4f5) — both far below WCAG AA's
+     4.5:1 for normal text, and this token carries real content, not
+     decoration: rail sub-labels, the pulse line, the account email, task
+     eyebrows, section labels, comment timestamps and every em-dash "no
+     value" cell. The DARK theme's own --text-muted (#9a9a9a) already
+     clears the bar comfortably (5.17:1 on --bg-card, 5.65 on --bg-panel,
+     6.37 on --bg-canvas), so the two themes were simply never calibrated
+     to the same standard — light was the one nobody checked.
+     #6b6b76 restores parity: 5.27:1 on --bg-panel, 4.71:1 on --bg-canvas.
+     Deliberately not zinc-500 (#71717a), which passes on white (4.85) but
+     lands at 4.33 on the canvas the whole left rail is painted over. */
+  --text-muted: #6b6b76;
 
   /* Accent — same strict monochrome, zero chroma. Light theme: near-black,
      darkened further (not lightened) on hover so it stays legible against

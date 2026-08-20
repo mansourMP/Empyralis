@@ -25,9 +25,8 @@
 
 .grouped-rail-group-label {
   font-size: var(--text-2xs);
-  font-weight: var(--weight-semibold);
-  letter-spacing: var(--tracking-wide);
-  text-transform: uppercase;
+  font-weight: var(--weight-medium);
+
   color: var(--text-muted);
   padding: 0 var(--space-2);
   margin-bottom: var(--space-1);
@@ -94,6 +93,21 @@
     border-bottom: 1px solid var(--border);
     margin-bottom: var(--space-2);
     scrollbar-width: none;
+    /* MEASURED, 2026-08-21, agent Configure sheet at 375px: this strip is
+       277px wide and its content is 849px — so 9 of the 12 destinations
+       (Skills onward: Channels, Connectors, Tools, Context, Capabilities,
+       Hardware, Memory) sat off the right edge. It scrolls, but the two
+       rules directly above hide the scrollbar and the cut happened to land
+       in a GAP between items, so the strip read as complete and finished.
+       A hover-revealed affordance is no affordance at all on a touch
+       device. The fade is the whole signal: no element, no colour, no
+       layout change — the last 24px of the strip dissolves, which is the
+       standard trailing-edge treatment for a horizontally scrollable
+       toolbar and reads correctly at either end.
+       CLAUDE.md already records this exact shape once (Memory's Save/Delete
+       overflowing this same sheet's edge and becoming unreachable). */
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent 100%);
+    mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent 100%);
   }
   .grouped-rail::-webkit-scrollbar {
     display: none;

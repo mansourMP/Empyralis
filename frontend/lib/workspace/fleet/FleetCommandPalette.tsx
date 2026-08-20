@@ -176,7 +176,11 @@ export function FleetCommandPalette({
       const agentBase = `${base}/projects/${encodeURIComponent(agentDetail.projectId)}/agents/${encodeURIComponent(agentDetail.agentId)}`;
       const tabActions: Action[] = AGENT_TABS.filter((t) => t.id !== agentDetail.tab).map((t) => ({
         id: `tab-${t.id}`,
-        label: t.id === "chat" ? "Chat with this agent" : t.label,
+        // The "chat" tab id is the agent's read-only observation surface — the
+        // composer was removed (CLAUDE.md, 2026-08-20: conversation happens in
+        // the channel, never here). The route id stays "chat"; the LABEL must
+        // not keep promising a conversation the surface no longer offers.
+        label: t.id === "chat" ? "Watch this agent work" : t.label,
         group: "This agent",
         icon: t.icon,
         run: () => replaceTab(`${agentBase}/${t.id}`),

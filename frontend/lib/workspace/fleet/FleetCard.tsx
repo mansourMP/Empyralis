@@ -69,7 +69,7 @@ export function FleetCard({
           type="button"
           className="fleet-card-action-btn"
           title="Open chat"
-          aria-label="Open chat with agent"
+          aria-label="Watch this agent work"
           onClick={(e) => {
             e.stopPropagation();
             onChat(agent.id);

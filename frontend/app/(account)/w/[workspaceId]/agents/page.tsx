@@ -185,7 +185,7 @@ export default function AgentsPage() {
           // the project-agents space's own placeholder
           // (fleet-theme.css's .fleet-project-agents-placeholder — an
           // identical shape, reused rather than a second rule).
-          <div className="fleet-project-agents-placeholder">Select a conversation to start chatting.</div>
+          <div className="fleet-project-agents-placeholder">Pick an agent to watch it work.</div>
         )}
       </div>
 
