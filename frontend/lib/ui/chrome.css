@@ -2569,8 +2569,13 @@ body[data-theme='dark'] .app-auth-card--elevated {
 
 .app-auth-provider-stack {
   display: grid;
-  gap: var(--app-space-3);
-  margin-bottom: var(--app-space-2);
+  /* space-4 (16), not space-3 (12): matches .app-auth-form's own
+     field-to-field rhythm so the divider's own margin (below) lands the
+     same distance from its neighbour on both sides — see the divider rule.
+     No margin-bottom of its own; the form's outer grid gap already supplies
+     the space to the next field, and a second margin on top of it was the
+     asymmetry (measured 20px above the divider, 32px below it). */
+  gap: var(--app-space-4);
 }
 
 .app-auth-social-grid {
@@ -2662,7 +2667,11 @@ body[data-theme='dark'] .app-auth-card--elevated {
 
 .app-auth-divider > span[aria-hidden="true"] {
   height: 1px;
-  background: #e1e4e8;
+  /* Token, not a hardcoded hex: --app-border-default is the same colour
+     the input/button borders on this card already use, and it is
+     theme-aware (this literal hex previously stayed light-grey in dark
+     mode). */
+  background: var(--app-border-default);
 }
 
 .app-auth-field {
@@ -2944,6 +2953,11 @@ body[data-theme='dark'] .app-auth-input:-webkit-autofill:focus {
   min-height: 48px;
   justify-content: center;
   gap: var(--app-space-2);
+  /* .app-button's base font-size is 13px (the app-wide default for every
+     button); the field above this one is 14px, so the primary action read
+     smaller than the input it submits. Bumped to parity here only — this
+     is not a global button-size change. */
+  font-size: var(--app-font-14);
   border-radius: 12px;
   border: 1px solid rgba(0, 0, 0, 0.1);
   background: var(--premium-graphite-bg);
@@ -3037,6 +3051,13 @@ body[data-theme='dark'] .app-auth-input:-webkit-autofill:focus {
 }
 
 .app-auth-footer {
+  /* Explicit margin, not the browser default: an unreset <p> was adding its
+     own ~1em (14px) top margin on top of .app-auth-form's 16px grid gap,
+     landing at 30px versus the 16/32 rhythm used everywhere else on this
+     card. This is a group break (form fields end, a different action
+     begins), so it takes the same 32px used at the header→form break
+     above, not the 16px used between fields within one group. */
+  margin: var(--app-space-4) 0 0;
   color: rgba(30, 32, 36, 0.56);
   font-size: 14px;
   line-height: 1.5;

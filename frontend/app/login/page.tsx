@@ -300,7 +300,9 @@ function LoginPageContent() {
               <p className="app-auth-provider-note">Google sign-in is unavailable right now. Use email below.</p>
             ) : null}
             <div className="app-auth-divider">
+              <span aria-hidden="true" />
               <span>or email</span>
+              <span aria-hidden="true" />
             </div>
           </div>
           <label className="app-auth-field">
