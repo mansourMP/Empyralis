@@ -5673,3 +5673,58 @@ catalog stays freeform (no published model-id vocabulary, unchanged).
 Ollama's own OpenAI-compat `/v1/chat/completions` reasoning support for
 gpt-oss models is plausible but not verified against Ollama's own docs —
 left in the "no verified wire contract" bucket rather than guessed.
+
+## Verifying against DOCS is still transcription (2026-08-20)
+
+**A capability table built from a provider's documentation is hardcoding
+that feels like research.** Docs are a snapshot, exactly like training
+data. The moment a provider ships a model, the table is wrong and a human
+has to notice and edit code — which is precisely the failure the
+"derive, never transcribe" rule already forbids.
+
+This was violated on 2026-08-20 by a dispatch that told an agent to
+"verify against each provider's official docs." It produced a correct-
+looking, doc-sourced reasoning-capability table that was already stale on
+arrival (missing grok-4.5 / 4.6 / 4.20-multi-agent, all of which DO
+support `reasoning_effort`). The founder's objection, and it is the rule:
+*"once they provide new model I don't have to change the entire thing, I
+don't have to think about it."*
+
+**The live source usually already exists, and is often already running on
+the box.** Verified on 2026-08-20 — the installed Codex binary emits its
+own machine-readable protocol contract:
+
+```
+codex app-server generate-json-schema --out <DIR>
+  → codex_app_server_protocol.v2.schemas.json
+
+ReasoningEffort            "A non-empty reasoning effort value ADVERTISED
+                            BY THE MODEL"  — type: string, NOT an enum
+supportedReasoningEfforts  array of { reasoningEffort, description }
+defaultReasoningEffort     the model's own default
+```
+
+Note `ReasoningEffort` is deliberately an OPEN STRING, not a closed enum,
+specifically so a new model can advertise a new level without any client
+change. Hardcoding an enum against a protocol designed to avoid enums is
+the mistake in miniature. Claude Code's harness advertises a different
+set than Codex's — which is why a single global list of levels is wrong
+by construction.
+
+The ordering to apply, for any capability question:
+
+```
+1. the running runtime/harness itself   (schema dump, app-server protocol,
+                                         --help, config dump, MCP contract)
+2. a live API the customer's own
+   credential can call                  (GET /v1/models and friends)
+3. a pinned, DATED, source-recorded
+   fallback                             ← last resort, must be visibly the
+                                          degraded path in the code
+4. documentation                        ← NOT a source of truth. At best a
+                                          hint about where to look for 1-3.
+```
+
+All four BYO runtimes (`codex`, `claude`, `cursor-agent`, `grok`) are
+installed on the founder's machine and can be probed directly. Before
+writing a capability table for any of them, run the binary and ask it.
