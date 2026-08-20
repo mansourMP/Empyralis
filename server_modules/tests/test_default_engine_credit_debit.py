@@ -105,6 +105,7 @@ class _TurnHarness:
         sdk_events=None,
         legacy_usage=None,
         real_bridge: bool = False,
+        extra_patches=None,
         **chat_kwargs,
     ):
         meter_calls: list[dict] = []
@@ -195,6 +196,8 @@ class _TurnHarness:
                     return_value=sdk_events if sdk_events is not None else _sdk_events(),
                 )
             )
+        if extra_patches:
+            patches.extend(extra_patches)
         if workspace_record is not None:
             patches.append(
                 patch(
@@ -783,3 +786,378 @@ class SingleDebitSeamStructureTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ── A byok_api AGENT was billed platform credits (2026-08-21) ───────────────
+#
+# THE BUG THIS SECTION EXISTS FOR
+# -------------------------------
+# "Who pays for this turn" has TWO possible sources and only ONE was asked:
+#
+#     WORKSPACE  admin_defaults.sage_ai_provider   -> "byok"      READ
+#     AGENT      model_config.mode == "byok_api"   -> "byok_api"  NOT READ
+#
+# _resolve_agent_cloud_provider computes the agent-level answer, its own
+# docstring states the rule outright ("NEVER bill platform credits for a
+# BYOK-bound agent"), and it is unit-tested. Its returned billing_mode had
+# exactly ONE production call site:
+#
+#     provider, credentials, _ = await _resolve_agent_cloud_provider(...)
+#                             ^ thrown away
+#
+# So a byok_api agent in an ordinary workspace — the normal case, since
+# sage_ai_provider is a WORKSPACE AI-route default nobody has to touch in
+# order to bind ONE agent to its own key — resolved to "platform_credits"
+# and was DEBITED for tokens the customer had already paid their own
+# provider for, with the usage_events row stamped mode="platform_credits":
+# a lie in the one column a future consumption-pricing model has to trust.
+#
+# CLAUDE.md's "built, tested, and never wired" failure mode, on a money path.
+#
+# Measured on the pre-fix tree by driving the real turn seam: mode recorded
+# as "platform_credits", 10 credits debited. After: mode "byok_api", zero
+# debits, the usage_events row still written.
+#
+# WHAT IS ASSERTED
+# ----------------
+# Counts, not existence: EXACTLY ONE usage_events row per turn (a metering
+# call that fires twice is as wrong as one that never fires) and EXACTLY
+# ZERO debits. "a row was written" and "no debit happened" are each
+# satisfied by failures in the opposite direction.
+#
+# Plus a structural test, because a behavioural one can only cover the
+# lanes that exist today: the resolved billing mode must not be discarded
+# into `_` again, and both _meter_and_debit_turn call sites must pass it.
+
+
+def _byok_agent_patches():
+    """The two module-level lookups _resolve_agent_cloud_provider's byok_api
+    branch makes. Patched (not faked one level up at
+    _resolve_agent_cloud_provider itself) precisely so the REAL resolver
+    runs and the REAL billing_mode it returns is what the assertions below
+    are reading — mocking the resolver would mock the thing under test."""
+    return [
+        patch(
+            "server_modules.sage_agent_runtime_service.direct_chat_credentials",
+            return_value={"api_key": "customers-own-key"},
+        ),
+        patch(
+            "server_modules.sage_agent_runtime_service.supports_direct_message_native_chat",
+            return_value=True,
+        ),
+    ]
+
+
+def _specialist(*, mode: str, provider: str = "openai", model: str = "gpt-4.1"):
+    from server_modules.specialist_runtime_context import SpecialistRuntimeContext
+
+    return SpecialistRuntimeContext(
+        agent_install_id=f"ainstall_{mode or 'unset'}",
+        agent_label="Test Agent",
+        agent_kind="specialist",
+        persona="",
+        provider=provider,
+        model=model,
+        mode=mode,
+    )
+
+
+_PLAIN_WORKSPACE = {
+    # No admin_defaults.sage_ai_provider — the ordinary workspace, and the
+    # one in which this bug fired.
+    "workspace_id": "ws-plain",
+    "tenant_id": "tenant-plain",
+    "metadata": {},
+}
+_BYOK_WORKSPACE = {
+    "workspace_id": "ws-adminbyok",
+    "tenant_id": "tenant-adminbyok",
+    "metadata": {"admin_defaults": {"sage_ai_provider": "anthropic"}},
+}
+
+
+class ByokApiAgentTurnBillingTests(unittest.TestCase):
+    """These FAIL on the pre-fix tree."""
+
+    def setUp(self) -> None:
+        self.harness = _TurnHarness(self)
+
+    def _run_agent(self, spec, workspace_record, request_id, engine=None):
+        return self.harness.run(
+            engine=engine or claude_agent_sdk_bridge.ENGINE_ID,
+            workspace_record=workspace_record,
+            extra_patches=_byok_agent_patches(),
+            workspace_id=workspace_record["workspace_id"],
+            message="hello",
+            request_id=request_id,
+            specialist_context=spec,
+        )
+
+    def test_byok_api_agent_turn_is_recorded_exactly_once(self):
+        """THE recording half. Record every orchestrated turn — a turn
+        Empyralis does not bill is still a turn Empyralis ran, and
+        consumption pricing cannot be re-based later onto data nobody
+        collected."""
+        run = self._run_agent(_specialist(mode="byok_api"), _PLAIN_WORKSPACE, "byok-agent-1")
+
+        self.assertEqual(len(run["meter_calls"]), 1)
+        metered = run["meter_calls"][0]
+        self.assertEqual(metered["tokens_in"], 12000)
+        self.assertEqual(metered["tokens_out"], 800)
+
+    def test_byok_api_agent_turn_is_never_debited(self):
+        """THE regression test. Zero, asserted as a count — the pre-fix tree
+        charged 10 credits here."""
+        run = self._run_agent(_specialist(mode="byok_api"), _PLAIN_WORKSPACE, "byok-agent-2")
+
+        self.assertEqual(run["debit"].await_count, 0)
+        self.assertEqual(run["hosted_debit"].call_count, 0)
+        # ...and the reply still shipped, so this is a billing fix and not a
+        # turn that was quietly broken into silence.
+        self.assertEqual(run["result"]["message"], "Here is your answer.")
+
+    def test_byok_api_agent_turn_is_labelled_byok_api_not_platform_credits(self):
+        """The mode column is the ONLY thing distinguishing "the customer
+        paid for this" from "we did" once the row is written. It said
+        platform_credits.
+
+        "byok_api" and not the workspace-level "byok": two different facts
+        (an agent bound to its own key vs. a whole workspace routed to one)
+        may not share one signal, and usage_events_repository's own
+        _USAGE_MODE_TO_PAYER already maps BOTH to the "BYOK" payer for
+        display — the reader was built for this value before any writer
+        produced it."""
+        run = self._run_agent(_specialist(mode="byok_api"), _PLAIN_WORKSPACE, "byok-agent-3")
+
+        self.assertEqual(run["meter_calls"][0]["mode"], "byok_api")
+
+        from server_modules import usage_events_repository as _usage_repo
+
+        self.assertEqual(_usage_repo._canonical_usage_payer("byok_api"), "BYOK")
+
+    def test_legacy_agent_shape_provider_without_mode_is_also_treated_as_byok(self):
+        """An agent with a provider and NO explicit mode pre-dates
+        model_config.mode; the resolver documents it as byok_api ("the
+        closest real meaning of 'this agent has its own provider'"). The
+        billing answer must come from the RESOLVER, never from the raw
+        _spec.mode string — which is empty here, and would read as
+        platform-paid to anyone deriving it locally."""
+        run = self._run_agent(_specialist(mode=""), _PLAIN_WORKSPACE, "byok-agent-legacy")
+
+        self.assertEqual(run["debit"].await_count, 0)
+        self.assertEqual(run["meter_calls"][0]["mode"], "byok_api")
+
+    def test_platform_credits_agent_still_debits_exactly_once(self):
+        """The control, and the proof this fix did not simply switch the
+        debit off. An agent that really is platform-paid still charges,
+        exactly once."""
+        run = self._run_agent(
+            _specialist(mode="platform_credits", provider="deepseek", model="deepseek-chat"),
+            _PLAIN_WORKSPACE,
+            "platform-agent-1",
+        )
+
+        self.assertEqual(run["debit"].await_count, 1)
+        self.assertEqual(run["debit"].await_args.kwargs["request_id"], "platform-agent-1")
+        self.assertGreater(run["debit"].await_args.kwargs["credits_to_charge"], 0)
+        self.assertEqual(run["meter_calls"][0]["mode"], "platform_credits")
+
+    def test_platform_credits_agent_in_a_byok_workspace_is_unchanged(self):
+        """Precedence, in the direction that could have regressed something
+        already correct: an agent declaring platform_credits does NOT
+        override a workspace-level BYOK route. Adding the agent input must
+        not change any answer that was right before it existed."""
+        run = self._run_agent(
+            _specialist(mode="platform_credits", provider="deepseek", model="deepseek-chat"),
+            _BYOK_WORKSPACE,
+            "platform-agent-byok-ws",
+        )
+
+        self.assertEqual(run["debit"].await_count, 0)
+        self.assertEqual(run["meter_calls"][0]["mode"], "byok")
+
+    def test_master_sage_turn_with_no_agent_is_unchanged(self):
+        """No specialist at all — the master/Sage turn, which has no
+        per-agent model_config. Still platform-paid, still debited once."""
+        run = self.harness.run(
+            engine=claude_agent_sdk_bridge.ENGINE_ID,
+            workspace_record=_PLAIN_WORKSPACE,
+            workspace_id="ws-plain",
+            message="hello",
+            request_id="master-1",
+        )
+
+        self.assertEqual(run["debit"].await_count, 1)
+        self.assertEqual(run["meter_calls"][0]["mode"], "platform_credits")
+
+
+class MeterAndDebitSeamByokTests(unittest.TestCase):
+    """The seam itself, driven directly.
+
+    The class above drives whole turns, which only ever exercises whichever
+    _meter_and_debit_turn call site that lane happens to take. These call the
+    function, so the contract is pinned regardless of which branch reaches
+    it — the coverage that matters for the SECOND call site (the cloud
+    fallthrough), which no turn in this file's harness lands on with tokens
+    attached. Deliberately NOT written as a whole-turn test that quietly
+    exercises neither: a green that asserts nothing is worse than a red.
+    """
+
+    def _call(self, *, agent_billing_mode, workspace_record=_PLAIN_WORKSPACE):
+        meter = AsyncMock(return_value=None)
+        debit = AsyncMock(
+            return_value={"ok": True, "credits_debited": 1, "debited_usd": 0.002, "insufficient": False}
+        )
+        with (
+            patch("server_modules.usage_events_repository.record_usage_from_context", new=meter),
+            patch(
+                "server_modules.control_plane_repository.debit_workspace_credits_for_turn_atomic",
+                new=debit,
+            ),
+        ):
+            outcome = _run(
+                sage_agent_runtime_service._meter_and_debit_turn(
+                    workspace_id=workspace_record["workspace_id"],
+                    tenant_id=workspace_record["tenant_id"],
+                    credit_idempotency_key="seam-1",
+                    workspace_record=workspace_record,
+                    provider="openai",
+                    model="gpt-4.1",
+                    tokens_in=12000,
+                    tokens_out=800,
+                    # A REAL price, so "no debit" cannot pass merely because
+                    # nothing was priced — the vacuous way this assertion
+                    # could go green while the bug is intact.
+                    usd_cost=0.5,
+                    agent_billing_mode=agent_billing_mode,
+                )
+            )
+        return outcome, meter, debit
+
+    def test_byok_api_meters_once_and_debits_zero_even_with_a_real_price(self):
+        outcome, meter, debit = self._call(agent_billing_mode="byok_api")
+
+        self.assertEqual(meter.await_count, 1)
+        self.assertEqual(meter.await_args.kwargs["mode"], "byok_api")
+        self.assertEqual(debit.await_count, 0)
+        self.assertEqual(outcome["mode"], "byok_api")
+        self.assertEqual(outcome["credits_owed"], 0)
+        self.assertIsNone(outcome["debit"])
+        # usd_cost is still REPORTED — a BYOK turn costs the PLATFORM
+        # nothing, which is a different fact from the tokens being free to
+        # produce. Only `mode` is allowed to carry that difference.
+        self.assertEqual(outcome["usd_cost"], 0.5)
+
+    def test_platform_credits_at_the_same_seam_still_debits_exactly_once(self):
+        """The control that makes the assertion above mean something."""
+        outcome, meter, debit = self._call(agent_billing_mode="platform_credits")
+
+        self.assertEqual(meter.await_count, 1)
+        self.assertEqual(meter.await_args.kwargs["mode"], "platform_credits")
+        self.assertEqual(debit.await_count, 1)
+        self.assertGreater(outcome["credits_owed"], 0)
+
+    def test_the_argument_is_optional_and_omitting_it_changes_nothing(self):
+        """Every pre-existing caller keeps its exact behaviour."""
+        outcome, meter, debit = self._call(agent_billing_mode="")
+
+        self.assertEqual(meter.await_args.kwargs["mode"], "platform_credits")
+        self.assertEqual(debit.await_count, 1)
+
+
+class ResolveTurnPayerModeUnitTests(unittest.TestCase):
+    """The resolution rule on its own, so its precedence is pinned
+    independently of any turn."""
+
+    def _resolve(self, workspace_record, agent_mode=""):
+        return sage_agent_runtime_service._resolve_turn_payer_mode(workspace_record, agent_mode)
+
+    def test_agent_byok_beats_a_plain_workspace(self):
+        self.assertEqual(self._resolve(_PLAIN_WORKSPACE, "byok_api"), "byok_api")
+
+    def test_agent_byok_beats_a_byok_workspace_with_the_more_specific_answer(self):
+        self.assertEqual(self._resolve(_BYOK_WORKSPACE, "byok_api"), "byok_api")
+
+    def test_agent_platform_credits_does_not_override_a_byok_workspace(self):
+        self.assertEqual(self._resolve(_BYOK_WORKSPACE, "platform_credits"), "byok")
+
+    def test_no_agent_mode_falls_through_exactly_as_before(self):
+        self.assertEqual(self._resolve(_PLAIN_WORKSPACE, ""), "platform_credits")
+        self.assertEqual(self._resolve(_BYOK_WORKSPACE, ""), "byok")
+        self.assertEqual(self._resolve(None, ""), "platform_credits")
+
+    def test_an_unknown_agent_mode_fails_closed_and_never_debits(self):
+        """A lane this module has never heard of must not be billed to
+        platform credits on the grounds that nobody taught it otherwise. The
+        set is spelled as what IS platform-paid, so anything else is not."""
+        for unknown in ("cli_subscription", "local", "some_future_lane"):
+            with self.subTest(mode=unknown):
+                resolved = self._resolve(_PLAIN_WORKSPACE, unknown)
+                self.assertEqual(resolved, unknown)
+                self.assertNotEqual(resolved, "platform_credits")
+
+
+class BillingModeWiringStructureTests(unittest.TestCase):
+    """A behavioural test covers the lanes that exist today. These cover the
+    next one — specifically, the exact edit that caused this bug."""
+
+    def setUp(self) -> None:
+        self.tree = ast.parse(SAGE_RUNTIME_SOURCE.read_text(encoding="utf-8"))
+
+    def test_the_resolved_billing_mode_is_never_discarded_again(self):
+        """The whole bug in one line: `provider, credentials, _ = await
+        _resolve_agent_cloud_provider(...)`. Unpacking the billing mode into
+        a throwaway type-checks, runs, and is silent in production."""
+        offenders = []
+        for node in ast.walk(self.tree):
+            if not isinstance(node, ast.Assign):
+                continue
+            call = node.value
+            if isinstance(call, ast.Await):
+                call = call.value
+            if not isinstance(call, ast.Call):
+                continue
+            name = call.func.attr if isinstance(call.func, ast.Attribute) else getattr(call.func, "id", "")
+            if name != "_resolve_agent_cloud_provider":
+                continue
+            for target in node.targets:
+                if not isinstance(target, ast.Tuple) or len(target.elts) != 3:
+                    continue
+                third = target.elts[2]
+                if isinstance(third, ast.Name) and third.id == "_":
+                    offenders.append(node.lineno)
+        self.assertEqual(
+            offenders,
+            [],
+            "_resolve_agent_cloud_provider's billing_mode is being thrown away at "
+            f"line(s) {offenders} — that is the bug this file's byok_api section exists for. "
+            "Bind it and pass it to _meter_and_debit_turn.",
+        )
+
+    def test_every_meter_and_debit_call_site_passes_the_agent_billing_mode(self):
+        """A second call site that forgets the argument silently reverts to
+        the workspace-only answer for whichever lane it serves — which is
+        exactly how one engine kept charging while the other stopped."""
+        call_sites = [
+            node
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "id", getattr(node.func, "attr", "")) == SHARED_SEAM
+        ]
+        self.assertGreaterEqual(len(call_sites), 2, "expected both engine call sites")
+        for call in call_sites:
+            with self.subTest(line=call.lineno):
+                self.assertIn(
+                    "agent_billing_mode",
+                    {kw.arg for kw in call.keywords},
+                    f"{SHARED_SEAM} at line {call.lineno} does not pass agent_billing_mode",
+                )
+
+    def test_the_payer_decision_has_exactly_one_implementation(self):
+        """Who pays is answered in _resolve_turn_payer_mode and nowhere
+        else — the reason the workspace half and the agent half could not be
+        made to disagree once both are inputs to the same function."""
+        source = SAGE_RUNTIME_SOURCE.read_text(encoding="utf-8")
+        self.assertEqual(source.count("def _resolve_turn_payer_mode("), 1)
+        # And the seam asks it rather than deciding for itself.
+        self.assertEqual(source.count('"mode": _resolve_turn_payer_mode('), 1)
