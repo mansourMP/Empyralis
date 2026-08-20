@@ -3512,7 +3512,7 @@ def _local_workspace_billing_account_from_row(row: Any) -> Optional[Dict[str, An
     return {
         "workspace_id": str(row["workspace_id"] or "").strip(),
         "tenant_id": str(row["tenant_id"] or "").strip() or None,
-        "provider": str(row["provider"] or "stripe").strip() or "stripe",
+        "provider": str(row["provider"] or "polar").strip() or "polar",
         "billing_email": str(row["billing_email"] or "").strip().lower() or None,
         "provider_customer_id": str(row["provider_customer_id"] or "").strip() or None,
         "default_currency": str(row["default_currency"] or "usd").strip().lower() or "usd",
@@ -3544,7 +3544,7 @@ def _workspace_billing_subscription_from_row(row: Any) -> Optional[Dict[str, Any
         "id": str(row["id"] or "").strip(),
         "workspace_id": str(row["workspace_id"] or "").strip(),
         "tenant_id": str(row["tenant_id"] or "").strip() or None,
-        "provider": str(row["provider"] or "stripe").strip() or "stripe",
+        "provider": str(row["provider"] or "polar").strip() or "polar",
         "plan_id": str(row["plan_id"] or "free").strip().lower() or "free",
         "status": str(row["status"] or "active").strip().lower() or "active",
         "provider_subscription_id": str(row["provider_subscription_id"] or "").strip() or None,

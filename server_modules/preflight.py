@@ -582,6 +582,55 @@ def _check_removed_knowledge_rag_config() -> Optional[str]:
     )
 
 
+# The payment processor was replaced 2026-08-20: Polar, not Stripe -- see
+# CLAUDE.md, "Payment processor is Polar, not Stripe" (Stripe has no
+# standalone merchant account in Uzbekistan; Polar is the Merchant of
+# Record and the only processor that lets this business receive money).
+# These four env vars named the removed implementation and, per CLAUDE.md's
+# rule that removed config must fail loudly rather than fall through to a
+# default (see model_router's deliberately-retained `vertex` branch), a
+# boot that still carries one refuses to start rather than silently doing
+# nothing -- they had ZERO readers even before the removal, since
+# billing_service.py has always read its own env vars directly rather than
+# through server_modules.runtime_config, so a value here was already going
+# nowhere. Real Polar config lives under the EMPYRALIS_POLAR_* names (see
+# polar_client.py / .env.example).
+_REMOVED_STRIPE_BILLING_ENV_VARS = (
+    "EMPYRALIS_BILLING_PROVIDER",
+    "EMPYRALIS_STRIPE_SECRET_KEY",
+    "EMPYRALIS_STRIPE_WEBHOOK_SECRET",
+    "EMPYRALIS_STRIPE_PRICE_IDS",
+    "STRIPE_SECRET_KEY",
+)
+
+
+def _check_removed_stripe_billing_config() -> Optional[str]:
+    """Return ``None`` unless the environment still configures the removed
+    Stripe billing integration.
+
+    Refuses to boot rather than ignore the setting -- these variables have
+    no reader left anywhere in the tree (and never did, even under Stripe;
+    see the tuple's own comment). Honouring them silently is exactly the
+    "stale config falls through to a default" failure CLAUDE.md calls out.
+    """
+    present = sorted(name for name in _REMOVED_STRIPE_BILLING_ENV_VARS if os.getenv(name, "").strip())
+    if not present:
+        return None
+    return (
+        "The payment processor was replaced 2026-08-20 (Polar, not Stripe -- see "
+        "CLAUDE.md's \"Payment processor is Polar, not Stripe\"), but this environment "
+        f"still sets: {', '.join(present)}.\n"
+        "  These variables have no reader left in the codebase -- refusing to start "
+        "rather than let an operator believe a Stripe billing backend is configured "
+        "and running when no such code path exists.\n"
+        "  Fix: unset "
+        f"{', '.join(present)} and configure the real Polar variables instead "
+        "(EMPYRALIS_POLAR_ACCESS_TOKEN, EMPYRALIS_POLAR_SERVER, "
+        "EMPYRALIS_POLAR_WEBHOOK_SECRET, EMPYRALIS_POLAR_PRODUCT_PRO / "
+        "_PRODUCT_IDS, EMPYRALIS_POLAR_CREDIT_PRODUCT_ID -- see .env.example)."
+    )
+
+
 # ── kernel ───────────────────────────────────────────────────────────
 
 def _check_kernel() -> Optional[str]:
@@ -1734,6 +1783,12 @@ async def run_preflight_checks() -> List[str]:
     removed_rag_err = _check_removed_knowledge_rag_config()
     if removed_rag_err:
         errors.append(removed_rag_err)
+
+    # 1c. Same rule, the removed Stripe billing integration (2026-08-20):
+    #     Polar replaced it as the payment processor.
+    removed_stripe_billing_err = _check_removed_stripe_billing_config()
+    if removed_stripe_billing_err:
+        errors.append(removed_stripe_billing_err)
 
     # 2. Kernel
     kernel_err = _check_kernel()
