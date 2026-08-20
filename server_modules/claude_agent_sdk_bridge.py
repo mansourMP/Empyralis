@@ -611,6 +611,7 @@ def resolve_sdk_process_env(
     config_dir: str = "",
     provider: str = "",
     model: str = "",
+    reasoning_effort: str = "",
 ) -> Dict[str, str]:
     """Build the `env` override for ClaudeAgentOptions — never os.environ,
     never a hardcoded URL. Explicit per-turn overrides win; otherwise falls
@@ -690,7 +691,7 @@ def resolve_sdk_process_env(
         # a few lines below, never by raising out of this resolver.
         try:
             env["ANTHROPIC_AUTH_TOKEN"] = openai_compat_adapter.mint_turn_token_for_provider(
-                provider, creds, model,
+                provider, creds, model, reasoning_effort,
             )
         except Exception as exc:
             LOGGER.debug(
@@ -2135,6 +2136,15 @@ async def run_claude_agent_sdk_turn(
                 config_dir=config_dir,
                 provider=provider or "",
                 model=model or "",
+                # Adapter-routed providers (openai/gemini/xai/...) forward
+                # this out-of-band via the minted turn token — see
+                # openai_compat_adapter.py's "2b. Reasoning effort"
+                # section. Anthropic-routed turns already get it through
+                # ClaudeAgentOptions.effort below (resolve_sdk_effort);
+                # passing it here too is harmless for them since
+                # mint_turn_token_for_provider is never called on that
+                # branch.
+                reasoning_effort=reasoning_effort or "",
             )
             minted_token = turn_env.get("ANTHROPIC_AUTH_TOKEN") or ""
             if minted_token and openai_compat_adapter.is_adapter_routed_provider(provider):

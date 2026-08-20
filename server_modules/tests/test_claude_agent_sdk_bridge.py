@@ -237,6 +237,34 @@ class ResolveSdkProcessEnvTests(unittest.TestCase):
         self.assertFalse(env["ANTHROPIC_BASE_URL"].startswith("http://127.0.0.1:"))
         self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://localhost:11434")
 
+    def test_reasoning_effort_is_threaded_to_the_minted_adapter_token(self):
+        # openai_compat_adapter.py can only apply the reasoning-effort
+        # control if it actually receives it — this is the seam that
+        # carries model_config.reasoning_effort from the turn all the way
+        # to the token the adapter's messages_endpoint later looks up.
+        with patch.object(
+            openai_compat_adapter, "mint_turn_token_for_provider", return_value="tok-123",
+        ) as mock_mint:
+            env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+                credentials={"api_key": "k"}, provider="openai", model="gpt-5.4-mini",
+                reasoning_effort="high",
+            )
+        self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "tok-123")
+        mock_mint.assert_called_once_with("openai", {"api_key": "k"}, "gpt-5.4-mini", "high")
+
+    def test_reasoning_effort_defaults_to_empty_string_not_none(self):
+        # mint_turn_token_for_provider/mint_turn_credential both normalize
+        # via str(x or "").strip() -- passing the Python None default
+        # through unnormalized would still work today but is exactly the
+        # kind of drift a future refactor could turn into a crash.
+        with patch.object(
+            openai_compat_adapter, "mint_turn_token_for_provider", return_value="tok-456",
+        ) as mock_mint:
+            claude_agent_sdk_bridge.resolve_sdk_process_env(
+                credentials={"api_key": "k"}, provider="openai", model="gpt-5.4-mini",
+            )
+        mock_mint.assert_called_once_with("openai", {"api_key": "k"}, "gpt-5.4-mini", "")
+
     def test_ollama_cloud_is_a_distinct_provider_and_is_unaffected(self):
         # "ollama_cloud" (the hosted/BYOK offering) is a different provider
         # id from local "ollama" and has no native Anthropic surface -- it

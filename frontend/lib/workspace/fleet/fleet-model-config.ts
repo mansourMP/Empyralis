@@ -448,3 +448,117 @@ export function visibleCodexModels(catalog: CodexModelCatalogState): CodexModelC
   if (!catalog.supported || catalog.models.length === 0) return null;
   return catalog.models.filter((m) => !m.hidden);
 }
+
+// ── BYOK (byok_api) live model catalog ──────────────────────────────────────
+//
+// The founder's own requirement: "if I brought my own subscription into the
+// platform I should be able to see the models currently available in that
+// same subscription... verified by the official document or by the
+// official harness or by the official subscription." MODELS_BY_PROVIDER in
+// fleet-provider-constants.ts is a hand-typed mirror of provider_profiles.py
+// (its own doc comment says so) — accurate the day it's written, silently
+// stale the moment a provider retires or renames a model (this already
+// happened once for real, see MODELS_BY_PROVIDER's deepseek-chat/
+// deepseek-reasoner comment).
+//
+// `GET /api/providers/{id}/models` (connectors_core.get_provider_models)
+// already exists, is already scoped correctly (routes_connectors.py's
+// _authorize_provider_scope), and already calls the provider's OWN /v1/
+// models endpoint (or provider-specific equivalent) using the workspace's
+// actually-saved credential for that provider — server_modules/
+// provider_profiles.py's ProviderAdapter.list_models. It had a frontend
+// client method (workstation-client.ts's listProviderModels) with zero
+// callers anywhere in the UI — "built, tested, and never wired," same
+// shape as useCodexModelCatalog's own live discovery below, just never
+// applied to the BYOK picker it was built for.
+//
+// This hook is deliberately the smaller of the two: the endpoint returns
+// bare model-id strings (adapter.list_models), not the richer per-model
+// records list_model_records can produce, and requires the workspace to
+// already have a credential saved for this provider (a freshly-typed,
+// unsaved API key in the form has nothing to probe with yet) — so a
+// first-time setup still uses the static list, exactly the same
+// "couldn't verify right now, fall back honestly" contract
+// useCodexModelCatalog already established.
+
+export type ByokModelCatalogState = {
+  /** true once a fetch has resolved (success OR failure). */
+  loaded: boolean;
+  loading: boolean;
+  /** true only when the live call actually returned a non-empty model
+   *  list for a real, already-saved credential — false for a missing
+   *  credential, an upstream error, or a request that hasn't resolved. */
+  supported: boolean;
+  models: string[];
+  /** true when the workspace has no credential saved for this provider
+   *  yet — distinct from a genuine fetch failure, so a picker can say
+   *  "save your key first to see your real models" rather than a bare
+   *  "couldn't check." */
+  credentialRequired: boolean;
+};
+
+const EMPTY_BYOK_MODEL_CATALOG: ByokModelCatalogState = {
+  loaded: false,
+  loading: false,
+  supported: false,
+  models: [],
+  credentialRequired: false,
+};
+
+/** Fetches the live model list for one BYOK provider, using whatever
+ *  credential this workspace already has saved for it. Re-fetches
+ *  whenever provider changes; a freeform provider (no fixed catalog to
+ *  replace — azure_openai/custom_openai_compatible, where the "model" is
+ *  a deployment name, not a discoverable id) or an empty provider
+ *  short-circuits to the empty/unsupported state without a network call. */
+export function useByokModelCatalog(workspaceId: string, provider: string): ByokModelCatalogState {
+  const [state, setState] = useState<ByokModelCatalogState>(EMPTY_BYOK_MODEL_CATALOG);
+  const requestIdRef = useRef(0);
+
+  const refresh = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
+    if (!provider.trim() || FREEFORM_MODEL_PROVIDERS.has(provider)) {
+      setState(EMPTY_BYOK_MODEL_CATALOG);
+      return;
+    }
+    setState((prev) => ({ ...prev, loading: true }));
+    try {
+      const res = await fleetAuthorizedFetch(
+        `/api/providers/${encodeURIComponent(provider)}/models?workspace_id=${encodeURIComponent(workspaceId)}`,
+        { credentials: "include" },
+      );
+      const data = res.ok ? await res.json().catch(() => ({})) : {};
+      if (requestIdRef.current !== requestId) return;
+      const models: string[] = Array.isArray(data?.models)
+        ? data.models.filter((m: unknown): m is string => typeof m === "string" && m.trim().length > 0)
+        : [];
+      setState({
+        loaded: true,
+        loading: false,
+        supported: res.ok && models.length > 0 && !data?.error,
+        models,
+        credentialRequired: Boolean(data?.credential_required),
+      });
+    } catch {
+      if (requestIdRef.current !== requestId) return;
+      // Fetch failure is "couldn't verify," never "verified as empty" —
+      // same discipline as useCodexModelCatalog's own catch branch.
+      setState({ loaded: true, loading: false, supported: false, models: [], credentialRequired: false });
+    }
+  }, [workspaceId, provider]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  return state;
+}
+
+/** Models a picker should actually show: the live set when the provider's
+ *  own API could answer for this workspace's real credential, else null
+ *  (meaning "fall back to the static catalog and say so honestly," the
+ *  same contract visibleCodexModels already established). */
+export function visibleByokModels(catalog: ByokModelCatalogState): string[] | null {
+  if (!catalog.supported || catalog.models.length === 0) return null;
+  return catalog.models;
+}
