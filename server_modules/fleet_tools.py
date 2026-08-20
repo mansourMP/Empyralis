@@ -560,6 +560,47 @@ def _resolve_runtime_target(inst: Dict[str, Any]) -> str:
 async def _resolve_cloud_agent_readiness(
     workspace_id: str,
     model_config: Dict[str, Any],
+    *,
+    readiness_cache: Optional[Dict[tuple[str, str], tuple[bool, str]]] = None,
+) -> tuple[bool, str]:
+    """Cache-aware wrapper around _resolve_cloud_agent_readiness_uncached.
+
+    fleet_list_agents calls this once PER AGENT, every ~30s poll, for every
+    workspace. Most agents in a workspace share the platform_credits default
+    (no per-agent provider stored) or the same BYOK provider, so their
+    (mode, provider) pair — and therefore the whole DB-touching resolution
+    below (get_workspace_by_id, vault credential lookup, entitlements
+    check) — is IDENTICAL across every such agent. Before this cache, an
+    N-agent workspace ran that same resolution N times per poll: real N+1
+    query traffic on one of the most frequently-hit reads in the product.
+
+    Only platform_credits/byok_api are cached — their result depends solely
+    on (workspace_id, mode, provider), and workspace_id is constant for the
+    caller's single readiness_cache instance (one dict per fleet_list_agents
+    call, never shared across requests, so this can never serve a stale
+    answer to a later poll). cli_subscription/local are deliberately NOT
+    cached: their result also depends on gateway_binding/runtime, which
+    differ per agent, so a (mode, provider) key would incorrectly conflate
+    two different agents' bindings — and neither branch does any DB I/O
+    anyway, so caching them would save nothing.
+    """
+    mode = str((model_config or {}).get("mode") or "platform_credits").strip().lower()
+    provider = str((model_config or {}).get("provider") or "").strip().lower()
+    cacheable = mode in ("platform_credits", "byok_api")
+    if cacheable and readiness_cache is not None:
+        cache_key = (mode, provider)
+        cached = readiness_cache.get(cache_key)
+        if cached is not None:
+            return cached
+    result = await _resolve_cloud_agent_readiness_uncached(workspace_id, model_config)
+    if cacheable and readiness_cache is not None:
+        readiness_cache[(mode, provider)] = result
+    return result
+
+
+async def _resolve_cloud_agent_readiness_uncached(
+    workspace_id: str,
+    model_config: Dict[str, Any],
 ) -> tuple[bool, str]:
     """Check whether a CLOUD-placement agent's model_config resolves to a
     usable AI provider + credential RIGHT NOW — the honesty check backing
@@ -718,6 +759,7 @@ async def _resolve_hardware_status(
     heartbeats: Dict[str, dict],
     *,
     workspace_id: str = "",
+    readiness_cache: Optional[Dict[tuple[str, str], tuple[bool, str]]] = None,
 ) -> tuple[str, Optional[str], Optional[str], Optional[str]]:
     """Resolve hardware status, last heartbeat, current run, and (when not
     ready) a human reason for an agent install.
@@ -760,6 +802,7 @@ async def _resolve_hardware_status(
     if target in ("cloud", "empyralis-cloud"):
         ready, reason = await _resolve_cloud_agent_readiness(
             workspace_id, resolve_model_config(inst),
+            readiness_cache=readiness_cache,
         )
         if ready:
             return "online", None, None, None
@@ -925,6 +968,18 @@ async def fleet_list_agents(
     _last_active = await _fetch_latest_activity(workspace_id)
     _channels = await _fetch_agent_channels(tenant_id=tenant_id, workspace_id=workspace_id)
 
+    # Perf: _resolve_hardware_status calls _resolve_cloud_agent_readiness
+    # per cloud-placement agent below, and most agents in a workspace share
+    # the same (mode, provider) — the platform_credits default especially,
+    # which every agent with no per-agent provider override resolves
+    # identically. Without this cache, an N-cloud-agent workspace re-ran the
+    # same get_workspace_by_id + vault + entitlements lookups N times on
+    # EVERY ~30s poll of this endpoint (PrimaryRail/SageLauncher/command
+    # palette/the page itself all subscribe to it). One dict, scoped to
+    # this single call, shared across every agent in the loop below — see
+    # _resolve_cloud_agent_readiness's own docstring for why this is safe.
+    _readiness_cache: dict[tuple[str, str], tuple[bool, str]] = {}
+
     agents = []
     for inst in (installs or []):
         inst_dict = dict(inst) if isinstance(inst, dict) else {}
@@ -933,7 +988,7 @@ async def fleet_list_agents(
         # ── Phase U3: runtime target + hardware status ──
         _runtime_target = _resolve_runtime_target(inst_dict)
         _hardware_status, _last_heartbeat, _current_run_id, _hardware_status_reason = await _resolve_hardware_status(
-            inst_dict, _heartbeats, workspace_id=workspace_id,
+            inst_dict, _heartbeats, workspace_id=workspace_id, readiness_cache=_readiness_cache,
         )
 
         # ── Phase 7B: capability preset + hardware access + context policy ──

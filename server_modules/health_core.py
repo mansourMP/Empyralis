@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sys
 import threading
@@ -285,7 +286,19 @@ def _runtime_cloud_provider_readiness(
 async def health():
     runtime_contract = _runtime_contract_payload()
     openai_key, openai_env_source = _openai_env_bearer_with_source()
-    openai_probe = probe_openai_credential(
+    # probe_openai_credential does a BLOCKING urllib call (to api.openai.com,
+    # or to the vault-resolved provider's own validate() endpoint) with no
+    # asyncio await point in it. health() is `async def` and this backend
+    # runs a single uvicorn worker, so calling it directly here freezes the
+    # ENTIRE event loop -- every other concurrent request on the whole
+    # process, for every customer -- for the length of that live network
+    # round trip. Measured on production: /health (public, unauthenticated)
+    # took 0.9-1.5s per call, confirmed via tcpdump to be a real outbound
+    # SYN to api.openai.com fired synchronously inside this coroutine.
+    # asyncio.to_thread moves the blocking call off the event loop so this
+    # request can still take ~1s, but no longer stalls anyone else's.
+    openai_probe = await asyncio.to_thread(
+        probe_openai_credential,
         openai_key=openai_key,
         openai_env_source=openai_env_source,
         openai_healthcheck=OPENAI_HEALTHCHECK,

@@ -710,7 +710,6 @@ async def _resolve_cloud_provider(
     works hard to avoid elsewhere (see the memory-isolation audit).
     Callers resolving Sage's OWN turn should pass True explicitly.
     """
-    print(f"[TRACE_PROVIDER] _resolve_cloud_provider called ws={workspace_id}", flush=True)
     from server_modules.workspace_config_schema import workspace_admin_defaults_from_metadata
     from server_modules.control_plane_repository import get_workspace_by_id as _load_workspace
 
@@ -766,7 +765,6 @@ async def _resolve_cloud_provider(
     if active_provider:
         credentials = direct_chat_credentials(normalized_ws, active_provider)
         if supports_direct_message_native_chat(active_provider, credentials):
-            print(f"[TRACE_PROVIDER_OK] returning provider={active_provider} (explicit)", flush=True)
             return active_provider, credentials
         # Explicit provider is unavailable — HARD STOP.
         raise RuntimeError(
@@ -785,11 +783,9 @@ async def _resolve_cloud_provider(
             hosted_sage_ai_access_state_for_workspace_id as _hosted_access,
         )
         _access = _hosted_access(workspace_id=normalized_ws)
-        print(f"[TRACE_ENTITLE] ws={normalized_ws} allowed={_access.get('allowed')} reason={_access.get('reason')} message={str(_access.get('message') or '')[:120]}", flush=True)
         if _access.get("allowed"):
             credentials = direct_chat_credentials(normalized_ws, "deepseek")
             if supports_direct_message_native_chat("deepseek", credentials):
-                print(f"[TRACE_PROVIDER_OK] returning provider=deepseek (platform)", flush=True)
                 return "deepseek", credentials
             raise RuntimeError(
                 "Platform AI credentials could not be validated. "
@@ -810,7 +806,6 @@ async def _resolve_cloud_provider(
 
     credentials = direct_chat_credentials(normalized_ws, "deepseek")
     if supports_direct_message_native_chat("deepseek", credentials):
-        print(f"[TRACE_PROVIDER_OK] returning provider=deepseek (fallback, no entitlements)", flush=True)
         return "deepseek", credentials
 
     raise RuntimeError("No cloud provider is configured for this agent.")
@@ -5826,8 +5821,6 @@ async def _handle_sage_chat_unguarded(
     _persisted_model = await get_persisted_model_preference(normalized_workspace_id)
     if _persisted_model:
         requested_model = _persisted_model
-        import sys as _sys_model
-        print(f"[TRACE_MODEL_PERSISTED] ws={normalized_workspace_id} model={requested_model}", flush=True, file=_sys_model.stderr)
     # Phase 4: specialist model binding wins over the workspace preference.
     if _spec is not None:
         _spec_model = str(getattr(_spec, "model", "") or "").strip()

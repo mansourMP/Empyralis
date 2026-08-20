@@ -644,6 +644,106 @@ class ResolveHardwareStatusCloudHonestyTests(unittest.TestCase):
         self.assertIsNone(reason)
 
 
+class ResolveCloudAgentReadinessCacheTests(unittest.TestCase):
+    """Perf fix: fleet_list_agents polls _resolve_hardware_status once PER
+    AGENT, every ~30s, and most cloud-placement agents in a workspace share
+    the same (mode, provider) — the platform_credits default especially.
+    Without a cache, N such agents meant N identical get_workspace_by_id +
+    vault + entitlements resolutions on every poll. readiness_cache collapses
+    that to one call per DISTINCT (mode, provider) seen in a single
+    fleet_list_agents invocation, never across requests (a fresh dict is
+    created per call, so this can never serve a stale answer to a later
+    poll)."""
+
+    @staticmethod
+    def _cloud_inst(agent_id, model_config):
+        return {
+            "id": agent_id,
+            "runtime_profile": {"default_execution_target": "cloud"},
+            "metadata": {"model_config": model_config},
+        }
+
+    def test_platform_credits_default_resolved_once_for_many_agents(self):
+        cache: dict = {}
+        resolver = AsyncMock(return_value=("deepseek", {"api_key": "sk-live"}))
+        with patch(
+            "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+            new=resolver,
+        ):
+            for i in range(5):
+                inst = self._cloud_inst(f"agent-{i}", {"mode": "platform_credits"})
+                status, _hb, _run_id, _reason = _run(
+                    fleet_tools._resolve_hardware_status(
+                        inst, {}, workspace_id="ws-1", readiness_cache=cache,
+                    )
+                )
+                self.assertEqual(status, "online")
+        # The whole point: 5 agents, 1 real resolution.
+        self.assertEqual(resolver.call_count, 1)
+
+    def test_different_providers_are_not_conflated(self):
+        cache: dict = {}
+        with patch(
+            "server_modules.direct_chat_provider_service.direct_chat_credentials",
+            side_effect=lambda ws, provider: {"provider": provider},
+        ), patch(
+            "server_modules.direct_chat_provider_service.supports_direct_message_native_chat",
+            side_effect=lambda provider, creds: provider == "openai",
+        ):
+            openai_inst = self._cloud_inst(
+                "agent-openai", {"mode": "platform_credits", "provider": "openai"}
+            )
+            anthropic_inst = self._cloud_inst(
+                "agent-anthropic", {"mode": "platform_credits", "provider": "anthropic"}
+            )
+            openai_status, *_ = _run(
+                fleet_tools._resolve_hardware_status(
+                    openai_inst, {}, workspace_id="ws-1", readiness_cache=cache,
+                )
+            )
+            anthropic_status, _hb, _run_id, anthropic_reason = _run(
+                fleet_tools._resolve_hardware_status(
+                    anthropic_inst, {}, workspace_id="ws-1", readiness_cache=cache,
+                )
+            )
+        # A shared cache keyed only on (mode, provider) must still tell two
+        # different providers apart — never collapse a ready one and a
+        # not-ready one into the same cached answer.
+        self.assertEqual(openai_status, "online")
+        self.assertEqual(anthropic_status, "error")
+        self.assertIsNotNone(anthropic_reason)
+
+    def test_different_gateway_bindings_are_not_conflated_by_cache(self):
+        """cli_subscription/local are deliberately never cached (see the
+        function's own docstring) because their result also depends on
+        gateway_binding/runtime, which a (mode, provider) key can't see.
+        Two agents on the same runtime but different (bound vs. unbound)
+        gateways must resolve independently even when a cache dict is
+        passed through."""
+        cache: dict = {}
+        bound_inst = self._cloud_inst(
+            "agent-bound",
+            {"mode": "cli_subscription", "runtime": "claude_code", "gateway_binding": "gw-1"},
+        )
+        unbound_inst = self._cloud_inst(
+            "agent-unbound",
+            {"mode": "cli_subscription", "runtime": "claude_code", "gateway_binding": ""},
+        )
+        bound_status, *_ = _run(
+            fleet_tools._resolve_hardware_status(
+                bound_inst, {}, workspace_id="ws-1", readiness_cache=cache,
+            )
+        )
+        unbound_status, _hb, _run_id, unbound_reason = _run(
+            fleet_tools._resolve_hardware_status(
+                unbound_inst, {}, workspace_id="ws-1", readiness_cache=cache,
+            )
+        )
+        self.assertEqual(bound_status, "online")
+        self.assertEqual(unbound_status, "error")
+        self.assertIn("no", (unbound_reason or "").lower())
+
+
 class RecommendedModelConfigForGatewayTests(unittest.TestCase):
     """§29 per-agent-provider fix, task (c): hardware-aware "recommended"
     reuse. fleet_tools.recommended_model_config_for_gateway is the reusable

@@ -1801,7 +1801,6 @@ def stream_provider_backed_direct_chat(
         # plan is actively extending it (see the continuous-work check above).
         _strip_tools_provider = str(actual_provider or context.get("provider") or "").strip().lower()
         if executed_any_tools and _strip_tools_provider in _TOOL_STRIP_REQUIRED_PROVIDERS:
-            print(f"[TRACE_STRIP] stripping tools from metadata and context iteration={_loop_iteration} provider={_strip_tools_provider!r}", flush=True)
             if isinstance(metadata, dict) and metadata.get("tools"):
                 print(f"[DG_STRIP_TOOLS] stripping {len(metadata['tools'])} tools from metadata for synthesis iteration={_loop_iteration}", flush=True)
                 metadata = {**metadata, "tools": []}
@@ -3182,7 +3181,6 @@ def stream_provider_backed_direct_chat(
     # tools already ran. Runs here, OUTSIDE the for loop, so break cannot skip it.
     # Condition expanded to also catch empty-reply edge case (no error but no text).
     missing_reply = not final_reply.strip()
-    print(f"[TRACE_NUCLEAR_CHECK] executed_any_tools={executed_any_tools} llm_error={llm_error!r} final_reply_len={len(final_reply or '')}", flush=True)
     print(f"[DG_NUCLEAR_CHECK] executed_any_tools={executed_any_tools} llm_error={llm_error!r} final_reply_len={len(final_reply)} missing_reply={missing_reply}", flush=True)
     if executed_any_tools and (llm_error or missing_reply):
         _tool_outputs = [
