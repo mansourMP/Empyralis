@@ -13,7 +13,6 @@ import {
   railSpaceFromPathname,
   settingsSpaceLinks,
   spaceBackHref,
-  workspaceAgentsSpaceLinks,
 } from "./primary-rail-space";
 
 // Narrowing helper for the union — throws (fails the run) rather than
@@ -108,66 +107,33 @@ if (agentChat?.kind === "project-agents") {
   );
 }
 
-// ── The workspace-agents space (2026-08-19) ───────────────────────────────
-const workspaceAgentsIndex = railSpaceFromPathname("/w/ws1/agents");
-assert(workspaceAgentsIndex?.kind === "workspace-agents", "the bare /agents index is the workspace-agents space");
-assert(workspaceAgentsIndex?.workspaceId === "ws1", "the space carries its workspace id");
-
-const workspaceAgentsTrailingSlash = railSpaceFromPathname("/w/ws1/agents/");
+// ── The workspace-level /agents tree is NOT a rail space (2026-08-20) ─────
+// It briefly was (2026-08-19's "workspace-agents" kind) — see this file's
+// module header for why that was reverted. The bare index, an agent's own
+// tab page, and a stray "agentsx" segment must all read as "not a space":
+// the primary rail stays flat there, and the picker lives in the content
+// area instead (AgentConversationList.tsx, wired by agents/layout.tsx).
+assert(railSpaceFromPathname("/w/ws1/agents") === null, "the bare workspace /agents index is not a rail space");
+assert(railSpaceFromPathname("/w/ws1/agents/") === null, "a trailing slash on it is still not a rail space");
 assert(
-  workspaceAgentsTrailingSlash?.kind === "workspace-agents",
-  "a trailing slash on the bare index is still the workspace-agents space",
+  railSpaceFromPathname("/w/ws1/agents/ainstall_ab12/chat") === null,
+  "a workspace-level agent's own chat page is not a rail space either",
 );
+assert(railSpaceFromPathname("/w/ws1/agentsx") === null, "a segment merely starting with 'agents' is not a space");
+assert(railSpaceFromPathname("/w/ws1/inbox") === null, "Inbox is still not any space");
 
-// This is the load-bearing disjointness assertion: an agent's own page,
-// under a project's URL, must stay the project-agents space exactly as
-// pinned above — adding the workspace-agents kind must never repoint it.
+// This is the load-bearing disjointness assertion: a project's own agent
+// pages, under /projects/{pid}/agents/…, must stay the project-agents
+// space exactly as pinned above — nothing about the workspace-level tree
+// existing may ever repoint them.
 assert(
   railSpaceFromPathname("/w/ws1/projects/p1/agents")?.kind === "project-agents",
   "a project's own /agents section is still the project-agents space, unchanged",
 );
 assert(
   railSpaceFromPathname("/w/ws1/projects/p1/agents/ainstall_ab12/chat")?.kind === "project-agents",
-  "an agent's own chat page is still the project-agents space, unchanged",
+  "an agent's own chat page under a project's URL is still the project-agents space, unchanged",
 );
-assert(
-  railSpaceFromPathname("/w/ws1/agentsx") === null,
-  "a segment merely starting with 'agents' is not the workspace-agents space",
-);
-assert(
-  railSpaceFromPathname("/w/ws1/inbox") === null,
-  "Inbox is still not any space, workspace-agents included",
-);
-
-if (workspaceAgentsIndex?.kind === "workspace-agents") {
-  const workspaceAgentLinks = workspaceAgentsSpaceLinks(workspaceAgentsIndex, [
-    { agent_id: "ainstall_ab12", label: "Scout", project_id: "p1" },
-    { agent_id: "ainstall_cd34", label: null, project_id: "p2" },
-  ]);
-  assert(
-    workspaceAgentLinks.map((l) => l.href).join(" ") ===
-      "/w/ws1/projects/p1/agents/ainstall_ab12/chat /w/ws1/projects/p2/agents/ainstall_cd34/chat",
-    "every row links straight into that agent's OWN chat URL, whichever project it belongs to",
-  );
-  assert(
-    workspaceAgentLinks.map((l) => l.label).join("|") === "Scout|Unnamed agent",
-    "an unlabelled agent reads 'Unnamed agent', never a raw id",
-  );
-  assert(
-    workspaceAgentLinks.every((l) => l.active === false),
-    "no row is ever active — this space is only ever entered before an agent is picked",
-  );
-  // Back is the cameFrom rule (like settings), never a single owning
-  // project — agents are workspace-wide here.
-  assert(
-    spaceBackHref(workspaceAgentsIndex, "/w/ws1/projects/p1") === "/w/ws1/projects/p1",
-    "workspace-agents Back returns to where the person came from",
-  );
-  assert(
-    spaceBackHref(workspaceAgentsIndex, null) === "/w/ws1",
-    "workspace-agents Back falls back to the workspace root with no known origin",
-  );
-}
 
 // ── The Settings pick-list ────────────────────────────────────────────────
 const links = settingsSpaceLinks(asSettings(account));
@@ -279,38 +245,53 @@ assert(
   "ProjectDetailPage hides its tab strip via the same projectAgentsSpaceIsActive, not a second check",
 );
 
-// ── The workspace-agents space, wired the identical way ───────────────────
-assert(
-  /workspaceAgentsSpaceLinks\s*\(/.test(railSource),
-  "PrimaryRail renders the workspace-agents pick-list from workspaceAgentsSpaceLinks",
+// ── The workspace-level /agents picker is NOT on the rail (2026-08-20) ────
+// Reintroduction guard for the exact thing this file's own module header
+// documents being reverted: the primary rail must never again reference a
+// workspace-agents space or pick-list.
+assert(!/workspace-agents/.test(railSource), "PrimaryRail no longer references a workspace-agents rail space");
+assert(!/workspaceAgentsSpaceLinks/.test(railSource), "PrimaryRail no longer renders a workspace-agents pick-list");
+
+// The picker lives in the content area instead: agents/layout.tsx renders
+// AgentConversationList beside the routed agent page, gated on the exact
+// same planAgentCountShape rule every other count-decided shape here uses
+// — never a second, hand-rolled re-check of the count.
+const agentsLayoutSource = readFileSync(
+  new URL("../../../app/(account)/w/[workspaceId]/agents/layout.tsx", import.meta.url),
+  "utf8",
 );
 assert(
-  /workspaceAgentsSpaceIsActive\s*\(/.test(railSource),
-  "the workspace-agents space is gated by the SAME predicate the Agents page hides its grid with (workspace-agents-rail-shape.ts's workspaceAgentsSpaceIsActive), never a second one",
+  agentsLayoutSource.includes('from "@/lib/workspace/fleet/agent-count-shape"') &&
+    /planAgentCountShape\s*\(/.test(agentsLayoutSource),
+  "agents/layout.tsx gates the list pane via planAgentCountShape, not a second rule",
+);
+assert(
+  agentsLayoutSource.includes('from "@/lib/workspace/fleet/AgentConversationList"') &&
+    /<AgentConversationList\b/.test(agentsLayoutSource),
+  "agents/layout.tsx actually renders AgentConversationList — built, and wired",
+);
+assert(
+  /fleet-content--split/.test(agentsLayoutSource),
+  "the list+detail split reuses the same master-detail shell class Inbox/Work/Memory already use",
 );
 
-// And the content-area half of that same predicate: the workspace Agents
-// page must call the identical function to decide whether it hides its own
-// grid/board/list, not a hand-rolled re-check of the count — the drift
-// guard for the exact bug this shape already caused once for project-agents
-// (rail morphed into a picker while the content area rendered its own).
+// The actual "only one surface may be the picker" guard: the bare index
+// must show the quiet prompt, never a second list of its own, once the
+// layout's pane is showing — the same class the project-agents space's
+// own placeholder already uses (fleet-theme.css's
+// .fleet-project-agents-placeholder), reused rather than a second CSS rule
+// for an identical shape.
 const agentsPageSource = readFileSync(
   new URL("../../../app/(account)/w/[workspaceId]/agents/page.tsx", import.meta.url),
   "utf8",
 );
 assert(
-  agentsPageSource.includes('from "@/lib/workspace/fleet/workspace-agents-rail-shape"') &&
-    /workspaceAgentsSpaceIsActive\s*\(/.test(agentsPageSource),
-  "the workspace Agents page hides its grid via the same workspaceAgentsSpaceIsActive, not a second check",
+  /fleet-project-agents-placeholder/.test(agentsPageSource),
+  "the workspace Agents index renders the quiet placeholder, not a grid/board/list of its own",
 );
-// The actual "only one surface may be the picker" guard for this space: at
-// 2+ agents the content area must show the quiet prompt, never the grid —
-// the same class the project-agents space's own placeholder already uses
-// (see fleet-theme.css's .fleet-project-agents-placeholder), reused rather
-// than a second CSS rule for an identical shape.
 assert(
-  /workspaceAgentsRailActive\s*\?[\s\S]{0,800}fleet-project-agents-placeholder/.test(agentsPageSource),
-  "the workspace Agents page renders the quiet placeholder — not the grid/board/list — while workspaceAgentsRailActive is true",
+  !/from ["']@\/lib\/workspace\/fleet\/(AgentsBoard|AgentsGroupedList|AgentViewOptions)["']/.test(agentsPageSource),
+  "the workspace Agents index no longer IMPORTS the fleet-management surfaces that were already unreachable behind the old rail-space gate (mentioning them in prose, e.g. explaining they're now orphaned, is fine — this only bans a live import)",
 );
 
 // And the in-content sidebar is actually GONE: SettingsShell must not render

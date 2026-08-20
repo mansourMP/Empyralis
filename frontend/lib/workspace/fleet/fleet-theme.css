@@ -1789,17 +1789,16 @@ a.fleet-breadcrumb:hover {
   margin-inline: 0;
 }
 
-/* A bare /agents index, once the PRIMARY rail has morphed into a picker
-   (2+ agents — primary-rail-space.ts): the flat table/board/list is gone
-   from here, replaced by a quiet prompt — the rail IS the browse surface,
-   so a second one in the content would just be the same list twice. Shared
-   by TWO spaces on purpose, not a coincidence of naming: a project's own
-   /agents (project-agents — the old in-content .fleet-agents-rail column
-   and its agents/layout.tsx split are deleted, a replaced shell takes its
-   CSS with it) and the workspace-level /agents (workspace-agents, added
-   2026-08-19 when the founder moved agents back onto the rail). Both are
-   the identical shape — a quiet centered sentence — so one rule serves
-   both rather than two copies drifting apart. */
+/* A bare /agents index once its own picker is showing elsewhere: the flat
+   table/board/list is gone from here, replaced by a quiet prompt. Shared
+   by TWO surfaces on purpose, not a coincidence of naming — a project's
+   own /agents at 2+ agents (project-agents, primary-rail-space.ts — the
+   rail morphs into the pick-list) and the workspace-level /agents at 2+
+   agents (agents/layout.tsx's AgentConversationList pane, 2026-08-20 —
+   the CONTENT area, not the rail, is the pick-list there; see that
+   module's own header for why). Both are the identical shape — a quiet
+   centered sentence — so one rule serves both rather than two copies
+   drifting apart. */
 .fleet-project-agents-placeholder {
   display: flex;
   align-items: center;
@@ -1807,6 +1806,155 @@ a.fleet-breadcrumb:hover {
   height: 100%;
   color: var(--text-muted);
   font-size: var(--text-sm);
+}
+
+/* ── Workspace Agents — conversation list pane (2026-08-20) ───────────────
+   AgentConversationList.tsx, rendered by agents/layout.tsx beside the
+   selected agent's chat inside .fleet-content--split. Same 30%/320px/
+   hairline-divide CONTRACT as .fleet-inbox-list/.fleet-work-list/
+   .fleet-memory-file-list (the Linear reference those already cite) —
+   given its own rule rather than joining that shared selector because this
+   pane has an internal header (search + "new") those four don't: joining
+   would apply `overflow-y: auto` to the header too, and a page-shell class
+   asked to serve two different internal shapes is exactly the trap this
+   codebase already documented once (CLAUDE.md: "a page-shell class shared
+   by two page SHAPES will be right for one and wrong for the other"). */
+.fleet-agents-conversation-list {
+  flex: 0 0 30%;
+  min-width: 320px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+}
+.fleet-agents-conversation-list-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.fleet-agents-conversation-search {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--h-control-md);
+  padding: 0 10px;
+  border-radius: var(--radius-control);
+  background: var(--bg-inset);
+  color: var(--text-muted);
+}
+.fleet-agents-conversation-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  font: inherit;
+}
+.fleet-agents-conversation-search input:focus { outline: none; }
+.fleet-agents-conversation-search input::placeholder { color: var(--text-muted); }
+.fleet-agents-conversation-list-rows {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.fleet-agents-conversation-list-empty {
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+/* One row = one agent's conversation. Same idiom as .fleet-inbox-row (real
+   link, hairline-divided, hover/active states) with a leading avatar
+   instead of a dot, and a two-line text block (name + time / preview)
+   instead of one — the shape every messenger's chat list uses. */
+.fleet-conversation-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-primary);
+  text-decoration: none;
+  cursor: pointer;
+}
+.fleet-agents-conversation-list-rows .fleet-conversation-row:last-child { border-bottom: none; }
+.fleet-conversation-row:hover { background: var(--bg-card-hover); }
+.fleet-conversation-row--active { background: var(--rail-active); }
+.fleet-conversation-row:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: -2px;
+}
+.fleet-conversation-row-avatar {
+  position: relative;
+  flex-shrink: 0;
+  display: flex;
+  width: 32px;
+  height: 32px;
+}
+.fleet-conversation-row-avatar .fleet-sdot {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  border: 2px solid var(--bg-panel);
+  border-radius: 999px;
+}
+.fleet-conversation-row-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.fleet-conversation-row-line1 {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.fleet-conversation-row-name {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fleet-conversation-row-time {
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+.fleet-conversation-row-preview {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The detail pane beside the list — the routed agent page (or, at the bare
+   index, the placeholder above). flex:1 for the same reason
+   .fleet-content--chat/--with-panel use it rather than height:100% (see
+   .fleet-shell-scroll's own comment): it needs a REAL resolved height for
+   FleetAgentDetail's .fleet-detail--page (height:100%) to bind against one
+   level further down. */
+.fleet-agents-detail-pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 /* ~30%, floored at 320px per the Linear reference — a hairline-divided list,

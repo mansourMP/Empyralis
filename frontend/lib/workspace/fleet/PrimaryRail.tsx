@@ -23,7 +23,7 @@ import {
 import { logout } from "@/lib/auth/auth-client";
 import { useAccountShell } from "@/lib/shell/account-shell-context";
 import { useRevealedEmail } from "@/lib/shell/use-revealed-email";
-import { getInboxLastSeenAt, resolveAgentProjectId, useFleetAgents, useFleetNotifications, useFleetProjects, useFleetWorkspace, useFleetWorkspaceTasks, useWorkspaceActivity } from "./fleet-data";
+import { getInboxLastSeenAt, useFleetAgents, useFleetNotifications, useFleetProjects, useFleetWorkspace, useFleetWorkspaceTasks, useWorkspaceActivity } from "./fleet-data";
 import { deriveStatus, findSageAgent } from "./fleet-presentation";
 import { ProjectIcon } from "./fleet-project-identity";
 import { planAgentCountShape } from "./agent-count-shape";
@@ -36,11 +36,9 @@ import {
   railSpaceFromPathname,
   settingsSpaceLinks,
   spaceBackHref,
-  workspaceAgentsSpaceLinks,
   type RailSpaceLink,
 } from "./primary-rail-space";
 import { projectAgentsSpaceIsActive } from "./project-agents-rail-shape";
-import { workspaceAgentsSpaceIsActive } from "./workspace-agents-rail-shape";
 import { activeProjectIdFromPathname } from "./primary-rail-project-mode";
 import { AgentSigil, StatusDot } from "./fleet-indicators";
 import { rememberLastViewedAgent } from "./AgentsList";
@@ -114,15 +112,20 @@ const money = (n: number) => (n === 0 ? "—" : `$${n.toFixed(4)}`);
  *
  * Agents CAME BACK 2026-08-19 — a founder reversal on this one point (see
  * primary-rail-nav.ts's own history for the exact words), not a re-opening
- * of that boundary. It is a top-level row again, but it does not aggregate
- * into the content area the way the pre-2026-08-13 shape did: pressing it
- * morphs THIS rail into the workspace-agents space — every real agent,
- * across every project — the same mechanism Settings already uses
- * (primary-rail-space.ts, gated by workspace-agents-rail-shape.ts). A
- * project's own Agents tab is untouched and still opens the older,
- * project-scoped twin of this same mechanism (project-agents) — the two
- * are independent, see primary-rail-space.ts's header for why they stay
- * that way rather than merging.
+ * of that boundary. It is a top-level row, a normal flat one exactly like
+ * Projects and My work — NOT a rail-morphing picker. It briefly was one
+ * (2026-08-19 through 2026-08-20: pressing it morphed this whole rail into
+ * a bare list of agent names, Inbox/My work/Projects all gone from view),
+ * and the founder rejected that design the same session it shipped ("not
+ * on this left rail but something else... I really don't like the design
+ * of it right now"). The picker for "which agent" now lives in the CONTENT
+ * area instead — a persistent list pane beside the chat
+ * (AgentConversationList.tsx, wired by agents/layout.tsx), the same
+ * master-detail shape Inbox/Work/Memory already use. See
+ * primary-rail-space.ts's own 2026-08-20 correction and
+ * agents-conversation-list.ts's header for the full reasoning. A project's
+ * own Agents tab is untouched and still opens the project-agents rail
+ * space — that one was never the complaint, and stays exactly as it was.
  *
  * COUNTS ARE NON-ZERO ONLY. Inbox and My work each show a number when they
  * have one and nothing when they don't — a zero badge is noise, and it is
@@ -364,32 +367,15 @@ export function PrimaryRail({
         : [],
     [space, allAgents],
   );
-  // The workspace-agents space lists EVERY real agent in the workspace —
-  // `agents` (declared above: allAgents with Sage/the Operator already
-  // filtered out, the same exclusion every other agent surface here makes)
-  // is exactly that list. Each row needs a resolved project id to build its
-  // href (resolveAgentProjectId — the same fallback every other agent link
-  // in this app already goes through), so that resolution happens here, not
-  // inside primary-rail-space.ts, which stays free of fleet-data.
-  const spaceWorkspaceAgents = useMemo(
-    () =>
-      space?.kind === "workspace-agents"
-        ? agents.map((a) => ({ agent_id: a.agent_id, label: a.label, project_id: resolveAgentProjectId(a.project_id, projects) }))
-        : [],
-    [space, agents, projects],
-  );
-  // Whether the agents space actually morphs the rail is the SAME predicate
-  // ProjectDetailPage (project-agents) / the workspace Agents page
-  // (workspace-agents) calls to decide whether to hide its own picking
-  // surface — never a second rule, and never two rules that happen to
-  // agree today. Below the gate the rail simply stays flat.
+  // Whether the project-agents space actually morphs the rail is the SAME
+  // predicate ProjectDetailPage calls to decide whether to hide its own
+  // picking surface — never a second rule. There is no workspace-wide
+  // rail-morph twin of this any more (2026-08-20 — see this component's
+  // own header): the top-level Agents row never morphs the rail, so it
+  // needs no gate here at all.
   const effectiveSpace =
     space?.kind === "project-agents"
       ? projectAgentsSpaceIsActive(true, spaceProjectAgents.length)
-        ? space
-        : null
-      : space?.kind === "workspace-agents"
-      ? workspaceAgentsSpaceIsActive(true, agents.length)
         ? space
         : null
       : space;
@@ -409,21 +395,14 @@ export function PrimaryRail({
   const spaceLinks: RailSpaceLink[] | null = useMemo(() => {
     if (!effectiveSpace) return null;
     if (effectiveSpace.kind === "settings") return settingsSpaceLinks(effectiveSpace);
-    if (effectiveSpace.kind === "workspace-agents") return workspaceAgentsSpaceLinks(effectiveSpace, spaceWorkspaceAgents);
     return projectAgentsSpaceLinks(effectiveSpace, spaceProjectAgents);
-  }, [effectiveSpace, spaceProjectAgents, spaceWorkspaceAgents]);
+  }, [effectiveSpace, spaceProjectAgents]);
   const spaceBack = effectiveSpace ? spaceBackHref(effectiveSpace, lastOutsideSpaceRef.current) : null;
   const spaceProject =
     effectiveSpace?.kind === "project-agents"
       ? projects.find((p) => p.id === effectiveSpace.projectId)
       : null;
-  const spaceTitle = effectiveSpace
-    ? effectiveSpace.kind === "settings"
-      ? "Settings"
-      : effectiveSpace.kind === "workspace-agents"
-      ? "Agents"
-      : spaceProject?.name || "Agents"
-    : null;
+  const spaceTitle = effectiveSpace ? (effectiveSpace.kind === "settings" ? "Settings" : spaceProject?.name || "Agents") : null;
 
   const railHrefFor = useCallback(
     (item: { segment: string }) => `/w/${encodeURIComponent(workspaceId)}/${item.segment}`,
@@ -643,15 +622,7 @@ export function PrimaryRail({
             </span>
             {!effectiveCollapsed && <span className="fleet-rail-item-label">Back</span>}
           </Link>
-          {/* The heading is DELIBERATELY absent for the workspace-agents
-              space (founder, 2026-08-19: "i dont want this in this left rail
-              after i open this agents"). The rail rows ARE the agents, and a
-              grey "AGENTS" label above a list of agents restates what the
-              list already says. `spaceTitle` still feeds the <nav>'s
-              aria-label above, so a screen reader keeps the name it needs —
-              removing the visible heading must not remove the accessible
-              one. */}
-          {!effectiveCollapsed && spaceTitle && effectiveSpace.kind !== "workspace-agents" && (
+          {!effectiveCollapsed && spaceTitle && (
             <div className="fleet-rail-space-title">{spaceTitle}</div>
           )}
           {spaceLinks.map((link) => {
@@ -659,15 +630,9 @@ export function PrimaryRail({
             // An agent row carries the agent's own identity (sigil + live
             // status dot) instead of a generic icon — the same rendering
             // the old in-content list used, now living where picking lives.
-            // workspace-agents looks the row up in the full, already
-            // Sage-excluded `agents` list (not spaceWorkspaceAgents, which
-            // only carries the fields workspaceAgentsSpaceLinks needs to
-            // build an href — AgentSigil/StatusDot need the real record).
             const agent =
               effectiveSpace.kind === "project-agents"
                 ? spaceProjectAgents.find((a) => a.agent_id === link.key)
-                : effectiveSpace.kind === "workspace-agents"
-                ? agents.find((a) => a.agent_id === link.key)
                 : undefined;
             return (
               <Link
@@ -698,33 +663,6 @@ export function PrimaryRail({
               </Link>
             );
           })}
-          {/* "+ New agent", at the FOOT of the agent list (founder,
-              2026-08-19: "i do not have any button to create an agent and
-              + agent should be at the bottom of this left rail"). Deliberately
-              identical in shape and reasoning to "+ New project" below: a real
-              <Link>, never a button that opens a dialog straight from the rail,
-              so `?new=1` hands off to the ONE zero-decision create the agents
-              page already owns (agent-quick-create.ts — the same URL the
-              command palette's own "New agent" uses) instead of standing up a
-              second composer -- and being an <a> means cmd-click opens it in a
-              new tab like any other navigation. Neutral, never accent-filled:
-              the agents page's own "+ New agent" header action is that view's
-              one accent action, and two filled buttons in one view is a bug.
-              Only in the workspace-agents space: the project-agents space is
-              scoped to one project, and Settings has nothing to create. */}
-          {effectiveSpace.kind === "workspace-agents" && (
-            <Link
-              href={`${hrefFor("agents")}?new=1`}
-              className="fleet-rail-item fleet-rail-item--new"
-              title={effectiveCollapsed ? "New agent" : undefined}
-              aria-label="New agent"
-            >
-              <span className="fleet-rail-item-icon">
-                <Plus size={RAIL_ICON} strokeWidth={2} aria-hidden="true" />
-              </span>
-              {!effectiveCollapsed && <span className="fleet-rail-item-label">New agent</span>}
-            </Link>
-          )}
         </nav>
       ) : (
       <nav className="fleet-rail-nav">
