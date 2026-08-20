@@ -7091,12 +7091,17 @@ def execute_single_direct_tool_call(
                 _project_tasks.get_task(tenant_id=_caller_tenant_id, workspace_id=workspace_id, task_id=task_id)
             )
             _task_in_own_project(existing, task_id)
-            target_project_id = callbacks.run_async_tool_call(
-                _project_tasks.agent_project_id(
-                    tenant_id=_caller_tenant_id, workspace_id=workspace_id, agent_id=target_agent_id,
+            # feat/agent-context-grant: the TARGET must be granted THIS
+            # TASK'S project, not merely have a home project the caller can
+            # also reach. Handing work to an agent that cannot open the
+            # project it lives in produces a task nobody can ever work.
+            _task_project_id = str((existing or {}).get("project_id") or "")
+            _target_grant = callbacks.run_async_tool_call(
+                _grants.resolve_agent_project_grant(
+                    tenant_id=_caller_tenant_id, workspace_id=workspace_id, agent_install_id=target_agent_id,
                 )
             )
-            if not target_project_id or target_project_id not in _caller_project_ids:
+            if _task_project_id not in _target_grant.project_ids:
                 raise RuntimeError(
                     f"Agent '{target_agent_id}' is not in your project — cannot assign this task to it."
                 )
@@ -7423,13 +7428,16 @@ def execute_single_direct_tool_call(
             if not goal_text:
                 raise RuntimeError("Tool 'goal__create' requires goal_text.")
             target_agent_id = str(argument_payload.get("agent_id") or "").strip() or _caller_agent_id
+            _goal_project_id = _require_write_project("create")
             if target_agent_id != _caller_agent_id:
-                target_project_id = callbacks.run_async_tool_call(
-                    _project_tasks.agent_project_id(
-                        tenant_id=_caller_tenant_id, workspace_id=workspace_id, agent_id=target_agent_id,
+                # Same rule as project_task__assign: the TARGET must be
+                # granted the project this goal will live in.
+                _target_grant = callbacks.run_async_tool_call(
+                    _grants.resolve_agent_project_grant(
+                        tenant_id=_caller_tenant_id, workspace_id=workspace_id, agent_install_id=target_agent_id,
                     )
                 )
-                if not target_project_id or target_project_id not in _caller_project_ids:
+                if _goal_project_id not in _target_grant.project_ids:
                     raise RuntimeError(
                         f"Agent '{target_agent_id}' is not in your project — cannot create a goal for it."
                     )
@@ -7438,7 +7446,7 @@ def execute_single_direct_tool_call(
                     _goals.create_goal(
                         tenant_id=_caller_tenant_id,
                         workspace_id=workspace_id,
-                        project_id=_require_write_project("create"),
+                        project_id=_goal_project_id,
                         agent_id=target_agent_id,
                         goal_text=goal_text,
                         title=str(argument_payload.get("title") or ""),

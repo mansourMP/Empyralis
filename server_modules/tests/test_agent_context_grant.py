@@ -584,9 +584,11 @@ class TheModelCannotWidenItsOwnGrantTests(unittest.TestCase):
         install row, not from anything the model handed in."""
         source = (_SERVER_MODULES / "skills_service.py").read_text()
         self.assertEqual(
-            source.count("_grants.resolve_agent_project_grant("), 2,
-            "project_task__* and goal__* each resolve the grant directly; document__* goes "
-            "through agent_document_scope_service, which resolves it too",
+            source.count("_grants.resolve_agent_project_grant("), 4,
+            "two for the CALLER (project_task__*, goal__*) and two for the TARGET of "
+            "project_task__assign / goal__create -- handing work to an agent that cannot "
+            "open the project produces a task nobody can ever work. document__* resolves "
+            "the same grant one level down, through agent_document_scope_service.",
         )
         self.assertIn("resolve_agent_document_project_scope(", source)
 
