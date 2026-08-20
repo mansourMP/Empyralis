@@ -467,7 +467,13 @@ class DocumentToolTier1VisibilityTests(unittest.TestCase):
             "capability_providers": frozenset(),
             "agent_install_id": "agent-pixel",
             "subagents_enabled": False,
+            # feat/agent-context-grant: production builds this from the
+            # agent's CONTEXT GRANT, so "project_ids" (the reach) is what
+            # every visibility gate asks and "project_id" is only the write
+            # target. A fixture carrying just the old scalar would agree
+            # with itself and be wrong about the caller (CLAUDE.md).
             "project_id": project_id,
+            "project_ids": [project_id] if project_id else [],
         }
 
     def _tool_names(self, *, specialist_toolset) -> list[str]:

@@ -5,7 +5,7 @@ from typing import Optional
 
 from fastapi import Depends, HTTPException, File, UploadFile
 
-from server_modules import upload_content_policy
+from server_modules import upload_content_policy, workspace_storage_service
 from server_modules.auth import enforce_workspace_access, workspace_tenant_id
 from server_modules.runtime_common import require_member_api_key, require_viewer_api_key
 from server_modules.workspace_context import workspace_attachments_dir
@@ -59,9 +59,49 @@ def register_sage_context_file_routes(app) -> None:
         safe_filename = f"{file_id}{extension}"
         dest_path = attachments_dir / safe_filename
 
+        # THE STORAGE CAP, checked BEFORE a byte lands on disk. The decision
+        # itself is upload_content_policy.assert_within_storage_cap, raised
+        # from inside reserve_storage_for_upload's transaction -- so a
+        # refusal has written neither the ledger row nor the file, and the
+        # sentence the customer reads comes out of the same module that
+        # writes every other upload refusal here.
+        #
+        # project_id is the workspace-level bucket because this route has no
+        # project anywhere in its request; see workspace_storage_service's
+        # docstring for why no optional parameter was invented for it.
+        try:
+            reservation = await workspace_storage_service.reserve_storage_for_upload(
+                tenant_id=tenant_id,
+                workspace_id=resolved_workspace_id,
+                project_id=workspace_storage_service.WORKSPACE_LEVEL_BUCKET,
+                object_id=file_id,
+                surface=workspace_storage_service.SURFACE_CHAT_ATTACHMENT,
+                object_key=safe_filename,
+                byte_size=len(raw),
+                filename=file.filename,
+                content_type=file.content_type,
+                created_by=str((current_user or {}).get("id") or "").strip() or None,
+            )
+        except upload_content_policy.UploadRejected as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
         try:
             dest_path.write_bytes(raw)
         except Exception as exc:
+            # The ledger row committed and the file did not, so those bytes
+            # would be charged against the cap forever with nothing on disk
+            # to delete. Release it. Best-effort: a failed release must not
+            # replace the real "could not save" the caller needs to hear.
+            if reservation.get("recorded"):
+                try:
+                    await workspace_storage_service.forget_stored_object(
+                        tenant_id=tenant_id,
+                        workspace_id=resolved_workspace_id,
+                        surface=workspace_storage_service.SURFACE_CHAT_ATTACHMENT,
+                        object_key=safe_filename,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
             raise HTTPException(status_code=500, detail=f"Failed to save attachment: {exc}")
 
         return {

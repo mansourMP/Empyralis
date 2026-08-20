@@ -15,6 +15,7 @@ import {
   ChevronRight,
   Clock,
   Cpu,
+  FolderTree,
   LayoutGrid,
   Loader2,
   Lock,
@@ -35,6 +36,7 @@ import {
 } from "lucide-react";
 
 import { WorkTab } from "./tabs/WorkTab";
+import { ContextTab } from "./tabs/ContextTab";
 import { HardwareTab } from "./tabs/HardwareTab";
 import { MemoryTab } from "./tabs/MemoryTab";
 import { ProfileFilesSection } from "./tabs/ProfileFilesSection";
@@ -126,7 +128,7 @@ function isChannelConnected(
 // longer a distinct SURFACE: activeTab==="work" renders the exact same
 // observation view as activeTab==="chat" (see the render below), so an old
 // bookmark still works instead of 404ing.
-type TabId = "general" | "work" | "channels" | "connectors" | "hardware" | "model" | "skills" | "memory" | "tools" | "capabilities" | "chat" | "persona";
+type TabId = "general" | "work" | "channels" | "connectors" | "hardware" | "model" | "skills" | "memory" | "tools" | "capabilities" | "chat" | "persona" | "context";
 
 // Single source of id/label/icon truth for every one of the remaining
 // sections — Chat is the agent's front door, rendered directly (no tab
@@ -171,6 +173,11 @@ const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
   { id: "channels", label: "Channels", icon: Radio },
   { id: "connectors", label: "Connectors", icon: Plug },
   { id: "tools", label: "Tools", icon: Users },
+  // feat/agent-context-grant: which PROJECTS this agent may reach. Named
+  // "Context" and not "Projects" because the thing being granted is the
+  // agent's context layer (tasks + documents), and because an agent no
+  // longer LIVES in a project at all (CLAUDE.md, founder 2026-08-20).
+  { id: "context", label: "Context", icon: FolderTree },
   { id: "capabilities", label: "Capabilities", icon: Wand2 },
   { id: "hardware", label: "Hardware", icon: Cpu },
   { id: "memory", label: "Memory", icon: Brain },
@@ -202,7 +209,10 @@ const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
 // once and does not deserve equal billing").
 const CONFIGURE_GROUPS: { id: string; label: string; tabs: TabId[] }[] = [
   { id: "brain", label: "Brain", tabs: ["general", "model", "capabilities", "skills"] },
-  { id: "reach", label: "Reach", tabs: ["channels", "connectors", "tools"] },
+  // "context" sits in Reach on purpose — this group is literally "how
+  // it's reached, and WHAT IT CAN REACH OUT TO", and the project grant is
+  // the largest thing an agent can reach out to.
+  { id: "reach", label: "Reach", tabs: ["channels", "connectors", "tools", "context"] },
   { id: "compute", label: "Compute", tabs: ["hardware"] },
 ];
 const CONFIGURE_TAB_IDS = new Set<TabId>(CONFIGURE_GROUPS.flatMap((g) => g.tabs));
@@ -1286,6 +1296,9 @@ export function FleetAgentDetail({
             )}
             {activeTab === "tools" && (
               <ToolsTab workspaceId={workspaceId} agentId={agentId} agent={agent} onChat={() => onChat(agentId)} />
+            )}
+            {activeTab === "context" && (
+              <ContextTab workspaceId={workspaceId} agentId={agentId} isMaster={isMaster} />
             )}
             {activeTab === "hardware" && (
               <HardwareTab workspaceId={workspaceId} agentId={agentId} agent={agent} onSaved={onRenamed} />

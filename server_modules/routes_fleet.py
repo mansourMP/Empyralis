@@ -2843,6 +2843,120 @@ async def fleet_agent_private_memory_note_write(
         return {"ok": False, "error": str(exc)}
 
 
+class FleetAgentContextGrantRequest(BaseModel):
+    """The projects an agent may reach. The WHOLE list, never a patch.
+
+    A grant is a small set a person is looking at on one screen, so a
+    wholesale replace is what the screen actually means -- and a merge
+    semantics would make "revoke everything" unexpressible, which is the
+    single most important thing this control has to be able to say."""
+
+    project_ids: List[str] = Field(default_factory=list)
+
+
+@router.get("/api/w/{workspace_id}/fleet/agents/{agent_id}/context-projects")
+async def fleet_agent_context_projects(
+    request: Request, workspace_id: str, agent_id: str,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Which projects this agent may reach, plus the ones it could be given.
+
+    The candidate list is the CALLER's own visible projects (_visible_project_ids),
+    never the workspace's whole project table -- a person cannot grant reach
+    into a project they cannot themselves open."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
+    await _enforce_agent_project_access(current_user, resolved_workspace_id, tenant_id, agent_id, minimum_role="viewer")
+
+    from server_modules import agent_context_grant_service as grants
+    from server_modules import projects_repository as projects
+
+    visible_ids = await _visible_project_ids(current_user, resolved_workspace_id, tenant_id)
+    rows = await projects.list_projects(tenant_id=tenant_id, workspace_id=resolved_workspace_id) or []
+    candidates = [
+        {"id": str(r.get("id") or "").strip(), "name": str(r.get("name") or "").strip()}
+        for r in rows
+        if str(r.get("id") or "").strip()
+        and (visible_ids is None or str(r.get("id") or "").strip() in visible_ids)
+    ]
+    grant = await grants.resolve_agent_project_grant(
+        tenant_id=tenant_id, workspace_id=resolved_workspace_id, agent_install_id=agent_id,
+    )
+    if grant.status == grants.STATUS_UNAVAILABLE:
+        # "I could not read this" is not "it has none" (CLAUDE.md's outcome
+        # honesty law). Say so, and do not render a checklist of falsehoods.
+        return {"ok": False, "error": "Could not read this agent's project access.", "projects": candidates}
+    return {
+        "ok": True,
+        "projects": candidates,
+        "granted_project_ids": list(grant.project_ids),
+        # TRUE means no grant has ever been recorded on this install, so it
+        # is still running on the pre-grant workspace-membership behaviour.
+        # The screen has to say that rather than draw an empty checklist,
+        # which would be a lie in the safe-looking direction.
+        "is_legacy": grant.is_legacy,
+        "write_project_id": grant.write_project_id,
+    }
+
+
+@router.put("/api/w/{workspace_id}/fleet/agents/{agent_id}/context-projects")
+async def fleet_agent_set_context_projects(
+    request: Request, workspace_id: str, agent_id: str, body: FleetAgentContextGrantRequest,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Set this agent's context grant. THE ONLY WRITER.
+
+    Deliberately its own owner-gated route rather than a
+    `fleet_configure_agent` patch key: `configure_agent` is reachable BY AN
+    AGENT (fleet__configure_agent, empyralis_configure_agent), and a grant a
+    model can widen is not a boundary. See agent_context_grant_service's
+    docstring.
+
+    Every id is checked against the CALLER's own visible projects before it
+    is stored, so this route cannot be used to hand an agent reach into a
+    project the person driving it cannot open themselves."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
+    await _enforce_agent_project_access(current_user, resolved_workspace_id, tenant_id, agent_id, minimum_role="owner")
+
+    from server_modules import agent_context_grant_service as grants
+    from server_modules import agent_registry_repository as repo
+    from server_modules import projects_repository as projects
+
+    requested = grants.normalize_granted_project_ids(list(body.project_ids or [])) or []
+    if requested:
+        visible_ids = await _visible_project_ids(current_user, resolved_workspace_id, tenant_id)
+        rows = await projects.list_projects(tenant_id=tenant_id, workspace_id=resolved_workspace_id) or []
+        real_ids = {
+            str(r.get("id") or "").strip() for r in rows if str(r.get("id") or "").strip()
+        }
+        allowed = real_ids if visible_ids is None else (real_ids & set(visible_ids))
+        unknown = [pid for pid in requested if pid not in allowed]
+        if unknown:
+            # Refuse the whole write rather than storing the subset that
+            # happened to be valid -- a partially-applied grant is a screen
+            # that lies about what it saved.
+            raise HTTPException(status_code=400, detail="One of those projects is not in this workspace.")
+
+    updated = await repo.update_workspace_agent_install(
+        agent_id,
+        tenant_id=tenant_id,
+        workspace_id=resolved_workspace_id,
+        metadata={grants.GRANT_METADATA_KEY: requested},
+    )
+    if not isinstance(updated, dict):
+        raise HTTPException(status_code=404, detail="Agent not found in this workspace.")
+    grant = grants.grant_from_install_fields(
+        metadata=updated.get("metadata"), home_project_id=updated.get("project_id"),
+    )
+    return {
+        "ok": True,
+        "granted_project_ids": list(grant.project_ids),
+        "is_legacy": grant.is_legacy,
+        "write_project_id": grant.write_project_id,
+    }
+
+
 @router.get("/api/w/{workspace_id}/fleet/agent-channels")
 async def fleet_agent_channels(
     request: Request,

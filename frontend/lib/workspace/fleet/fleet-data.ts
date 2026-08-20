@@ -1928,3 +1928,91 @@ export async function setFleetTaskParent(
   }
   return withNormalizedStatus(data.task as FleetTask);
 }
+
+// ── Context grant (feat/agent-context-grant) ────────────────────────────────
+// Which projects one agent may reach. CLAUDE.md, founder 2026-08-20: "an
+// agent belongs to the workspace not to the project", and its context is
+// GRANTED per agent, defaulting to none — *"even if I create this agent on
+// behalf of other businesses it wouldn't see my task or my context about the
+// platform."*
+//
+// `isLegacy` is the field that matters and it is NOT a styling detail: TRUE
+// means no grant has ever been recorded on this install, so it is still
+// running the pre-grant behaviour (its one home project). Drawing an empty
+// checklist for that state would be a lie in the safe-looking direction —
+// the screen has to say which of the two it is looking at.
+export type FleetContextProject = { id: string; name: string };
+
+export type FleetAgentContextGrant = {
+  projects: FleetContextProject[];
+  grantedProjectIds: string[];
+  isLegacy: boolean;
+  writeProjectId: string;
+};
+
+export function useFleetAgentContextProjects(workspaceId: string, agentId: string | null) {
+  const [grant, setGrant] = useState<FleetAgentContextGrant | null>(null);
+  const [loading, setLoading] = useState(false);
+  // "could not load" is a DIFFERENT fact from "granted nothing", and this
+  // whole feature is about that distinction — so this hook carries a real
+  // error instead of collapsing a failed fetch into an empty list the way
+  // some older hooks in this file still do.
+  const [error, setError] = useState<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
+  const refresh = useCallback(async () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    if (!agentId) { setGrant(null); setError(null); return; }
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fleetAuthorizedFetch(
+        `/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}/context-projects`,
+        { signal: controller.signal },
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
+      setGrant({
+        projects: Array.isArray(data.projects) ? data.projects : [],
+        grantedProjectIds: Array.isArray(data.granted_project_ids) ? data.granted_project_ids : [],
+        isLegacy: Boolean(data.is_legacy),
+        writeProjectId: String(data.write_project_id || ""),
+      });
+    } catch (e) {
+      if (e instanceof Error && e.name === "AbortError") return;
+      setGrant(null);
+      setError(e instanceof Error ? e.message : "Could not load this agent's project access.");
+    } finally {
+      if (abortRef.current === controller) setLoading(false);
+    }
+  }, [workspaceId, agentId]);
+
+  useEffect(() => {
+    void refresh();
+    return () => { abortRef.current?.abort(); };
+  }, [refresh]);
+
+  return { grant, loading, error, refresh };
+}
+
+// Replace-semantics, matching the route: the WHOLE list every time, because
+// a merge would make "revoke everything" unexpressible — the single most
+// important thing this control has to be able to say.
+export async function saveFleetAgentContextProjects(
+  workspaceId: string, agentId: string, projectIds: string[],
+): Promise<void> {
+  const res = await fleetAuthorizedFetch(
+    `/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}/context-projects`,
+    {
+      method: "PUT",
+      credentials: "include",
+      headers: buildCookieAuthHeaders("PUT", { "Content-Type": "application/json" }),
+      body: JSON.stringify({ project_ids: projectIds }),
+    },
+  );
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
+}

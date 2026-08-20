@@ -471,4 +471,20 @@ CREATE POLICY empyralis_agent_private_memory_note_revisions_scope ON agent_priva
     USING (public.empyralis_rls_scope_match(tenant_id, workspace_id))
     WITH CHECK (public.empyralis_rls_scope_match(tenant_id, workspace_id));
 
+-- workspace_storage_objects is a BRAND NEW table (migrations/
+-- add_workspace_storage_objects.sql -- the byte ledger behind the
+-- per-project storage cap). Same posture as agent_private_memory_notes
+-- above: every call site (workspace_storage_service.py) was written
+-- against the scoped rls_fetch/rls_fetchval/rls_execute helpers, or an
+-- explicit apply_connection_scope inside its own transaction, from the
+-- first commit -- so there is no legacy unscoped reader to sequence
+-- around and RLS ships with the table rather than after it.
+ALTER TABLE workspace_storage_objects ENABLE ROW LEVEL SECURITY;
+ALTER TABLE workspace_storage_objects FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS empyralis_workspace_storage_objects_scope ON workspace_storage_objects;
+CREATE POLICY empyralis_workspace_storage_objects_scope ON workspace_storage_objects
+    FOR ALL
+    USING (public.empyralis_rls_scope_match(tenant_id, workspace_id))
+    WITH CHECK (public.empyralis_rls_scope_match(tenant_id, workspace_id));
+
 COMMIT;

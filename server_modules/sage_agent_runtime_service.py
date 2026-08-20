@@ -2846,6 +2846,7 @@ async def _resolve_specialist_toolset(
     # instead, same "deny-more, never allow-more" convention as every other
     # field here.
     project_id = ""
+    project_ids: list[str] = []
     try:
         from server_modules import agent_bindings_repository as _bind
         rows = await _bind.list_agent_connector_bindings(
@@ -2880,7 +2881,20 @@ async def _resolve_specialist_toolset(
         # agent gets one — see agent_project_id's docstring), matching
         # exactly what the runtime check at call time will accept.
         if isinstance(bundle, dict):
-            project_id = str(bundle.get("project_id") or "").strip()
+            # feat/agent-context-grant: the CONTEXT GRANT decides, not the
+            # home-project column (CLAUDE.md, founder 2026-08-20). Resolved
+            # from the bundle already in hand -- grant_from_install_fields
+            # is pure and reads `metadata` + `project_id`, both of which this
+            # SELECT already returned, so this costs no extra query. An
+            # install with no grant recorded resolves to exactly its old
+            # home project, which is why nothing pre-existing moves.
+            from server_modules import agent_context_grant_service as _grants
+
+            _grant = _grants.grant_from_install_fields(
+                metadata=bundle.get("metadata"), home_project_id=bundle.get("project_id"),
+            )
+            project_ids = list(_grant.project_ids)
+            project_id = _grant.write_project_id
         # The same agent_installs.subagents_enabled resolution fleet_configure_agent
         # writes and fleet_tools.py's own callers already read (default False for a
         # specialist unless explicitly turned on — see resolve_subagents_enabled).
@@ -2995,7 +3009,16 @@ async def _resolve_specialist_toolset(
         # _specialist_tool_allowed / _filter_registry_for_specialist (Tier-2
         # registry visibility) — project membership is the grant for these
         # tools, not a connector binding; see those functions' own comments.
+        #
+        # feat/agent-context-grant: "project_id" is now specifically the ONE
+        # project this agent may CREATE in (empty when its grant names
+        # several and none of them is its home project -- there is no single
+        # answer, and picking one silently is the shape CLAUDE.md records as
+        # a bug). "project_ids" is the full READ reach and is what every
+        # visibility gate below asks, because a grant of three projects and
+        # no write target still deserves its read tools.
         "project_id": project_id,
+        "project_ids": project_ids,
     }
 
 
@@ -3124,7 +3147,7 @@ def _specialist_tool_allowed(tool_name: str, toolset: dict[str, Any]) -> bool:
         return True
     connector = name.split("__", 1)[0].strip().lower() if "__" in name else ""
     if connector in _PROJECT_SCOPED_CONNECTOR_IDS:
-        return bool(str(toolset.get("project_id") or "").strip())
+        return bool(toolset.get("project_ids"))
     return bool(connector and connector in toolset.get("connectors", set()))
 
 
@@ -3200,7 +3223,7 @@ def _filter_registry_for_specialist(registry: Any, toolset: dict[str, Any], *, w
             # See _PROJECT_SCOPED_CONNECTOR_IDS's own comment: project
             # membership is the grant, not a connector binding — these
             # connectors have no binding path to check.
-            if str(toolset.get("project_id") or "").strip():
+            if toolset.get("project_ids"):
                 kept.append(entry)
         elif connector and connector in toolset.get("connectors", set()):
             kept.append(entry)
@@ -3336,7 +3359,7 @@ def _direct_tool_bundle(*, workspace_id: str, provider: str, sender_class: str =
         # time for one anyway (skills_service.py's connector_id in
         # ("project_task", "document", "goal") dispatch, agent_project_id()
         # returning falsy).
-        if str(specialist_toolset.get("project_id") or "").strip():
+        if specialist_toolset.get("project_ids"):
             _seen_task_names = {t.get("name") for t in tools}
             for _pt_descriptor in _sage_skills_service._builtin_tool_descriptors():
                 if _pt_descriptor.connector_id not in _PROJECT_SCOPED_CONNECTOR_IDS or _pt_descriptor.tool_name in _seen_task_names:
@@ -4251,6 +4274,9 @@ async def _run_sage_action_loop_v3(
                 # payload (via _direct_tool_bundle above) and still have
                 # every call denied here at execution time.
                 "project_id": str(_specialist_toolset.get("project_id") or "").strip(),
+                # The GRANT (feat/agent-context-grant). The guard checks
+                # reach, not the write target -- see _specialist_tool_allowed.
+                "project_ids": list(_specialist_toolset.get("project_ids") or []),
             }
     import asyncio as _asyncio
 

@@ -12,7 +12,7 @@ from server_modules import email_verification_service
 from server_modules import rust_runtime_kernel_client
 from server_modules import session_service
 from server_modules import workspace_admin_service
-from server_modules import workspace_invite_email_service
+from server_modules import workspace_invite_email_service, workspace_member_policy
 from server_modules.workspace_ai_route_service import (
     build_workspace_ai_route_payload,
     update_workspace_default_ai_route,
@@ -963,6 +963,28 @@ async def create_workspace_invite_route(
 
     tenant_id = await _control_plane_tenant_id(current_user, resolved_workspace_id, user)
 
+    # Courtesy, NOT the guard. The real seat check is on the accept waist
+    # (_finalize_workspace_invite_acceptance) because this one can go stale
+    # between minting an invite and someone using it. It runs anyway so an
+    # owner learns the workspace is full BEFORE an email goes out carrying
+    # our name to someone who can never get in. An already-invited teammate
+    # is not counted here -- only members occupy seats -- so this refuses
+    # exactly when the roster itself is full.
+    try:
+        current_members = await control_plane_repository.list_workspace_members(resolved_workspace_id)
+    except Exception:  # noqa: BLE001
+        LOGGER.exception(
+            "workspace_member_cap: could not read the roster for workspace_id=%s -- "
+            "letting the invite through; the accept path re-checks",
+            resolved_workspace_id,
+        )
+        current_members = None
+    if current_members is not None:
+        try:
+            workspace_member_policy.assert_seat_available(members=current_members)
+        except workspace_member_policy.WorkspaceMemberLimitReached as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     clean_project_id = str(body.project_id or "").strip() or None
     from server_modules import projects_repository
 
@@ -1236,6 +1258,40 @@ async def _finalize_workspace_invite_acceptance(invite: Dict[str, Any], user_id:
     invite_workspace_id = str(invite.get("workspace_id") or "").strip()
     invite_metadata = invite.get("metadata") if isinstance(invite.get("metadata"), dict) else {}
     invite_role = auth_module.normalize_rbac_role(invite.get("role"), default="viewer")
+
+    # SEAT CAP, on the seam every accept path crosses -- this function is the
+    # one place membership is actually granted, so the check belongs here and
+    # not repeated in each route above it. Checked BEFORE
+    # upsert_workspace_membership, so a refusal has granted nothing: no
+    # membership row, no project access, and the invite stays 'pending' and
+    # re-usable once a seat frees up (accept_workspace_invite below is never
+    # reached). 409 rather than 403 -- the caller is not forbidden, the
+    # destination is full, and those are different facts to the person
+    # reading them.
+    #
+    # A read failure must not cost a legitimate teammate their invite: the
+    # cap bounds cost, it is not a second availability dependency in front of
+    # a working accept. Fails OPEN on an unreadable roster, loudly, the same
+    # posture email_verification_service's own send-gate takes.
+    try:
+        existing_members = await control_plane_repository.list_workspace_members(invite_workspace_id)
+    except Exception:  # noqa: BLE001
+        LOGGER.exception(
+            "workspace_member_cap: could not read the roster for workspace_id=%s -- "
+            "admitting user_id=%s without a seat check",
+            invite_workspace_id,
+            user_id,
+        )
+        existing_members = None
+    if existing_members is not None:
+        try:
+            workspace_member_policy.assert_seat_available(
+                members=existing_members,
+                joining_user_id=user_id,
+            )
+        except workspace_member_policy.WorkspaceMemberLimitReached as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     auth_module.upsert_workspace_membership(user_id, invite_workspace_id, invite_role)
 
     # MAN-70/MAN-114 follow-up: grant the project this invite carries, if
