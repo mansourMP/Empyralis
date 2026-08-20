@@ -197,3 +197,89 @@ def assert_allowed_upload(
             + allowed_extensions_sentence()
         )
     return extension
+
+
+# ── Storage cap ────────────────────────────────────────────────────────────
+#
+# THE SECOND HALF OF THE SAME GATE. `assert_allowed_upload` above answers
+# "may this KIND of file be stored"; this answers "is there room for it".
+# Both live in this module on purpose: a refusal a customer reads has to
+# come out of one vocabulary, and splitting the two questions across two
+# modules is how the second one grows a bare "denied" with no next step.
+#
+# This function stays PURE — it takes the already-measured usage as an
+# argument and touches no database. The counting lives in
+# `workspace_storage_service` (which owns the ledger and the RLS-scoped
+# read); the DECISION lives here, beside the extension allowlist, so there
+# is exactly one place that says no to an upload.
+
+
+class StorageCapExceeded(UploadRejected):
+    """No room left in this project's storage allowance.
+
+    A subclass of UploadRejected so every existing `except UploadRejected`
+    at a route keeps working — a full project and a rejected file type are
+    both "this upload does not happen", and both already answer 400 with
+    the sentence carried here. It is a distinct class anyway because the
+    two are different FACTS: one is fixed by sending a different file, the
+    other by deleting something or asking for more room, and a caller that
+    wants to tell them apart must be able to.
+    """
+
+
+def format_bytes(value: int) -> str:
+    """Human sizes for a refusal message. A cap stated as `1073741824` is a
+    number the person cannot act on."""
+    size = max(0, int(value or 0))
+    for unit, scale in (("GB", 1024 ** 3), ("MB", 1024 ** 2), ("KB", 1024)):
+        amount = size / scale
+        # 0.995 rather than 1.0: 1 GiB minus ten bytes must read "1 GB", not
+        # "1024 MB" -- a limit message that names a number nobody writes down
+        # is the same failure as naming the raw byte count.
+        if amount >= 0.995:
+            # One decimal only below 10 -- "1.5 GB" reads, "1.53 GB" does not.
+            rendered = f"{amount:.1f}".rstrip("0").rstrip(".") if amount < 10 else f"{amount:.0f}"
+            return f"{rendered} {unit}"
+    return f"{size} bytes"
+
+
+def storage_cap_sentence(*, used_bytes: int, cap_bytes: int, scope_label: str = "project") -> str:
+    """One line naming the limit and what is left, for every cap refusal —
+    the same "say what WOULD work" rule `allowed_extensions_sentence` follows
+    for the extension allowlist."""
+    used = max(0, int(used_bytes or 0))
+    cap = max(0, int(cap_bytes or 0))
+    remaining = max(0, cap - used)
+    return (
+        f"This {scope_label} has {format_bytes(remaining)} of its "
+        f"{format_bytes(cap)} storage left ({format_bytes(used)} used). "
+        "Delete files you no longer need, or upload a smaller one."
+    )
+
+
+def assert_within_storage_cap(
+    *,
+    used_bytes: int,
+    incoming_bytes: int,
+    cap_bytes: int,
+    scope_label: str = "project",
+) -> int:
+    """Raise StorageCapExceeded unless this file fits. Returns the resulting
+    total on success, so a caller can record it without recomputing.
+
+    `cap_bytes <= 0` means "no cap configured" and admits everything — a
+    misconfigured or unset limit must never silently refuse every upload in
+    the product. The env override in billing_credit_config clamps to >= 1,
+    so reaching that branch takes a deliberate call.
+    """
+    used = max(0, int(used_bytes or 0))
+    incoming = max(0, int(incoming_bytes or 0))
+    cap = int(cap_bytes or 0)
+    if cap <= 0:
+        return used + incoming
+    if used + incoming > cap:
+        raise StorageCapExceeded(
+            f"This file needs {format_bytes(incoming)} and does not fit. "
+            + storage_cap_sentence(used_bytes=used, cap_bytes=cap, scope_label=scope_label)
+        )
+    return used + incoming

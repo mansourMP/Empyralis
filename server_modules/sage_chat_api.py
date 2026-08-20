@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi import Depends, File, HTTPException, Query, UploadFile
 
 from server_modules import activity_ledger_service, sage_proof_log_service, security_audit_service
-from server_modules import upload_content_policy
+from server_modules import upload_content_policy, workspace_storage_service
 from server_modules.auth import enforce_workspace_access, workspace_tenant_id
 from server_modules.sage_agent_runtime_contract import (
     SAGE_MODE,
@@ -263,6 +263,27 @@ def register_sage_chat_routes(app) -> None:
         attach_dir = workspace_attachments_dir(resolved_workspace_id)
         safe_name = f"{file_id}_{Path(file.filename).name}"
         dest = attach_dir / safe_name
+        # Same storage cap as the live twin, for the same reason the content
+        # policy above is duplicated here: two registrations of one route
+        # must never accept two different things. This handler is shadowed
+        # (sage_context_files_api registers the path first and FastAPI serves
+        # the first match), so this call is what keeps the shadow honest if
+        # registration order ever changes.
+        try:
+            await workspace_storage_service.reserve_storage_for_upload(
+                tenant_id=workspace_tenant_id(current_user, resolved_workspace_id),
+                workspace_id=resolved_workspace_id,
+                project_id=workspace_storage_service.WORKSPACE_LEVEL_BUCKET,
+                object_id=file_id,
+                surface=workspace_storage_service.SURFACE_CHAT_ATTACHMENT,
+                object_key=safe_name,
+                byte_size=len(raw),
+                filename=file.filename,
+                content_type=file.content_type,
+                created_by=str((current_user or {}).get("id") or "").strip() or None,
+            )
+        except upload_content_policy.UploadRejected as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         dest.write_bytes(raw)
         content_type = str(file.content_type or mimetypes.guess_type(file.filename)[0] or "application/octet-stream")
         return {
