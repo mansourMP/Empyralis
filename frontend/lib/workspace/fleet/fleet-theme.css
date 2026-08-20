@@ -2349,35 +2349,12 @@ a.fleet-breadcrumb:hover {
 .fleet-panel-row-value--muted { color: var(--text-muted); font-weight: var(--weight-medium); }
 .fleet-panel-row-value--accent { color: var(--accent); }
 
-/* ── Sessions section of the agent detail page's right panel (Part 2) ────
-   The drawer's own scroll (.fleet-properties-drawer-inner, overflow-y:auto)
-   would otherwise scroll Properties and a long session list as ONE unit —
-   the founder's own requirement is that a long history "never scrolls the
-   whole page". Whenever this section is present the drawer's own scroll is
-   switched off (:has, already an established pattern in this stylesheet —
-   see .fleet-detail-body:has(> .fleet-work-root)) and .fleet-agent-sessions
-   flexes to fill whatever height Properties left, owning its own scrollbar
-   instead. Properties (fixed, usually 5-10 short rows) stays fully visible
-   above it either way. */
-.fleet-properties-drawer-inner:has(.fleet-agent-sessions) {
-  overflow: hidden;
-}
-.fleet-agent-sessions {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-.fleet-agent-sessions-list {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  margin: 0 -4px;
-}
-.fleet-agent-sessions-list .fleet-sage-history-row {
-  border-radius: var(--radius-control);
-  padding: 8px 10px;
-}
+/* The agent detail page's right panel is Properties only now — the
+   "Sessions" section that used to sit below it (a second, owner-only
+   conversation picker) is gone with the composer it existed to serve; see
+   FleetAgentDetail.tsx's own top-of-file note, 2026-08-20. Its rules
+   (.fleet-agent-sessions*) are deleted, not just unused — the observation
+   view (tabs/WorkTab.tsx) is the one real session picker now. */
 
 /* Composer popover variant of .fleet-toolbar-popover — the composer sits at
    the bottom of the view, so its controls' popovers open UPWARD and
@@ -4165,26 +4142,13 @@ a.fleet-breadcrumb:hover {
   font-size: 12px;
   color: var(--text-secondary);
 }
-/* Work — a persistent header control (not a menu item), so it carries the
-   margin-left:auto that pushes it plus the "⋯" menu right after it to the
-   far edge; .fleet-chat-header-menu no longer needs its own auto-margin
-   since it directly follows this in DOM order. Sized down from .fleet-btn's
-   default padding to fit this compact header row; "current" (not hidden)
-   while already on Work gets the same quiet is-active fill GroupedRail's
-   own active row uses — never an accent fill, which stays reserved for
-   Chat's send button, the one primary action in this frame. */
-.fleet-chat-header-work {
-  margin-left: auto;
-  padding: 5px 10px;
-  font-size: 13px;
-}
-.fleet-chat-header-work.is-active {
-  background: var(--rail-active);
-  color: var(--text-primary);
-  border-color: var(--border-strong);
-}
+/* The persistent header "Work" button (a control distinct from Chat) is
+   gone — 2026-08-20, folded into one observation surface with nothing left
+   to switch to. The "⋯" menu is now the only thing after the identity
+   block, so IT carries the margin-left:auto that used to belong to Work,
+   pushing itself to the far edge of the header row. */
 .fleet-chat-header-menu {
-  margin-left: 0;
+  margin-left: auto;
 }
 
 /* The relative anchor the Properties overlay floats against — same contract
