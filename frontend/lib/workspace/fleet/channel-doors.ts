@@ -416,9 +416,25 @@ export function groupTransportedChannels(entries: TransportedChannelInput[]): Tr
         label: transportedDoorLabel(variant, platformLabel),
         body: transportedDoorBody(variant),
         real: true,
-        // A pairing variant is linked ON the box by hand; a credential one is
-        // pasted from here. Same question, same answer, on both paths.
-        requiresHardware: variant.connect_method === "pairing",
+        // EVERY transported door needs the agent's own computer, whichever
+        // way it is set up — this used to read `connect_method === "pairing"`,
+        // which understated it. A `credential` variant is pasted from here
+        // rather than linked by hand on the box, but the thing the paste ends
+        // up in is the transport's config ON that box: the catalog itself is
+        // read off a gateway, the credential write is
+        // `PUT .../gateways/{gateway_id}/channels/{key}/credential`, and
+        // `remediationFor(..., hasGateway: false)` already answers
+        // `needs_hardware` for every transported channel regardless of
+        // connect_method. So "needs a computer" is a property of the LANE,
+        // not of the individual channel — which is exactly why it can be
+        // stated here once, for all of them, with no per-channel knowledge
+        // and nothing to edit when the transport ships another one.
+        //
+        // Read by two things that already existed: the door face's hardware
+        // note in the transported picker, and channel-hardware-tier.ts, which
+        // derives the whole grid's two-tier split from this field rather than
+        // from a list of channel names.
+        requiresHardware: true,
       })),
     };
   });

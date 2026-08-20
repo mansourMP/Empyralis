@@ -3370,6 +3370,43 @@ a.fleet-breadcrumb:hover {
   color: var(--text-muted);
 }
 
+/* The founder's one authored "start here". Deliberately NOT a second pill:
+   it rides inside the same single secondary line as "3 ways to connect"
+   (.fleet-channel-card-ways), so the face still reads as icon + label + one
+   status pill. Accent-tinted text on a faint accent wash rather than a filled
+   chip — the accent FILL is spent on the single primary action in a view, and
+   a badge is not an action. */
+.fleet-channel-card-recommended {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.01em;
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* The two-tier filter sits between the tab's own one-line subtitle and the
+   grid. Airy between groups, dense inside one — the count rides inside its own
+   segment rather than becoming a second row of chips. */
+.fleet-channel-filter {
+  display: flex;
+  align-items: center;
+  margin: 12px 0;
+}
+
+.fleet-channel-filter-count {
+  margin-left: 6px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.fleet-segmented-btn--active .fleet-channel-filter-count {
+  color: var(--text-muted);
+}
+
 .fleet-channel-card-dot {
   width: 6px;
   height: 6px;
@@ -7261,6 +7298,12 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   border-radius: var(--radius-card);
   background: var(--bg-rail);
 }
+/* Amber, not offline-red. "Needs a computer" is a SETUP STEP, not a thing
+   that is down — which is precisely the call already made one file up for the
+   card pill this block is the panel behind (.fleet-channel-card-pill--gateway,
+   whose own comment says so). Red on the panel and amber on the card was one
+   fact rendered in two colour languages, and the red one was telling a person
+   something had failed when nothing had. */
 .fleet-door-unavailable-title {
   display: flex;
   align-items: center;
@@ -7268,10 +7311,15 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   margin: 0 0 var(--space-2);
   font-size: var(--text-sm);
   font-weight: var(--weight-medium);
-  color: var(--offline-text);
+  color: var(--warning-text);
 }
 .fleet-door-unavailable .fleet-channel-expand-hint {
   margin: 0;
+}
+/* The real next step sits under the sentence with air between them — dense
+   inside a group, airy between groups. */
+.fleet-door-unavailable .fleet-btn {
+  margin-top: var(--space-3);
 }
 
 /* At the grid's own 900px breakpoint the chosen-door bar stops being a row:

@@ -1279,7 +1279,7 @@ export function FleetAgentDetail({
               <SkillsTab workspaceId={workspaceId} agentId={agentId} agent={agent} onSaved={onRenamed} />
             )}
             {activeTab === "channels" && (
-              <ChannelsTab workspaceId={workspaceId} agentId={agentId} agent={agent} onChannelsChanged={refreshChannels} />
+              <ChannelsTab workspaceId={workspaceId} agentId={agentId} agent={agent} onChannelsChanged={refreshChannels} hardwareHref={tabHref("hardware")} />
             )}
             {activeTab === "connectors" && (
               <ConnectorsTab workspaceId={workspaceId} agentId={agentId} agent={agent} />
@@ -1833,7 +1833,18 @@ import {
   type ChannelDoor,
 } from "./channel-doors";
 import { planUnifiedChannelGrid } from "./channel-platform";
-import { compareChannelsByPopularity } from "./channel-popularity";
+import { isChannelRecommended } from "./channel-popularity";
+import {
+  CHANNEL_RECOMMENDED_BADGE,
+  channelHardwareNextStep,
+  channelHardwareTier,
+  compareChannelGridCards,
+  planChannelHardwareFilter,
+  showsRecommendedBadge,
+  type ChannelHardwareFilterId,
+  type ChannelHardwareNextStep,
+  type ChannelHardwareTier,
+} from "./channel-hardware-tier";
 // PersonalChannelConnectPanel and IMessageSetupPanel imports DELETED
 // 2026-08-14 (full OpenClaw channel cutover) — their only call sites (the
 // Telegram full_account door, WhatsApp/Signal/iMessage's first-party cards)
@@ -1863,6 +1874,34 @@ import {
 // cutover) — signal_personal's first-party runtime is gone, and
 // openclaw_signal's status now renders through the generic OpenClaw channel
 // panel (OpenClawChannelsPanel.tsx / ChannelCardPanel), not this one-off.
+
+/** A channel that runs on the agent's own computer, opened by an agent that
+ *  has none: the fact, plainly, plus the REAL next step.
+ *
+ *  This is the "no dead controls" law read the right way round. The wrong fix
+ *  is to render the setup form anyway and let it fail, and the fix that was
+ *  actually shipped until now is barely better — one sentence naming a tab,
+ *  with nothing to press. A person who has just been told their channel needs
+ *  something they do not have should be one click from getting it, and the
+ *  click is a real `<Link>` so cmd-click and middle-click work.
+ *
+ *  Renders no control at all when there is no destination to point at, rather
+ *  than a button that goes nowhere — the same rule one level down. */
+function HardwareNextStep({ step, href }: { step: ChannelHardwareNextStep; href?: string }) {
+  return (
+    <div className="fleet-door-unavailable">
+      <p className="fleet-door-unavailable-title">
+        <Cpu size={14} strokeWidth={2} aria-hidden /> {step.title}
+      </p>
+      <p className="fleet-channel-expand-hint">{step.body}</p>
+      {href ? (
+        <Link className="fleet-btn fleet-btn--accent" href={href}>
+          {step.action}
+        </Link>
+      ) : null}
+    </div>
+  );
+}
 
 /** The door that was chosen, kept on screen while its setup runs.
  *
@@ -1925,11 +1964,19 @@ function channelStatePill(channel: FleetChannel | undefined): { label: string; t
 }
 
 export function ChannelsTab({
-  workspaceId, agentId, agent, onChannelsChanged,
+  workspaceId, agentId, agent, onChannelsChanged, hardwareHref,
 }: {
   workspaceId: string;
   agentId: string;
   agent: FleetAgent | null;
+  /** Where "Set up a computer" goes. A channel that runs on the agent's own
+   *  box is not a dead end for a cloud-only agent — it says so plainly and
+   *  offers the real next step, which is a REAL LINK so cmd-click and
+   *  middle-click work (CLAUDE.md craft doctrine). Optional because a caller
+   *  embedding this tab outside the agent surface has no Hardware tab to point
+   *  at; where it is absent the panel still states the fact and simply renders
+   *  no control, rather than a button that goes nowhere. */
+  hardwareHref?: string;
   /** Called (in addition to this tab's own internal refresh) after a
    *  channel connects/binds — lets a caller that holds its OWN separate
    *  useFleetAgentChannels instance (FleetAgentDetail's Properties column,
@@ -1973,6 +2020,12 @@ export function ChannelsTab({
   // provision or a credential save instead of showing a snapshot from click
   // time.
   const [openclawDetailKey, setOpenclawDetailKey] = useState<string | null>(null);
+  // Which half of the two-tier split the grid is showing. Defaults to the
+  // channels a person can connect with nothing installed — the founder's
+  // "lead with what works with no hardware". Plain state, not persisted: the
+  // honest default is a property of the grid, and a remembered selection would
+  // silently hide half of it on a later visit.
+  const [channelFilter, setChannelFilter] = useState<ChannelHardwareFilterId>("hardware_free");
   // Which VARIANT of that platform is being set up — the transported half of
   // the same door pick the first-party panel makes with `selectedDoor`.
   const [openclawDoorKey, setOpenclawDoorKey] = useState<string | null>(null);
@@ -2415,6 +2468,14 @@ export function ChannelsTab({
      *  (channelDoorChoiceNote), on both halves of the grid — never a list of
      *  "these channels have variants". */
     waysNote: string | null;
+    /** Whether connecting this card needs a computer paired to this agent —
+     *  DERIVED from the card's own doors (channel-hardware-tier.ts), never
+     *  from a list of channel names here. Drives the grid's two-tier filter
+     *  and, inside the panel, the honest next step for a cloud-only agent. */
+    tier: ChannelHardwareTier;
+    /** The founder's authored "start here" marker, gated on the tier so it can
+     *  never sit on a card that first demands hardware. */
+    recommended: boolean;
     /** A card that cannot be opened at all is rendered `disabled` rather than
      *  clicked-into-a-dead-end (product law: no dead controls). Only
      *  first-party "Not configured here" is that — every transported card
@@ -2449,12 +2510,16 @@ export function ChannelsTab({
 
   const legacyCards: UnifiedChannelCard[] = firstPartyGrid.map((platform) => {
     const pill = channelStatePill(byId.get(platform.id));
+    const doorPlanForCard = planChannelDoors(platform.id);
+    const tier = channelHardwareTier(doorPlanForCard.doors);
     return {
       key: `first_party:${platform.id}`,
       label: platform.label,
       iconSrc: channelIconSrc(platform.id),
       pill,
-      waysNote: channelDoorChoiceNote(planChannelDoors(platform.id)),
+      waysNote: channelDoorChoiceNote(doorPlanForCard),
+      tier,
+      recommended: showsRecommendedBadge(isChannelRecommended(platform.label), tier),
       disabled: pill.tone === "locked",
       active: expanded === platform.id,
       open: () => handleCardClick(platform, pill),
@@ -2496,6 +2561,15 @@ export function ChannelsTab({
         ? channelCardPill(pillRow.remediation)
         : { label: "Unknown", tone: "locked" as const },
       waysNote: channelDoorChoiceNote(planDoors(platform.doors)),
+      tier: channelHardwareTier(platform.doors),
+      // Structurally unreachable today (every transported door needs the box,
+      // so the tier gate below can never pass) and computed the same way
+      // regardless, so a transported lane that ever becomes hardware-free is
+      // treated like any other card rather than by an exception.
+      recommended: showsRecommendedBadge(
+        isChannelRecommended(platform.label),
+        channelHardwareTier(platform.doors),
+      ),
       // "Needs Gateway" stays clickable, exactly like the first-party cards
       // in the same state (channelStatePill / handleCardClick) — pairing a
       // Gateway is a real, actionable next step, so this is never `disabled`.
@@ -2511,13 +2585,35 @@ export function ChannelsTab({
     };
   });
 
-  // Sorted by how many people actually use the platform, not by its first
-  // letter — alphabetical opened the grid with ClickClack above Discord and
-  // Nostr above WhatsApp. The ranking is authored (it exists in no data we
-  // hold) but it is a PREFIX, never a membership test: a channel the transport
-  // ships tomorrow is simply unranked and lands at the bottom in alphabetical
-  // order, with no code change. See channel-popularity.ts.
-  const unifiedChannelCards = [...legacyCards, ...openclawCards].sort(compareChannelsByPopularity);
+  // ORDER: what a person can finish today, first.
+  //
+  // Three ordering rules, composed rather than fused, because each answers a
+  // different question and each is read on its own somewhere:
+  //
+  //   1. TIER        no computer needed before needs-a-computer, so the grid
+  //                  opens with cards that can actually be completed right now
+  //                  (derived — channel-hardware-tier.ts).
+  //   2. RECOMMENDED the founder's one authored "start here" (Telegram), which
+  //                  is why it is card #1 and not merely early.
+  //   3. POPULARITY  how many people use the platform, not its first letter —
+  //                  alphabetical opened the grid with ClickClack above
+  //                  Discord. A PREFIX, never a membership test: a channel the
+  //                  transport ships tomorrow is unranked, lands at the bottom
+  //                  and sorts alphabetically among its peers, with no code
+  //                  change. See channel-popularity.ts.
+  // One exported comparator, not a chain spelled out here — see
+  // compareChannelGridCards for why the test has to be able to import the
+  // real order rather than re-type it.
+  const unifiedChannelCards = [...legacyCards, ...openclawCards].sort(compareChannelGridCards);
+
+  // THE TWO-TIER FILTER. Pure, and it decides its own visibility: the control
+  // is rendered only when both tiers are actually populated, because a filter
+  // that can only ever show everything is a dead control. `plan.selected` is
+  // what is in force, which is not always what was asked for — a selection
+  // naming a tier with no cards resolves to one that has some rather than
+  // rendering an empty grid that reads as broken.
+  const hardwareFilter = planChannelHardwareFilter(unifiedChannelCards, channelFilter);
+  const visibleChannelCards = hardwareFilter.visible;
 
   // The transported PLATFORM whose panel is open, re-resolved from the live row
   // set on every render rather than captured at click time — provisioning and
@@ -2545,6 +2641,13 @@ export function ChannelsTab({
   // it works, a back affordance past the first step) are asserted in
   // channel-setup-flow.test.ts against the REAL door plan and the REAL
   // remediations, which no amount of reading this JSX could give us.
+  // The honest answer for a transported card opened by a cloud-only agent.
+  // Null the moment a computer exists, so this can never linger as a stale
+  // instruction beside a working setup form.
+  const openclawHardwareStep = channelHardwareNextStep(
+    channelHardwareTier(openclawPlatform?.doors ?? []),
+    Boolean(agentGatewayId),
+  );
   const openclawFlow = planChannelSetupFlow({
     doorPlan: openclawDoorPlan,
     doorChosen: Boolean(openclawActiveDoor),
@@ -2627,8 +2730,34 @@ export function ChannelsTab({
         </div>
       ) : null}
 
+      {/* The two-tier split, made filterable — because a channel is now the
+          only way a person talks to their agent, so "which of these can I
+          finish today" is the first question the grid has to answer. Reuses
+          the house .fleet-segmented control rather than inventing a second
+          switch shape. Absent entirely when there is nothing to choose
+          between. */}
+      {hardwareFilter.options.length > 0 ? (
+        <div className="fleet-channel-filter">
+          <div className="fleet-segmented" role="tablist" aria-label="Filter channels by what they need">
+            {hardwareFilter.options.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                role="tab"
+                aria-selected={hardwareFilter.selected === option.id}
+                className={`fleet-segmented-btn${hardwareFilter.selected === option.id ? " fleet-segmented-btn--active" : ""}`}
+                onClick={() => setChannelFilter(option.id)}
+              >
+                {option.label}
+                <span className="fleet-channel-filter-count">{option.count}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
       <div className="fleet-channel-grid">
-        {unifiedChannelCards.map((card) => (
+        {visibleChannelCards.map((card) => (
           <button
             key={card.key}
             type="button"
@@ -2644,11 +2773,19 @@ export function ChannelsTab({
               {card.pill.tone === "connected" ? <span className="fleet-channel-card-dot" /> : null}
               {card.pill.label}
             </span>
-            {/* The card offers a CHOICE, said on the face so the picker behind
-                it is not a surprise. Deliberately not a second pill competing
-                with the status one — one line, smaller and dimmer, and absent
-                entirely on the single-door cards (most of them). */}
-            {card.waysNote ? <span className="fleet-channel-card-ways">{card.waysNote}</span> : null}
+            {/* The card's ONE secondary line. A face is icon + label + one
+                pill, so "Recommended" and the door-choice note share this
+                single smaller, dimmer line rather than each becoming a second
+                chip competing with the status pill. Absent entirely on a card
+                with neither, which is most of them. */}
+            {card.recommended || card.waysNote ? (
+              <span className="fleet-channel-card-ways">
+                {card.recommended ? (
+                  <span className="fleet-channel-card-recommended">{CHANNEL_RECOMMENDED_BADGE}</span>
+                ) : null}
+                {card.waysNote}
+              </span>
+            ) : null}
           </button>
         ))}
       </div>
@@ -2911,7 +3048,14 @@ export function ChannelsTab({
                       paste here.
                     </p>
                   ) : null}
-                  {openclawFlow.screen === "needs_hardware" || openclawFlow.screen === "unknown" || !agentGatewayId ? (
+                  {/* Two different facts, two different renderings — never
+                      one shared paragraph. "You have no computer" has a real
+                      next step and gets one; "this computer could not be
+                      reached / declares nothing" genuinely has no action
+                      here and stays the one honest sentence. */}
+                  {openclawHardwareStep ? (
+                    <HardwareNextStep step={openclawHardwareStep} href={hardwareHref} />
+                  ) : openclawFlow.screen === "needs_hardware" || openclawFlow.screen === "unknown" || !agentGatewayId ? (
                     <p className="fleet-channel-expand-hint" style={{ marginTop: 0 }}>
                       {openclawDetail.remediation.detail}
                     </p>
@@ -3053,6 +3197,14 @@ export function ChannelsTab({
                     <Cpu size={14} strokeWidth={2} aria-hidden /> {activeDoor.label} needs a computer
                   </p>
                   <p className="fleet-channel-expand-hint">{channelDoorUnavailableReason(activeDoor)}</p>
+                  {/* The same real next step the transported panel offers, so
+                      a person meets one behaviour rather than two depending on
+                      which half of the grid the card came from. */}
+                  {hardwareHref ? (
+                    <Link className="fleet-btn fleet-btn--accent" href={hardwareHref}>
+                      Set up a computer
+                    </Link>
+                  ) : null}
                 </div>
               ) : null}
 
