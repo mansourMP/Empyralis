@@ -147,7 +147,7 @@ function AgentCard({
   selected: boolean;
   onSelect: (agentId: string, projectId: string) => void;
 }) {
-  const presetRaw = (agent.capability_preset || agent.purpose_preset || "").toLowerCase().replace(/_/g, " ");
+  const presetRaw = (agent.capability_preset || "").toLowerCase().replace(/_/g, " ");
   const preset = presetRaw ? presetRaw.charAt(0).toUpperCase() + presetRaw.slice(1) : "";
   const st = deriveAgentStatus(agent, gateways);
 

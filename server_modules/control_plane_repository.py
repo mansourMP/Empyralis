@@ -3411,7 +3411,7 @@ def _extract_workspace_id_from_route(route: Any) -> Optional[str]:
 def _normalize_workspace_default_route(workspace_id: str, route: Any) -> str:
     clean_workspace_id = str(workspace_id or "").strip()
     clean_route = str(route or "").strip()
-    # The bare workspace route renders FleetHome (see
+    # The bare workspace route redirects into Projects (see
     # frontend/app/(account)/w/[workspaceId]/page.tsx) -- there is no
     # top-level or workspace-scoped "/chat" route, so a fallback pointing at
     # one would 404 the moment it fired.

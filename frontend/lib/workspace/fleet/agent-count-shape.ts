@@ -31,11 +31,13 @@
  *                             surveying an empty fleet.
  *   count === 1  →  "solo"   One thing exists. A table of one is worse
  *                             than no table (the issue's own words) — the
- *                             Agents rail entry and the workspace root
- *                             both route straight to that one agent
- *                             instead of wrapping it in a fleet table
- *                             whose filters/sort/cost-comparison controls
- *                             have nothing to act on.
+ *                             Agents rail entry routes straight to that
+ *                             one agent instead of wrapping it in a fleet
+ *                             table whose filters/sort/cost-comparison
+ *                             controls have nothing to act on. The
+ *                             workspace root does NOT do this — see its
+ *                             own page.tsx: it always lands on Projects,
+ *                             agent count or no.
  *   count >= 2   →  "fleet"  Today's behaviour, unchanged. Once there is
  *                             something to compare, the survey tools earn
  *                             their place back automatically — no setting

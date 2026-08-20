@@ -213,15 +213,12 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
     const rest = pathname.startsWith(base) ? pathname.slice(base.length) : "";
     let segments = rest.split("/").filter(Boolean);
 
-    // "/fleet" is a legacy alias of the bare workspace root — both render the
-    // exact same FleetHome component (see fleet/page.tsx vs. the bare
-    // page.tsx), and FleetHome carries its own <h1> ("Your fleet") as real
-    // page content, not chrome. The root itself gets no crumb at all (see the
-    // comment below) precisely so it doesn't compete with that h1; a lone
-    // "fleet" segment needs the same treatment; MAN-145 title-dedup follow-up
-    // — a "Home" breadcrumb-h1 above FleetHome's own "Your fleet" h1 would be
-    // two headings with different text, which still fails "exactly one
-    // visible h1" even though the words don't match.
+    // "/fleet" used to be a legacy alias of the bare workspace root
+    // (rendering the now-deleted FleetHome component) and is already
+    // intercepted by next.config.ts's LEGACY_REDIRECTS (-> /agents) before
+    // the router ever sees it, so this branch is unreachable in production
+    // — kept only because a stray direct hit during local dev should still
+    // fold cleanly rather than draw a dead "fleet" crumb.
     if (segments.length === 1 && segments[0] === "fleet") segments = [];
 
     // Agent detail's own sub-tab (…/projects/{id}/agents/{agentId}/{tab} —
@@ -318,9 +315,9 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
     return items;
   }, [pathname, workspaceId, labels, badges, icons]);
 
-  // The workspace landing page (bare /w/{id}, no section segment) has its own
-  // page heading (FleetHome's "Your fleet") — nothing to crumb there once the
-  // root crumb is gone.
+  // The bare /w/{id} route (no section segment) never renders content of
+  // its own any more — it redirects into /projects before anything paints
+  // — so there's nothing to crumb there once the root crumb is gone.
   if (crumbs.length === 0) return null;
 
   // Mobile-collapsed shape: the immediate parent (one level up — a "‹ Back"

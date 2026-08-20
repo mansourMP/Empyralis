@@ -50,8 +50,12 @@ import {
  * that routine activity still deserves a home, just not the front door.
  * "Activity" is the second tab: the OLD Inbox page's own list+detail+trace
  * UI, moved here rather than rewritten. useWorkspaceActivity itself is
- * untouched and still has its other two callers (FleetHome's own "Recent
- * activity" widget, PrimaryRail's badge) — checked before touching it.
+ * untouched and still has its other caller (PrimaryRail's badge) —
+ * checked before touching it. FleetHome's own "Recent activity" widget
+ * was a second caller until FleetHome was deleted outright (the workspace
+ * root now redirects into Projects rather than rendering its own
+ * dashboard) — nothing replaced it, this Activity tab already covers
+ * "what happened" for anyone who wants it.
  *
  * NO NEW TOP-LEVEL RAIL ROW. primary-rail-nav.ts's own header records that
  * an "Activity" rail item was floated and deliberately dropped the same

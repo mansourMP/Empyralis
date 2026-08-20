@@ -956,21 +956,6 @@ export function FleetAgentDetail({
   // still real and load-bearing below (it's what makes the workspace's one
   // operator/Sage agent skip the "Tools" row and its delete control).
   const isMaster = (agent?.role || "agent") === "operator";
-  const { tools: agentTools } = useFleetAgentTools(workspaceId, agentId);
-  // Truth Map B1 (mirrors ToolsTab's identical requiredConnector/
-  // connectorMissing check): a tool bound behind requires_connector does
-  // nothing until that connector is actually connected, so it shouldn't
-  // count toward "customer access" just because it's granted. 2026-08-14:
-  // there is no more per-agent enable/disable checklist — every listed
-  // tool is already available to the agent itself, so this is purely a
-  // WHO (audience/mandate) count now, not a WHO-and-WHAT one.
-  const connectorById = new Map(connectors.map((c) => [c.id, c]));
-  const customerAccessCount = agentTools.filter((t) => {
-    if (!(t.audience_safe || t.mandate_granted)) return false;
-    const requiredConnector = t.requires_connector ? connectorById.get(t.requires_connector) : undefined;
-    const connectorMissing = Boolean(t.requires_connector) && !requiredConnector?.connected;
-    return !connectorMissing;
-  }).length;
 
   // Tab clicks just navigate — activeTab above already tracks initialTab
   // directly, so there's no local state to update here; the URL round-trips
@@ -1126,28 +1111,21 @@ export function FleetAgentDetail({
           row used to open) had no other caller, so it was deleted with this
           row rather than left as dead code — see ModelTab below for the
           real editor. */}
-      {/* "Tools", not "Customer access": the internal audience/mandate
-          vocabulary that name used to expose. What this counts hasn't
-          changed — tools an outside customer messaging this agent can
-          actually invoke right now (enabled, granted, and not blocked on a
-          missing connector) — only the label, into words a workspace owner
-          recognizes without a tooltip. Still skipped for the operator agent
-          (isMaster): it has no customer-facing surface to count.
-          Also skipped for any owner-audience agent (Personal Assistant /
-          internal_assistant preset, resolved server-side into
-          agent.audience via fleet_tools.resolve_agent_audience): a
-          "customer messages it" count is not a concept that applies to an
-          agent nobody outside the workspace can ever reach — per founder
-          direction, this row only means something for the external-audience
-          (Customer Support / customer_facing) type. Absent, not zero. */}
-      {!isMaster && agent?.audience === "external" && (
-        <PanelRow
-          label="Tools"
-          value={`${customerAccessCount} ${customerAccessCount === 1 ? "tool" : "tools"}`}
-          tone={customerAccessCount > 0 ? "default" : "muted"}
-          hint="Tools this agent can use when someone outside your workspace messages it. You keep full access regardless."
-        />
-      )}
+      {/* The "Tools" row that used to live here ("customer access" count,
+          gated on agent.audience === "external") is deleted outright, not
+          just hidden — founder, repeatedly: the owner/customer-facing
+          classification is a concept the product should not have at all,
+          "conversations are private, agent is public — that shit is
+          [wrong], the entire thing." Access to an agent is binary, gated by
+          who can reach it (a channel it's wired to), never a per-agent
+          "audience" a human grades it with in a form. The Configure >
+          General "Purpose" picker that used to write agent.audience
+          (PurposeSection) is deleted the same way, below GeneralTab.
+          fleet_tools.resolve_agent_audience is left alone on the backend
+          (JSONB metadata, not a live security gate — see
+          audience_tool_filter.py's own docstring for the actual,
+          per-CHANNEL-TURN tool-authority mechanism this is not, and never
+          reads agent.audience at all). */}
       {/* Zero is never shown as a row — an unconnected Channels/Connectors
           count is noise, not a fact worth a permanent line in a panel
           that's visible on every tab. Configure > Channels/Connectors is
@@ -1622,113 +1600,8 @@ function GeneralTab({
         <AgentTitle workspaceId={workspaceId} agentId={agentId} label={agent.label || ""} onRenamed={onRenamed} />
       )}
       {!isMaster && agent && (
-        <PurposeSection workspaceId={workspaceId} agentId={agentId} agent={agent} onSaved={onRenamed} />
-      )}
-      {!isMaster && agent && (
         <ScheduleSection workspaceId={workspaceId} agentId={agentId} />
       )}
-    </div>
-  );
-}
-
-// Server field: purpose_preset (customer_facing | internal_assistant |
-// operator) — seeds default instructions at creation only; changing it
-// here never rewrites instructions the owner already has. "operator" is
-// deliberately not offered — same reasoning as the (now-deleted)
-// create-agent wizard's own comment: the owner is the operator, and Sage/
-// the platform's own operator role is never a pick for a specialist. Each
-// remaining option carries its own `audience` (owner | external) — the
-// signal fleet_tools.resolve_agent_audience gates the Properties panel's
-// "Tools" row on, and a later credential/connector/memory resolver reads —
-// so changing the preset here always sends both fields together, matching
-// how fleet_create_agent pairs them at creation.
-const PURPOSE_OPTIONS: { value: "customer_facing" | "internal_assistant"; label: string; body: string; audience: "owner" | "external" }[] = [
-  { value: "customer_facing", label: "Customer Support", audience: "external", body: "Talks to your customers — kept separate from your private accounts." },
-  { value: "internal_assistant", label: "Personal Assistant", audience: "owner", body: "Works for you — trusted with your connected accounts and memory." },
-];
-
-function purposePresetFromAgent(agent: FleetAgent): "customer_facing" | "internal_assistant" {
-  return agent.purpose_preset === "customer_facing" ? "customer_facing" : "internal_assistant";
-}
-
-// This was completely unreachable before this change — purpose_preset was
-// only ever set once, at creation, by the (now-deleted) 4-step wizard. An
-// owner who created a Personal Assistant and later wanted Customer Support
-// had no way to change it short of a database edit. Same save-on-click
-// pattern as HardwareTab's own ACCESS_OPTIONS picker: no separate Save
-// button, optimistic local state, roll back on a failed PATCH.
-function PurposeSection({
-  workspaceId, agentId, agent, onSaved,
-}: {
-  workspaceId: string;
-  agentId: string;
-  agent: FleetAgent;
-  /** Called after a successful save so the caller can refetch — the
-   *  Properties column's "Tools" row (gated on agent.audience) reads off
-   *  the same `agent` prop and should catch up immediately, same reason
-   *  ModelTab/HardwareTab's own onSaved exists. */
-  onSaved?: () => void;
-}) {
-  const [preset, setPreset] = useState<string>(() => purposePresetFromAgent(agent));
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  // Resync when the agent record (re)loads under us — e.g. a Cmd+K palette
-  // swap to a different agent — but never while a save is in flight.
-  useEffect(() => {
-    if (saving) return;
-    setPreset(purposePresetFromAgent(agent));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agent.purpose_preset]);
-
-  async function select(next: "customer_facing" | "internal_assistant") {
-    if (saving || next === preset) return;
-    const prior = preset;
-    const option = PURPOSE_OPTIONS.find((p) => p.value === next);
-    setPreset(next);
-    setSaving(true);
-    setError(null);
-    try {
-      const res = await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
-        method: "PATCH",
-        credentials: "include",
-        headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
-        body: JSON.stringify({ patch: { purpose_preset: next, audience: option?.audience || "owner" } }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
-      onSaved?.();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not save.");
-      // Roll back to the last-known-saved value rather than leaving the
-      // picker pointed at a selection that didn't actually persist.
-      setPreset(prior);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div style={{ marginTop: 4 }}>
-      <div className="fleet-detail-section-title" style={{ marginTop: 0 }}>Purpose</div>
-      <div className="fleet-wizard-options">
-        {PURPOSE_OPTIONS.map((opt) => (
-          <button
-            key={opt.value}
-            type="button"
-            className={`fleet-wizard-option${preset === opt.value ? " is-selected" : ""}`}
-            disabled={saving}
-            onClick={() => void select(opt.value)}
-          >
-            <span className="fleet-wizard-option-label">{opt.label}</span>
-            <span className="fleet-wizard-option-body">{opt.body}</span>
-          </button>
-        ))}
-      </div>
-      <div style={{ marginTop: 8, minHeight: 20 }}>
-        {saving && <span className="fleet-channel-expand-hint" style={{ margin: 0 }}>Saving…</span>}
-        {error && <span className="fleet-channel-expand-error" style={{ margin: 0 }}>{error}</span>}
-      </div>
     </div>
   );
 }
