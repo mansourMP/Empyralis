@@ -5848,6 +5848,79 @@ All four BYO runtimes (`codex`, `claude`, `cursor-agent`, `grok`) are
 installed on the founder's machine and can be probed directly. Before
 writing a capability table for any of them, run the binary and ask it.
 
+## THE PLATFORM IS NOT A CHAT PRODUCT (2026-08-20) — settled
+
+**Conversation happens in channels. Never in the web UI.** Founder, verbatim
+and emphatic: *"messaging would never be done inside this platform. I'm
+strictly going to prohibit that and nobody is going to use that... you want
+to speak and have an agent, go set it up, go to Telegram and speak with the
+agent inside that channel. We are not going to try to be a channel."*
+
+```
+WHAT THE PLATFORM IS              WHAT IT IS NOT
+  context layer                     a chat UI
+    tasks + documents,              a Telegram competitor
+    GitHub/Linear-grade             a place you spend time in
+  agent configuration
+    hardware, model, memory,      HOW YOU TALK TO AN AGENT
+    tools, MCP                      Telegram / WhatsApp / iMessage
+  observation                       /commands inside the channel
+    what is it doing,
+    is it healthy
+```
+
+The strategic argument, and it is the load-bearing one: every hour spent on
+in-platform chat competes with Telegram, Claude and ChatGPT on THEIR
+strongest surface with none of their distribution. Poke (raised ~$20M) is
+the reference — it deliberately pushes users to iMessage rather than
+building its own chat, and reached the App Store as an agent platform.
+
+**Consequences, all settled by the founder in the same conversation:**
+
+- **No message composer anywhere in the platform.** The agent detail
+  surface is READ-ONLY: which channel each inbound message came from, the
+  agent's output, tool calls, plan steps, live work. Session name and
+  history on top. You watch; you never type.
+- **Keep the live streaming of tool calls and reasoning.** That is the
+  reason to open the platform at all. Removing chat must not remove it.
+- **The "Work" button/tab is removed.** Attribution belongs on the TASK and
+  DOCUMENT surfaces instead — which agent created, updated, commented,
+  completed — not behind a separate tab.
+- **Agent creation is name + optional system prompt. Nothing else.**
+  Model/hardware/memory/tools are configuration seen and edited afterwards,
+  never questions at creation.
+- **An agent may exist unpaired**, showing as not-yet-reachable. A channel
+  is not required to create one.
+- **Agents belong to the WORKSPACE, not to a project.** *"project and
+  agents are completely independent — let's stop creating agents inside
+  this specific project, let's get rid of that entirely."* This resolves
+  the open question previously recorded below.
+- **Telegram is the recommended channel** and must be presented first, with
+  a "Recommended" marker, wherever channels are set up.
+
+**A verified fact that makes the no-hardware case a non-issue:** documents
+and tasks do NOT go through git or hardware. `document__write/__edit/__read/
+__list` and the 14 `project_task__*` tools write to
+`project_documents_repository` / the tasks store in Postgres, with real
+revision history, and never touch a gateway. So a cloud-only agent with no
+hardware can already fully create and edit documents and tasks. Hardware is
+required only for SHELL and FILESYSTEM work — which is the correct
+boundary, and is the same model ChatGPT/Claude use. This is already built;
+it was simply never presented as the feature it is.
+
+**The internal-MCP idea the founder described already exists too:** agents
+natively hold 14 task tools and 4 document tools over the workspace's own
+data. "Go check this project" works with no connector registration and no
+re-authenticating Notion/Linear inside the agent.
+
+**The risk to hold in mind, stated once so it is not forgotten:** with chat
+gone, CHANNEL SETUP BECOMES THE CRITICAL PATH. A new customer gets zero
+value until a channel works. On 2026-08-20 that path was found to be a dead
+end for every cloud-only agent (see the Telegram entry). It must be
+flawless, not merely fixed. The zero-friction path already exists — the
+hosted bot, "no BotFather, no token" — and belongs immediately after agent
+creation.
+
 ## OPEN FOUNDER DECISIONS — unresolved, do not guess (2026-08-20)
 
 These are questions the founder has raised MORE THAN ONCE and has not yet
@@ -5855,6 +5928,10 @@ had answered. They are recorded here because holding them in a
 conversation loses them — he has said, correctly, that he raises the same
 problem weeks apart and nothing happens. **If you are working in one of
 these areas, do not pick an answer silently. Surface it.**
+
+### 1. RESOLVED 2026-08-20 — agents belong to the WORKSPACE. See the entry above.
+
+(original question kept for context)
 
 ### 1. Does an agent belong to a PROJECT or to the WORKSPACE?
 
@@ -5876,6 +5953,10 @@ redundant and should be removed. Unanswered.
 Everything downstream depends on this: whether creation asks for a
 project, whether the unlinked project-agents route is deleted, and whether
 "repetitive project work" is a distinct product concept.
+
+### 2. RESOLVED 2026-08-20 — setup + observation, never conversation. See above.
+
+(original question kept for context)
 
 ### 2. Is the web UI a WORKSPACE or a SETUP SURFACE?
 
