@@ -296,16 +296,45 @@ class ReasoningEffortLevelsForModelTests(unittest.TestCase):
         self.assertEqual(provider_profiles.reasoning_effort_levels_for_model("gemini", "gemini-1.5-pro"), [])
         self.assertEqual(provider_profiles.reasoning_effort_levels_for_model("gemini", "gemini-2.0-flash"), [])
 
-    def test_xai_current_catalog_models_have_no_wire_levels(self) -> None:
-        # Every xai model this catalog offers today reasons with a fixed
-        # budget and exposes no settable reasoning_effort (docs.x.ai,
-        # verified 2026-08-20) — this is the concrete finding that the
-        # reasoning-effort picker currently does nothing on the wire for
-        # ANY model in the xai provider's catalog.
+    def test_xai_grok_4_family_has_no_wire_levels(self) -> None:
+        # grok-4/-4-0709/-4-latest/-3 all reason with a fixed budget and
+        # expose no settable reasoning_effort (docs.x.ai, verified
+        # 2026-08-20).
         for model_id in ("grok-4", "grok-4-0709", "grok-4-latest", "grok-3"):
             self.assertEqual(
                 provider_profiles.reasoning_effort_levels_for_model("xai", model_id), [], model_id,
             )
+
+    def test_xai_grok_4_5_and_later_are_deliberately_not_hardcoded(self) -> None:
+        # Second pass, 2026-08-20: xAI has shipped grok-4.5/4.6/4.20-multi-
+        # agent with REAL reasoning_effort support since the first catalog
+        # pass. They were briefly added here as hardcoded entries and then
+        # reverted on the founder's own correction — verifying against a
+        # document and hand-typing the result is still transcription, and
+        # this codebase has a genuine live self-describing source for the
+        # cli_subscription/Codex case (codex app-server's model/list RPC,
+        # verified live, 2026-08-20) but none for xai's REST API. This
+        # test pins the ABSENCE as deliberate, not an oversight to "fix"
+        # by re-adding a table.
+        for model_id in ("grok-4.5", "grok-4.6", "grok-4.20-multi-agent"):
+            self.assertEqual(
+                provider_profiles.reasoning_effort_levels_for_model("xai", model_id), [], model_id,
+            )
+
+    def test_model_is_known_for_provider_distinguishes_unknown_from_confirmed_unsupported(self) -> None:
+        # The signal openai_compat_adapter's staleness-observability log
+        # relies on: grok-4 is a CONFIRMED "no" (in the catalog, empty
+        # reasoning_levels); a model this catalog has never heard of is a
+        # genuinely different fact and must classify differently.
+        self.assertTrue(provider_profiles.model_is_known_for_provider("xai", "grok-4"))
+        # grok-4.6 is deliberately NOT in the catalog (see the test above)
+        # — it must classify the same as any other live-discovered id this
+        # catalog has never heard of, which is the whole point of the
+        # distinction this function exists to make.
+        self.assertFalse(provider_profiles.model_is_known_for_provider("xai", "grok-4.6"))
+        self.assertFalse(
+            provider_profiles.model_is_known_for_provider("xai", "grok-5-hypothetical-future-release"),
+        )
 
     def test_unknown_model_returns_empty_never_guessed(self) -> None:
         self.assertEqual(

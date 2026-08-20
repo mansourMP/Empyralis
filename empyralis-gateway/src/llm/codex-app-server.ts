@@ -44,14 +44,29 @@ export interface CodexAppServerParams {
  *  mode/plan this box's Codex is logged in under; the server computes this
  *  itself, we just relay it). Field names match the protocol's own `Model`
  *  type (see codex app-server generate-ts's v2/Model.ts) minus the parts we
- *  don't use (reasoning-effort options, service tiers, upgrade metadata) —
- *  never hand-typed, always this shape or nothing. */
+ *  don't use (service tiers, upgrade metadata) — never hand-typed, always
+ *  this shape or nothing. Includes the live reasoning-effort catalog
+ *  (defaultReasoningEffort / supportedReasoningEfforts) — this varies per
+ *  model and per account (verified live: gpt-5.6-terra offers a distinct
+ *  set from gpt-5.6-luna, including "ultra", a level absent from every
+ *  static table and every doc page), so it must be relayed from the RPC
+ *  itself rather than transcribed once and left to rot. */
 export interface CodexModelListEntry {
   id: string;
   displayName: string;
   description: string;
   hidden: boolean;
   isDefault: boolean;
+  defaultReasoningEffort: string;
+  /** NULL means "this gateway could not tell you" — the RPC carried no such
+   *  field (an older codex, or a malformed response). An EMPTY ARRAY means
+   *  the model positively reports no selectable levels. Those are different
+   *  facts and must not share one value: the cloud renders a static fallback
+   *  ladder for the first and NO picker at all for the second (a picker whose
+   *  every option the model does not implement is a dead control). See
+   *  codex-reasoning-options.ts's planCodexReasoningPicker, which is the one
+   *  place that distinction is turned into a rendering decision. */
+  supportedReasoningEfforts: { reasoningEffort: string; description: string }[] | null;
 }
 
 export interface CodexModelListResult {
@@ -417,10 +432,56 @@ export class CodexAppServerDaemon {
         description: String(m.description || ""),
         hidden: Boolean(m.hidden),
         isDefault: Boolean(m.isDefault),
+        defaultReasoningEffort: String(m.defaultReasoningEffort || ""),
+        supportedReasoningEfforts: parseSupportedReasoningEffortsOrUnknown(m.supportedReasoningEfforts),
       }))
       .filter((m) => m.id);
     return { authMethod, models };
   }
+}
+
+/** codex app-server's `supportedReasoningEfforts` is per-model and per-
+ *  account (verified live: distinct sets for gpt-5.6-terra vs gpt-5.6-luna,
+ *  including levels like "ultra" that exist in no doc and no static table
+ *  here) — so this parses defensively rather than asserting a shape a future
+ *  catalog change could break. A missing/malformed entry degrades to an
+ *  empty array, never a throw; a malformed individual item is dropped, not
+ *  the whole list. */
+export function parseSupportedReasoningEfforts(raw: unknown): { reasoningEffort: string; description: string }[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((e): e is Record<string, unknown> => !!e && typeof e === "object")
+    .map((e) => ({
+      reasoningEffort: String(e.reasoningEffort || ""),
+      description: String(e.description || ""),
+    }))
+    .filter((e) => e.reasoningEffort);
+}
+
+/** The absent-vs-empty distinction `CodexModelListEntry.supported
+ *  ReasoningEfforts` documents, in one place. Returns NULL for "the RPC did
+ *  not tell us" (field absent, or present but so malformed that nothing
+ *  survives parsing) and an ARRAY — possibly empty — for "the RPC answered."
+ *
+ *  Why this is not paranoia: every fleet box still running a gateway built
+ *  before this field was forwarded sends no field at all, so "absent" is the
+ *  MAJORITY live state today, not an edge case. Flattening it to `[]` would
+ *  make every one of those boxes indistinguishable from a model that
+ *  genuinely offers no levels — and the two demand opposite renderings.
+ *
+ *  A non-empty raw array that yields zero valid entries is treated as
+ *  UNKNOWN rather than as "no levels": something was there and we failed to
+ *  understand it, which is not the same as the model saying no. Verified
+ *  live 2026-08-20 against a real authenticated codex app-server: all five
+ *  models return a non-empty array, so `[]` from a modern gateway is
+ *  genuinely exceptional and must never be manufactured by our own parser. */
+export function parseSupportedReasoningEffortsOrUnknown(
+  raw: unknown,
+): { reasoningEffort: string; description: string }[] | null {
+  if (!Array.isArray(raw)) return null;
+  const parsed = parseSupportedReasoningEfforts(raw);
+  if (parsed.length === 0 && raw.length > 0) return null;
+  return parsed;
 }
 
 function extractTurnText(turnRes: Record<string, unknown>): string {

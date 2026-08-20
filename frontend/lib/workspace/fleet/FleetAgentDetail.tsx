@@ -4144,6 +4144,7 @@ import {
   useByokModelCatalog,
   visibleByokModels,
 } from "./fleet-model-config";
+import { planCodexReasoningPicker } from "./codex-reasoning-options";
 
 /** Label for a <select> model option — appends "(Recommended)" to the
  *  balanced/mid-tier pick every provider's picker pre-selects (see
@@ -4539,12 +4540,32 @@ function ModelTab({
   // rendering an empty, misleading <select>. Gated by cliRuntime, which
   // already tracks the Subscription <select> above, so switching the
   // subscription provider swaps the option list (or the note) live.
+  // The model's OWN live reasoning-effort vocabulary (2026-08-20) — codex
+  // app-server's real model/list RPC self-describes this per model, and the
+  // gateway now forwards it (empyralis-gateway/src/llm/codex-app-server.ts
+  // + runtime.ts). Verified live against a real authenticated Codex install:
+  // levels genuinely differ between two models on ONE account, and include
+  // values no static table here ever had ("ultra" on gpt-5.6-terra).
+  //
+  // The three-state decision (live / static fallback / no control at all)
+  // lives in planCodexReasoningPicker so it is testable without a browser —
+  // do not re-derive it here. Its `none` case is the "no dead controls"
+  // product law: a model that positively reports zero levels gets no
+  // <select>, rather than the static ladder it does not implement.
   function renderCliReasoningEffortPicker() {
-    const options = CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME[cliRuntime];
-    if (options.length === 0) {
+    const plan = planCodexReasoningPicker({
+      runtime: cliRuntime,
+      catalogSupported: codexModelCatalog.supported,
+      models: codexModelCatalog.models,
+      selectedModel,
+    });
+    const options = plan.kind === "live" ? plan.options : CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME[cliRuntime];
+    if (plan.kind === "none" || options.length === 0) {
       return (
         <p className="fleet-channel-expand-hint">
-          {RUNTIME_LABELS[cliRuntime]} has no reasoning-effort control today.
+          {plan.kind === "none"
+            ? `${selectedModel} has no reasoning-effort levels to choose from.`
+            : `${RUNTIME_LABELS[cliRuntime]} has no reasoning-effort control today.`}
         </p>
       );
     }
@@ -4561,7 +4582,9 @@ function ModelTab({
           ))}
         </select>
         <p className="fleet-channel-expand-hint">
-          Higher effort can solve harder problems but costs more and replies slower. Passed straight to {RUNTIME_LABELS[cliRuntime]}’s own reasoning control.
+          {plan.kind === "live"
+            ? `Levels this exact model reports supporting, straight from your own Codex account.`
+            : `Higher effort can solve harder problems but costs more and replies slower. Passed straight to ${RUNTIME_LABELS[cliRuntime]}’s own reasoning control.`}
         </p>
       </>
     );

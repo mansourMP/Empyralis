@@ -118,12 +118,61 @@ async def fetch_codex_model_catalog(
         model_id = str(m.get("id") or "").strip()
         if not model_id:
             continue
+        # default_reasoning_effort/supported_reasoning_efforts (2026-08-20):
+        # read DEFENSIVELY, not required — the gateway's own RPC handler
+        # (empyralis-gateway/src/llm/codex-app-server.ts's listModels(),
+        # runtime.ts's listModelsForRuntime()) does not forward these two
+        # fields yet, even though codex app-server's real `model/list` RPC
+        # already returns them per model (verified live against this
+        # box's own real, authenticated Codex install, 2026-08-20:
+        # `supportedReasoningEfforts`/`defaultReasoningEffort` present on
+        # every entry, including an effort level — "ultra", on
+        # gpt-5.6-terra — no static table in this codebase had ever
+        # modeled). Reading them with .get() rather than a required key
+        # means this function does the right thing BOTH today (they are
+        # simply absent, so every consumer falls back exactly as before)
+        # and the moment the gateway starts forwarding them (see the
+        # flagged follow-up for empyralis-gateway/src/llm/codex-app-
+        # server.ts + runtime.ts) — no second change needed here.
+        #
+        # ABSENT AND EMPTY ARE DIFFERENT FACTS AND MUST NOT COLLAPSE (2026-08-20).
+        # `None` here means "the gateway did not tell us" — which is the
+        # MAJORITY live state, not an edge case: every fleet box still running
+        # a gateway built before these fields were forwarded sends no key at
+        # all. `[]` means the model positively reports no selectable levels.
+        # The picker renders a static fallback ladder for the first and NO
+        # control at all for the second, so flattening them would either take
+        # the picker away from most of the fleet or leave a dead control on a
+        # model that implements none of its options.
+        supported_efforts_raw = m.get("supported_reasoning_efforts")
+        supported_efforts: Optional[List[Dict[str, str]]] = None
+        if isinstance(supported_efforts_raw, list):
+            parsed: List[Dict[str, str]] = []
+            for entry in supported_efforts_raw:
+                if not isinstance(entry, dict):
+                    continue
+                # The gateway relays codex's own camelCase key verbatim inside
+                # each entry (runtime.ts snake_cases only the OUTER field), so
+                # both spellings are accepted here on purpose — this is the
+                # seam where the two halves of the chain meet.
+                effort = str(entry.get("reasoning_effort") or entry.get("reasoningEffort") or "").strip()
+                if not effort:
+                    continue
+                parsed.append({
+                    "reasoning_effort": effort,
+                    "description": str(entry.get("description") or ""),
+                })
+            # Something was there and nothing survived parsing: that is
+            # "unintelligible", not "the model says no".
+            supported_efforts = None if (not parsed and supported_efforts_raw) else parsed
         models.append({
             "id": model_id,
             "display_name": str(m.get("display_name") or model_id),
             "description": str(m.get("description") or ""),
             "hidden": bool(m.get("hidden")),
             "is_default": bool(m.get("is_default")),
+            "default_reasoning_effort": str(m.get("default_reasoning_effort") or "").strip() or None,
+            "supported_reasoning_efforts": supported_efforts,
         })
     return {
         "supported": supported,

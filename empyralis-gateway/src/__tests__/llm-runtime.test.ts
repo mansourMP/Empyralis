@@ -423,8 +423,28 @@ test("llm.models.list: codex runtime calls the injected listModels impl and rela
       return {
         authMethod: "chatgpt",
         models: [
-          { id: "gpt-5.6-terra", displayName: "GPT-5.6-Terra", description: "Balanced.", hidden: false, isDefault: true },
-          { id: "codex-auto-review", displayName: "Codex Auto Review", description: "Internal.", hidden: true, isDefault: false },
+          {
+            id: "gpt-5.6-terra",
+            displayName: "GPT-5.6-Terra",
+            description: "Balanced.",
+            hidden: false,
+            isDefault: true,
+            defaultReasoningEffort: "medium",
+            supportedReasoningEfforts: [
+              { reasoningEffort: "low", description: "Fast responses with lighter reasoning" },
+              { reasoningEffort: "medium", description: "Balances speed and reasoning depth" },
+              { reasoningEffort: "ultra", description: "Maximum reasoning with automatic task delegation" },
+            ],
+          },
+          {
+            id: "codex-auto-review",
+            displayName: "Codex Auto Review",
+            description: "Internal.",
+            hidden: true,
+            isDefault: false,
+            defaultReasoningEffort: "",
+            supportedReasoningEfforts: [],
+          },
         ],
       };
     },
@@ -440,6 +460,14 @@ test("llm.models.list: codex runtime calls the injected listModels impl and rela
   assert.equal(models[0].id, "gpt-5.6-terra");
   assert.equal(models[0].is_default, true);
   assert.equal(models[1].hidden, true);
+  // The whole point of this fix: a reasoning-effort level with no doc and no
+  // static table anywhere ("ultra") must survive both re-shaping .map()s
+  // untouched, in snake_case, for the cloud side to actually see it.
+  assert.equal(models[0].default_reasoning_effort, "medium");
+  const efforts = models[0].supported_reasoning_efforts as Array<Record<string, unknown>>;
+  assert.equal(efforts.length, 3);
+  assert.equal(efforts[2].reasoningEffort, "ultra");
+  assert.deepEqual(models[1].supported_reasoning_efforts, []);
 });
 
 test("llm.models.list: a runtime with no verified live catalog gets an honest supported:false, never a guess", async () => {
