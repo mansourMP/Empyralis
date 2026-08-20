@@ -388,6 +388,11 @@ export type CodexModelCatalogState = {
   supported: boolean;
   models: CodexModelCatalogEntry[];
   authMethod: string | null;
+  /** The CLI's OWN words when it could not produce a catalog (e.g. Cursor's
+   *  "No models available for this account."). Null when there was nothing
+   *  to relay. Never our own guess at why — see the gateway's
+   *  cli-model-list.ts for why an empty dropdown is worse than a sentence. */
+  reason: string | null;
 };
 
 const EMPTY_CODEX_MODEL_CATALOG: CodexModelCatalogState = {
@@ -396,13 +401,20 @@ const EMPTY_CODEX_MODEL_CATALOG: CodexModelCatalogState = {
   supported: false,
   models: [],
   authMethod: null,
+  reason: null,
 };
 
-/** Fetches the live Codex model catalog for one paired Gateway. Re-fetches
- *  whenever gatewayId/runtime changes; a runtime other than "codex" or an
- *  empty gatewayId short-circuits to the empty/unsupported state without a
- *  network call — nothing here fabricates a list for a runtime we have no
- *  verified way to ask. */
+/** Fetches the live model catalog for one paired Gateway and one
+ *  cli_subscription runtime.
+ *
+ *  No longer codex-only (2026-08-20): the gateway can now also answer for
+ *  cursor_cli (`cursor-agent models`) and grok_build (`grok models`), each
+ *  through that CLI's OWN native subcommand — see the gateway's
+ *  cli-model-list.ts. claude_code has nothing to ask and comes back
+ *  supported:false, which is why the gate here is now "is there a gateway to
+ *  ask" rather than a hardcoded runtime name: the BOX decides what it can
+ *  enumerate, and nothing on this side fabricates a list for a runtime it
+ *  cannot. */
 export function useCodexModelCatalog(
   workspaceId: string,
   gatewayId: string,
@@ -413,7 +425,7 @@ export function useCodexModelCatalog(
 
   const refresh = useCallback(async () => {
     const requestId = ++requestIdRef.current;
-    if (runtime !== "codex" || !gatewayId.trim()) {
+    if (!runtime.trim() || !gatewayId.trim()) {
       setState(EMPTY_CODEX_MODEL_CATALOG);
       return;
     }
@@ -458,13 +470,14 @@ export function useCodexModelCatalog(
         supported: res.ok && Boolean(data?.supported),
         models,
         authMethod: typeof data?.auth_method === "string" ? data.auth_method : null,
+        reason: typeof data?.reason === "string" && data.reason ? data.reason : null,
       });
     } catch {
       if (requestIdRef.current !== requestId) return;
       // Fetch failure is "couldn't verify," never "verified as empty" — the
       // caller's fallback path (the static catalog, clearly labeled as
       // possibly stale) is what renders here, not a bare empty list.
-      setState({ loaded: true, loading: false, supported: false, models: [], authMethod: null });
+      setState({ loaded: true, loading: false, supported: false, models: [], authMethod: null, reason: null });
     }
   }, [workspaceId, gatewayId, runtime]);
 

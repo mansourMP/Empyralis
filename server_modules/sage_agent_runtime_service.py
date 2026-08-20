@@ -840,7 +840,7 @@ _CLI_SUBSCRIPTION_RUNTIME_LABEL: Dict[str, str] = {
 # direct_chat, which applies this as a native provider-API param or a
 # system-prompt instruction — see direct_chat_generation_service.py's
 # "Reasoning effort logic" block).
-_VALID_REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
+_VALID_REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
 
 # cli_subscription's OWN reasoning-effort vocabulary (Phase 1: reasoning-
 # effort control) — DIFFERENT from _VALID_REASONING_EFFORTS above and
@@ -861,12 +861,78 @@ _VALID_REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 # Kept in sync with fleet_tools.py's _VALID_CLI_REASONING_EFFORTS_BY_RUNTIME
 # (same duplicate-but-documented-across-layers pattern as
 # _VALID_CLI_SUBSCRIPTION_RUNTIMES above, not a shared import).
-_VALID_CLI_REASONING_EFFORTS_BY_RUNTIME: Dict[str, set] = {
+# What each CLI's own flag NATIVELY accepts. This is no longer the picker's
+# vocabulary — since 2026-08-20 the customer sees ONE shared ladder for every
+# runtime (founder's rule; his words are quoted verbatim in frontend/lib/
+# workspace/fleet/fleet-provider-constants.ts's REASONING_EFFORT_LADDER
+# comment). These sets survive as the CLAMP TARGET: the picker is uniform,
+# the wire stays native.
+#
+#   picked   low medium high xhigh max ultra      (same list, every runtime)
+#      │
+#      ▼  clamp_cli_reasoning_effort(runtime, picked)
+#   claude_code  `--effort`                 ultra -> max
+#   codex        `-c model_reasoning_effort=` ultra -> max
+#   grok_build   `--reasoning-effort`        ultra -> max
+#   cursor_cli   (no flag exists at all)     anything -> "" (dropped)
+#
+# Sourced from each CLI's own --help/docs (a pinned, dated fallback — source
+# priority 3 — because none of the four publishes a machine-readable list of
+# accepted values for this flag; `grok --help` prints `--reasoning-effort
+# <EFFORT>` with no enumeration, and claude ships as a compiled binary).
+# Kept in sync with fleet_tools.py's copy of the same table.
+_NATIVE_CLI_REASONING_EFFORTS_BY_RUNTIME: Dict[str, set] = {
     "claude_code": {"low", "medium", "high", "xhigh", "max"},
     "codex": {"off", "minimal", "low", "medium", "high", "xhigh", "max"},
     "grok_build": {"none", "minimal", "low", "medium", "high", "xhigh", "max"},
     "cursor_cli": set(),
 }
+
+# Ordered weakest -> strongest. The clamp reads this order; membership alone
+# is not enough, because "nearest acceptable level" is an ordinal question.
+# "off"/"none" are the same rung (two CLIs' spelling of the same idea).
+_CLI_REASONING_EFFORT_RANK: Dict[str, int] = {
+    "off": 0, "none": 0, "minimal": 1,
+    "low": 2, "medium": 3, "high": 4, "xhigh": 5, "max": 6, "ultra": 7,
+}
+
+# What the Fleet Model tab and /thinking may SAVE, per runtime. The shared
+# ladder is always accepted; each runtime's own extra native rungs stay
+# accepted too so a value saved before the ladder was unified (a codex agent
+# on "minimal", say) does not start failing validation.
+_VALID_CLI_REASONING_EFFORTS_BY_RUNTIME: Dict[str, set] = {
+    runtime: {"low", "medium", "high", "xhigh", "max", "ultra"} | native
+    for runtime, native in _NATIVE_CLI_REASONING_EFFORTS_BY_RUNTIME.items()
+}
+
+
+def clamp_cli_reasoning_effort(runtime: str, requested: str) -> str:
+    """Nearest level the bound CLI's own flag actually accepts.
+
+    Returns "" when nothing can be sent — an unrecognized value, or a
+    runtime with no reasoning flag at all (cursor_cli). "" means "append no
+    flag", which is the same thing an unset effort has always meant, so the
+    turn is never broken by a level the CLI would reject.
+
+    Ties break UPWARD: a customer who asked for more effort and cannot have
+    exactly that much gets the nearest available, preferring more over less
+    only when the distance is equal."""
+    normalized = str(requested or "").strip().lower()
+    native = _NATIVE_CLI_REASONING_EFFORTS_BY_RUNTIME.get(
+        str(runtime or "").strip().lower(), set()
+    )
+    if not normalized or not native:
+        return ""
+    if normalized in native:
+        return normalized
+    wanted = _CLI_REASONING_EFFORT_RANK.get(normalized)
+    if wanted is None:
+        return ""
+    ranked = [(lvl, _CLI_REASONING_EFFORT_RANK[lvl]) for lvl in native if lvl in _CLI_REASONING_EFFORT_RANK]
+    if not ranked:
+        return ""
+    # min by (distance, -rank): nearest first, higher effort wins a tie.
+    return min(ranked, key=lambda pair: (abs(pair[1] - wanted), -pair[1]))[0]
 
 
 async def _resolve_agent_cloud_provider(
@@ -6438,22 +6504,20 @@ async def _handle_sage_chat_unguarded(
     if _spec is not None and str(getattr(_spec, "mode", "") or "").strip().lower() == "cli_subscription":
         _cli_runtime = str(getattr(_spec, "runtime", "") or "").strip().lower() or "claude_code"
         _cli_gateway_id = str(getattr(_spec, "gateway_binding", "") or "").strip()
-        # Reasoning effort (Phase 1): _spec.reasoning_effort is this
-        # specialist's own model_config.reasoning_effort (what the Fleet
-        # Model tab's cli_subscription picker AND /thinking both write to —
-        # see command_registry.py's _handle_thinking). Validated against
-        # THIS runtime's own vocabulary, not _VALID_REASONING_EFFORTS — the
-        # CLI flags accept a different value set (e.g. "max") than the
-        # platform_credits/byok_api provider-API param does. An invalid or
-        # stale value (e.g. "off" saved while bound to claude_code, which
-        # has no such value) is dropped, not passed through raw — same
-        # fail-safe convention as the platform_credits/byok_api path below.
+        # Reasoning effort: _spec.reasoning_effort is this specialist's own
+        # model_config.reasoning_effort (what the Fleet Model tab's picker
+        # AND /thinking both write to — see command_registry.py's
+        # _handle_thinking). Since 2026-08-20 the customer picks from ONE
+        # shared ladder for every runtime, so a level this CLI's own flag
+        # does not accept is EXPECTED here rather than exceptional — it is
+        # CLAMPED to the nearest level the CLI does accept, not dropped.
+        # Dropping was right when the picker could only ever offer legal
+        # values; now it would silently discard a deliberate choice (an
+        # "ultra" on claude_code) that "max" expresses perfectly well.
+        # A runtime with no reasoning flag at all (cursor_cli) still yields
+        # "" — nothing is appended, and nothing is invented.
         _cli_reasoning_raw = str(getattr(_spec, "reasoning_effort", "") or "").strip().lower()
-        _cli_reasoning_effort = (
-            _cli_reasoning_raw
-            if _cli_reasoning_raw in _VALID_CLI_REASONING_EFFORTS_BY_RUNTIME.get(_cli_runtime, set())
-            else ""
-        )
+        _cli_reasoning_effort = clamp_cli_reasoning_effort(_cli_runtime, _cli_reasoning_raw)
         _cli_reply, _cli_usage, _cli_model = await _dispatch_cli_subscription_gateway_brain(
             workspace_id=normalized_workspace_id,
             tenant_id=effective_tenant_id,

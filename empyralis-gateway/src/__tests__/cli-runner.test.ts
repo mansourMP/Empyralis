@@ -173,6 +173,80 @@ test("grok_build: parses the single --output-format json object into {text, usag
   assert.deepEqual(result.usage, { input_tokens: 12, output_tokens: 4 });
 });
 
+// ── The fixture above is SYNTHETIC and that is exactly how this shipped
+// broken ──────────────────────────────────────────────────────────────────
+// The test above builds its payload with JSON.stringify(), which produces a
+// SINGLE-LINE object. The real `grok -p <prompt> --output-format json`
+// pretty-prints a multi-line document — so the test passed for months while
+// EVERY real grok_build turn on every box failed with "grok exited with
+// code 0 and no parsable result". CLAUDE.md, verbatim: "a fixture that
+// invents its own input cannot notice the real input is shaped
+// differently."
+//
+// The blob below is the REAL stdout, captured live 2026-08-20 from a signed-
+// in grok 0.2.112 answering "Reply with exactly one word: PONG". Do not
+// reformat it, and do not replace it with JSON.stringify — the whitespace IS
+// the thing under test.
+const REAL_GROK_PRETTY_PRINTED_STDOUT = [
+  "{",
+  '  "text": "PONG",',
+  '  "stopReason": "EndTurn",',
+  '  "sessionId": "01a01edf-31d6-7702-aa14-2b719815fad0",',
+  '  "requestId": "bcd962c7-6be9-4051-a527-9cbf47b5b4bc",',
+  '  "thought": "The user wants me to reply with exactly one word: PONG.",',
+  '  "usage": {',
+  '    "input_tokens": 12435,',
+  '    "cache_read_input_tokens": 1024,',
+  '    "output_tokens": 35,',
+  '    "reasoning_tokens": 33,',
+  '    "total_tokens": 13494',
+  "  },",
+  '  "num_turns": 1,',
+  '  "total_cost_usd": 0.025592',
+  "}",
+  "",
+].join("\n");
+
+test("grok_build: the REAL pretty-printed --output-format json document parses (regression: every grok turn used to fail here)", async () => {
+  const fake = makeFakeChild();
+  const promise = runCliSubscription(baseParams({ runtime: "grok_build" }), {
+    spawnImpl: spawnImplReturning(fake),
+  });
+  fake.emitStdout(REAL_GROK_PRETTY_PRINTED_STDOUT);
+  fake.emitClose(0, null);
+  const result = await promise;
+  assert.equal(result.text, "PONG");
+  assert.deepEqual(result.usage, { input_tokens: 12435, output_tokens: 35 });
+});
+
+test("a pretty-printed document is only a FALLBACK — a real JSONL stream still yields every event, not one merged blob", async () => {
+  // codex/claude_code emit one object per line. If the whole-document
+  // fallback ever started running for them it would change which event
+  // "the last one wins" picks, so this pins that it does not.
+  const fake = makeFakeChild();
+  const promise = runCliSubscription(baseParams({ runtime: "codex" }), {
+    spawnImpl: spawnImplReturning(fake),
+  });
+  fake.emitStdout(`${JSON.stringify({ type: "thread.started", thread_id: "t1" })}\n`);
+  fake.emitStdout(`${JSON.stringify({ type: "item.completed", item: { id: "i0", type: "agent_message", text: "first" } })}\n`);
+  fake.emitStdout(`${JSON.stringify({ type: "item.completed", item: { id: "i1", type: "agent_message", text: "second" } })}\n`);
+  fake.emitStdout(`${JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 2 } })}\n`);
+  fake.emitClose(0, null);
+  const result = await promise;
+  assert.equal(result.text, "second", "the LAST streamed event must still win");
+});
+
+test("stdout that is neither JSONL nor a whole JSON document is still an honest crash, never a fabricated empty success", async () => {
+  const fake = makeFakeChild();
+  const promise = runCliSubscription(baseParams({ runtime: "grok_build" }), {
+    spawnImpl: spawnImplReturning(fake),
+    delayImpl: noDelay,
+  });
+  fake.emitStdout("{ this is not json at all\n");
+  fake.emitClose(0, null);
+  await assert.rejects(promise, (err: unknown) => err instanceof CliRunError);
+});
+
 test("grok_build: a {type:'error', message} object with no exit-0 result classifies as crash", async () => {
   const fake = makeFakeChild();
   const promise = runCliSubscription(baseParams({ runtime: "grok_build" }), {

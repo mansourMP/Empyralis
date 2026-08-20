@@ -30,10 +30,8 @@ import {
 import {
   REASONING_EFFORT_OPTIONS,
   REASONING_EFFORT_SUPPORTED_MODES,
-  CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME,
-  normalizeCliRuntime,
+  CLI_REASONING_EFFORT_OPTIONS,
   reasoningEffortLabel,
-  runtimeForProvider,
 } from "./fleet-provider-constants";
 
 type RawTurn = Record<string, any>;
@@ -648,13 +646,12 @@ function ComposerModelControl({
 // on the right, the current level named above it — mirroring Claude's own
 // effort UI, not a list of radio rows.
 //
-// Covers every mode/runtime with a reasoning-effort vocabulary at all:
-// platform_credits' Pro tier and byok_api share REASONING_EFFORT_OPTIONS;
-// cli_subscription has its own runtime-gated vocabulary
-// (CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME). Renders nothing — no dead
-// control — for Flash (no reasoning-effort vocabulary at all), local
-// (Ollama, same), or a cli_subscription runtime with none published
-// (cursor_cli).
+// One shared ladder for every mode that has reasoning effort at all —
+// platform_credits' Pro tier, byok_api and cli_subscription all render
+// REASONING_EFFORT_OPTIONS now (founder's 2026-08-20 rule; the per-runtime
+// cli_subscription vocabularies are gone — see REASONING_EFFORT_LADDER's
+// comment in fleet-provider-constants.ts). Renders nothing for Flash (whose
+// platform tier has no reasoning at all) and for local (Ollama, same).
 function ComposerReasoningControl({
   workspaceId,
   agentId,
@@ -669,7 +666,6 @@ function ComposerReasoningControl({
   const config = agent.model_config || {};
   const mode = resolveDisplayMode(config);
   const tier = platformCreditsTierForModel(config.model);
-  const cliRuntime = normalizeCliRuntime(runtimeForProvider(config.provider || ""));
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
@@ -694,7 +690,7 @@ function ComposerReasoningControl({
   const options = mode === "platform_credits"
     ? (PLATFORM_CREDITS_TIER_SUPPORTS_REASONING[tier] ? REASONING_EFFORT_OPTIONS : [])
     : mode === "cli_subscription"
-      ? CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME[cliRuntime]
+      ? CLI_REASONING_EFFORT_OPTIONS
       : (REASONING_EFFORT_SUPPORTED_MODES.has(mode) ? REASONING_EFFORT_OPTIONS : []);
 
   async function pick(value: string) {

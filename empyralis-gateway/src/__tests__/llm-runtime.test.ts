@@ -471,22 +471,81 @@ test("llm.models.list: codex runtime calls the injected listModels impl and rela
 });
 
 test("llm.models.list: a runtime with no verified live catalog gets an honest supported:false, never a guess", async () => {
-  let calls = 0;
+  let codexCalls = 0;
+  let cliCalls = 0;
   const runtime = new GatewayLLMRuntime({
     codexModelsListImpl: async () => {
-      calls += 1;
+      codexCalls += 1;
       return { authMethod: null, models: [] };
     },
+    cliModelsListImpl: async () => {
+      cliCalls += 1;
+      return { supported: false, models: [], reason: "nope" };
+    },
   });
-  for (const rt of ["claude_code", "grok_build", "cursor_cli", "ollama", ""]) {
+  // claude_code has NOTHING to ask (compiled binary, no models subcommand,
+  // no --list-models flag — verified by static inspection 2026-08-20).
+  // ollama/"" are not cli_subscription runtimes at all.
+  for (const rt of ["claude_code", "ollama", ""]) {
     const result = await runtime.handleCapabilityInvoke(
       makeInvokeFrame({ runtime: rt }, { capability_id: LLM_MODELS_LIST_CAPABILITY }),
     );
     assert.equal(result.supported, false);
     assert.deepEqual(result.models, []);
   }
-  // Never spawned codex for a runtime it can't answer for.
-  assert.equal(calls, 0);
+  // Never spawned ANY CLI for a runtime it can't answer for.
+  assert.equal(codexCalls, 0);
+  assert.equal(cliCalls, 0);
+});
+
+test("llm.models.list: cursor_cli and grok_build are answered by their OWN native `models` subcommand, never by codex's RPC", async () => {
+  let codexCalls = 0;
+  const asked: string[] = [];
+  const runtime = new GatewayLLMRuntime({
+    codexModelsListImpl: async () => {
+      codexCalls += 1;
+      return { authMethod: "chatgpt", models: [] };
+    },
+    cliModelsListImpl: async (rt: string) => {
+      asked.push(rt);
+      return { supported: true, models: [{ id: "grok-4.6", displayName: "grok-4.6", isDefault: true }] };
+    },
+  });
+  for (const rt of ["cursor_cli", "grok_build"]) {
+    const result = await runtime.handleCapabilityInvoke(
+      makeInvokeFrame({ runtime: rt }, { capability_id: LLM_MODELS_LIST_CAPABILITY }),
+    );
+    assert.equal(result.supported, true, `${rt} should report a live catalog`);
+    const models = result.models as Array<Record<string, unknown>>;
+    assert.equal(models.length, 1);
+    assert.equal(models[0].id, "grok-4.6");
+    assert.equal(models[0].is_default, true);
+    // NULL, never [] — these runtimes publish no reasoning-level data, which
+    // is "we cannot tell you", not "the model reports none".
+    assert.equal(models[0].supported_reasoning_efforts, null);
+    // No auth-mode field is published by either CLI, so none is invented.
+    assert.equal(result.auth_method, null);
+  }
+  assert.deepEqual(asked, ["cursor_cli", "grok_build"]);
+  assert.equal(codexCalls, 0, "codex's app-server must never be spawned to answer for another runtime");
+});
+
+test("llm.models.list: a CLI that lists zero models reports supported:false carrying the CLI's OWN sentence, never an empty catalog", async () => {
+  const runtime = new GatewayLLMRuntime({
+    codexModelsListImpl: async () => ({ authMethod: null, models: [] }),
+    cliModelsListImpl: async () => ({
+      supported: false,
+      models: [],
+      // Observed live 2026-08-20 from a real `cursor-agent models` run.
+      reason: "No models available for this account.",
+    }),
+  });
+  const result = await runtime.handleCapabilityInvoke(
+    makeInvokeFrame({ runtime: "cursor_cli" }, { capability_id: LLM_MODELS_LIST_CAPABILITY }),
+  );
+  assert.equal(result.supported, false);
+  assert.deepEqual(result.models, []);
+  assert.equal(result.reason, "No models available for this account.");
 });
 
 test("llm.models.list: a genuine CLI failure (not installed/authenticated/timeout) propagates as a real error, not a swallowed empty list", async () => {

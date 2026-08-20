@@ -105,23 +105,29 @@ _VALID_MODEL_RUNTIMES = {"claude_code", "codex", "grok_build", "cursor_cli", "ol
 # stream_provider_backed_direct_chat, which applies this natively for
 # models it recognizes as reasoning models, degraded to a system-prompt
 # instruction otherwise.
-_VALID_REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
-# cli_subscription's OWN reasoning-effort vocabulary — DIFFERENT from
-# _VALID_REASONING_EFFORTS above and DIFFERENT per runtime, verified live
-# against each CLI's own --help. claude_code's `--effort` has no "off"/
-# "minimal"; codex's `-c model_reasoning_effort=` is its own ReasoningEffort
-# enum (off/minimal/low/medium/high/xhigh/max — see empyralis-gateway/src/
-# llm/codex-app-server.ts's identical comment). Kept in sync with
-# sage_agent_runtime_service.py's _VALID_CLI_REASONING_EFFORTS_BY_RUNTIME.
+_VALID_REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
+# What the Fleet Model tab and /thinking may SAVE for a cli_subscription
+# agent. Since 2026-08-20 the PICKER is one shared ladder for every runtime
+# (founder's rule — see frontend/lib/workspace/fleet/fleet-provider-
+# constants.ts's REASONING_EFFORT_LADDER for his words), so this set is the
+# shared ladder plus each CLI's own extra native rungs, which stay accepted
+# so a value saved before the ladder was unified keeps validating.
+#
+# The per-runtime NATIVE vocabulary still exists — it just moved to where the
+# value is actually sent (sage_agent_runtime_service.clamp_cli_reasoning_
+# effort), so an "ultra" saved on a claude_code agent clamps to "max" on the
+# wire rather than being rejected at save time. Kept in sync with that
+# module's _NATIVE_CLI_REASONING_EFFORTS_BY_RUNTIME.
+_SHARED_REASONING_EFFORT_LADDER = {"low", "medium", "high", "xhigh", "max", "ultra"}
 _VALID_CLI_REASONING_EFFORTS_BY_RUNTIME = {
-    "claude_code": {"low", "medium", "high", "xhigh", "max"},
-    "codex": {"off", "minimal", "low", "medium", "high", "xhigh", "max"},
-    # xAI Grok Build's own canonical vocabulary (docs.x.ai/build's headless-
-    # mode guide, fetched 2026-07-24). Cursor CLI has no reasoning-effort
-    # flag documented at all, so it gets an empty set (no value is ever
-    # valid), same treatment "local" (Ollama) already gets.
-    "grok_build": {"none", "minimal", "low", "medium", "high", "xhigh", "max"},
-    "cursor_cli": set(),
+    "claude_code": _SHARED_REASONING_EFFORT_LADDER,
+    "codex": _SHARED_REASONING_EFFORT_LADDER | {"off", "minimal"},
+    "grok_build": _SHARED_REASONING_EFFORT_LADDER | {"none", "minimal"},
+    # Cursor CLI publishes no reasoning-effort flag, so the value is dropped
+    # on the wire — but the picker still OFFERS the ladder (founder's rule),
+    # so saving one must not fail. This is the one runtime where the control
+    # genuinely does nothing today; that is reported, not papered over.
+    "cursor_cli": _SHARED_REASONING_EFFORT_LADDER,
 }
 # MAN-310 Phase 1: which turn engine drives an agent whose model_config.mode
 # is platform_credits/byok_api. "legacy" (also what an unset/absent value

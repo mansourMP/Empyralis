@@ -5875,9 +5875,178 @@ hiding it was judged unnecessary rather than skipped for time. `cli_
 subscription`'s own reasoning-effort picker (claude_code/codex/grok_build)
 was already correct before this pass and untouched. Cursor CLI's model
 catalog stays freeform (no published model-id vocabulary, unchanged).
+**Both of those last two sentences were overtaken the NEXT DAY** — the
+per-runtime pickers were collapsed into one shared ladder, and Cursor turned
+out to publish a real per-account catalog after all (`cursor-agent models`).
+See "BYO subscription: one effort ladder, live model lists, no auth shim
+(2026-08-20)" above.
 Ollama's own OpenAI-compat `/v1/chat/completions` reasoning support for
 gpt-oss models is plausible but not verified against Ollama's own docs —
 left in the "no verified wire contract" bucket rather than guessed.
+
+## BYO subscription: one effort ladder, live model lists, no auth shim (2026-08-20)
+
+**The founder OVERRODE the reasoning-effort picker's `none` branch the day
+after it shipped. Do not reinstate it.** `planCodexReasoningPicker` used to
+resolve three ways — live levels / static ladder / **render nothing** when a
+model positively reported zero levels. His words:
+
+```
+"I'm not going to change this effort level based on like separated for each
+ one provider... low medium high, extra high max and ultra. If it works, it
+ works otherwise you can still choose it — for example that's how it works
+ inside this Claude Code even if I use it with DeepSeek, it doesn't have any
+ effort level."
+```
+
+So: **ONE ladder — low · medium · high · xhigh · max · ultra — offered for
+every mode, every provider, every model, always.** `REASONING_EFFORT_LADDER`
+(fleet-provider-constants.ts) is the single source; the four per-runtime
+`CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME` lists are DELETED.
+
+This is not the "no dead controls" law being waived, because **the picker
+became uniform while the WIRE stayed native**:
+
+```
+picked        low  medium  high  xhigh  max  ultra      (same list, everywhere)
+      │
+      ▼ clamped at the seam that actually sends it
+claude_code   `--effort`                  ultra → max
+codex         `-c model_reasoning_effort=` ultra → max, off/minimal still legal
+grok_build    `--reasoning-effort`        ultra → max, none/minimal still legal
+cursor_cli    NO FLAG EXISTS              → "" — nothing appended
+byok/platform provider_profiles.reasoning_effort_levels_for_model
+              → native wire param, else a strong system instruction
+```
+
+`sage_agent_runtime_service.clamp_cli_reasoning_effort` is that seam; it
+**clamps, it does not drop**. Dropping was correct while the picker could
+only offer legal values — now an out-of-vocabulary level is the EXPECTED
+case, and dropping would silently discard a deliberate choice ("ultra" on
+claude_code) that "max" expresses perfectly well. Save-time validation
+(`fleet_tools`) accepts the shared ladder for every runtime PLUS each CLI's
+own legacy rungs, so a value saved before unification keeps validating and a
+level the picker offers can never 400.
+
+**`cursor_cli` is the ONE place the control genuinely does nothing** —
+cursor-agent publishes no reasoning-effort flag at all. That is stated in the
+picker's own hint and asserted in a test, not papered over by inventing a
+control Cursor does not provide.
+
+The live catalog changed ROLE, it was not discarded: it now names the model's
+own default ("Model default (medium)"), relays the model's own prose per
+level, and **appends any level the model reports that the ladder does not
+carry** — codex types `ReasoningEffort` as an OPEN STRING for exactly that
+reason, and "ultra" reached the ladder that way in the first place.
+
+### Model lists are live for THREE of four runtimes, each asked its own way
+
+Founder's correction on how to do this, and it governs auth as much as
+models: *"We are going to make it work by how THEY provide the specific
+thing, not trying to make another thing for those providers. I don't want to
+build something like Codex does for Cursor or xAI or Anthropic. I just want
+to serve however they provide to me."* No shim, no adapter, no unified
+protocol.
+
+```
+codex        `codex app-server` JSON-RPC model/list   structured, per-account,
+                                                      carries reasoning levels
+cursor_cli   `cursor-agent models`                    "List available models
+                                                       for this account"
+grok_build   `grok models`                            "List available models"
+claude_code  NOTHING TO ASK — a compiled Mach-O binary with no models
+             subcommand and no --list-models flag (static string inspection,
+             2026-08-20). Reported unsupported; a list transcribed from docs
+             would be exactly what CLAUDE.md already forbids.
+```
+
+Both text-printing CLIs print HUMAN TEXT (neither `models --help` offers a
+JSON flag), so `empyralis-gateway/src/llm/cli-model-list.ts` parses their own
+output and **fails to "unsupported-with-a-reason", never to an empty
+catalog** — a zero-model answer comes back carrying the CLI's own sentence
+("No models available for this account.") because an empty dropdown is a dead
+control and a relayed sentence is a fact. `useCodexModelCatalog` no longer
+short-circuits on `runtime !== "codex"`; the BOX decides what it can
+enumerate.
+
+**Verified live 2026-08-20, real binaries, real accounts:** `grok models` →
+`grok-4.6`, marked default, parsed correctly. `cursor-agent models` → "No
+models available for this account." relayed verbatim (that account is not
+signed in for headless use — Cursor's POPULATED output shape is therefore
+genuinely UNVERIFIED, and the zero-model path is what protects a customer
+from that gap).
+
+### There is NO token exchange for BYO subscription — for any of the four
+
+The founder remembered one ("in Codex we had it"). Traced: there is not, and
+there should not be. The thing he is remembering is a DIFFERENT mode.
+
+```
+cli_subscription (BYO SUBSCRIPTION — all four runtimes)
+  credential lives ON THE BOX, in the CLI's OWN store, written by the CLI's
+  OWN login, and the gateway NEVER reads or transmits it
+  (cli-login-session.ts forwards only a URL or a "paste code" prompt — an
+  allowlist a line must match, not a promise in a comment)
+    codex        `codex login` device auth / --with-api-key / --with-access-token
+    claude_code  `claude auth login --claudeai` (or --console)  → Keychain /
+                 ~/.claude/.credentials.json
+    grok_build   `grok login --device-auth`                     → ~/.grok/auth.json
+    cursor_cli   `agent login` (NO_OPEN_BROWSER=1 prints the URL)
+  → a turn is just: spawn the CLI. It resolves its own auth. Nothing minted.
+
+byok_api (BYO API KEY — a different mode entirely)   ← the token exchange
+  openai_compat_adapter.mint_turn_credential issues an opaque per-turn token,
+  IN THE CLOUD, so the `claude` CLI the SDK engine spawns gets
+  ANTHROPIC_AUTH_TOKEN=<opaque> instead of the customer's real key, and
+  messages_endpoint swaps it back. Cleared when the turn ends.
+```
+
+`codex app-server` is a WARM DAEMON, not a token exchanger — that is the
+"running somewhere" he half-remembers, and it is a latency optimisation.
+**No runtime is missing an integration here.** Each one's native mechanism is
+already wired; the correct answer for the other three is that they need
+nothing Codex-shaped, and building it would be inventing a shape they never
+asked for.
+
+### Found while proving it: EVERY grok_build turn failed, on every box
+
+`grok -p <prompt> --output-format json` emits ONE **pretty-printed**
+document. `cli-runner.ts`'s `parseJsonLines` is line-oriented — the first
+line is a bare `{`, which `JSON.parse` rejects, and no other line starts with
+`{`. Zero events → `grok exited with code 0 and no parsable result`, thrown
+on a turn the CLI had completed perfectly, with the answer and real usage
+sitting unread in stdout.
+
+```
+BEFORE  grok_build effort=high  ERROR crash  "no parsable result"   100% of turns
+AFTER   grok_build effort=high  {"text":"PONG","usage":{...}}
+```
+
+It survived because its own test built the fixture with `JSON.stringify()`,
+which produces a SINGLE LINE — the "a fixture that invents its own input
+cannot notice the real input is shaped differently" failure, again, and the
+fixture was one call away from the real thing. The regression test now
+carries the REAL captured stdout with its real whitespace; **do not reformat
+it and do not replace it with `JSON.stringify`, the whitespace IS the thing
+under test.** The whole-document parse is a FALLBACK that only fires when
+line-scanning found nothing, so codex/claude_code's genuine JSONL streams are
+untouched (asserted).
+
+**Live end-to-end results, real CLIs, real accounts, through the real
+`runCliSubscription` path:** codex ✓ (PONG, 15,860 in / 6 out, `-c
+model_reasoning_effort=high` accepted); grok_build ✓ after the fix (PONG,
+real usage, `--reasoning-effort high` accepted); cursor_cli → honest
+`not_authenticated` (that account is not signed in headless — not a defect).
+**claude_code was verified BY CODE READING ONLY, deliberately** — this file's
+own standing rule that the founder's personal Claude subscription is never
+driven by an automated agent, not once.
+
+Harness note, so nobody re-diagnoses it: `cli-runner`'s retry delay uses an
+**`unref`'d** timer. Correct inside the gateway (a live WS always holds the
+event loop), but a bare `node` script driving `runCliSubscription` drains the
+loop and exits with `ERR_UNSETTLED_TOP_LEVEL_AWAIT` before the retry fires —
+that is the harness, not a production hang. Hold the loop open with an
+interval when driving it by hand.
 
 ## Verifying against DOCS is still transcription (2026-08-20)
 
@@ -6392,6 +6561,17 @@ product law forbids. Fixed by carrying `null` (unknown) distinctly from
 `[]`, and `planCodexReasoningPicker` (`codex-reasoning-options.ts`, pure +
 tested, same shape as `agent-count-shape.ts`/`channel-doors.ts`) is the
 one place that turns the three states into `live` / `fallback` / `none`.
+
+**SUPERSEDED, 2026-08-20, ONE DAY LATER — the `none` branch above no longer
+exists and must not be reinstated.** The founder overrode it: the effort
+ladder is one shared list offered for every provider and every model, always
+("If it works, it works otherwise you can still choose it"). The `null` vs
+`[]` distinction described above is still carried end to end and is still
+worth keeping — it is exactly why the seam stayed honest — but it now only
+decides how much ANNOTATION the picker can show, never whether the picker
+exists. Full reasoning, the clamp that replaced the restriction, and his
+words verbatim are in "BYO subscription: one effort ladder, live model lists,
+no auth shim (2026-08-20)" above.
 
 **Verified live, first-hand, against this box's own real authenticated
 Codex install** (spawned `codex app-server`, drove the real

@@ -3257,13 +3257,35 @@ class SageAgentRuntimeReasoningEffortResolutionTests(unittest.TestCase):
         mock_dispatch = self._run_cli_subscription_chat(runtime="claude_code", reasoning_effort="xhigh")
         self.assertEqual(mock_dispatch.await_args.kwargs["reasoning_effort"], "xhigh")
 
-    def test_cli_subscription_claude_code_drops_a_codex_only_value(self):
-        """"off" is real for codex's -c model_reasoning_effort= but NOT for
-        the Claude CLI's --effort (verified live against each CLI's own
-        --help — see _VALID_CLI_REASONING_EFFORTS_BY_RUNTIME's docstring). A
-        stale value saved under a different runtime must never reach the
-        wrong CLI's flag."""
+    def test_cli_subscription_claude_code_clamps_a_codex_only_value(self):
+        """INVERTED 2026-08-20, not deleted. This used to assert that "off"
+        (codex's vocabulary, absent from the Claude CLI's --effort) was
+        DROPPED on a claude_code agent. Dropping was right while the picker
+        could only ever offer legal values; since the founder unified the
+        ladder, an out-of-vocabulary level is the EXPECTED case and dropping
+        it would silently discard a deliberate choice. It is clamped to the
+        nearest rung claude's own --effort accepts instead — the wire stays
+        native, only the picker is uniform."""
         mock_dispatch = self._run_cli_subscription_chat(runtime="claude_code", reasoning_effort="off")
+        self.assertEqual(mock_dispatch.await_args.kwargs["reasoning_effort"], "low")
+
+    def test_cli_subscription_ultra_clamps_down_to_each_cli_own_ceiling(self):
+        """"ultra" is on the shared ladder (it came from a real codex
+        model/list response) and NO CLI flag accepts it. It must reach the
+        strongest level each CLI does accept, never the empty string."""
+        for runtime in ("claude_code", "codex", "grok_build"):
+            mock_dispatch = self._run_cli_subscription_chat(runtime=runtime, reasoning_effort="ultra")
+            self.assertEqual(
+                mock_dispatch.await_args.kwargs["reasoning_effort"], "max",
+                f"{runtime} should clamp ultra to its own ceiling",
+            )
+
+    def test_cursor_cli_still_sends_nothing_because_it_has_no_flag(self):
+        """The ONE runtime where the offered control genuinely does nothing:
+        cursor-agent publishes no reasoning-effort flag, so nothing is
+        appended. Asserted explicitly so this stays a known, reported fact
+        rather than something a future reader discovers by surprise."""
+        mock_dispatch = self._run_cli_subscription_chat(runtime="cursor_cli", reasoning_effort="max")
         self.assertEqual(mock_dispatch.await_args.kwargs["reasoning_effort"], "")
 
     def test_cli_subscription_codex_accepts_its_own_off_value(self):

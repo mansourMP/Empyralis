@@ -559,7 +559,13 @@ _REASONING_EFFORT_NESTED_OBJECT_PROVIDERS = frozenset({"openrouter"})
 # Claude-Agent-SDK-only ceiling with no adapter-routed equivalent, clamped
 # down to whatever the model's own highest verified level is, same as
 # every other out-of-range request.
-_REASONING_EFFORT_LADDER = ["low", "medium", "high", "xhigh", "max"]
+# "ultra" joined the customer-facing ladder on 2026-08-20 (founder's rule —
+# one shared ladder, never narrowed per provider; see frontend/lib/workspace/
+# fleet/fleet-provider-constants.ts's REASONING_EFFORT_LADDER for his words).
+# It is listed here so a requested "ultra" CLAMPS DOWN to whatever this model
+# actually tops out at (usually "max") instead of falling out of the ladder
+# and silently losing the native wire param it could have had.
+_REASONING_EFFORT_LADDER = ["low", "medium", "high", "xhigh", "max", "ultra"]
 
 
 def clamp_reasoning_effort(requested: str, allowed_levels: List[str]) -> Optional[str]:
