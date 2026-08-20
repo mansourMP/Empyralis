@@ -892,13 +892,21 @@ def execute_single_direct_tool_call(
         # comment). Gated on the guard's own project_id instead, mirroring
         # the prompt-time grant in _specialist_tool_allowed /
         # _filter_registry_for_specialist.
+        # feat/agent-context-grant: the guard asks the agent's CONTEXT GRANT
+        # (every project it may reach), not the single write target -- an
+        # agent granted several projects and no write target still gets its
+        # read tools. `project_ids` is absent on a guard minted before this
+        # change, so the old `project_id` stays as the fallback rather than
+        # a mid-deploy turn losing its project tools.
+        _guard_project_ids = [str(i or "").strip() for i in (_spec_guard.get("project_ids") or [])]
         _guard_project_id = str(_spec_guard.get("project_id") or "").strip()
+        _guard_project_reach = bool([i for i in _guard_project_ids if i]) or bool(_guard_project_id)
         _guard_project_scoped_connectors = ("project_task", "document", "goal")
         _guard_allowed = (
             tool_name in _guard_core
             or tool_name in _guard_tools
             or (bool(_tool_connector) and _tool_connector in _guard_connectors)
-            or (_tool_connector in _guard_project_scoped_connectors and bool(_guard_project_id))
+            or (_tool_connector in _guard_project_scoped_connectors and _guard_project_reach)
         )
         if not _guard_allowed:
             _acting = str(_spec_guard.get("agent_install_id") or "").strip() or None
