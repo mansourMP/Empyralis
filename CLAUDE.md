@@ -57,6 +57,62 @@ menu of parts to pick from. The founder's words, after saying it many times:
 argue against adopting it — never quietly curate a subset and call it
 adoption.
 
+## An agent belongs to the WORKSPACE. Context is GRANTED, never inherited (2026-08-20)
+
+**Founder's decision, and he called it core: "an agent belongs to the
+workspace not to the project it's correct and I want you to remember that."
+It REVERSES the earlier "agents are shared team infrastructure" line and it
+supersedes every remaining trace of "an agent belongs to its project and
+works only there."**
+
+His reasoning, and it is an analogy to this very tool: *"you are not
+specifically tied into a project inside this cloud application right? But
+what you have is MCP tools and other things that makes you connect to other
+things... In Linear you could see everything, teams projects and whatever,
+you are not specifically tied to a specific thing to make you work. So
+agents — just an agent with its harness, the rest should be MCP."*
+
+```
+AGENT   = harness + MCP tools.   lives in the WORKSPACE, never inside a project
+CONTEXT = GRANTED per agent.     which projects it may reach. default NONE.
+                                 never inherited from where the agent lives
+```
+
+**Why a GRANT and not a LOCATION, which is the whole point:** a location can
+only ever express ONE project, and it drags an entire broken navigation
+behind it — a project needs an Agents tab, pressing it swaps the rail into
+an agent picker, and the project's own Tasks/Documents surface disappears
+(the founder's words: *"it's fundamentally wrong... what we are building is
+not kind of like Telegram surface"*). A grant expresses none, one, or many,
+and changes no navigation at all. Channels exist so people talk to an agent
+from Telegram/WhatsApp — never so the platform becomes a chat surface.
+
+**The case that decides it, in his words:** *"even if I create this agent on
+behalf of other businesses it wouldn't see my task or my context about the
+platform, even though I created this agent for my father's business."* An
+agent built for someone else's business must be able to reach NOTHING of the
+owner's own workspace context. Only a per-agent grant can express that;
+workspace membership cannot.
+
+**STATE AS OF 2026-08-20 — two-thirds shipped, the important third is not.**
+```
+DONE   frontend/lib/workspace/fleet/project-views.ts
+         PROJECT_TAB_VIEWS = ["tasks", "documents"]     Agents gone from projects
+DONE   frontend/lib/workspace/fleet/primary-rail-nav.ts
+         RAIL_ITEMS = Inbox · My work · Projects · Agents · Context
+NOT BUILT  the grant itself. Verified by grep 2026-08-20: no allowed_project /
+         project_grant / agent_project_access anywhere. An agent reaches
+         projects through WORKSPACE MEMBERSHIP today, so an agent made for an
+         outside business CAN read the owner's tasks and documents right now.
+         `_enforce_agent_project_access` (routes_fleet.py) is NOT this — it
+         governs which PEOPLE may reach an agent, not which PROJECTS an agent
+         may reach.
+```
+
+Do not re-nest agents under projects, do not add an Agents tab to a project,
+and do not treat workspace membership as the context boundary. The grant is
+the boundary.
+
 ## Positioning
 
 **The WORKSPACE is the product. The agent layer is the second thing, not the
@@ -183,8 +239,15 @@ after examining Linear's model, where a project carries its own member list and
 lead independent of teams. Empyralis has one workflow, so a team tier would be
 ceremony every customer leaves empty.
 
-**AN AGENT BELONGS TO ITS PROJECT AND WORKS ONLY THERE. That is the design,
-not a gap.** Founder's correction, 2026-08-13, after an agent was dispatched
+**SUPERSEDED 2026-08-20 — an agent belongs to the WORKSPACE, and context is
+granted per agent. See the section of that name near the top of this file.
+The entry below is kept only because its NAVIGATION reasoning is still
+correct (never nest agents under a project, never add an Agents tab to a
+project) and because it records what was believed at the time. Its
+ownership claim is dead — do not act on it.**
+
+~~AN AGENT BELONGS TO ITS PROJECT AND WORKS ONLY THERE. That is the design,
+not a gap.~~ Founder's correction, 2026-08-13, after an agent was dispatched
 to "fix" it: *"Agent should not be able to work in a different project if
 it's not enabled to? And that's the reason why we have projects and inside
 project you are going to create agents and agent is going to work in that
