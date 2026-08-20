@@ -2224,6 +2224,36 @@ def _destructive_action_awareness_guidance() -> str:
     )
 
 
+# MAN-358. Chat left the platform, so a task or document an agent touches is
+# only reachable from the conversation if the agent SAYS the address. The
+# address itself is never invented here: skills_service attaches a `url` to
+# every project_task__*/document__* result via deep_link_service, and that
+# module emits no url at all on a deployment with no declared public origin.
+# So this instruction is self-degrading by construction -- "if the result
+# carries a url" is false on exactly the deployments where a link would be
+# broken, and the model has nothing to pass on.
+#
+# Deliberately NOT conditioned on channel_origin. The rule is true on every
+# surface (a link in the web console is at worst redundant), and a branch here
+# would be one more place a future channel silently misses -- the same
+# "put the rule on the narrow waist, never on each branch" reasoning as
+# _guard_sage_visible_reply. A module-level function for the same reasons as
+# _destructive_action_awareness_guidance above: one definition, directly unit-
+# testable, greppable at both of its call sites, and asserted present in both
+# prompt-assembly branches by test_deep_link_guidance.py.
+def _deep_link_guidance() -> str:
+    return (
+        "\n\n## Linking back to the work\n"
+        "Task and document tool results carry a `url` (and tasks a "
+        "`display_id` like GEN-12). When you tell someone about a task or "
+        "document you created, changed, or are pointing them at, name it by "
+        "its display_id and include its url exactly as given, on its own — "
+        "that link is the only way they can open it from here. Never "
+        "shorten, rewrite, or guess a url, and if a result carries none, "
+        "just say what you did without one."
+    )
+
+
 def _build_prompt_envelope(
     *,
     workspace_id: str,
@@ -6275,6 +6305,10 @@ async def _handle_sage_chat_unguarded(
     # master, already carries this capability.
     _destructive_action_awareness_rule = _destructive_action_awareness_guidance()
 
+    # MAN-358 -- see _deep_link_guidance's own comment. Unconditional and
+    # applied in BOTH branches below, like the rule above it.
+    _deep_link_rule = _deep_link_guidance()
+
     # ── Phase U2: audience behavioral instructions ──
     _audience_instructions = ""
     if _sender_class != "owner":
@@ -6420,7 +6454,7 @@ async def _handle_sage_chat_unguarded(
         _spec_context_layer_block = (
             f"\n\n## {context_layer_index}" if context_layer_index else ""
         )
-        _specialist_system_prompt = f"{_spec_persona}{_spec_scope_rule}{_spec_autonomy_rule}{_spec_intro_rule}{_spec_honesty_rule}{_spec_capability_manifest_block}{_channel_action_honesty_rule}{_destructive_action_awareness_rule}{_spec_memory_block}{_spec_context_layer_block}{_audience_instructions}{attachment_context}{mcp_tool_inventory}"
+        _specialist_system_prompt = f"{_spec_persona}{_spec_scope_rule}{_spec_autonomy_rule}{_spec_intro_rule}{_spec_honesty_rule}{_spec_capability_manifest_block}{_channel_action_honesty_rule}{_destructive_action_awareness_rule}{_deep_link_rule}{_spec_memory_block}{_spec_context_layer_block}{_audience_instructions}{attachment_context}{mcp_tool_inventory}"
         envelope = _build_prompt_envelope(
             workspace_id=normalized_workspace_id,
             message=normalized_message,
@@ -6436,7 +6470,7 @@ async def _handle_sage_chat_unguarded(
             # this pass. Computing the index and then only handing it to
             # specialists would be the same "built and never wired" defect
             # one level down.
-            system_prompt=f"{instruction_bundle.system_prompt.rstrip()}{_audience_instructions}{sage_surface_guardrails}{_channel_action_honesty_rule}{_destructive_action_awareness_rule}" + (f"\n\n## {context_layer_index}" if context_layer_index else "") + f"{attachment_context}{mcp_tool_inventory}",
+            system_prompt=f"{instruction_bundle.system_prompt.rstrip()}{_audience_instructions}{sage_surface_guardrails}{_channel_action_honesty_rule}{_destructive_action_awareness_rule}{_deep_link_rule}" + (f"\n\n## {context_layer_index}" if context_layer_index else "") + f"{attachment_context}{mcp_tool_inventory}",
         )
 
     # ── BYO-brain Phase 2: on-box local model turn ─────────────────────────

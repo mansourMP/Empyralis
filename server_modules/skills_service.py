@@ -6870,6 +6870,21 @@ def execute_single_direct_tool_call(
                 )
             return _caller_project_id
 
+        def _linked(task: Any) -> Any:
+            """Attach the task's own URL + GEN-12 identifier before it reaches
+            the model. This is the ONLY thing that makes "I created GEN-12 for
+            you" tappable in Telegram/Slack: the agent's reply is written from
+            this tool result, so the address has to be IN the result -- there
+            is no channel-side rewriter, and there must not be one (a
+            per-channel link builder is the "channels is ONE system" rule
+            broken). deep_link_service returns no url at all when the
+            deployment has not declared its public origin, so a link is never
+            invented. See _deep_link_guidance() in sage_agent_runtime_service
+            for the instruction that tells the model to pass it on."""
+            from server_modules import deep_link_service as _deep_links
+
+            return _deep_links.annotate_task(task, workspace_id=workspace_id)
+
         def _task_in_own_project(task: Optional[Dict[str, Any]], task_id: str) -> Dict[str, Any]:
             if task is None:
                 raise RuntimeError(f"Task '{task_id}' not found in your project.")
@@ -6897,7 +6912,7 @@ def execute_single_direct_tool_call(
                 )
             except ValueError as exc:
                 raise RuntimeError(str(exc)) from exc
-            return json.dumps({"ok": True, "task": task}, ensure_ascii=False)
+            return json.dumps({"ok": True, "task": _linked(task)}, ensure_ascii=False)
 
         if action_id == "list":
             status = str(argument_payload.get("status") or "").strip() or None
@@ -6917,7 +6932,7 @@ def execute_single_direct_tool_call(
                         sort=argument_payload.get("sort"),
                     )
                 ) or [])
-            return json.dumps({"ok": True, "tasks": tasks_rows}, ensure_ascii=False)
+            return json.dumps({"ok": True, "tasks": [_linked(t) for t in tasks_rows]}, ensure_ascii=False)
 
         if action_id == "get":
             task_id = str(argument_payload.get("task_id") or "").strip()
@@ -6937,7 +6952,10 @@ def execute_single_direct_tool_call(
                     tenant_id=_caller_tenant_id, workspace_id=workspace_id, parent_task_id=task_id,
                 )
             )
-            return json.dumps({"ok": True, "task": task, "subtasks": subtasks}, ensure_ascii=False)
+            return json.dumps(
+                {"ok": True, "task": _linked(task), "subtasks": [_linked(s) for s in (subtasks or [])]},
+                ensure_ascii=False,
+            )
 
         if action_id == "set_parent":
             task_id = str(argument_payload.get("task_id") or "").strip()
@@ -6972,7 +6990,7 @@ def execute_single_direct_tool_call(
                 )
             except ValueError as exc:
                 raise RuntimeError(str(exc)) from exc
-            return json.dumps({"ok": True, "task": task}, ensure_ascii=False)
+            return json.dumps({"ok": True, "task": _linked(task)}, ensure_ascii=False)
 
         if action_id in ("list_labels", "add_label", "remove_label"):
             from server_modules import workspace_labels_service as _labels
@@ -7052,7 +7070,7 @@ def execute_single_direct_tool_call(
                 )
             except ValueError as exc:
                 raise RuntimeError(str(exc)) from exc
-            return json.dumps({"ok": True, "task": task}, ensure_ascii=False)
+            return json.dumps({"ok": True, "task": _linked(task)}, ensure_ascii=False)
 
         if action_id == "comment":
             task_id = str(argument_payload.get("task_id") or "").strip()
@@ -7078,7 +7096,7 @@ def execute_single_direct_tool_call(
                 )
             except ValueError as exc:
                 raise RuntimeError(str(exc)) from exc
-            return json.dumps({"ok": True, "task": task}, ensure_ascii=False)
+            return json.dumps({"ok": True, "task": _linked(task)}, ensure_ascii=False)
 
         if action_id == "assign":
             task_id = str(argument_payload.get("task_id") or "").strip()
@@ -7124,6 +7142,8 @@ def execute_single_direct_tool_call(
                 )
             except ValueError as exc:
                 raise RuntimeError(str(exc)) from exc
+            if isinstance(result, dict) and isinstance(result.get("task"), dict):
+                result = {**result, "task": _linked(result["task"])}
             return json.dumps({"ok": True, **result}, ensure_ascii=False)
 
         raise RuntimeError(f"Unsupported project_task direct tool '{action_id}'.")
@@ -7182,8 +7202,17 @@ def execute_single_direct_tool_call(
                 "reach for this turn."
             )
 
+        def _document_link(document: Any) -> Any:
+            """The document's own URL, attached before the model sees it --
+            same reasoning as the task side's _linked() above: an agent
+            telling someone in Telegram that it wrote a document can only
+            hand over the address if the address is in the tool result."""
+            from server_modules import deep_link_service as _deep_links
+
+            return _deep_links.annotate_document(document, workspace_id=workspace_id)
+
         def _document_summary(document: Dict[str, Any]) -> Dict[str, Any]:
-            return {
+            summary = {
                 "id": document.get("id"),
                 "title": document.get("title"),
                 "path": document.get("path"),
@@ -7196,6 +7225,7 @@ def execute_single_direct_tool_call(
                 "updated_at": document.get("updated_at"),
                 "updated_by": document.get("updated_by"),
             }
+            return _document_link(summary)
 
         if action_id == "list":
             docs = callbacks.run_async_tool_call(
@@ -7255,7 +7285,7 @@ def execute_single_direct_tool_call(
                         "Read it by id instead -- document__list returns one per document."
                     )
                 document = _hits[0]
-            return json.dumps({"ok": True, "document": document}, ensure_ascii=False)
+            return json.dumps({"ok": True, "document": _document_link(document)}, ensure_ascii=False)
 
         if action_id == "edit":
             path = str(argument_payload.get("path") or "").strip()

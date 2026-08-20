@@ -21,6 +21,7 @@ import {
   readDeliveryFromSignupPayload,
   rememberVerificationDelivery,
 } from '@/lib/auth/verification-delivery';
+import { safeNextPath } from '@/lib/auth/login-next';
 import { AppButton, AppInput } from '@/lib/ui/primitives';
 
 function authErrorCopy(error: string): string {
@@ -83,22 +84,14 @@ function AuthErrorNotice({ title, message }: { title: string; message: string })
   );
 }
 
-// Mirrors /login's safeNextPath (frontend/app/login/page.tsx) — only ever
-// same-origin, path-relative redirects, never an absolute/protocol-relative
-// URL. Needed so the "Create an account" button on the workspace-invite
-// accept page (frontend/app/join/[token]/page.tsx) can carry a visitor who
-// has no account yet all the way back to /join/{token} once signup
-// finishes, instead of dropping them on their own new, unrelated workspace
-// (MAN-114 — without this, a brand-new teammate's invite never actually
-// gets accepted after they sign up; they'd have to notice and click the
-// invite link a second time).
-function safeNextPath(rawNext: string): string {
-  const trimmed = rawNext.trim();
-  if (!trimmed || !trimmed.startsWith('/') || trimmed.startsWith('//') || trimmed.includes('\\')) {
-    return '/';
-  }
-  return trimmed;
-}
+// safeNextPath is shared (lib/auth/login-next.ts) rather than re-declared
+// here — it used to be a byte-identical private copy in this file, in
+// /login and in /verify-email, each with a comment saying it mirrored the
+// others. Signup needs it so the "Create an account" button on the
+// workspace-invite accept page (frontend/app/join/[token]/page.tsx) can
+// carry a visitor with no account all the way back to /join/{token} once
+// signup finishes, instead of dropping them on their own new, unrelated
+// workspace (MAN-114).
 
 export default function SignupPage() {
   const [name, setName] = useState('');
