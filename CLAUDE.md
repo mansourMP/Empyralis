@@ -3266,6 +3266,92 @@ don't go through `WorkspaceTransportAdapter` at all) with a refresh-and-retry-
 once on 401 — the other ~33 raw `fetch()` call sites in `fleet-data.ts` and
 elsewhere do NOT have this yet; same gap, separate cleanup.
 
+**CORRECTION, 2026-08-20 — that "~33 raw fetch() in fleet-data.ts" gap is
+CLOSED and this paragraph was stale.** Measured directly: `fleet-data.ts`
+has 36 `fleetAuthorizedFetch(` calls and zero raw `fetch(` call sites today.
+`lib/workspace/authorized-fetch-drift.test.ts`'s own header comment confirms
+the fuller sweep this paragraph called "separate cleanup" actually
+happened — fleet-data.ts's ~33 plus 96 more across 38 other client files,
+all routed through the same `fleetAuthorizedFetch`/`auth-client.refresh()`
+mechanism — and that test now runs in `npm run test:unit`, scanning every
+`.ts`/`.tsx` under `frontend/lib` and `frontend/app` for a raw `fetch(` not
+wrapped or explicitly allowlisted with a reason, so this specific gap cannot
+reopen silently.
+
+**A DIFFERENT, un-covered instance of the identical race survived at a
+layer that drift test cannot see, and it is the one that actually produced
+"every fleet call 401s, refresh 400s, session never recovers" — MAN-355-ish,
+fixed same day as this correction (`fix/session-death-401-storm`).**
+`authorized-fetch-drift.test.ts` only scans `lib/` and `app/` (browser-side
+client code); `frontend/proxy.ts` lives at the frontend root and was never
+in scope. `proxy.ts` makes its OWN inline call to
+`POST /api/v1/auth/refresh` — proactively, server-side, on ordinary GET
+navigations whose access-token cookie is near expiry — completely
+uncoordinated with `auth-client.ts`'s single-flighted `refresh()` this
+entry describes above, because it runs in the Next.js SERVER process, a
+different execution context than the browser JS that single-flight lives
+in. Concurrent qualifying GETs (RSC prefetches, `router.refresh()` polls,
+several near-simultaneous navigations — routine, not contrived) each
+independently raced the backend's single-use refresh-token rotation.
+Reproduced live against a disposable stack with an accelerated
+access-token TTL: a burst of 5 concurrent qualifying GETs produced 1
+winning refresh (200) and 4 losing ones (401 "Refresh token was already
+used by a concurrent request"), and under sustained concurrency the
+resulting call volume tripped the backend's own `limit_refresh_requests`
+rate limiter — captured directly, >60s of relapsing 401→(401/429)→401
+cycles on real endpoints (`/api/v1/auth/account-shell`,
+`/api/workspaces/.../bootstrap`). Fixed the same way MAN-324 fixed the
+browser side: single-flighted, but keyed by the refresh-token cookie VALUE
+rather than a single global lock (`lib/auth/proxy-refresh-single-flight.ts`)
+so concurrent requests for the SAME session collapse into one upstream
+call while different sessions on the same Next.js process stay
+independent. Verified red-before-green: the same 5-way burst that produced
+1×200+4×401 before the fix produces exactly 1×200 after it, across
+repeated bursts, with zero 401s and zero 429s. This coordinates every
+request landing on ONE Next.js server process — production today is a
+single VPS, so this closes the race that actually occurs; it does not
+coordinate across a future horizontally-scaled deployment, which would
+need a cross-process lock (Redis, or similar) if that topology ever ships.
+**BLAST RADIUS — this races on DEV/LOCAL stacks and is DEAD on
+empyralis.ai today. Measured, not reasoned.** The fixing pass reported
+"production is affected" on the grounds that `proxy.ts` ships
+unconditionally with no `NODE_ENV` gate. That much is true and the race
+is real, but it stops one line earlier than that reasoning goes:
+
+```
+proxy()  ... if (!csrfToken || !upstreamBaseUrl) return nextWithCsp();
+                                └── controlPlaneBaseUrl() decides this
+
+controlPlaneBaseUrl(env)
+  isCloudEnvironment  = EMPYRALIS_DEPLOY_ENV|NODE_ENV in {production,prod,staging}
+  if cloud AND (protocol !== 'https:' OR host is loopback) ─▶ return ''
+
+empyralis.ai TODAY (read off the box, 2026-08-20):
+  NODE_ENV=production · EMPYRALIS_DEPLOY_ENV=production
+  frontend/.env.local  EMPYRALIS_API_URL=http://127.0.0.1:8001   ← http, loopback
+  ─▶ controlPlaneBaseUrl() == ""  ─▶ the refresh block NEVER RUNS
+```
+
+Confirmed by running `proxy.ts`'s OWN `controlPlaneBaseUrl` source against
+production's real env values: returns `""`. A local/dev stack is not a
+cloud environment, so the same call returns `http://127.0.0.1:8001` and
+the path IS live — which is exactly where the storm was observed (the
+original report says "reproduced in a real browser against a **disposable
+local stack**"). So the practical impact today is on AGENT TEST SESSIONS,
+not on customers, and it has been quietly poisoning them.
+
+**The second finding is the one worth acting on: proxy.ts's entire
+proactive server-side refresh is DEAD CODE on production** — the
+"built, tested, and never wired" shape, except it is wired and
+config-disabled. Production relies solely on the browser-side refresh
+path. Whether that is intended (the single-VPS deploy fronts both from
+one nginx, so a loopback backend URL is the natural configuration) or an
+accident of `isCloudEnvironment`'s https rule meeting a loopback URL is
+an open question — and note the direction of the trap: pointing
+`EMPYRALIS_API_URL` at an https hostname to "fix" the dead feature turns
+this race ON in production the same day. Merge order matters; the
+single-flight fix must be in place first, and it is.
+
 **Testing RLS locally means a non-superuser role, and `REASSIGN OWNED BY`
 run once affects every database in the cluster, not just the one you're
 connected to.** Discovered 2026-08-13 during the cross-tenant-authz security
