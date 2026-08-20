@@ -147,9 +147,21 @@ failure-beacon plumbing.
    nginx -t && systemctl reload nginx
    ```
 7. **Restart the backend.** Today this is `pm2 restart empyralis` (root-owned pm2 process — that's how it currently runs, not yet migrated to systemd). Migrating to `deploy/empyralis-backend.service` (runs as the `empyralis` user instead of root, adds `--proxy-headers`) is recommended but is a real behavior change to a live process — do it as its own deliberate step, not blended into a routine deploy:
+   **NEVER pass `--update-env` from a bare shell.** pm2 replaces the process
+   environment with the invoking shell's, and the backend's real configuration
+   lives ONLY in pm2's saved env — `/opt/empyralis-app/.env` is NOT loaded in
+   production (`runtime_config._should_load_dotenv()` is false for
+   `EMPYRALIS_DEPLOY_ENV=self-hosted`, deliberately, per MAN-202). A bare
+   `--update-env` therefore silently strips DATABASE_URL and every other
+   runtime secret. `/root/pm2-env.sh` (root, 0600) is the authoritative
+   snapshot; source it whenever env must change.
+
    ```bash
-   # routine deploy, current mechanism:
+   # routine deploy, current mechanism (no env change):
    pm2 restart empyralis
+   # ONLY when environment variables must change:
+   set -a; source /root/pm2-env.sh; set +a
+   pm2 restart empyralis --update-env && pm2 save
    # OR, the one-time hardening migration:
    pm2 delete empyralis
    cp deploy/empyralis-backend.service /etc/systemd/system/
