@@ -6325,6 +6325,94 @@ immediately below (whether the web UI is a workspace or a setup surface)
 specific and explicit founder instruction, not a general judgment about
 the rest of the surface.
 
+## Plan limits: bytes and seats are capped, ROWS never are (2026-08-21)
+
+**Nothing counted stored bytes. Anywhere.** File TYPE was gated server-side
+(`upload_content_policy`) and one file was capped at 32MB, but there was no
+total-storage accounting in the product — so the cap that was wanted could
+not be written until the count existed.
+
+```
+THE ONLY MULTIPART UPLOAD ROUTE IN THE BACKEND
+  POST /api/sage-chat/attachments   registered TWICE; sage_context_files_api
+                                    wins on registration order
+  workspace-scoped. NO project_id anywhere in the request.
+        │
+        ▼
+  assert_allowed_upload        WHAT kind of file      (unchanged)
+  assert_within_storage_cap    is there ROOM for it   (new, same module)
+        │                        ↑ pure. takes the usage as an argument.
+        ▼
+  reserve_storage_for_upload   ONE transaction: advisory lock → SUM → decide
+   workspace_storage_service   → INSERT. A refusal rolls back, so neither the
+                                 ledger row nor the file exists.
+```
+
+**Counted: files on disk. NOT counted: project document BODIES** — markdown
+TEXT in a Postgres column. Counting them would make writing a document spend
+storage allowance, i.e. charge for the thing being sold. Agent knowledge
+files and inbound channel media are real disk and are deliberately NOT
+enrolled (one has no decrementing delete path; the other would drop a
+customer's inbound message rather than refuse a customer's action). The
+`surface` column carries which is which per row, so the answer is readable
+from the data and not only from a comment.
+
+**The cap is PER PROJECT and every byte today lands in the workspace-level
+bucket, because no upload surface carries a project.** `project_id` is
+`TEXT NOT NULL DEFAULT ''` and NOT a foreign key — `''` is a real bucket, and
+a `REFERENCES projects(id)` would forbid the only row the product writes.
+Both bucket kinds are capped by the same number, so the unattributed bucket
+is never a way around the cap. **No optional `project_id` parameter was added
+to that route to make this look finished** — the upload is Sage's own per-user
+Ask AI console, nothing in the frontend could send it, and a parameter no
+caller sends is this codebase's own most-documented defect. When a
+project-scoped file surface ships it passes its own `project_id` and the
+bucket is real with no change to the service.
+
+**ROW COUNTS ARE NEVER CAPPED, and that is positioning, not an oversight.**
+Bytes and seats have real marginal cost; a project row does not, and the
+founder has said four times that context is the product and never the
+paywall. `billing_credit_config` holds both dials (`PROJECT_STORAGE_CAP_BYTES`
+1 GiB, `WORKSPACE_MEMBER_LIMIT` 10) with `EMPYRALIS_*` overrides, read through
+functions so no call site keeps a copy.
+
+**The seat cap is on `_finalize_workspace_invite_acceptance`, the one seam
+every accept route crosses, and BEFORE `upsert_workspace_membership`** — a
+refusal grants nothing and leaves the invite pending and re-usable. Invite
+CREATION also checks, so no mail goes out for a full workspace, but that
+check can go stale between minting and accepting and is explicitly not the
+guard. **409, not 403**: the caller is not forbidden, the destination is
+full. Someone already inside is never refused for a seat they already hold.
+
+**Both caps fail OPEN — on an unreadable control plane and on an unset
+dial.** They bound cost; they must not become a second availability
+dependency in front of a working feature, and a zero-valued dial meaning "no
+room at all" would take uploads away from every workspace at once. An
+uncounted upload is LOGGED and reported (`recorded: False`), never hidden.
+
+Verified against real Postgres as a `NOSUPERUSER NOBYPASSRLS` role owning the
+table (superusers bypass FORCE RLS, so the app's own local role proves
+nothing): under-cap admitted, over-cap refused having written nothing,
+cross-tenant read returned 0 rows, and **10 simultaneous 100-byte uploads
+into 100 free bytes admitted exactly ONE**, landing on exactly the cap. That
+last one is what the per-bucket `pg_advisory_xact_lock` is for; without it a
+check-then-act read is the classic race on the one number the cap depends on.
+
+**The credit purchase floor is $10, not $1** — Polar charges a FIXED 50c plus
+5% per transaction, so a $1 top-up loses 55% of itself to fees; at $10 it is
+10%. Max stays $500. The frontend's `$5` top-up preset became a control the
+server could only ever refuse, so `TOP_UP_PRESETS_USD` is now `[10, 25, 50]`,
+with a drift test reading the presets and the server floor from different
+files.
+
+**Still open, flagged not built:** nothing in the product SHOWS a workspace
+its storage usage — `workspace_storage_usage()` returns the per-project
+breakdown plus the roll-up and has no route or screen, so today a customer
+meets the cap only at the moment of refusal. And nothing deletes a stored
+attachment, so `forget_stored_object` exists (a reservation without a release
+is how a counter becomes monotonic) with one caller: the rollback when the
+file write fails after the ledger row committed.
+
 ## OPEN FOUNDER DECISIONS — unresolved, do not guess (2026-08-20)
 
 These are questions the founder has raised MORE THAN ONCE and has not yet
