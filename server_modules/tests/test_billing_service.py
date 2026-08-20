@@ -3,10 +3,23 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
+from server_modules import billing_credit_config
 from server_modules import billing_service
 from server_modules import control_plane_repository
+
+# Real constants, not hardcoded magic numbers — several assertions below
+# were found failing on an unmodified `main` (before any Polar work) because
+# HOSTED_SAGE_AI_CREDITS_PER_USD and NEW_ACCOUNT_SIGNUP_CREDIT_USD had
+# changed since this file was last updated (one nearby comment already
+# documented this exact drift once, for one assertion — the rest were
+# simply never caught, since nothing gates on this suite; see CLAUDE.md,
+# "Nothing gates on the Python suite"). Deriving expected values from the
+# live constants here means the next constant change can't silently break
+# this file the same way again.
+_CREDITS_PER_USD = billing_service.HOSTED_SAGE_AI_CREDITS_PER_USD
+_SIGNUP_FLOOR_USD = billing_credit_config.NEW_ACCOUNT_SIGNUP_CREDIT_USD
 
 
 class BillingServiceTests(unittest.TestCase):
@@ -48,9 +61,15 @@ class BillingServiceTests(unittest.TestCase):
         self.assertEqual(summary["usage"]["specialists_in_use"], 0)
         self.assertEqual(summary["hosted_sage_ai"]["policy"], "enabled_with_cap")
         self.assertEqual(summary["hosted_sage_ai"]["monthly_cap_usd"], 5.0)
-        self.assertEqual(summary["hosted_sage_ai"]["monthly_credit_cap"], 10000)
+        self.assertEqual(summary["hosted_sage_ai"]["monthly_credit_cap"], int(round(5.0 * _CREDITS_PER_USD)))
         self.assertTrue(summary["hosted_sage_ai"]["allowed"])
         self.assertEqual(summary["hosted_sage_ai"]["reason"], None)
+        # Outcome-honesty fields (2026-08-20): the entitlement grant every
+        # new workspace starts with is not a real payment, so the DISPLAY
+        # label must read "Free" even though the entitlement tier is "pro".
+        self.assertFalse(summary["subscription"]["is_paid"])
+        self.assertEqual(summary["subscription"]["display_plan_id"], "free")
+        self.assertEqual(summary["subscription"]["display_label"], "Free")
 
     def test_new_google_workspace_defaults_to_capped_hosted_credits(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -78,7 +97,7 @@ class BillingServiceTests(unittest.TestCase):
         self.assertEqual(summary["subscription"]["effective_plan_id"], "pro")
         self.assertTrue(summary["hosted_sage_ai"]["allowed"])
         self.assertEqual(summary["hosted_sage_ai"]["policy"], "enabled_with_cap")
-        self.assertEqual(summary["hosted_sage_ai"]["monthly_credit_cap"], 10000)
+        self.assertEqual(summary["hosted_sage_ai"]["monthly_credit_cap"], int(round(5.0 * _CREDITS_PER_USD)))
 
     def test_pilot_plan_is_recognized_as_hosted_ai_plan(self):
         self.assertEqual(billing_service.normalize_billing_plan_id("pilot"), "pilot")
@@ -120,8 +139,8 @@ class BillingServiceTests(unittest.TestCase):
         self.assertEqual(summary["hosted_sage_ai"]["policy"], "enabled_with_cap")
         self.assertEqual(summary["hosted_sage_ai"]["monthly_cap_usd"], 8.0)
         self.assertEqual(summary["hosted_sage_ai"]["monthly_remaining_usd"], 8.0)
-        self.assertEqual(summary["hosted_sage_ai"]["monthly_credit_cap"], 160000)
-        self.assertEqual(summary["hosted_sage_ai"]["monthly_credits_remaining"], 160000)
+        self.assertEqual(summary["hosted_sage_ai"]["monthly_credit_cap"], int(round(8.0 * _CREDITS_PER_USD)))
+        self.assertEqual(summary["hosted_sage_ai"]["monthly_credits_remaining"], int(round(8.0 * _CREDITS_PER_USD)))
 
     def test_billing_summary_honors_admin_defaults_billing_plan(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -156,17 +175,17 @@ class BillingServiceTests(unittest.TestCase):
         self.assertTrue(summary["hosted_sage_ai"]["allowed"])
         self.assertEqual(summary["hosted_sage_ai"]["policy"], "enabled_with_cap")
         self.assertEqual(summary["hosted_sage_ai"]["monthly_cap_usd"], 12.0)
-        self.assertEqual(summary["hosted_sage_ai"]["monthly_credit_cap"], 240000)
+        self.assertEqual(summary["hosted_sage_ai"]["monthly_credit_cap"], int(round(12.0 * _CREDITS_PER_USD)))
 
-    def test_checkout_session_uses_configured_plan_price_and_records_pending_state(self):
+    def test_checkout_session_uses_configured_plan_product_and_records_pending_state(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             workspace_id = self._create_workspace(root)
             with patch.dict(
                 os.environ,
                 {
-                    "EMPYRALIS_STRIPE_SECRET_KEY": "sk_test_123",
-                    "EMPYRALIS_STRIPE_PRICE_IDS": '{"pro":"price_pro_123"}',
+                    "EMPYRALIS_POLAR_ACCESS_TOKEN": "polar_oat_test_123",
+                    "EMPYRALIS_POLAR_PRODUCT_IDS": '{"pro":"prod_pro_123"}',
                 },
                 clear=False,
             ), patch.object(
@@ -178,10 +197,10 @@ class BillingServiceTests(unittest.TestCase):
                 "ensure_control_plane_schema",
                 new=AsyncMock(return_value=None),
             ), patch.object(
-                billing_service,
-                "_stripe_api_request",
-                return_value={"id": "cs_test_123", "url": "https://checkout.stripe.test/session/cs_test_123"},
-            ) as stripe_request:
+                billing_service.polar_client,
+                "create_checkout_session",
+                return_value={"id": "checkout_test_123", "url": "https://polar.sh/checkout/checkout_test_123", "customer_id": "cus_test_123"},
+            ) as polar_checkout:
                 payload = billing_service.create_workspace_checkout_session(
                     workspace_id=workspace_id,
                     plan_id="pro",
@@ -190,21 +209,24 @@ class BillingServiceTests(unittest.TestCase):
                 summary = billing_service.workspace_billing_summary_for_workspace_id(workspace_id)
 
         self.assertEqual(payload["plan_id"], "pro")
-        self.assertEqual(payload["checkout_session_id"], "cs_test_123")
+        self.assertEqual(payload["checkout_session_id"], "checkout_test_123")
         self.assertEqual(summary["subscription"]["plan_id"], "pro")
         self.assertEqual(summary["subscription"]["status"], "checkout_pending")
         self.assertEqual(summary["subscription"]["effective_plan_id"], "pro")
-        request_args = stripe_request.call_args[0]
-        self.assertEqual(request_args[0], "/checkout/sessions")
-        self.assertEqual(request_args[1]["line_items[0][price]"], "price_pro_123")
+        self.assertEqual(polar_checkout.call_args.kwargs["product_id"], "prod_pro_123")
+        self.assertEqual(polar_checkout.call_args.kwargs["external_customer_id"], workspace_id)
+        self.assertEqual(polar_checkout.call_args.kwargs["metadata"]["plan_id"], "pro")
 
-    def test_credit_purchase_checkout_uses_payment_mode_with_inline_price(self):
+    def test_credit_purchase_checkout_uses_pay_what_you_want_amount(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             workspace_id = self._create_workspace(root)
             with patch.dict(
                 os.environ,
-                {"EMPYRALIS_STRIPE_SECRET_KEY": "sk_test_123"},
+                {
+                    "EMPYRALIS_POLAR_ACCESS_TOKEN": "polar_oat_test_123",
+                    "EMPYRALIS_POLAR_CREDIT_PRODUCT_ID": "prod_credits_123",
+                },
                 clear=False,
             ), patch.object(
                 control_plane_repository,
@@ -215,25 +237,52 @@ class BillingServiceTests(unittest.TestCase):
                 "ensure_control_plane_schema",
                 new=AsyncMock(return_value=None),
             ), patch.object(
-                billing_service,
-                "_stripe_api_request",
-                return_value={"id": "cs_credit_123", "url": "https://checkout.stripe.test/session/cs_credit_123"},
-            ) as stripe_request:
+                billing_service.polar_client,
+                "create_checkout_session",
+                return_value={"id": "checkout_credit_123", "url": "https://polar.sh/checkout/checkout_credit_123"},
+            ) as polar_checkout:
                 payload = billing_service.create_credit_purchase_checkout_session(
                     workspace_id=workspace_id,
                     amount_usd=10.0,
                     billing_email="owner@example.com",
                 )
-                request_args = stripe_request.call_args[0]
 
         self.assertEqual(payload["purchase_kind"], "credits")
         self.assertEqual(payload["amount_usd"], 10.0)
-        self.assertEqual(payload["credits"], 20000)
-        self.assertEqual(payload["checkout_session_id"], "cs_credit_123")
-        self.assertEqual(request_args[0], "/checkout/sessions")
-        self.assertEqual(request_args[1]["mode"], "payment")
-        self.assertEqual(request_args[1]["line_items[0][price_data][unit_amount]"], 1000)
-        self.assertEqual(request_args[1]["metadata[purchase_kind]"], "credits")
+        self.assertEqual(payload["credits"], int(round(10.0 * _CREDITS_PER_USD)))
+        self.assertEqual(payload["checkout_session_id"], "checkout_credit_123")
+        self.assertEqual(polar_checkout.call_args.kwargs["product_id"], "prod_credits_123")
+        self.assertEqual(polar_checkout.call_args.kwargs["amount_cents"], 1000)
+        self.assertEqual(polar_checkout.call_args.kwargs["metadata"]["purchase_kind"], "credits")
+
+    def test_credit_purchase_checkout_rejects_when_credit_product_not_configured(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            workspace_id = self._create_workspace(root)
+            with patch.dict(
+                os.environ,
+                {"EMPYRALIS_POLAR_ACCESS_TOKEN": "polar_oat_test_123", "EMPYRALIS_POLAR_CREDIT_PRODUCT_ID": ""},
+                clear=False,
+            ), patch.object(
+                control_plane_repository,
+                "LOCAL_IDENTITY_DB_FILE",
+                root / "users.db",
+            ), patch.object(
+                control_plane_repository,
+                "ensure_control_plane_schema",
+                new=AsyncMock(return_value=None),
+            ), patch.object(
+                billing_service.polar_client,
+                "create_checkout_session",
+                new=Mock(),
+            ) as polar_checkout:
+                with self.assertRaises(Exception) as ctx:
+                    billing_service.create_credit_purchase_checkout_session(
+                        workspace_id=workspace_id,
+                        amount_usd=10.0,
+                    )
+        self.assertEqual(getattr(ctx.exception, "status_code", None), 503)
+        polar_checkout.assert_not_called()
 
     def test_credit_purchase_rejects_amount_below_minimum(self):
         with self.assertRaises(Exception) as ctx:
@@ -254,9 +303,15 @@ class BillingServiceTests(unittest.TestCase):
             ):
                 balance = billing_service.credit_balance_for_workspace(workspace_id)
 
-        self.assertEqual(balance["credit_balance_usd"], 0.0)
-        self.assertEqual(balance["credit_balance_credits"], 0)
-        self.assertEqual(balance["transactions"], [])
+        # A fresh workspace starts at the signup credit floor, not zero —
+        # see control_plane_repository._new_workspace_billing_metadata.
+        self.assertEqual(balance["credit_balance_usd"], _SIGNUP_FLOOR_USD)
+        self.assertEqual(balance["credit_balance_credits"], int(round(_SIGNUP_FLOOR_USD * _CREDITS_PER_USD)))
+        if _SIGNUP_FLOOR_USD > 0:
+            self.assertEqual(len(balance["transactions"]), 1)
+            self.assertEqual(balance["transactions"][0]["kind"], "bonus")
+        else:
+            self.assertEqual(balance["transactions"], [])
 
     def test_credit_balance_includes_purchased_credits_in_credit_state(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -281,9 +336,14 @@ class BillingServiceTests(unittest.TestCase):
                 summary = billing_service.workspace_billing_summary_for_workspace_id(workspace_id)
 
         self.assertEqual(summary["hosted_sage_ai"]["credit_balance_usd"], 5.0)
-        self.assertEqual(summary["hosted_sage_ai"]["credit_balance_credits"], 100000)
-        self.assertEqual(summary["hosted_sage_ai"]["total_available_usd"], 5.5)
-        self.assertEqual(summary["hosted_sage_ai"]["total_available_credits"], 110000)
+        self.assertEqual(summary["hosted_sage_ai"]["credit_balance_credits"], int(round(5.0 * _CREDITS_PER_USD)))
+        # The real invariant (total = monthly allowance left + credit
+        # balance), not a hardcoded number tied to today's default monthly
+        # cap — that default drifted once already (0.5 -> 5.0) without this
+        # assertion being updated.
+        expected_total_usd = round(summary["hosted_sage_ai"]["monthly_remaining_usd"] + 5.0, 6)
+        self.assertEqual(summary["hosted_sage_ai"]["total_available_usd"], expected_total_usd)
+        self.assertEqual(summary["hosted_sage_ai"]["total_available_credits"], int(round(expected_total_usd * _CREDITS_PER_USD)))
 
     def test_credit_balance_allows_usage_when_monthly_cap_reached(self):
         with tempfile.TemporaryDirectory() as tempdir:

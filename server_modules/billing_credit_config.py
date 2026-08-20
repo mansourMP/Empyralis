@@ -12,7 +12,7 @@ should hardcode a dollar-to-credit rate or a free-allowance size.
 
 1. Retail exchange rate — ``HOSTED_SAGE_AI_CREDITS_PER_USD``.
    This is the ONE conversion between real dollars and the "credits" a
-   workspace sees: it prices both what a Stripe top-up buys
+   workspace sees: it prices both what a Polar top-up buys
    (``create_credit_purchase_checkout_session``) and what the balance/
    usage UI displays (``credit_balance_for_workspace``,
    ``workspace_billing_summary_for_workspace_id``). $1 buys
@@ -103,7 +103,7 @@ def _env_positive_int(name: str, fallback: int) -> int:
 
 
 # ── 1. Retail exchange rate ─────────────────────────────────────────────
-# $1 buys this many credits (Stripe top-up grant rate AND the display
+# $1 buys this many credits (Polar top-up grant rate AND the display
 # rate for any "credits" figure shown anywhere in the product).
 HOSTED_SAGE_AI_CREDITS_PER_USD = int(
     round(

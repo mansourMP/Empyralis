@@ -1,29 +1,30 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import hashlib
-import hmac
 import json
 import os
 import time
 from typing import Any, Dict, Optional
-from urllib import error as urlerror
-from urllib import parse as urlparse
-from urllib import request as urlrequest
 
 from fastapi import HTTPException
 
 from server_modules import billing_credit_config
 from server_modules import control_plane_repository
+from server_modules import polar_client
 from server_modules import run_state_repository
 from server_modules import rust_runtime_kernel_client
 from server_modules.direct_tool_config_service import run_async_tool_call
 
 
 DEFAULT_BILLING_PLAN_ID = "free"
-STRIPE_PROVIDER = "stripe"
-STRIPE_API_BASE = "https://api.stripe.com/v1"
-STRIPE_WEBHOOK_TOLERANCE_SECONDS = 300
+# Billing runs on Polar, not Stripe — see CLAUDE.md, "Payment processor is
+# Polar, not Stripe" (2026-08-20). Stripe has no standalone merchant account
+# in Uzbekistan, where the founder is based; Polar is a Merchant of Record
+# and the only processor that lets this business receive money at all. The
+# wire-level Polar client lives in polar_client.py — this module owns what
+# a checkout/webhook MEANS for a workspace's plan and credit balance, which
+# is provider-agnostic and needed no changes when Stripe was replaced.
+BILLING_PROVIDER = polar_client.POLAR_PROVIDER
 HOSTED_SAGE_AI_CREDITS_PER_USD = billing_credit_config.HOSTED_SAGE_AI_CREDITS_PER_USD
 DEFAULT_HOSTED_SAGE_AI_MONTHLY_CAP_USD = billing_credit_config.DEFAULT_HOSTED_SAGE_AI_MONTHLY_CAP_USD
 
@@ -282,41 +283,19 @@ def _hosted_sage_ai_credit_state(
     }
 
 
-def _stripe_secret_key() -> str:
-    return str(
-        os.getenv("EMPYRALIS_STRIPE_SECRET_KEY")
-        or os.getenv("STRIPE_SECRET_KEY")
-        or ""
-    ).strip()
-
-
-def _stripe_webhook_secret() -> str:
-    return str(os.getenv("EMPYRALIS_STRIPE_WEBHOOK_SECRET") or "").strip()
-
-
-def _stripe_price_map() -> Dict[str, str]:
+def _polar_plan_product_map() -> Dict[str, str]:
+    # polar_client.polar_product_map() keys off raw env content; normalize
+    # plan ids through the same alias table checkout/webhook code already
+    # uses, so "EMPYRALIS_POLAR_PRODUCT_IDS={\"standard\": \"...\"}" resolves
+    # the same way a subscription webhook's own plan_id would.
     mapping: Dict[str, str] = {}
-    raw_json = str(os.getenv("EMPYRALIS_STRIPE_PRICE_IDS") or "").strip()
-    if raw_json:
-        try:
-            parsed = json.loads(raw_json)
-        except Exception:
-            parsed = {}
-        if isinstance(parsed, dict):
-            for raw_plan, raw_price_id in parsed.items():
-                price_id = str(raw_price_id or "").strip()
-                if price_id:
-                    mapping[normalize_billing_plan_id(raw_plan)] = price_id
-    for plan_id in PLAN_LABELS:
-        env_key = f"EMPYRALIS_STRIPE_PRICE_{plan_id.upper()}"
-        price_id = str(os.getenv(env_key) or "").strip()
-        if price_id:
-            mapping[plan_id] = price_id
+    for raw_plan, product_id in polar_client.polar_product_map().items():
+        mapping[normalize_billing_plan_id(raw_plan)] = product_id
     return mapping
 
 
-def _price_to_plan_map() -> Dict[str, str]:
-    return {price_id: plan_id for plan_id, price_id in _stripe_price_map().items() if price_id}
+def _product_to_plan_map() -> Dict[str, str]:
+    return {product_id: plan_id for plan_id, product_id in _polar_plan_product_map().items() if product_id}
 
 
 def _frontend_origin() -> str:
@@ -366,8 +345,8 @@ def _billing_portal_return_url(workspace_id: str) -> str:
     return f"{_frontend_origin()}/w/{workspace_id}/admin/billing"
 
 
-def _stripe_configured() -> bool:
-    return bool(_stripe_secret_key()) and any(_stripe_price_map().values())
+def _polar_plan_checkout_configured() -> bool:
+    return polar_client.polar_configured() and any(_polar_plan_product_map().values())
 
 
 _MIN_CREDIT_PURCHASE_USD = 1.0
@@ -492,41 +471,6 @@ def debit_workspace_credits_for_turn(
     }
 
 
-def _stripe_api_request(path: str, form_fields: Dict[str, Any]) -> Dict[str, Any]:
-    secret_key = _stripe_secret_key()
-    if not secret_key:
-        raise HTTPException(status_code=503, detail="Stripe billing is not configured.")
-    encoded = urlparse.urlencode(
-        [
-            (str(key), str(value))
-            for key, value in form_fields.items()
-            if value is not None and str(value) != ""
-        ]
-    ).encode("utf-8")
-    request = urlrequest.Request(
-        f"{STRIPE_API_BASE}{path}",
-        data=encoded,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {secret_key}",
-            "Content-Type": "application/x-www-form-urlencoded",
-        },
-    )
-    try:
-        with urlrequest.urlopen(request, timeout=15) as response:
-            payload = response.read().decode("utf-8")
-    except urlerror.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise HTTPException(status_code=502, detail=f"Stripe request failed: {detail or exc.reason}") from exc
-    except urlerror.URLError as exc:
-        raise HTTPException(status_code=502, detail=f"Stripe request failed: {exc.reason}") from exc
-    try:
-        parsed = json.loads(payload)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail="Stripe returned an invalid response.") from exc
-    return dict(parsed) if isinstance(parsed, dict) else {}
-
-
 def _subscription_effective_plan(subscription: Optional[Dict[str, Any]]) -> str:
     payload = _coerce_dict(subscription)
     if not payload:
@@ -548,15 +492,15 @@ def _subscription_terminal(subscription: Optional[Dict[str, Any]]) -> bool:
 
 
 def _plan_catalog_summary(current_plan_id: str) -> list[Dict[str, Any]]:
-    price_map = _stripe_price_map()
+    product_map = _polar_plan_product_map()
     plans: list[Dict[str, Any]] = []
     for plan_id, label in PLAN_LABELS.items():
         plans.append(
             {
                 "plan_id": plan_id,
                 "label": label,
-                "checkout_enabled": plan_id != DEFAULT_BILLING_PLAN_ID and bool(price_map.get(plan_id)),
-                "price_configured": bool(price_map.get(plan_id)),
+                "checkout_enabled": plan_id != DEFAULT_BILLING_PLAN_ID and bool(product_map.get(plan_id)),
+                "price_configured": bool(product_map.get(plan_id)),
                 "current": plan_id == current_plan_id,
             }
         )
@@ -649,7 +593,7 @@ def billing_proxy_from_summary(summary: Optional[Dict[str, Any]]) -> Dict[str, A
     return {
         "workspace_id": str(payload.get("workspace_id") or "").strip() or None,
         "workspace_name": str(payload.get("workspace_name") or "").strip() or None,
-        "provider": str(payload.get("provider") or STRIPE_PROVIDER).strip().lower() or STRIPE_PROVIDER,
+        "provider": str(payload.get("provider") or BILLING_PROVIDER).strip().lower() or BILLING_PROVIDER,
         "effective_plan_id": effective_plan_id,
         "effective_plan_label": billing_plan_label(effective_plan_id),
         "subscription_status": str(subscription.get("status") or "inactive").strip().lower() or "inactive",
@@ -719,14 +663,38 @@ def workspace_billing_summary_for_workspace_id(
         usage=usage,
         workspace=resolved_workspace,
     )
+    # Outcome-honesty fix (2026-08-20): `effective_plan_id` above is an
+    # ENTITLEMENT tier used to gate real features (max_specialists,
+    # hosted_ai_enabled, ...) and every new workspace is seeded with
+    # metadata.billing.plan_id = "personal" (-> normalizes to "pro") so new
+    # accounts get generous default access without anyone paying — see
+    # control_plane_repository._new_workspace_billing_metadata(). That is
+    # correct FOR GATING, but showing the customer a plan literally called
+    # "Pro" with no unpaid indicator is a lie by omission: nothing was ever
+    # charged. `is_paid` answers a different, narrower question — is there a
+    # REAL subscription record from a payment processor, not an internal
+    # entitlement grant — and is what display copy must key off instead of
+    # `effective_plan_id`. `provider_subscription_id` is only ever written by
+    # apply_polar_webhook_event() from a real subscription.* event; the
+    # metadata-seeded entitlement override above never touches it.
+    # A canceled/unpaid/paused subscription still carries its old
+    # provider_subscription_id in storage (cancellation doesn't erase the
+    # id, only the status) — presence alone would keep reading as paid
+    # forever after a cancellation. Must be a REAL subscription id AND
+    # currently in an active-billing status.
+    is_paid_subscription = bool(
+        str(subscription.get("provider_subscription_id") or "").strip()
+    ) and _subscription_active(subscription)
+    display_plan_id = effective_plan_id if is_paid_subscription else DEFAULT_BILLING_PLAN_ID
+    display_plan_label = PLAN_LABELS.get(display_plan_id, display_plan_id.title())
     return {
         "ok": True,
         "workspace_id": str(payload.get("workspace_id") or resolved_workspace.get("workspace_id") or "").strip(),
         "tenant_id": tenant_id,
         "workspace_name": str(payload.get("workspace_name") or resolved_workspace.get("name") or "").strip()
         or str(resolved_workspace.get("workspace_id") or "").strip(),
-        "provider": STRIPE_PROVIDER,
-        "configured": _stripe_configured(),
+        "provider": BILLING_PROVIDER,
+        "configured": _polar_plan_checkout_configured(),
         "account": {
             "billing_email": str(account.get("billing_email") or "").strip().lower() or None,
             "provider_customer_id": str(account.get("provider_customer_id") or "").strip() or None,
@@ -738,6 +706,9 @@ def workspace_billing_summary_for_workspace_id(
             "plan_id": normalize_billing_plan_id(subscription.get("plan_id")),
             "effective_plan_id": effective_plan_id,
             "label": PLAN_LABELS.get(effective_plan_id, effective_plan_id.title()),
+            "is_paid": is_paid_subscription,
+            "display_plan_id": display_plan_id,
+            "display_label": display_plan_label,
             "status": str(subscription.get("status") or "active").strip().lower() or "active",
             "provider_subscription_id": str(subscription.get("provider_subscription_id") or "").strip() or None,
             "provider_price_id": str(subscription.get("provider_price_id") or "").strip() or None,
@@ -756,7 +727,7 @@ def workspace_billing_summary_for_workspace_id(
             "active": _subscription_active(subscription),
             "terminal": _subscription_terminal(subscription),
         },
-        "portal_available": bool(account.get("provider_customer_id")) and _stripe_configured(),
+        "portal_available": bool(account.get("provider_customer_id")) and _polar_plan_checkout_configured(),
         "plans": _plan_catalog_summary(effective_plan_id),
         "limits": limits,
         "usage": usage,
@@ -787,8 +758,8 @@ def create_workspace_checkout_session(
         raise HTTPException(status_code=400, detail="Free does not require checkout.")
     if normalized_plan_id != "pro":
         raise HTTPException(status_code=400, detail="Only the Pro plan is available for checkout.")
-    price_id = _stripe_price_map().get(normalized_plan_id)
-    if not price_id:
+    product_id = _polar_plan_product_map().get(normalized_plan_id)
+    if not product_id:
         raise HTTPException(status_code=400, detail=f"Billing plan '{normalized_plan_id}' is not configured.")
     summary = workspace_billing_summary_for_workspace_id(workspace_id)
     account = _coerce_dict(summary.get("account"))
@@ -800,43 +771,36 @@ def create_workspace_checkout_session(
         target_status=normalized_plan_id,
         idempotency_key=f"{workspace_id}:checkout:{normalized_plan_id}",
     )
-    form_fields: Dict[str, Any] = {
-        "mode": "subscription",
-        "success_url": str(success_url or _billing_success_url(workspace_id)).strip(),
-        "cancel_url": str(cancel_url or _billing_cancel_url(workspace_id)).strip(),
-        "line_items[0][price]": price_id,
-        "line_items[0][quantity]": 1,
-        "client_reference_id": workspace_id,
-        "metadata[workspace_id]": workspace_id,
-        "metadata[plan_id]": normalized_plan_id,
-        "subscription_data[metadata][workspace_id]": workspace_id,
-        "subscription_data[metadata][plan_id]": normalized_plan_id,
-    }
-    customer_id = str(account.get("provider_customer_id") or "").strip()
-    if customer_id:
-        form_fields["customer"] = customer_id
-    elif billing_email:
-        form_fields["customer_email"] = str(billing_email or "").strip().lower()
-    response = _stripe_api_request("/checkout/sessions", form_fields)
+    response = polar_client.create_checkout_session(
+        product_id=product_id,
+        success_url=str(success_url or _billing_success_url(workspace_id)).strip(),
+        # Polar has no cancel_url — return_url is its closest equivalent
+        # (a back button on the checkout page). See polar_client.py's
+        # module docstring for why this isn't a 1:1 Stripe mapping.
+        return_url=str(cancel_url or _billing_cancel_url(workspace_id)).strip() or None,
+        customer_email=str(billing_email or "").strip().lower() or None,
+        external_customer_id=workspace_id,
+        metadata={"workspace_id": workspace_id, "plan_id": normalized_plan_id},
+    )
     checkout_session_id = str(response.get("id") or "").strip()
     checkout_url = str(response.get("url") or "").strip()
     if not checkout_session_id or not checkout_url:
-        raise HTTPException(status_code=502, detail="Stripe checkout session did not include a usable URL.")
+        raise HTTPException(status_code=502, detail="Polar checkout session did not include a usable URL.")
     run_async_tool_call(
         control_plane_repository.upsert_workspace_billing_subscription(
             workspace_id,
             plan_id=normalized_plan_id,
             status="checkout_pending",
-            provider_customer_id=str(response.get("customer") or "").strip() or None,
+            provider_customer_id=str(response.get("customer_id") or "").strip() or None,
             checkout_session_id=checkout_session_id,
             checkout_url=checkout_url,
             currency=str(response.get("currency") or account.get("default_currency") or "usd").strip().lower() or "usd",
-            metadata={"source": "stripe_checkout"},
+            metadata={"source": "polar_checkout"},
         )
     )
     return {
         "ok": True,
-        "provider": STRIPE_PROVIDER,
+        "provider": BILLING_PROVIDER,
         "plan_id": normalized_plan_id,
         "checkout_session_id": checkout_session_id,
         "checkout_url": checkout_url,
@@ -862,16 +826,13 @@ def create_workspace_portal_session(
         target_status=str(subscription.get("status") or "active").strip().lower() or "active",
         idempotency_key=f"{workspace_id}:billing_portal:{customer_id}",
     )
-    response = _stripe_api_request(
-        "/billing_portal/sessions",
-        {
-            "customer": customer_id,
-            "return_url": str(return_url or _billing_portal_return_url(workspace_id)).strip(),
-        },
+    response = polar_client.create_customer_portal_session(
+        customer_id=customer_id,
+        return_url=str(return_url or _billing_portal_return_url(workspace_id)).strip(),
     )
-    portal_url = str(response.get("url") or "").strip()
+    portal_url = str(response.get("customer_portal_url") or "").strip()
     if not portal_url:
-        raise HTTPException(status_code=502, detail="Stripe portal session did not include a usable URL.")
+        raise HTTPException(status_code=502, detail="Polar customer portal session did not include a usable URL.")
     run_async_tool_call(
         control_plane_repository.upsert_workspace_billing_subscription(
             workspace_id,
@@ -896,7 +857,7 @@ def create_workspace_portal_session(
     )
     return {
         "ok": True,
-        "provider": STRIPE_PROVIDER,
+        "provider": BILLING_PROVIDER,
         "portal_url": portal_url,
     }
 
@@ -924,45 +885,42 @@ def create_credit_purchase_checkout_session(
         target_status="credit_purchase",
         idempotency_key=f"{workspace_id}:credit_checkout:{unit_amount_cents}",
     )
-    form_fields: Dict[str, Any] = {
-        "mode": "payment",
-        "success_url": str(success_url or _billing_credit_success_url(workspace_id)).strip(),
-        "cancel_url": str(cancel_url or _billing_credit_cancel_url(workspace_id)).strip(),
-        "client_reference_id": workspace_id,
-        "metadata[workspace_id]": workspace_id,
-        "metadata[purchase_kind]": "credits",
-        "metadata[amount_usd]": str(amount_usd),
-        "line_items[0][price_data][currency]": str(account.get("default_currency") or "usd").strip().lower() or "usd",
-        "line_items[0][price_data][product_data][name]": "Hosted AI Credits",
-        "line_items[0][price_data][product_data][description]": f"{int(round(amount_usd * HOSTED_SAGE_AI_CREDITS_PER_USD))} credits for hosted AI usage",
-        "line_items[0][price_data][unit_amount]": unit_amount_cents,
-        "line_items[0][quantity]": 1,
-    }
+    credit_product_id = polar_client.polar_credit_product_id()
+    if not credit_product_id:
+        raise HTTPException(status_code=503, detail="Polar billing is not configured.")
     customer_id = str(account.get("provider_customer_id") or "").strip()
-    if customer_id:
-        form_fields["customer"] = customer_id
-    elif billing_email:
-        form_fields["customer_email"] = str(billing_email or "").strip().lower()
-    response = _stripe_api_request("/checkout/sessions", form_fields)
+    response = polar_client.create_checkout_session(
+        product_id=credit_product_id,
+        success_url=str(success_url or _billing_credit_success_url(workspace_id)).strip(),
+        return_url=str(cancel_url or _billing_credit_cancel_url(workspace_id)).strip() or None,
+        customer_email=None if customer_id else (str(billing_email or "").strip().lower() or None),
+        external_customer_id=workspace_id,
+        metadata={"workspace_id": workspace_id, "purchase_kind": "credits", "amount_usd": amount_usd},
+        # The credit product must be configured in Polar's dashboard with a
+        # "Pay what you want" price — this `amount` selects the actual
+        # charge within that product's configured min/max, mirroring what
+        # Stripe's inline `price_data` used to do. See polar_client.py.
+        amount_cents=unit_amount_cents,
+    )
     checkout_session_id = str(response.get("id") or "").strip()
     checkout_url = str(response.get("url") or "").strip()
     if not checkout_session_id or not checkout_url:
-        raise HTTPException(status_code=502, detail="Stripe checkout session did not include a usable URL.")
+        raise HTTPException(status_code=502, detail="Polar checkout session did not include a usable URL.")
     run_async_tool_call(
         control_plane_repository.upsert_workspace_billing_subscription(
             workspace_id,
             plan_id=normalize_billing_plan_id(summary.get("subscription", {}).get("plan_id")),
             status="checkout_pending",
-            provider_customer_id=str(response.get("customer") or "").strip() or customer_id or None,
+            provider_customer_id=str(response.get("customer_id") or "").strip() or customer_id or None,
             checkout_session_id=checkout_session_id,
             checkout_url=checkout_url,
             currency=str(response.get("currency") or account.get("default_currency") or "usd").strip().lower() or "usd",
-            metadata={"source": "stripe_credit_checkout", "purchase_kind": "credits", "amount_usd": amount_usd},
+            metadata={"source": "polar_credit_checkout", "purchase_kind": "credits", "amount_usd": amount_usd},
         )
     )
     return {
         "ok": True,
-        "provider": STRIPE_PROVIDER,
+        "provider": BILLING_PROVIDER,
         "purchase_kind": "credits",
         "amount_usd": amount_usd,
         "credits": int(round(amount_usd * HOSTED_SAGE_AI_CREDITS_PER_USD)),
@@ -1399,201 +1357,211 @@ def unified_credit_usage_for_workspace(
     }
 
 
-def _stripe_signature_payload(timestamp: str, body: bytes) -> bytes:
-    return f"{timestamp}.{body.decode('utf-8')}".encode("utf-8")
-
-
-def verify_stripe_webhook_signature(body: bytes, signature_header: str) -> None:
-    secret = _stripe_webhook_secret()
-    if not secret:
-        raise HTTPException(status_code=503, detail="Stripe webhook secret is not configured.")
-    parts: Dict[str, str] = {}
-    for item in str(signature_header or "").split(","):
-        if "=" not in item:
-            continue
-        key, value = item.split("=", 1)
-        parts[key.strip()] = value.strip()
-    timestamp = parts.get("t")
-    signature = parts.get("v1")
-    if not timestamp or not signature:
-        raise HTTPException(status_code=400, detail="Stripe signature is invalid.")
+def _polar_unix_ts(value: Any) -> Optional[int]:
+    """Polar's timestamps are ISO 8601 strings (unlike Stripe's Unix ints);
+    every stored `current_period_start`/`current_period_end`/`canceled_at`/
+    `trial_ends_at` column is an int, so every read off a Polar payload goes
+    through this."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    raw = str(value).strip()
+    if not raw:
+        return None
     try:
-        timestamp_value = int(timestamp)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="Stripe signature timestamp is invalid.") from exc
-    if abs(int(time.time()) - timestamp_value) > STRIPE_WEBHOOK_TOLERANCE_SECONDS:
-        raise HTTPException(status_code=400, detail="Stripe signature timestamp is outside the tolerance window.")
-    expected = hmac.new(
-        secret.encode("utf-8"),
-        _stripe_signature_payload(timestamp, body),
-        hashlib.sha256,
-    ).hexdigest()
-    if not hmac.compare_digest(expected, signature):
-        raise HTTPException(status_code=400, detail="Stripe signature verification failed.")
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        return int(datetime.fromisoformat(raw).timestamp())
+    except Exception:
+        return None
 
 
-def _workspace_id_from_webhook_object(payload: Dict[str, Any]) -> Optional[str]:
+def _workspace_id_from_polar_object(payload: Dict[str, Any]) -> Optional[str]:
+    """Resolution order matches polar_client.py's module docstring:
+    `external_customer_id` is Polar's own blessed "your id for this
+    customer" mechanism (present at top level on a Checkout, nested under
+    `customer.external_id` on an Order/Subscription); `metadata.workspace_id`
+    is a fallback that costs nothing to also check."""
     metadata = _coerce_dict(payload.get("metadata"))
+    customer = _coerce_dict(payload.get("customer"))
+    customer_metadata = _coerce_dict(customer.get("metadata"))
     token = (
-        str(metadata.get("workspace_id") or "").strip()
-        or str(payload.get("client_reference_id") or "").strip()
+        str(payload.get("external_customer_id") or "").strip()
+        or str(metadata.get("workspace_id") or "").strip()
+        or str(customer.get("external_id") or "").strip()
+        or str(customer_metadata.get("workspace_id") or "").strip()
     )
     return token or None
 
 
-def _plan_id_from_subscription_object(payload: Dict[str, Any]) -> str:
+def _plan_id_from_polar_subscription_object(payload: Dict[str, Any]) -> str:
     metadata = _coerce_dict(payload.get("metadata"))
     metadata_plan = str(metadata.get("plan_id") or metadata.get("target_plan") or "").strip()
     if metadata_plan:
         return normalize_billing_plan_id(metadata_plan)
-    price_to_plan = _price_to_plan_map()
-    items = (((payload.get("items") or {}).get("data")) if isinstance(payload.get("items"), dict) else None) or []
-    if isinstance(items, list):
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            price = _coerce_dict(item.get("price"))
-            price_id = str(price.get("id") or "").strip()
-            if price_id and price_id in price_to_plan:
-                return price_to_plan[price_id]
+    product_to_plan = _product_to_plan_map()
+    product_id = str(payload.get("product_id") or "").strip()
+    if product_id and product_id in product_to_plan:
+        return product_to_plan[product_id]
     return DEFAULT_BILLING_PLAN_ID
 
 
-def apply_stripe_webhook_event(event: Dict[str, Any]) -> Dict[str, Any]:
+def apply_polar_webhook_event(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Polar's event envelope is flatter than Stripe's: `data` IS the
+    resource object directly (never nested under `data.object`)."""
     event_type = str(event.get("type") or "").strip()
-    data = _coerce_dict(event.get("data"))
-    obj = _coerce_dict(data.get("object"))
+    obj = _coerce_dict(event.get("data"))
     if not event_type or not obj:
-        raise HTTPException(status_code=400, detail="Stripe webhook payload is invalid.")
+        raise HTTPException(status_code=400, detail="Polar webhook payload is invalid.")
 
-    if event_type == "checkout.session.completed":
-        workspace_id = _workspace_id_from_webhook_object(obj)
+    if event_type == "checkout.updated":
+        # The fast-path equivalent of Stripe's `checkout.session.completed`:
+        # marks a PLAN checkout active as soon as the checkout succeeds,
+        # without waiting for the slower subscription.* event. Deliberately
+        # NOT used to credit a credit top-up — order.paid below is the more
+        # authoritative "money received" signal for that, and doing it here
+        # too would risk a double credit if Polar ever redelivers this event.
+        if str(obj.get("status") or "").strip().lower() != "succeeded":
+            return {"ok": True, "ignored": True, "reason": "checkout_not_succeeded"}
+        workspace_id = _workspace_id_from_polar_object(obj)
         if not workspace_id:
             return {"ok": True, "ignored": True, "reason": "missing_workspace_id"}
-        customer_details = _coerce_dict(obj.get("customer_details"))
         run_async_tool_call(
             control_plane_repository.upsert_workspace_billing_account(
                 workspace_id,
-                billing_email=str(customer_details.get("email") or "").strip().lower() or None,
-                provider_customer_id=str(obj.get("customer") or "").strip() or None,
-                metadata={"source": "stripe_webhook"},
+                billing_email=str(obj.get("customer_email") or "").strip().lower() or None,
+                provider_customer_id=str(obj.get("customer_id") or "").strip() or None,
+                metadata={"source": "polar_webhook"},
             )
         )
-        session_mode = str(obj.get("mode") or "").strip().lower()
         metadata = _coerce_dict(obj.get("metadata"))
         purchase_kind = str(metadata.get("purchase_kind") or "").strip().lower()
-
-        if session_mode == "payment" and purchase_kind == "credits":
-            amount_usd = _coerce_float(metadata.get("amount_usd"))
-            if amount_usd is not None and amount_usd > 0:
-                workspace = run_async_tool_call(
-                    control_plane_repository.get_workspace_by_id(workspace_id)
-                ) or {}
-                ws_metadata = _workspace_billing_metadata(workspace)
-                current_balance = _credit_balance_from_metadata(ws_metadata)
-                new_balance = round(current_balance + amount_usd, 6)
-                transactions = _credit_transactions_from_metadata(ws_metadata)
-                transactions.append(
-                    {
-                        "kind": "purchase",
-                        "amount_usd": amount_usd,
-                        "credits": int(round(amount_usd * HOSTED_SAGE_AI_CREDITS_PER_USD)),
-                        "checkout_session_id": str(obj.get("id") or "").strip() or None,
-                        "provider": STRIPE_PROVIDER,
-                        "created_at": int(time.time()),
-                    }
-                )
-                run_async_tool_call(
-                    control_plane_repository.update_workspace_admin_defaults_metadata(
-                        workspace_id,
-                        metadata={
-                            **_coerce_dict(ws_metadata),
-                            "credit_balance_usd": new_balance,
-                            "credit_transactions": transactions,
-                        },
-                    )
-                )
-            run_async_tool_call(
-                control_plane_repository.upsert_workspace_billing_subscription(
-                    workspace_id,
-                    plan_id=normalize_billing_plan_id(
-                        _coerce_dict(
-                            run_async_tool_call(
-                                control_plane_repository.get_workspace_billing_summary(workspace_id)
-                            ) or {}
-                        ).get("subscription", {}).get("plan_id")
-                    ),
-                    status="checkout_completed",
-                    provider_customer_id=str(obj.get("customer") or "").strip() or None,
-                    checkout_session_id=str(obj.get("id") or "").strip() or None,
-                    metadata={"source": "stripe_webhook", "purchase_kind": "credits", "amount_usd": amount_usd},
-                )
-            )
-            return {
-                "ok": True,
-                "event_type": event_type,
-                "workspace_id": workspace_id,
-                "purchase_kind": "credits",
-                "amount_usd": amount_usd,
-            }
-
-        target_plan = normalize_billing_plan_id(
-            metadata.get("plan_id") or metadata.get("target_plan")
-        )
+        if purchase_kind == "credits":
+            return {"ok": True, "event_type": event_type, "workspace_id": workspace_id, "ignored": True, "reason": "credits_await_order_paid"}
+        target_plan = normalize_billing_plan_id(metadata.get("plan_id") or metadata.get("target_plan"))
         run_async_tool_call(
             control_plane_repository.upsert_workspace_billing_subscription(
                 workspace_id,
                 plan_id=target_plan,
                 status="checkout_completed",
-                provider_customer_id=str(obj.get("customer") or "").strip() or None,
+                provider_customer_id=str(obj.get("customer_id") or "").strip() or None,
                 checkout_session_id=str(obj.get("id") or "").strip() or None,
-                metadata={"source": "stripe_webhook"},
+                metadata={"source": "polar_webhook"},
             )
         )
         return {"ok": True, "event_type": event_type, "workspace_id": workspace_id}
 
-    if event_type.startswith("customer.subscription."):
-        workspace_id = _workspace_id_from_webhook_object(obj)
+    if event_type == "order.paid":
+        # "Sent when an order is paid... fully processed and payment has
+        # been received" (Polar's own docs) — the authoritative signal for
+        # crediting a one-time credit top-up. Fires for a plan subscription's
+        # first invoice too (order.subscription_id set); subscription.*
+        # events below own plan activation, so this branch only acts when
+        # metadata says it's a credit purchase.
+        workspace_id = _workspace_id_from_polar_object(obj)
         if not workspace_id:
             return {"ok": True, "ignored": True, "reason": "missing_workspace_id"}
-        customer_id = str(obj.get("customer") or "").strip() or None
-        billing_email = str(_coerce_dict(obj.get("customer_details")).get("email") or "").strip().lower() or None
+        customer = _coerce_dict(obj.get("customer"))
+        run_async_tool_call(
+            control_plane_repository.upsert_workspace_billing_account(
+                workspace_id,
+                billing_email=str(customer.get("email") or "").strip().lower() or None,
+                provider_customer_id=str(obj.get("customer_id") or "").strip() or None,
+                metadata={"source": "polar_webhook"},
+            )
+        )
+        metadata = _coerce_dict(obj.get("metadata"))
+        purchase_kind = str(metadata.get("purchase_kind") or "").strip().lower()
+        if purchase_kind != "credits":
+            return {"ok": True, "event_type": event_type, "workspace_id": workspace_id, "ignored": True, "reason": "not_a_credit_purchase"}
+        amount_usd = _coerce_float(metadata.get("amount_usd"))
+        if amount_usd is not None and amount_usd > 0:
+            workspace = run_async_tool_call(control_plane_repository.get_workspace_by_id(workspace_id)) or {}
+            ws_metadata = _workspace_billing_metadata(workspace)
+            current_balance = _credit_balance_from_metadata(ws_metadata)
+            new_balance = round(current_balance + amount_usd, 6)
+            transactions = _credit_transactions_from_metadata(ws_metadata)
+            transactions.append(
+                {
+                    "kind": "purchase",
+                    "amount_usd": amount_usd,
+                    "credits": int(round(amount_usd * HOSTED_SAGE_AI_CREDITS_PER_USD)),
+                    "checkout_session_id": str(obj.get("checkout_id") or "").strip() or None,
+                    "provider": BILLING_PROVIDER,
+                    "created_at": int(time.time()),
+                }
+            )
+            run_async_tool_call(
+                control_plane_repository.update_workspace_admin_defaults_metadata(
+                    workspace_id,
+                    metadata={
+                        **_coerce_dict(ws_metadata),
+                        "credit_balance_usd": new_balance,
+                        "credit_transactions": transactions,
+                    },
+                )
+            )
+        run_async_tool_call(
+            control_plane_repository.upsert_workspace_billing_subscription(
+                workspace_id,
+                plan_id=normalize_billing_plan_id(
+                    _coerce_dict(
+                        run_async_tool_call(control_plane_repository.get_workspace_billing_summary(workspace_id)) or {}
+                    ).get("subscription", {}).get("plan_id")
+                ),
+                status="checkout_completed",
+                provider_customer_id=str(obj.get("customer_id") or "").strip() or None,
+                checkout_session_id=str(obj.get("checkout_id") or "").strip() or None,
+                metadata={"source": "polar_webhook", "purchase_kind": "credits", "amount_usd": amount_usd},
+            )
+        )
+        return {
+            "ok": True,
+            "event_type": event_type,
+            "workspace_id": workspace_id,
+            "purchase_kind": "credits",
+            "amount_usd": amount_usd,
+        }
+
+    if event_type.startswith("subscription."):
+        workspace_id = _workspace_id_from_polar_object(obj)
+        if not workspace_id:
+            return {"ok": True, "ignored": True, "reason": "missing_workspace_id"}
+        customer = _coerce_dict(obj.get("customer"))
+        customer_id = str(obj.get("customer_id") or customer.get("id") or "").strip() or None
+        billing_email = str(customer.get("email") or "").strip().lower() or None
         if customer_id or billing_email:
             run_async_tool_call(
                 control_plane_repository.upsert_workspace_billing_account(
                     workspace_id,
                     billing_email=billing_email,
                     provider_customer_id=customer_id,
-                    metadata={"source": "stripe_webhook"},
+                    metadata={"source": "polar_webhook"},
                 )
             )
         status = str(obj.get("status") or "").strip().lower() or "active"
-        items = (((obj.get("items") or {}).get("data")) if isinstance(obj.get("items"), dict) else None) or []
-        first_item = items[0] if isinstance(items, list) and items else {}
-        price = _coerce_dict(_coerce_dict(first_item).get("price"))
         run_async_tool_call(
             control_plane_repository.upsert_workspace_billing_subscription(
                 workspace_id,
-                plan_id=_plan_id_from_subscription_object(obj),
+                plan_id=_plan_id_from_polar_subscription_object(obj),
                 status=status,
                 provider_subscription_id=str(obj.get("id") or "").strip() or None,
-                provider_price_id=str(price.get("id") or "").strip() or None,
-                provider_product_id=str(price.get("product") or "").strip() or None,
+                provider_price_id=None,
+                provider_product_id=str(obj.get("product_id") or "").strip() or None,
                 provider_customer_id=customer_id,
-                currency=str(obj.get("currency") or price.get("currency") or "usd").strip().lower() or "usd",
-                billing_interval=str(price.get("recurring", {}).get("interval") if isinstance(price.get("recurring"), dict) else "" or "").strip().lower() or None,
-                current_period_start=_coerce_int(obj.get("current_period_start")),
-                current_period_end=_coerce_int(obj.get("current_period_end")),
+                currency=str(obj.get("currency") or "usd").strip().lower() or "usd",
+                billing_interval=str(obj.get("recurring_interval") or "").strip().lower() or None,
+                current_period_start=_polar_unix_ts(obj.get("current_period_start")),
+                current_period_end=_polar_unix_ts(obj.get("current_period_end")),
                 cancel_at_period_end=bool(obj.get("cancel_at_period_end")),
-                canceled_at=_coerce_int(obj.get("canceled_at")),
-                trial_ends_at=_coerce_int(obj.get("trial_end")),
-                metadata={"source": "stripe_webhook"},
+                canceled_at=_polar_unix_ts(obj.get("canceled_at")),
+                trial_ends_at=_polar_unix_ts(obj.get("trial_end")),
+                metadata={"source": "polar_webhook"},
             )
         )
         if status in TERMINAL_SUBSCRIPTION_STATUSES:
-            workspace = run_async_tool_call(
-                control_plane_repository.get_workspace_by_id(workspace_id)
-            ) or {}
+            workspace = run_async_tool_call(control_plane_repository.get_workspace_by_id(workspace_id)) or {}
             ws_metadata = _coerce_dict(_coerce_dict(workspace).get("metadata"))
             billing_metadata = _coerce_dict(ws_metadata.get("billing"))
             next_billing = {k: v for k, v in billing_metadata.items() if k not in {"billing_plan", "plan", "plan_id", "plan_tier"}}
@@ -1616,12 +1584,12 @@ def apply_stripe_webhook_event(event: Dict[str, Any]) -> Dict[str, Any]:
     return {"ok": True, "ignored": True, "reason": "unsupported_event_type", "event_type": event_type}
 
 
-def handle_stripe_webhook(body: bytes, signature_header: str) -> Dict[str, Any]:
-    verify_stripe_webhook_signature(body, signature_header)
+def handle_polar_webhook(body: bytes, headers: Dict[str, str]) -> Dict[str, Any]:
+    polar_client.verify_webhook_signature(body, headers)
     try:
         event = json.loads(body.decode("utf-8"))
     except Exception as exc:
-        raise HTTPException(status_code=400, detail="Stripe webhook payload is invalid JSON.") from exc
+        raise HTTPException(status_code=400, detail="Polar webhook payload is invalid JSON.") from exc
     if not isinstance(event, dict):
-        raise HTTPException(status_code=400, detail="Stripe webhook payload is invalid.")
-    return apply_stripe_webhook_event(event)
+        raise HTTPException(status_code=400, detail="Polar webhook payload is invalid.")
+    return apply_polar_webhook_event(event)

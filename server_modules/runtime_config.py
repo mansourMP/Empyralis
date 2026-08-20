@@ -480,10 +480,17 @@ def _assert_auth_secrets_safe_for_environment() -> None:
 
 _assert_frontend_origins_safe_for_environment()
 _assert_auth_secrets_safe_for_environment()
-EMPYRALIS_BILLING_PROVIDER = config_str("EMPYRALIS_BILLING_PROVIDER", "stripe")
-EMPYRALIS_STRIPE_SECRET_KEY = config_str("EMPYRALIS_STRIPE_SECRET_KEY", config_str("STRIPE_SECRET_KEY", ""))
-EMPYRALIS_STRIPE_WEBHOOK_SECRET = config_str("EMPYRALIS_STRIPE_WEBHOOK_SECRET", "")
-EMPYRALIS_STRIPE_PRICE_IDS = config_str("EMPYRALIS_STRIPE_PRICE_IDS", "")
+# EMPYRALIS_BILLING_PROVIDER / EMPYRALIS_STRIPE_SECRET_KEY / _WEBHOOK_SECRET /
+# _PRICE_IDS were removed 2026-08-20 (Polar replaced Stripe as the payment
+# processor — see CLAUDE.md's "Payment processor is Polar, not Stripe").
+# They were ALREADY dead before that: billing_service.py has always read its
+# own env vars directly via os.getenv(), never through this module, so these
+# four constants had zero readers under Stripe either. Rather than leave a
+# stale "stripe" default that goes nowhere, they are deleted outright and
+# preflight._check_removed_stripe_billing_config() refuses to boot if any of
+# their env var NAMES are still set, so a leftover value fails loudly
+# instead of looking configured. Real Polar config lives in
+# polar_client.py under the EMPYRALIS_POLAR_* names (see .env.example).
 EMPYRALIS_BILLING_FRONTEND_ORIGIN = config_str("EMPYRALIS_BILLING_FRONTEND_ORIGIN", "")
 EMPYRALIS_BILLING_SUCCESS_URL = config_str("EMPYRALIS_BILLING_SUCCESS_URL", "")
 EMPYRALIS_BILLING_CANCEL_URL = config_str("EMPYRALIS_BILLING_CANCEL_URL", "")

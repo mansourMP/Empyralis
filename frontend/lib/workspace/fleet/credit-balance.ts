@@ -152,9 +152,10 @@ export type TopUpResult =
   | { ok: false; notConfigured: false; message: string };
 
 /**
- * Starts a credit top-up checkout session. Degrades gracefully when Stripe
- * isn't configured server-side (billing_service._stripe_configured() ==
- * False) instead of surfacing a raw error — the payment rails themselves
+ * Starts a credit top-up checkout session. Degrades gracefully when Polar
+ * isn't configured server-side (polar_client.polar_configured() == False,
+ * or the credit top-up product specifically isn't set) instead of
+ * surfacing a raw error — the payment rails themselves
  * are the platform owner's own secure setup step, same as any other OAuth/
  * API-key secret in this app (see billing_credit_config.py's module docs
  * and this file's Billing page caller).

@@ -26,7 +26,7 @@ def _billing_summary(*, customer_id: str | None = None) -> dict[str, object]:
 
 
 @pytest.mark.asyncio
-async def test_workspace_checkout_rust_denial_blocks_stripe_checkout():
+async def test_workspace_checkout_rust_denial_blocks_polar_checkout():
     denied = RustKernelDecisionError(
         {
             "ok": False,
@@ -38,8 +38,8 @@ async def test_workspace_checkout_rust_denial_blocks_stripe_checkout():
     )
     with patch.object(
         billing_service,
-        "_stripe_price_map",
-        return_value={"pro": "price_1"},
+        "_polar_plan_product_map",
+        return_value={"pro": "product_1"},
     ), patch.object(
         billing_service,
         "workspace_billing_summary_for_workspace_id",
@@ -49,10 +49,10 @@ async def test_workspace_checkout_rust_denial_blocks_stripe_checkout():
         "run_runtime_kernel_enforced",
         side_effect=denied,
     ) as rust_gate, patch.object(
-        billing_service,
-        "_stripe_api_request",
+        billing_service.polar_client,
+        "create_checkout_session",
         new=Mock(),
-    ) as stripe_request:
+    ) as polar_checkout:
         with pytest.raises(HTTPException) as raised:
             billing_service.create_workspace_checkout_session(
                 workspace_id="workspace-1",
@@ -66,15 +66,15 @@ async def test_workspace_checkout_rust_denial_blocks_stripe_checkout():
     assert payload["workspace_id"] == "workspace-1"
     assert payload["tenant_id"] == "tenant-1"
     assert payload["target_status"] == "pro"
-    stripe_request.assert_not_called()
+    polar_checkout.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_workspace_checkout_unexpected_rust_next_action_blocks_stripe_checkout():
+async def test_workspace_checkout_unexpected_rust_next_action_blocks_polar_checkout():
     with patch.object(
         billing_service,
-        "_stripe_price_map",
-        return_value={"pro": "price_1"},
+        "_polar_plan_product_map",
+        return_value={"pro": "product_1"},
     ), patch.object(
         billing_service,
         "workspace_billing_summary_for_workspace_id",
@@ -94,10 +94,10 @@ async def test_workspace_checkout_unexpected_rust_next_action_blocks_stripe_chec
             },
         },
     ), patch.object(
-        billing_service,
-        "_stripe_api_request",
+        billing_service.polar_client,
+        "create_checkout_session",
         new=Mock(),
-    ) as stripe_request:
+    ) as polar_checkout:
         with pytest.raises(HTTPException) as raised:
             billing_service.create_workspace_checkout_session(
                 workspace_id="workspace-1",
@@ -106,11 +106,11 @@ async def test_workspace_checkout_unexpected_rust_next_action_blocks_stripe_chec
 
     assert raised.value.status_code == 423
     assert "unexpected next_action" in str(raised.value.detail["reason"])
-    stripe_request.assert_not_called()
+    polar_checkout.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_workspace_billing_portal_rust_denial_blocks_stripe_portal():
+async def test_workspace_billing_portal_rust_denial_blocks_polar_portal():
     denied = RustKernelDecisionError(
         {
             "ok": False,
@@ -129,10 +129,10 @@ async def test_workspace_billing_portal_rust_denial_blocks_stripe_portal():
         "run_runtime_kernel_enforced",
         side_effect=denied,
     ) as rust_gate, patch.object(
-        billing_service,
-        "_stripe_api_request",
+        billing_service.polar_client,
+        "create_customer_portal_session",
         new=Mock(),
-    ) as stripe_request:
+    ) as polar_portal:
         with pytest.raises(HTTPException) as raised:
             billing_service.create_workspace_portal_session(workspace_id="workspace-1")
 
@@ -142,11 +142,11 @@ async def test_workspace_billing_portal_rust_denial_blocks_stripe_portal():
     assert payload["operation"] == "billing_update"
     assert payload["record_type"] == "workspace_billing_portal"
     assert payload["workspace_id"] == "workspace-1"
-    stripe_request.assert_not_called()
+    polar_portal.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_credit_purchase_checkout_rust_denial_blocks_stripe_checkout():
+async def test_credit_purchase_checkout_rust_denial_blocks_polar_checkout():
     denied = RustKernelDecisionError(
         {
             "ok": False,
@@ -165,10 +165,10 @@ async def test_credit_purchase_checkout_rust_denial_blocks_stripe_checkout():
         "run_runtime_kernel_enforced",
         side_effect=denied,
     ) as rust_gate, patch.object(
-        billing_service,
-        "_stripe_api_request",
+        billing_service.polar_client,
+        "create_checkout_session",
         new=Mock(),
-    ) as stripe_request:
+    ) as polar_checkout:
         with pytest.raises(HTTPException) as raised:
             billing_service.create_credit_purchase_checkout_session(
                 workspace_id="workspace-1",
@@ -181,4 +181,4 @@ async def test_credit_purchase_checkout_rust_denial_blocks_stripe_checkout():
     assert payload["operation"] == "billing_update"
     assert payload["record_type"] == "workspace_billing_credit_checkout"
     assert payload["target_status"] == "credit_purchase"
-    stripe_request.assert_not_called()
+    polar_checkout.assert_not_called()

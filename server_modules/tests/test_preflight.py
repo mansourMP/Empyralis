@@ -470,6 +470,52 @@ class RemovedKnowledgeRagConfigCheckTests(unittest.TestCase):
         self.assertIn("Uploaded knowledge files are unaffected", error)
 
 
+class RemovedStripeBillingConfigCheckTests(unittest.TestCase):
+    """The payment processor was replaced 2026-08-20 (Polar, not Stripe --
+    see CLAUDE.md's "Payment processor is Polar, not Stripe"). Its env knobs
+    have no reader left (and never did -- billing_service.py has always
+    read its own env vars directly), so a boot that still sets one must
+    FAIL rather than ignore it."""
+
+    def test_clean_environment_passes(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(preflight._check_removed_stripe_billing_config())
+
+    def test_each_removed_var_is_rejected_on_its_own(self):
+        # Driven off the module's own tuple rather than a hand-copied
+        # sample -- a hand-written list goes stale the moment someone
+        # renames a var, and this failure is silent by construction.
+        self.assertTrue(preflight._REMOVED_STRIPE_BILLING_ENV_VARS)
+        for name in preflight._REMOVED_STRIPE_BILLING_ENV_VARS:
+            with self.subTest(env_var=name):
+                with patch.dict(os.environ, {name: "something"}, clear=True):
+                    error = preflight._check_removed_stripe_billing_config()
+                self.assertIsNotNone(error, f"{name} must fail the boot, not be ignored")
+                self.assertIn(name, error)
+
+    def test_blank_value_is_not_treated_as_configured(self):
+        with patch.dict(os.environ, {"EMPYRALIS_STRIPE_SECRET_KEY": "   "}, clear=True):
+            self.assertIsNone(preflight._check_removed_stripe_billing_config())
+
+    def test_error_names_every_offending_var_not_just_the_first(self):
+        with patch.dict(
+            os.environ,
+            {"EMPYRALIS_BILLING_PROVIDER": "stripe", "EMPYRALIS_STRIPE_SECRET_KEY": "sk_live_x"},
+            clear=True,
+        ):
+            error = preflight._check_removed_stripe_billing_config()
+        self.assertIsNotNone(error)
+        self.assertIn("EMPYRALIS_BILLING_PROVIDER", error)
+        self.assertIn("EMPYRALIS_STRIPE_SECRET_KEY", error)
+
+    def test_error_names_the_real_polar_variables_to_set_instead(self):
+        # The operator's next question after "what broke" is "what do I set
+        # instead" -- the answer belongs in the message, not a separate doc.
+        with patch.dict(os.environ, {"EMPYRALIS_STRIPE_WEBHOOK_SECRET": "whsec_x"}, clear=True):
+            error = preflight._check_removed_stripe_billing_config()
+        self.assertIn("EMPYRALIS_POLAR_ACCESS_TOKEN", error)
+
+
 class PlatformCreditKeyCheckTests(unittest.TestCase):
     """preflight.py's advisory DeepSeek ``/user/balance`` health check — the
     one preflight step that makes a real outbound HTTPS request.
