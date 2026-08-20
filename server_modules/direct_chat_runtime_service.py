@@ -911,9 +911,7 @@ def build_direct_operator_reply(
         from server_modules.sage_agent_runtime_service import _resolve_cloud_provider as _resolve_provider
         provider, direct_chat_credentials = run_async_tool_call(_resolve_provider(normalized_workspace_id))
     except Exception as _prov_err:
-        import sys as _sys
         _prov_msg = str(_prov_err).strip() or "Provider unavailable"
-        print(f"[TRACE_WEB_PROVIDER_ERR] ws={normalized_workspace_id} error={_prov_msg}", flush=True, file=_sys.stderr)
         yield {
             "type": "final",
             "payload": services.no_provider_reasoning_required_response() if callable(getattr(services, "no_provider_reasoning_required_response", None)) else {
@@ -924,8 +922,6 @@ def build_direct_operator_reply(
             },
         }
         return
-    import sys as _sys
-    print(f"[TRACE_WEB_PROVIDER] ws={normalized_workspace_id} provider={provider} resolver=_resolve_cloud_provider (entitlement-gated, unified)", flush=True, file=_sys.stderr)
     # Platform runtime is the default — mark it so the rest of the pipeline knows.
     availability_payload = {
         **availability_payload,
@@ -977,8 +973,6 @@ def build_direct_operator_reply(
             provider,
         )
     )
-    import sys as _sys2
-    print(f"[TRACE_WEB_MODEL] ws={normalized_workspace_id} provider={provider} model={selected_model}", flush=True, file=_sys2.stderr)
     # ── ALL messages flow through the LLM agent loop. No regex/keyword shortcuts. ──
     route_decision = services.plan_direct_chat_route(
         message=normalized_message,

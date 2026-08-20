@@ -349,8 +349,6 @@ async def execute_direct_chat_turn_request(
     _console_envelope = InboundEnvelope.from_metadata(_envelope_meta) if _envelope_meta else None
 
     # ── UNIFIED ENTRY: route web chat through the SAME handle_sage_chat() that channels use ──
-    import sys as _sys_turn
-    print(f"[TRACE_UNIFIED_ENTRY] ws={workspace_id} channel={turn_request.channel} routing through handle_sage_chat (unified entry)", flush=True, file=_sys_turn.stderr)
 
     def producer():
         """Producer that routes through the unified Sage entry, forwarding
