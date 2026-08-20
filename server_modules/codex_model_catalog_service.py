@@ -118,12 +118,43 @@ async def fetch_codex_model_catalog(
         model_id = str(m.get("id") or "").strip()
         if not model_id:
             continue
+        # default_reasoning_effort/supported_reasoning_efforts (2026-08-20):
+        # read DEFENSIVELY, not required — the gateway's own RPC handler
+        # (empyralis-gateway/src/llm/codex-app-server.ts's listModels(),
+        # runtime.ts's listModelsForRuntime()) does not forward these two
+        # fields yet, even though codex app-server's real `model/list` RPC
+        # already returns them per model (verified live against this
+        # box's own real, authenticated Codex install, 2026-08-20:
+        # `supportedReasoningEfforts`/`defaultReasoningEffort` present on
+        # every entry, including an effort level — "ultra", on
+        # gpt-5.6-terra — no static table in this codebase had ever
+        # modeled). Reading them with .get() rather than a required key
+        # means this function does the right thing BOTH today (they are
+        # simply absent, so every consumer falls back exactly as before)
+        # and the moment the gateway starts forwarding them (see the
+        # flagged follow-up for empyralis-gateway/src/llm/codex-app-
+        # server.ts + runtime.ts) — no second change needed here.
+        supported_efforts_raw = m.get("supported_reasoning_efforts")
+        supported_efforts: List[Dict[str, str]] = []
+        if isinstance(supported_efforts_raw, list):
+            for entry in supported_efforts_raw:
+                if not isinstance(entry, dict):
+                    continue
+                effort = str(entry.get("reasoning_effort") or entry.get("reasoningEffort") or "").strip()
+                if not effort:
+                    continue
+                supported_efforts.append({
+                    "reasoning_effort": effort,
+                    "description": str(entry.get("description") or ""),
+                })
         models.append({
             "id": model_id,
             "display_name": str(m.get("display_name") or model_id),
             "description": str(m.get("description") or ""),
             "hidden": bool(m.get("hidden")),
             "is_default": bool(m.get("is_default")),
+            "default_reasoning_effort": str(m.get("default_reasoning_effort") or "").strip() or None,
+            "supported_reasoning_efforts": supported_efforts,
         })
     return {
         "supported": supported,

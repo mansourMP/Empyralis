@@ -5823,3 +5823,230 @@ The ordering to apply, for any capability question:
 All four BYO runtimes (`codex`, `claude`, `cursor-agent`, `grok`) are
 installed on the founder's machine and can be probed directly. Before
 writing a capability table for any of them, run the binary and ask it.
+## The codex reasoning-effort chain, wired end to end (2026-08-20)
+
+**The pass above was itself half of the mistake it was trying to fix, and
+the founder caught it.** xAI shipped grok-4.5/grok-4.6/grok-4.20-multi-agent
+with real `reasoning_effort` support after the first catalog pass; the
+natural-looking fix was to read xAI's docs and hand-type the three new
+entries into `PROVIDER_MODEL_CATALOG`. That was STARTED and then REVERTED
+before landing. The reason is the same standing rule this file already
+states, applied to itself: *"derive the capability set from the thing that
+owns it, never transcribe it."* A hardcoded table sourced from a document is
+still a hardcoded table — it goes stale again the moment the provider ships
+the next model, silently, with nobody re-reading the docs to notice.
+
+**There IS a live source for this — on the box, right now — and it was
+verified directly, not read about.** `codex app-server generate-json-schema`
+(the real, installed 0.144.1 binary) emits a schema where `ReasoningEffort`
+is `{"type": "string", "minLength": 1}` — deliberately NOT a closed enum —
+and `Model` carries `defaultReasoningEffort` + `supportedReasoningEfforts`
+per model. Confirmed further by spawning the real `codex app-server`
+process and driving its actual `initialize` → `model/list` JSON-RPC
+exchange (the same handshake `empyralis-gateway/src/llm/codex-app-server.ts`
+already uses) against this box's own real, authenticated ChatGPT/Codex
+login — genuine live output, not a mock:
+
+```
+gpt-5.6-terra (the live default)  low medium high xhigh max ULTRA
+gpt-5.6-luna                      low medium high xhigh max
+gpt-5.5                           low medium high xhigh
+gpt-5.4-mini                      low medium high xhigh   (upgrade: gpt-5.6-luna)
+codex-auto-review (hidden)        low medium high xhigh max
+```
+
+`"ultra"` is a real, currently-live reasoning-effort level on the account's
+own default model — a level that did not exist in this file's own 5-word
+ladder (`low/medium/high/xhigh/max`), in xAI's docs, or in any table this
+codebase has ever hand-typed. No amount of "verify against the official
+document" would have produced it; only asking the running harness did. This
+is the concrete proof for the standing rule, not just a restatement of it.
+
+**xAI's grok-4.5/4.6/4.20-multi-agent additions were reverted, on
+purpose, and are NOT re-added as a table.** They are real
+(`docs.x.ai/developers/grok-4-6` does describe them, and that finding
+itself was not wrong) — what was wrong was the RESPONSE: hand-typing three
+more rows into a table that will need the same manual edit again for
+whatever xAI ships next. Unlike Codex, xAI's BYOK surface is a bare REST
+API with no on-box daemon and no equivalent self-describing RPC reachable
+from this codebase — `/v1/models`-shaped listings carry no capability
+metadata. So for `xai` (and every other pure-API-key BYOK provider —
+gemini/openai/groq/openrouter/qwen/mistral/ollama_cloud/azure_openai/
+custom_openai_compatible), there is currently no live harness to prefer,
+and the four originally-verified xai entries (`grok-4`/`grok-4-0709`/
+`grok-4-latest`/`grok-3`, confirmed correct and unchallenged) are the
+catalog's honest ceiling — a live-discovered model outside them lands on
+the system-instruction fallback, same as before, now logged distinctly
+(see below).
+
+**What shipped instead, scoped to what a live source actually supports
+today:**
+
+```
+cli_subscription / codex   REAL harness exists (verified above) — wired
+                            end to end EXCEPT one link:
+
+  codex app-server model/list RPC
+    │ (real, has supportedReasoningEfforts/defaultReasoningEffort per model)
+    ▼
+  codex-app-server.ts's listModels()      ← STRIPS both fields today
+    │ (CodexModelListEntry only carries id/displayName/description/
+    │  hidden/isDefault — the interface's own comment says so explicitly)
+    ▼
+  runtime.ts's listModelsForRuntime()     ← re-strips them again, snake_case
+    │
+    ▼
+  codex_model_catalog_service.py         ← NOW reads default_reasoning_
+    (server_modules, this pass)             effort/supported_reasoning_
+    │                                       efforts defensively (.get(),
+    │                                       never required) — lights up
+    │                                       the MOMENT the two TS files
+    │                                       above start forwarding them,
+    │                                       no second Python/frontend
+    │                                       change needed
+    ▼
+  fleet-model-config.ts's                ← NOW parses the same two fields
+  CodexModelCatalogEntry                    into supportedReasoningEfforts/
+    │                                       defaultReasoningEffort
+    ▼
+  FleetAgentDetail.tsx's                 ← NOW renders THIS model's own
+  renderCliReasoningEffortPicker            live levels (open, per-model,
+                                             not a closed enum) when
+                                             present; falls back to the
+                                             static CLI_REASONING_EFFORT_
+                                             OPTIONS_BY_RUNTIME.codex table
+                                             — now visibly the DEGRADED
+                                             last resort (its own render
+                                             branch says so in the UI
+                                             hint), never the primary path
+```
+
+**That last link LANDED (`bbbf1b1f`) and the chain is now closed.** The
+gateway half and the consumer half were written by two different agents
+who never saw each other — each one's own comments flag the other's file
+as "the missing follow-up." They are merged here as one change. Anyone
+reading either half's comments in isolation will find them describing a
+gap that no longer exists; the merge rewrote those, and this paragraph is
+the record of why.
+
+**Merging them surfaced a defect NEITHER half could see alone: absent and
+empty were the same signal.** `[]` meant three different things at once —
+CLAUDE.md's own "two different facts may never share one signal" law, at a
+seam where one of the facts is a live fleet condition:
+
+```
+GATEWAY BUILD               Python receives    MEANS             correct behaviour
+pre-bbbf1b1f (live fleet)   key absent      "I don't know"       static fallback
+post-fix, model has levels  [{...}]         "these levels"       live options
+post-fix, model has none    []              "no levels at all"   RENDER NOTHING
+```
+
+Every fleet box still running a pre-`bbbf1b1f` gateway sends no field at
+all, so collapsing absent into empty is not hypothetical — it is the
+majority state today. And a model that positively reports zero levels
+would have rendered the static ladder anyway: a picker whose every option
+the model does not implement, i.e. the dead control this file's own
+product law forbids. Fixed by carrying `null` (unknown) distinctly from
+`[]` (positively none) the whole way — `codex-app-server.ts` returns
+`null` when the RPC field is absent or malformed rather than flattening to
+`[]`, and `planCodexReasoningPicker` (`codex-reasoning-options.ts`, pure +
+tested, same shape as `agent-count-shape.ts`/`channel-doors.ts`) is the
+one place that turns the three states into `live` / `fallback` / `none`.
+
+**Verified live, first-hand, against this box's own real authenticated
+Codex install** (spawned `codex app-server`, drove the real
+`initialize` → `getAuthStatus` → `model/list` JSON-RPC exchange — the same
+handshake `codex-app-server.ts` uses):
+
+```
+gpt-5.6-terra (live default)  low medium high xhigh max ULTRA   default=medium
+gpt-5.6-luna                  low medium high xhigh max         default=medium
+gpt-5.5                       low medium high xhigh             default=medium
+gpt-5.4-mini                  low medium high xhigh             default=medium
+codex-auto-review (hidden)    low medium high xhigh max         default=medium
+```
+
+`"ultra"` is live on the account's own default model and appears in no
+doc and in no static table in this codebase. Note also that NO model
+reports an empty list today — which is exactly why the absent-vs-empty
+collapse was invisible to both halves and had to be reasoned about from
+the protocol rather than observed.
+
+**The other three cli_subscription runtimes were re-checked live, not
+re-read from docs, per the same discipline:**
+
+```
+claude_code (Anthropic CLI)   ALREADY CORRECT, no gap. Its reasoning-effort
+                              vocabulary was already sourced from the
+                              ACTUALLY-INSTALLED claude_agent_sdk/types.py:
+                              `EffortLevel: TypeAlias = Literal["low",
+                              "medium", "high", "xhigh", "max"]` — a real
+                              harness read (the installed package's own
+                              type stub), not a guess, already wired via
+                              resolve_sdk_effort. No per-model variation
+                              is exposed by that type — Anthropic's own
+                              CLI/API is the validator at call time.
+
+cursor_cli                   CONFIRMED, live: `cursor-agent --help` on
+                              this box has NO reasoning-effort flag at
+                              all. The existing "no reasoning-effort
+                              control" modeling was already right —
+                              verified against the real installed binary,
+                              not assumed. (`--list-models` exists as a
+                              genuine live model-listing surface, unused
+                              here since it has nothing to do with
+                              reasoning effort — noted for whoever builds
+                              live model discovery for this runtime.)
+
+grok_build (the CLI, distinct  `grok --help` on this box confirms
+from the "xai" BYOK/API-key    `--reasoning-effort <EFFORT>` exists (alias
+provider above)                `--effort`) — matches this codebase's
+                              existing docs.x.ai-sourced vocabulary. `grok
+                              models` exists as a subcommand but printed
+                              "You are not authenticated" when actually
+                              run on this box, so a live per-model
+                              reasoning-vocabulary check (the codex-shaped
+                              proof) could NOT be completed here — this is
+                              a genuinely underivable gap on THIS box
+                              today, reported as such rather than papered
+                              over with the CLI's own hardcoded fallback
+                              model list it showed instead.
+```
+
+**The permanent-staleness decision, restated with the harness-first
+framing:** a live self-describing surface (codex app-server) is preferred
+whenever one exists and is reachable from this codebase; where none exists
+(every pure-API-key BYOK provider, and grok_build on this box today) the
+honest system-instruction fallback is the permanent floor — it can never
+break a turn and never invents a capability — and
+`_log_unrecognized_reasoning_effort_model`
+(`server_modules/openai_compat_adapter.py`) makes exactly which
+live-discovered models are landing on that floor a greppable operational
+signal (`reasoning_effort_model_unknown`), distinct from a model the
+catalog has explicitly confirmed does NOT support the control. That is now
+the honest, permanent answer to "the catalog will always eventually lag a
+live provider" for the providers that have no better answer available.
+
+Guarded by new/updated tests, red-before-green
+(`test_codex_model_catalog_service.py`'s two new defensive-parsing tests;
+`test_openai_compat_adapter.py`'s unknown-model-logging tests;
+`test_provider_profiles.py`'s `model_is_known_for_provider` distinction
+test) — the xai hardcoded-table tests from the reverted attempt were
+themselves reverted along with the code, not left behind as dead
+assertions.
+
+**Still open, flagged not fixed:** grok_build's live per-model vocabulary
+(blocked on auth state on this box); and the pre-existing, unrelated
+save-time validation gap this pass surfaced while reading `fleet_tools.py`
+— `model_is_known_for_provider` (used by `configure_agent`'s save-time
+model validation for `platform_credits`/`byok_api`) still validates
+against the STATIC `PROVIDER_CATALOG` model list, not live discovery,
+for every BYOK adapter-routed provider except codex — meaning a customer
+whose live-discovered model list (this file's earlier "BYO-subscription
+model truth" entry) shows a real model outside the static list can pick
+it, see it rendered, and then have the SAVE itself rejected with "Invalid
+model_config model." Codex already solved this exact problem for itself
+(`fleet_tools.py`'s codex-specific save-time check calls the live catalog,
+not the static list) — the same pattern needs extending to the other
+adapter-routed providers, which is real, separately-scoped work, not done
+in this pass.

@@ -618,7 +618,52 @@ def _apply_reasoning_effort(
     or — always, never silently dropped — the same honest system-prompt
     nudge the legacy engine already sends for a non-reasoning model. A
     customer who picks "High" never gets a turn where the setting simply
-    did nothing, on either engine."""
+    did nothing, on either engine.
+
+    THE PERMANENT-STALENESS DECISION (2026-08-20, second pass): live model
+    discovery (see fleet-model-config.ts's useByokModelCatalog) means a
+    customer's picker can show a model this catalog has never heard of —
+    the provider shipped it after this file was last updated, which is now
+    a standing condition, not a one-off bug to clear once. Three options
+    were weighed for what an UNRECOGNIZED live-discovered model should do:
+
+      1. Fall back to the system-instruction path (this function's
+         existing behavior for a KNOWN non-reasoning model).
+      2. Infer support from the model id (e.g. a "newer point release"
+         heuristic).
+      3. Attempt the real wire parameter and degrade on a provider error.
+
+    (2) is REJECTED with a concrete counter-example already in hand: xAI's
+    own docs list grok-4.1-fast as reasoning-capable internally but
+    explicitly WITHOUT a settable reasoning_effort, while grok-4.5 (an
+    earlier point release by version number) DOES have one — no id-shaped
+    rule separates them, so a heuristic would guess wrong in exactly the
+    cases that matter. Guessing wrong here doesn't just under-deliver, it
+    risks a 400 the customer did nothing to cause, which breaks the WHOLE
+    TURN — categorically worse than the control merely underperforming.
+
+    (3) is REJECTED because this module's own streaming contract (see the
+    file docstring) commits to `message_start` before an error can be
+    known, so a real attempt-and-retry needs a separate non-streaming
+    pre-flight probe on every turn to every unrecognized model — real
+    latency on the common path, for a rare case. Distinguishing "rejected
+    because of reasoning_effort specifically" from any other 400 would
+    also mean parsing upstream error prose, which is exactly the "stale
+    string matching" failure this codebase already tracks and forbids
+    elsewhere (see this repo's own standing rule to match stable codes,
+    never sentences — providers do not agree on error wording and do not
+    version it).
+
+    (1) is KEPT as the permanent default: it can never break a turn, never
+    invents a capability, and the picker's own help text already promises
+    it truthfully for every model. What changes here is observability —
+    see _log_unrecognized_reasoning_effort_model below: a genuinely
+    UNKNOWN model (this catalog has no entry for it at all) now logs
+    distinctly from a model this catalog has explicitly VERIFIED does not
+    support the control, so "which live-discovered models are quietly
+    landing on the fallback" is a greppable operational signal instead of
+    an invisible, permanent gap — the concrete next-catalog-update list,
+    rather than nothing."""
     effort = str(requested_effort or "").strip().lower()
     if not effort:
         return
@@ -633,12 +678,40 @@ def _apply_reasoning_effort(
     if clamped and normalized_provider in _REASONING_EFFORT_NESTED_OBJECT_PROVIDERS:
         openai_body["reasoning"] = {"effort": clamped}
         return
+    _log_unrecognized_reasoning_effort_model(provider_profiles, provider=provider, model=model)
     instruction = _reasoning_effort_system_instruction(effort)
     messages = openai_body.get("messages")
     if isinstance(messages, list) and messages and messages[0].get("role") == "system":
         messages[0]["content"] = f"{messages[0].get('content', '')}\n\n[System Instruction: {instruction}]".strip()
     elif isinstance(messages, list):
         messages.insert(0, {"role": "system", "content": f"[System Instruction: {instruction}]"})
+
+
+def _log_unrecognized_reasoning_effort_model(provider_profiles_module: Any, *, provider: str, model: str) -> None:
+    """The observability half of the permanent-staleness decision above.
+    Two facts collapse into the same fallback BEHAVIOR (both send the
+    instruction, correctly) but are different facts operationally: a model
+    this catalog has explicitly verified does NOT expose reasoning_effort
+    (expected, stable, not worth a log line every turn) versus a model
+    this catalog has never heard of at all (a live-discovery arrival —
+    exactly the "provider shipped something new" signal that should turn
+    into the next catalog update). Only the second case logs, at WARNING
+    so it survives default log levels without being noisy in the common
+    case; the model/provider pair is the whole payload, on purpose — no
+    prose to grep for later, just `grep 'reasoning_effort_model_unknown'`."""
+    try:
+        known = provider_profiles_module.model_is_known_for_provider(provider, model)
+    except Exception:  # pragma: no cover - defensive; a broken classifier must never break a turn
+        return
+    if known:
+        return
+    LOGGER.warning(
+        "reasoning_effort_model_unknown provider=%s model=%s — not in PROVIDER_MODEL_CATALOG, "
+        "falling back to a system-instruction nudge instead of a verified wire parameter. "
+        "If this provider genuinely shipped reasoning_effort support for this model, add it to "
+        "provider_profiles.PROVIDER_MODEL_CATALOG.",
+        provider, model,
+    )
 
 
 def translate_anthropic_request_to_openai(

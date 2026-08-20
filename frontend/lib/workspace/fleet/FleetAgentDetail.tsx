@@ -4904,8 +4904,34 @@ function ModelTab({
   // rendering an empty, misleading <select>. Gated by cliRuntime, which
   // already tracks the Subscription <select> above, so switching the
   // subscription provider swaps the option list (or the note) live.
+  // The model's OWN live reasoning-effort vocabulary (2026-08-20) — codex
+  // app-server's real model/list RPC self-describes this per model
+  // (verified live, including levels no static table here ever had, e.g.
+  // "ultra"). NOT wired end to end yet: empyralis-gateway/src/llm/codex-
+  // app-server.ts + runtime.ts don't forward these two fields on the wire
+  // today (flagged separately), so this returns null — and the picker
+  // below falls back to the static CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME
+  // table — until that lands. The moment it does, this starts returning
+  // real data with no further frontend change needed.
+  function liveCodexReasoningOptionsForSelectedModel(): { value: string; label: string }[] | null {
+    if (cliRuntime !== "codex" || !codexModelCatalog.supported) return null;
+    const entry = codexModelCatalog.models.find((m) => m.id === selectedModel);
+    if (!entry || entry.supportedReasoningEfforts.length === 0) return null;
+    const defaultLabel = entry.defaultReasoningEffort
+      ? `Model default (${entry.defaultReasoningEffort})`
+      : "Model default";
+    return [
+      { value: "", label: defaultLabel },
+      ...entry.supportedReasoningEfforts.map((o) => ({
+        value: o.reasoningEffort,
+        label: o.description ? `${o.reasoningEffort} — ${o.description}` : o.reasoningEffort,
+      })),
+    ];
+  }
+
   function renderCliReasoningEffortPicker() {
-    const options = CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME[cliRuntime];
+    const liveOptions = liveCodexReasoningOptionsForSelectedModel();
+    const options = liveOptions ?? CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME[cliRuntime];
     if (options.length === 0) {
       return (
         <p className="fleet-channel-expand-hint">
@@ -4926,7 +4952,9 @@ function ModelTab({
           ))}
         </select>
         <p className="fleet-channel-expand-hint">
-          Higher effort can solve harder problems but costs more and replies slower. Passed straight to {RUNTIME_LABELS[cliRuntime]}’s own reasoning control.
+          {liveOptions
+            ? `Levels this exact model reports supporting, straight from your own Codex account.`
+            : `Higher effort can solve harder problems but costs more and replies slower. Passed straight to ${RUNTIME_LABELS[cliRuntime]}’s own reasoning control.`}
         </p>
       </>
     );

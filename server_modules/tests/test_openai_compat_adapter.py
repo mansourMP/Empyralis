@@ -432,6 +432,54 @@ class TestReasoningEffortWiring:
             assert "reasoning" not in out, provider
             assert "low reasoning effort" in out["messages"][0]["content"], provider
 
+    # ── Second pass, 2026-08-20: xAI has shipped grok-4.5/4.6/4.20-multi-
+    # agent (real reasoning_effort support) since the first catalog pass.
+    # They are DELIBERATELY NOT added as hardcoded entries here — see
+    # provider_profiles.py's own xai catalog comment for why (no on-box,
+    # self-describing harness exists for this provider, unlike Codex; a
+    # hardcoded entry is still transcription and goes stale the same way).
+    # These three currently fall to the honest fallback, proven below. ──
+
+    def test_grok_4_6_currently_falls_back_pending_a_live_capability_source(self):
+        # Genuinely reasoning-capable per xAI's docs, but this catalog has
+        # no way to derive that live — the safe, honest default applies.
+        body = {"model": "grok-4.6", "messages": [{"role": "user", "content": "hi"}]}
+        out = adapter.translate_anthropic_request_to_openai(body, provider="xai", reasoning_effort="high")
+        assert "reasoning_effort" not in out
+        assert "high reasoning effort" in out["messages"][0]["content"]
+
+    def test_unrecognized_live_discovered_model_logs_a_greppable_warning(self, caplog):
+        # The permanent-staleness decision: an id this catalog has NEVER
+        # heard of (as opposed to one it has explicitly verified doesn't
+        # support the control) must be distinguishable operationally, even
+        # though both land on the same safe fallback behavior.
+        import logging
+        with caplog.at_level(logging.WARNING, logger="server_modules.openai_compat_adapter"):
+            body = {"model": "grok-5-hypothetical-future-release", "messages": [{"role": "user", "content": "hi"}]}
+            out = adapter.translate_anthropic_request_to_openai(body, provider="xai", reasoning_effort="high")
+        assert "reasoning_effort" not in out
+        assert "high reasoning effort" in out["messages"][0]["content"]
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("reasoning_effort_model_unknown" in r.message for r in warnings)
+        assert any("grok-5-hypothetical-future-release" in r.message for r in warnings)
+
+    def test_known_unsupported_model_does_not_log_the_unknown_warning(self):
+        # grok-4 is IN the catalog (with reasoning_levels: []) — a
+        # confirmed, stable "no", not a live-discovery arrival. Logging it
+        # on every turn would be noise, not signal.
+        import logging
+        logger = logging.getLogger("server_modules.openai_compat_adapter")
+        records: List[logging.LogRecord] = []
+        handler = logging.Handler()
+        handler.emit = records.append  # type: ignore[method-assign]
+        logger.addHandler(handler)
+        try:
+            body = {"model": "grok-4", "messages": [{"role": "user", "content": "hi"}]}
+            adapter.translate_anthropic_request_to_openai(body, provider="xai", reasoning_effort="high")
+        finally:
+            logger.removeHandler(handler)
+        assert not any("reasoning_effort_model_unknown" in r.getMessage() for r in records)
+
 
 # ============================================================================
 # 2. AnthropicStreamAssembler — pure state machine, varied fragmentation

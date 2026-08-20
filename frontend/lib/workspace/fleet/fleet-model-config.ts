@@ -348,12 +348,30 @@ export async function saveAgentModelConfig(
 // the static MODELS_BY_PROVIDER catalog with an honest note that it may be
 // stale, never a silent, confident-looking empty state.
 
+export type CodexReasoningEffortOption = {
+  reasoningEffort: string;
+  description: string;
+};
+
 export type CodexModelCatalogEntry = {
   id: string;
   displayName: string;
   description: string;
   hidden: boolean;
   isDefault: boolean;
+  /** This model's OWN live reasoning-effort vocabulary and default,
+   *  straight from codex app-server's `model/list` RPC (verified live
+   *  against a real, authenticated Codex install, 2026-08-20 — levels
+   *  genuinely vary per model, and include values no static table in
+   *  this codebase ever modeled, e.g. "ultra" on gpt-5.6-terra). Empty/
+   *  null until empyralis-gateway/src/llm/codex-app-server.ts +
+   *  runtime.ts forward these two fields (flagged, not yet done — see
+   *  codex_model_catalog_service.py's own comment); the picker falls
+   *  back to CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME.codex until then,
+   *  which is the deliberately-degraded last resort, not the primary
+   *  path. */
+  supportedReasoningEfforts: CodexReasoningEffortOption[];
+  defaultReasoningEffort: string | null;
 };
 
 export type CodexModelCatalogState = {
@@ -415,6 +433,17 @@ export function useCodexModelCatalog(
               description: String(m.description || ""),
               hidden: Boolean(m.hidden),
               isDefault: Boolean(m.is_default),
+              supportedReasoningEfforts: Array.isArray(m.supported_reasoning_efforts)
+                ? m.supported_reasoning_efforts
+                    .filter((e: unknown): e is Record<string, unknown> => !!e && typeof e === "object" && typeof (e as Record<string, unknown>).reasoning_effort === "string" && Boolean((e as Record<string, unknown>).reasoning_effort))
+                    .map((e: Record<string, unknown>) => ({
+                      reasoningEffort: String(e.reasoning_effort),
+                      description: String(e.description || ""),
+                    }))
+                : [],
+              defaultReasoningEffort: typeof m.default_reasoning_effort === "string" && m.default_reasoning_effort
+                ? m.default_reasoning_effort
+                : null,
             }))
         : [];
       setState({

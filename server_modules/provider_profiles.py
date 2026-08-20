@@ -1351,14 +1351,39 @@ PROVIDER_MODEL_CATALOG = {
     # `supports_reasoning: True` here means "this model reasons
     # internally" — it does NOT mean the API exposes a `reasoning_effort`
     # control. Verified against docs.x.ai/developers/model-capabilities/
-    # text/reasoning, 2026-08-20: only Grok 3 Mini and Grok 4.5+/4.6+
-    # expose a settable `reasoning_effort`. grok-4, grok-4-0709,
-    # grok-4-latest and grok-3 (the four models this catalog currently
-    # offers) reason with a FIXED, non-adjustable budget — sending
-    # reasoning_effort to any of them is silently ignored by xAI's API.
-    # `reasoning_levels: []` is the disambiguating signal the adapter uses
-    # to decide whether to forward the wire parameter at all — see
-    # openai_compat_adapter.py's reasoning-effort wiring.
+    # text/reasoning, 2026-08-20: grok-4, grok-4-0709, grok-4-latest and
+    # grok-3 (the four models this catalog carries) reason with a FIXED,
+    # non-adjustable budget — sending reasoning_effort to any of them is
+    # silently ignored by xAI's API. `reasoning_levels: []` is the
+    # disambiguating signal the adapter uses to decide whether to forward
+    # the wire parameter at all — see openai_compat_adapter.py's
+    # reasoning-effort wiring.
+    #
+    # DELIBERATELY NOT EXTENDED FURTHER, 2026-08-20 (second pass): xAI has
+    # since shipped grok-4.5/4.6/4.20-multi-agent, which DO expose a real
+    # reasoning_effort (docs.x.ai/developers/grok-4-6) — an earlier version
+    # of this pass added them here as hardcoded entries. That was reverted
+    # on the founder's own correction: verifying a fact against a
+    # DOCUMENT and then hand-typing it into this table is still
+    # transcription — the table goes stale again the next time xAI ships
+    # a model, silently, with no signal. CLAUDE.md's own standing rule:
+    # "derive the capability set from the thing that owns it, never
+    # transcribe it." Unlike Codex/cli_subscription (which has a real,
+    # queryable on-box harness — codex app-server's `model/list` RPC
+    # genuinely self-describes `supportedReasoningEfforts`/
+    # `defaultReasoningEffort` per model, verified live against this
+    # box's own real, authenticated Codex install, 2026-08-20: even a
+    # level this file's own hardcoded ladder never modeled, "ultra", is
+    # live on gpt-5.6-terra today), xAI's REST API has no equivalent
+    # self-describing surface reachable from this codebase — its
+    # `/v1/models` listing is a bare id/metadata endpoint with no
+    # reasoning-capability field (OpenAI-shaped `/v1/models` responses in
+    # general carry none). Until xAI (or another BYOK provider) exposes a
+    # live capability surface, an xai model outside the four entries below
+    # is GENUINELY UNDERIVABLE from this codebase and correctly lands on
+    # the honest system-instruction fallback — see
+    # openai_compat_adapter.py's `_log_unrecognized_reasoning_effort_model`
+    # for how that gap is made observable instead of silent.
     "xai": {
         "grok-4": {
             "label": "Grok 4",
