@@ -455,6 +455,29 @@ h6.fleet-doc-heading { font-size: 14px; }
   color: var(--text-muted);
 }
 
+/* Fixed-width icon slot -- MemberAvatar (18px, human), AgentSigil (13px,
+   agent) and the "other"/unattributed placeholder below all sit in the
+   SAME reserved width, so the name text after them (and everything in a
+   row after this whole badge, e.g. FleetHome's "Recent activity" event
+   text) starts at one consistent x whether or not this particular row has
+   a real avatar. 18px matches MemberAvatar's own "xs" size -- the wider of
+   the two real icons -- so the smaller AgentSigil centers inside it rather
+   than the slot clipping the larger one. */
+.fleet-doc-history-actor-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  flex-shrink: 0;
+}
+.fleet-doc-history-actor-icon-placeholder {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  opacity: 0.5;
+}
+
 .fleet-doc-history-time {
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;

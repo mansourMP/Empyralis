@@ -3951,7 +3951,14 @@ a.fleet-breadcrumb:hover {
   align-items: center;
   gap: 10px;
   flex-shrink: 0;
-  padding: 8px 12px;
+  /* No right inset, matching .fleet-shell-topbar's own documented rule
+     (below, "one shared right edge (Linear)"): this header is the page's
+     only header on every agent-detail tab (see the comment above), so its
+     own "⋯" menu is this page's corner control and belongs flush to the
+     panel edge like every other top-level screen's primary action —
+     previously inset an extra 12px (measured 21px from the viewport edge
+     versus 9px on Agents/Projects). Left padding is unchanged. */
+  padding: 8px 0 8px 12px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-card);
 }
@@ -11289,6 +11296,19 @@ h2.fleet-sage-console-title {
   align-items: center;
   gap: 4px;
   margin-left: auto;
+  /* Counteracts .fleet-content-toolbar's own 32px right padding so this
+     cluster's rightmost icon (Properties) lands on the SAME right edge as
+     .fleet-shell-topbar's "+ New agent" button above it — that topbar is
+     explicitly flush to the panel edge ("no right inset... one shared
+     right edge (Linear)", see its own rule). Before this, the three
+     corner controls on this page (New agent / Usage / Properties) had
+     three different right edges (measured 1461 / 1397 / 1429 at a 1470px
+     viewport — 0 / 64 / 32px short of flush). Scoped to this cluster, not
+     to .fleet-content-toolbar's shared padding, because that padding also
+     positions .fleet-content-toolbar > .fleet-member-avatar-stack on
+     other tabs (Tasks/Documents/Projects) and that alignment is correct
+     there and out of scope here. */
+  margin-right: -32px;
 }
 
 /* ── View-options popover (AgentViewOptions.tsx) ──────────────────────────

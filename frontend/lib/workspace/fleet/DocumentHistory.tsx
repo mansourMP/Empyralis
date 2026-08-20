@@ -156,17 +156,37 @@ export function RevisionActorBadge({ actor }: { actor: ResolvedRevisionActor }) 
   if (actor.kind === "human") {
     return (
       <span className="fleet-doc-history-actor">
-        <MemberAvatar name={actor.label} role={actor.role as any} size="xs" tintIndex={Math.max(actor.memberIndex, 0)} />
+        <span className="fleet-doc-history-actor-icon">
+          <MemberAvatar name={actor.label} role={actor.role as any} size="xs" tintIndex={Math.max(actor.memberIndex, 0)} />
+        </span>
         <span>{actor.label}</span>
       </span>
     );
   }
   if (actor.kind === "other") {
-    return <span className="fleet-doc-history-actor fleet-doc-history-actor--muted">{actor.label}</span>;
+    // No avatar because there is no resolved identity (e.g. a historical
+    // task completion recorded before completed_by_user_id/agent_id
+    // existed — correct, unattributed data, not a bug to hide). Without
+    // this element the row's own name text sat flush at the badge's left
+    // edge instead of after a reserved icon slot, so every row without an
+    // attribution read at a different x than every row with one. The dot
+    // is a placeholder for "no identity", never a stand-in for one — plain
+    // muted, no initials, no shape that could be mistaken for a real
+    // avatar or sigil.
+    return (
+      <span className="fleet-doc-history-actor fleet-doc-history-actor--muted">
+        <span className="fleet-doc-history-actor-icon" aria-hidden="true">
+          <span className="fleet-doc-history-actor-icon-placeholder" />
+        </span>
+        <span>{actor.label}</span>
+      </span>
+    );
   }
   return (
     <span className="fleet-doc-history-actor" title={actor.kind === "external_agent" ? "External agent" : "Agent"}>
-      <AgentSigil seed={actor.seed} size={13} />
+      <span className="fleet-doc-history-actor-icon">
+        <AgentSigil seed={actor.seed} size={13} />
+      </span>
       <span>{actor.label}</span>
     </span>
   );
