@@ -102,20 +102,41 @@ def get_private_memory_note(
     another user's row (agent_private_memory_repository.get_private_note's
     own WHERE clause makes that structurally impossible, not merely
     policy)."""
+    return sync_asyncio_bridge.run_coro_sync(
+        aget_private_memory_note(
+            workspace_id,
+            agent_install_id=agent_install_id,
+            user_id=user_id,
+        )
+    )
+
+
+async def aget_private_memory_note(
+    workspace_id: str,
+    *,
+    agent_install_id: str,
+    user_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Async twin of get_private_memory_note, holding the IDENTICAL guards.
+
+    It exists because `run_coro_sync` blocks the calling thread on a
+    separate bridge loop -- correct for a sync tool-dispatch body, and a
+    stalled event loop if an async FastAPI handler calls it. The owner-facing
+    memory route in routes_fleet.py is such a handler, so it awaits this
+    instead. The sync entrypoint above now delegates HERE rather than
+    carrying a second copy of the scope guards: `user_id` stays a required
+    keyword with no default on both, and there is still exactly one place
+    that decides which row is read."""
     resolved_user_id = _require_user_id(user_id)
     resolved_agent_install_id = _require_agent_install_id(agent_install_id)
     normalized_workspace_id = str(workspace_id or "").strip() or "default"
-
-    async def _run() -> Optional[Dict[str, Any]]:
-        tenant_id = await _resolve_tenant_id(normalized_workspace_id)
-        return await agent_private_memory_repository.get_private_note(
-            tenant_id=tenant_id,
-            workspace_id=normalized_workspace_id,
-            agent_install_id=resolved_agent_install_id,
-            user_id=resolved_user_id,
-        )
-
-    return sync_asyncio_bridge.run_coro_sync(_run())
+    tenant_id = await _resolve_tenant_id(normalized_workspace_id)
+    return await agent_private_memory_repository.get_private_note(
+        tenant_id=tenant_id,
+        workspace_id=normalized_workspace_id,
+        agent_install_id=resolved_agent_install_id,
+        user_id=resolved_user_id,
+    )
 
 
 def get_private_memory_block(
@@ -154,6 +175,31 @@ def write_private_memory_note(
     collide into the same row, and a write always lands under the identity
     that was actually resolved for THIS call, never one a caller merely
     claims."""
+    return sync_asyncio_bridge.run_coro_sync(
+        awrite_private_memory_note(
+            workspace_id,
+            agent_install_id=agent_install_id,
+            user_id=user_id,
+            content=content,
+            reason=reason,
+        )
+    )
+
+
+async def awrite_private_memory_note(
+    workspace_id: str,
+    *,
+    agent_install_id: str,
+    user_id: str,
+    content: str,
+    reason: str = "memory_write_private",
+) -> Dict[str, Any]:
+    """Async twin of write_private_memory_note, holding the IDENTICAL guards
+    (required user_id, required agent_install_id, empty-content refusal,
+    secret redaction BEFORE the write, size cap). Same reason the read has
+    one -- see aget_private_memory_note's docstring. The sync entrypoint
+    delegates here, so the redaction and the cap cannot be enforced on one
+    path and skipped on the other."""
     resolved_user_id = _require_user_id(user_id)
     resolved_agent_install_id = _require_agent_install_id(agent_install_id)
     normalized_workspace_id = str(workspace_id or "").strip() or "default"
@@ -169,18 +215,14 @@ def write_private_memory_note(
             f"Private memory note exceeds its {PRIVATE_MEMORY_NOTE_MAX_CHARS}-char "
             "cap. Keep it a compact summary of preferences, not a transcript."
         )
-
-    async def _run() -> Dict[str, Any]:
-        tenant_id = await _resolve_tenant_id(normalized_workspace_id)
-        return await agent_private_memory_repository.upsert_private_note(
-            tenant_id=tenant_id,
-            workspace_id=normalized_workspace_id,
-            agent_install_id=resolved_agent_install_id,
-            user_id=resolved_user_id,
-            content=redacted_content,
-            reason=reason,
-        )
-
-    saved = sync_asyncio_bridge.run_coro_sync(_run())
+    tenant_id = await _resolve_tenant_id(normalized_workspace_id)
+    saved = await agent_private_memory_repository.upsert_private_note(
+        tenant_id=tenant_id,
+        workspace_id=normalized_workspace_id,
+        agent_install_id=resolved_agent_install_id,
+        user_id=resolved_user_id,
+        content=redacted_content,
+        reason=reason,
+    )
     saved["redacted"] = content_was_redacted
     return saved

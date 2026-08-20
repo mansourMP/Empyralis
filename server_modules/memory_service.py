@@ -2573,13 +2573,31 @@ def build_direct_chat_daily_log_summary(*, user_message: str, assistant_reply: s
     )
 
 
-def save_direct_chat_daily_log_summary(*, workspace_id: str, user_message: str, assistant_reply: str) -> str:
+def save_direct_chat_daily_log_summary(
+    *,
+    workspace_id: str,
+    user_message: str,
+    assistant_reply: str,
+    agent_install_id: str | None = None,
+) -> str:
+    """Append one deterministic day-log line for a direct-chat turn.
+
+    `agent_install_id` is a pass-through added 2026-08-20: this function
+    dropped the scope entirely and every line landed in the WORKSPACE
+    namespace, so a specialist install's own daily notes were structurally
+    impossible to write. Defaults to None -- byte-identical to the previous
+    behaviour for every existing caller -- so this widens what CAN be
+    expressed without moving where anything already goes.
+
+    Returns the summary line that was written, or "" when the turn produced
+    nothing worth logging. Callers use that return value to report whether a
+    write actually happened rather than assuming one did."""
     summary = build_direct_chat_daily_log_summary(
         user_message=user_message,
         assistant_reply=assistant_reply,
     )
     if summary:
-        save_daily_log(workspace_id, summary)
+        save_daily_log(workspace_id, summary, agent_install_id=agent_install_id)
     return summary
 
 
