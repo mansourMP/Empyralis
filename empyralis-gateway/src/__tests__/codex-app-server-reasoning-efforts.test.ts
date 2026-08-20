@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { parseSupportedReasoningEfforts } from "../llm/codex-app-server";
+import { parseSupportedReasoningEfforts, parseSupportedReasoningEffortsOrUnknown } from "../llm/codex-app-server";
 
 // Defensive-parsing coverage for the reasoning-effort forwarding fix
 // (fix/gateway-forward-codex-reasoning-fields). codex-app-server.ts's
@@ -59,4 +59,44 @@ test("parseSupportedReasoningEfforts: a malformed individual item is dropped, no
     ["low", "high"],
   );
   assert.equal(result[1].description, "");
+});
+
+// --- absent vs. empty: two different facts, two different values ---
+// Added when the gateway half and the cloud half of this chain were merged.
+// Neither half could see this alone: the gateway flattened "the RPC said
+// nothing" into the same `[]` that means "the model reports no levels", and
+// the cloud then rendered its static fallback ladder for both. The first is
+// the MAJORITY live fleet state (any box on a gateway built before this
+// field was forwarded), and the second must render no control at all — so
+// the collapse either deletes the picker for most customers or leaves a dead
+// control on a model that implements none of its options.
+
+test("parseSupportedReasoningEffortsOrUnknown: an absent field is UNKNOWN (null), never an empty list", () => {
+  assert.equal(parseSupportedReasoningEffortsOrUnknown(undefined), null);
+  assert.equal(parseSupportedReasoningEffortsOrUnknown(null), null);
+  assert.equal(parseSupportedReasoningEffortsOrUnknown("not-an-array"), null);
+  assert.equal(parseSupportedReasoningEffortsOrUnknown(42), null);
+});
+
+test("parseSupportedReasoningEffortsOrUnknown: a genuinely empty array is a real answer — no levels — and stays []", () => {
+  assert.deepEqual(parseSupportedReasoningEffortsOrUnknown([]), []);
+});
+
+test("parseSupportedReasoningEffortsOrUnknown: absent and empty do not share a value", () => {
+  assert.notDeepEqual(parseSupportedReasoningEffortsOrUnknown(undefined), parseSupportedReasoningEffortsOrUnknown([]));
+});
+
+test("parseSupportedReasoningEffortsOrUnknown: a non-empty but unintelligible array is UNKNOWN, not 'no levels'", () => {
+  // Something was there and nothing survived parsing — that is a failure to
+  // understand the answer, not the model answering no.
+  assert.equal(parseSupportedReasoningEffortsOrUnknown(["garbage", null, { description: "no level key" }]), null);
+});
+
+test("parseSupportedReasoningEffortsOrUnknown: a well-formed live array relays verbatim, undocumented levels included", () => {
+  // Verbatim from a real model/list response, 2026-08-20, gpt-5.6-terra.
+  const result = parseSupportedReasoningEffortsOrUnknown([
+    { reasoningEffort: "max", description: "Maximum reasoning depth for the hardest problems" },
+    { reasoningEffort: "ultra", description: "Maximum reasoning with automatic task delegation" },
+  ]);
+  assert.deepEqual(result?.map((e) => e.reasoningEffort), ["max", "ultra"]);
 });
