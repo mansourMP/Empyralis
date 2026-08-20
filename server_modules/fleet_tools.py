@@ -1429,7 +1429,9 @@ async def fleet_configure_agent(
     """Update an agent's fleet-managed configuration.
 
     Allowed patch keys: enabled_tools, connectors, channel_bindings,
-    subagents_enabled, hardware_access, model_config, skills.
+    subagents_enabled, hardware_access, model_config, skills,
+    purpose_preset, audience (see _AUDIENCE_BY_PURPOSE_PRESET — changing
+    purpose_preset alone re-derives audience unless audience is also given).
 
     `skills` replaces the WHOLE list (like model_config, not a per-field
     merge like capability_config) — see _normalize_skills_patch for the
@@ -1674,6 +1676,42 @@ async def fleet_configure_agent(
                                 ,
                             }
 
+    # purpose_preset / audience: both keys have been in _ALLOWED_CONFIGURE_KEYS
+    # since fleet_create_agent shipped, but fleet_create_agent was the ONLY
+    # writer of either (see resolve_purpose_preset/resolve_agent_audience's
+    # own docstrings) — a PATCH carrying them passed the clean_patch filter
+    # and was then silently dropped, never reaching meta. "Built, tested, and
+    # never wired" one level up from the frontend control this unblocks
+    # (frontend/lib/workspace/fleet/FleetAgentDetail.tsx's GeneralTab).
+    # Validated here, before the bundle fetch, same placement as
+    # model_config's own save-time validation above — a bad value fails
+    # loudly at save time rather than being silently coerced later by
+    # resolve_purpose_preset's own defensive fallback.
+    _next_purpose_preset: Optional[str] = None
+    _next_audience: Optional[str] = None
+    if "purpose_preset" in clean_patch:
+        _requested_preset = str(clean_patch["purpose_preset"] or "").strip().lower()
+        if _requested_preset not in _VALID_PURPOSE_PRESETS:
+            return {
+                "ok": False,
+                "error": f"purpose_preset must be one of: {', '.join(sorted(_VALID_PURPOSE_PRESETS))}",
+            }
+        _next_purpose_preset = _requested_preset
+    if "audience" in clean_patch:
+        _requested_audience = str(clean_patch["audience"] or "").strip().lower()
+        if _requested_audience not in _VALID_AUDIENCES:
+            return {
+                "ok": False,
+                "error": f"audience must be one of: {', '.join(sorted(_VALID_AUDIENCES))}",
+            }
+        _next_audience = _requested_audience
+    elif _next_purpose_preset is not None:
+        # A caller that changes purpose_preset without naming audience gets
+        # the preset's own derived audience (_AUDIENCE_BY_PURPOSE_PRESET) —
+        # the same pairing fleet_create_agent applies at creation — rather
+        # than leaving a stale audience mismatched against the new preset.
+        _next_audience = _AUDIENCE_BY_PURPOSE_PRESET.get(_next_purpose_preset, "owner")
+
     try:
         bundle = await repo.get_workspace_agent_install_bundle(
             agent_id,
@@ -1696,6 +1734,10 @@ async def fleet_configure_agent(
             meta["subagents_enabled"] = bool(clean_patch["subagents_enabled"])
         if "instructions" in clean_patch:
             meta["instructions"] = str(clean_patch["instructions"] or "").strip()[:_MAX_INSTRUCTIONS_CHARS]
+        if _next_purpose_preset is not None:
+            meta["purpose_preset"] = _next_purpose_preset
+        if _next_audience is not None:
+            meta["audience"] = _next_audience
         if _clean_skills is not None:
             meta["skills"] = _clean_skills
         _next_label: Optional[str] = None
