@@ -5,17 +5,20 @@ import { useRouter } from "next/navigation";
 import { Bot } from "lucide-react";
 
 import { useFleetProjects } from "./fleet-data";
-import { createAgentQuickly, quickCreateAgentChatPath } from "./agent-quick-create";
+import { quickCreateAgentChatPath } from "./agent-quick-create";
+import { AgentCreateCard } from "./AgentCreateCard";
 
 /**
  * The single first-run call to action, shared by every fresh-workspace empty
  * state (Agents, Projects, Inbox): "create your first agent". One action,
- * non-technical copy, no tour — and, since 2026-08-19, no wizard either:
- * `onCreate` fires the create directly (see CreateFirstAgentEmpty below),
- * never opens a modal asking what to call it or where it lives first. This
- * component itself stays dumb (a title/desc/button plus a callback) so a
- * caller that wants different creation behavior — none do today — still
- * can without a second copy of this markup.
+ * non-technical copy, no tour. `onCreate` opens AgentCreateCard (see
+ * CreateFirstAgentEmpty below) — not a full wizard, one card with every
+ * field pre-filled and visible before it commits (agent-quick-create.ts's
+ * own "CORRECTION, 2026-08-20" header has the founder's own words on why
+ * the earlier zero-click version was an over-correction). This component
+ * itself stays dumb (a title/desc/button plus a callback) so a caller that
+ * wants different creation behavior — none do today — still can without a
+ * second copy of this markup.
  */
 export function FirstAgentEmpty({
   title,
@@ -44,14 +47,14 @@ export function FirstAgentEmpty({
   );
 }
 
-/** Self-contained: the first-run empty state plus the zero-decision create
- *  itself — no wizard, no intermediate screen. Lands straight in the new
- *  agent's own Chat (the same front door every other path into an agent
- *  uses) rather than refreshing back into the list this was rendered on,
- *  because the useful outcome here is talking to the agent, not seeing a
- *  slightly-less-empty Inbox/Projects page. `onCreated` still fires first,
- *  best-effort, for a caller that wants it for something other than
- *  navigation (none do today, but the signature costs nothing to keep). */
+/** Self-contained: the first-run empty state plus AgentCreateCard. Lands
+ *  straight in the new agent's own Chat (the same front door every other
+ *  path into an agent uses) rather than refreshing back into the list this
+ *  was rendered on, because the useful outcome here is talking to the
+ *  agent, not seeing a slightly-less-empty Inbox/Projects page. `onCreated`
+ *  still fires first, best-effort, for a caller that wants it for
+ *  something other than navigation (none do today, but the signature
+ *  costs nothing to keep). */
 export function CreateFirstAgentEmpty({
   workspaceId,
   onCreated,
@@ -65,27 +68,20 @@ export function CreateFirstAgentEmpty({
 }) {
   const router = useRouter();
   const { projects } = useFleetProjects(workspaceId);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [cardOpen, setCardOpen] = useState(false);
 
-  async function create() {
-    if (busy) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const { agentId, projectId } = await createAgentQuickly(workspaceId, undefined, projects);
-      onCreated?.();
-      router.push(quickCreateAgentChatPath({ workspaceId, projectId, agentId }));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not create the agent.");
-      setBusy(false);
-    }
+  function handleAgentCreated(result: { agentId: string; projectId: string }) {
+    setCardOpen(false);
+    onCreated?.();
+    router.push(quickCreateAgentChatPath({ workspaceId, projectId: result.projectId, agentId: result.agentId }));
   }
 
   return (
     <>
-      <FirstAgentEmpty title={title} desc={desc} onCreate={create} busy={busy} />
-      {error && <p className="fleet-channel-expand-error">{error}</p>}
+      <FirstAgentEmpty title={title} desc={desc} onCreate={() => setCardOpen(true)} />
+      {cardOpen && (
+        <AgentCreateCard workspaceId={workspaceId} projects={projects} onClose={() => setCardOpen(false)} onCreated={handleAgentCreated} />
+      )}
     </>
   );
 }
