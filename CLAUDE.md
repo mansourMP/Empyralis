@@ -5510,3 +5510,40 @@ faster than its ICMP round-trip to the same origin IP once Cloudflare is in
 front — TLS/HTTP hits a nearby edge PoP, ICMP goes straight to origin
 (Cloudflare doesn't proxy ICMP). "Ping the origin" and "connect to the site"
 measure different paths; do not conflate them when reading a future probe.
+
+## Payment processor is Polar, not Stripe — and the reason is not preference (2026-08-20)
+
+**A complete, tested Stripe integration exists in this codebase
+(`billing_service.py`, 1627 lines) with ZERO Polar references anywhere.
+Do not read that as "Stripe is the plan." It is dead code the founder
+never touched — he onboarded as a merchant with Polar, in Polar's own
+dashboard, and no line of this repo talks to Polar yet.**
+
+The reason is not taste, it's geography: **Stripe is not directly
+available as a standalone merchant account in Uzbekistan** (not one of
+its ~46 fully-supported countries; only limited Global Payouts since Feb
+2026). **Polar is supported in Uzbekistan specifically because Polar is
+the Merchant of Record** — the customer pays Polar (a US entity), and
+Polar handles the underlying Stripe relationship via Stripe Connect
+Express on the founder's behalf. It is the only processor that lets the
+founder legally receive money from this product today.
+
+```
+Stripe integration in this repo    tested, wired, unreachable by the
+                                    founder as a standalone merchant
+Polar (founder's real account)     3 of 7 onboarding steps done,
+                                    no product created yet, zero code
+```
+
+Do not recommend shipping on the existing Stripe code as-is. The
+credit-crediting DB logic and webhook-shape reasoning in
+`billing_service.py` are a legitimate head start and worth reading before
+building the Polar integration, but the actual processor calls
+(checkout session creation, webhook signature verification, event names)
+must be swapped to Polar's API, verified against Polar's own current
+docs rather than assumed to mirror Stripe's shape.
+
+**Tier pricing is still not settled** ($20/$100/$200 was the founder
+thinking aloud, explicitly not final — see the pricing memory). Wire the
+mechanism generically enough to take real product/price IDs once he
+finishes Polar onboarding; do not hardcode invented numbers as final.
