@@ -302,7 +302,6 @@ test("openclaw transport claims exactly the platforms cut over 2026-08-14, and n
   // Cut over: their first-party implementation is deleted, OpenClaw is now
   // the live route for every one of these.
   for (const cutOver of [
-    "openclaw_telegram",
     "openclaw_whatsapp",
     "openclaw_signal",
     "openclaw_imessage",
@@ -315,7 +314,24 @@ test("openclaw transport claims exactly the platforms cut over 2026-08-14, and n
   // openclaw_channel_registry.OPENCLAW_CUT_OVER_CHANNEL_IDS's own comment for
   // why forcing them onto a hardware-bound transport would be a regression,
   // not an improvement.
-  for (const stillFirstParty of ["openclaw_discord", "openclaw_slack", "openclaw_sms"]) {
+  // telegram REJOINED this group 2026-08-20. It was cut over on 2026-08-14,
+  // and that swept away the unrelated, still-live hosted-bot lane
+  // (sage_telegram_hosted) along with the deleted gramjs personal-account
+  // one — a token collision is per PLATFORM, not per LANE. Net effect,
+  // verified live: a fresh cloud-only agent's Channels tab showed Telegram
+  // as "Needs Gateway" with no route to the paste-a-BotFather-token flow at
+  // all, i.e. exactly the "force an agent to acquire hardware it does not
+  // need, for a channel that already works" regression that keeps
+  // discord/slack/sms first-party. `openclaw_telegram` stays DECLARED and
+  // reachable for someone who deliberately wants Telegram bundled with
+  // their other OpenClaw channels on one box; it just never enters the live
+  // lane maps. See openclaw_channel_registry.OPENCLAW_CUT_OVER_CHANNEL_IDS.
+  for (const stillFirstParty of [
+    "openclaw_telegram",
+    "openclaw_discord",
+    "openclaw_slack",
+    "openclaw_sms",
+  ]) {
     assert.equal(keys.includes(stillFirstParty), false, `${stillFirstParty} stays first-party`);
   }
   setOpenClawTransportEnabled(false);
