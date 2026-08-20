@@ -1582,8 +1582,113 @@ function GeneralTab({
         <AgentTitle workspaceId={workspaceId} agentId={agentId} label={agent.label || ""} onRenamed={onRenamed} />
       )}
       {!isMaster && agent && (
+        <PurposeSection workspaceId={workspaceId} agentId={agentId} agent={agent} onSaved={onRenamed} />
+      )}
+      {!isMaster && agent && (
         <ScheduleSection workspaceId={workspaceId} agentId={agentId} />
       )}
+    </div>
+  );
+}
+
+// Server field: purpose_preset (customer_facing | internal_assistant |
+// operator) — seeds default instructions at creation only; changing it
+// here never rewrites instructions the owner already has. "operator" is
+// deliberately not offered — same reasoning as the (now-deleted)
+// create-agent wizard's own comment: the owner is the operator, and Sage/
+// the platform's own operator role is never a pick for a specialist. Each
+// remaining option carries its own `audience` (owner | external) — the
+// signal fleet_tools.resolve_agent_audience gates the Properties panel's
+// "Tools" row on, and a later credential/connector/memory resolver reads —
+// so changing the preset here always sends both fields together, matching
+// how fleet_create_agent pairs them at creation.
+const PURPOSE_OPTIONS: { value: "customer_facing" | "internal_assistant"; label: string; body: string; audience: "owner" | "external" }[] = [
+  { value: "customer_facing", label: "Customer Support", audience: "external", body: "Talks to your customers — kept separate from your private accounts." },
+  { value: "internal_assistant", label: "Personal Assistant", audience: "owner", body: "Works for you — trusted with your connected accounts and memory." },
+];
+
+function purposePresetFromAgent(agent: FleetAgent): "customer_facing" | "internal_assistant" {
+  return agent.purpose_preset === "customer_facing" ? "customer_facing" : "internal_assistant";
+}
+
+// This was completely unreachable before this change — purpose_preset was
+// only ever set once, at creation, by the (now-deleted) 4-step wizard. An
+// owner who created a Personal Assistant and later wanted Customer Support
+// had no way to change it short of a database edit. Same save-on-click
+// pattern as HardwareTab's own ACCESS_OPTIONS picker: no separate Save
+// button, optimistic local state, roll back on a failed PATCH.
+function PurposeSection({
+  workspaceId, agentId, agent, onSaved,
+}: {
+  workspaceId: string;
+  agentId: string;
+  agent: FleetAgent;
+  /** Called after a successful save so the caller can refetch — the
+   *  Properties column's "Tools" row (gated on agent.audience) reads off
+   *  the same `agent` prop and should catch up immediately, same reason
+   *  ModelTab/HardwareTab's own onSaved exists. */
+  onSaved?: () => void;
+}) {
+  const [preset, setPreset] = useState<string>(() => purposePresetFromAgent(agent));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Resync when the agent record (re)loads under us — e.g. a Cmd+K palette
+  // swap to a different agent — but never while a save is in flight.
+  useEffect(() => {
+    if (saving) return;
+    setPreset(purposePresetFromAgent(agent));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agent.purpose_preset]);
+
+  async function select(next: "customer_facing" | "internal_assistant") {
+    if (saving || next === preset) return;
+    const prior = preset;
+    const option = PURPOSE_OPTIONS.find((p) => p.value === next);
+    setPreset(next);
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
+        body: JSON.stringify({ patch: { purpose_preset: next, audience: option?.audience || "owner" } }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
+      onSaved?.();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not save.");
+      // Roll back to the last-known-saved value rather than leaving the
+      // picker pointed at a selection that didn't actually persist.
+      setPreset(prior);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div style={{ marginTop: 4 }}>
+      <div className="fleet-detail-section-title" style={{ marginTop: 0 }}>Purpose</div>
+      <div className="fleet-wizard-options">
+        {PURPOSE_OPTIONS.map((opt) => (
+          <button
+            key={opt.value}
+            type="button"
+            className={`fleet-wizard-option${preset === opt.value ? " is-selected" : ""}`}
+            disabled={saving}
+            onClick={() => void select(opt.value)}
+          >
+            <span className="fleet-wizard-option-label">{opt.label}</span>
+            <span className="fleet-wizard-option-body">{opt.body}</span>
+          </button>
+        ))}
+      </div>
+      <div style={{ marginTop: 8, minHeight: 20 }}>
+        {saving && <span className="fleet-channel-expand-hint" style={{ margin: 0 }}>Saving…</span>}
+        {error && <span className="fleet-channel-expand-error" style={{ margin: 0 }}>{error}</span>}
+      </div>
     </div>
   );
 }
