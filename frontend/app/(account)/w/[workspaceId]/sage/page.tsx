@@ -7,9 +7,8 @@ import { redirect } from "next/navigation";
  * Was `/agents` — changed 2026-08-13 (project-as-spine nav): Agents is no
  * longer a top-level, linked destination (it lives inside each project
  * now), so a stale bookmark should land somewhere still on the primary nav
- * rather than an orphaned page. The bare workspace route is FleetHome, the
- * genuine landing page (see that route's own comment) and works at any
- * agent count.
+ * rather than an orphaned page. The bare workspace route redirects into
+ * Projects (see that route's own comment) and works at any agent count.
  */
 export default async function SagePage({
   params,

@@ -1,18 +1,22 @@
 /**
  * next.config.ts's LEGACY_REDIRECTS unit test — guards against the bare
- * workspace route (`/w/:workspaceId`, no section segment) ever being
- * redirected away again.
+ * workspace route (`/w/:workspaceId`, no section segment) ever being made a
+ * next.config redirect SOURCE again.
  *
- * That redirect existed from Phase 7A (before FleetHome existed) until
- * 2026-08-13: frontend/app/(account)/w/[workspaceId]/page.tsx renders
- * FleetHome there ON PURPOSE ("workspace landing = Fleet Home, not a
- * redirect" — see that file's own comment, plus Breadcrumbs.tsx's), but
- * Next's redirects() runs ahead of the router, so the stale rule made that
- * page permanently unreachable — every fresh signup, and every visit to
- * the workspace root, was silently bounced into the Agents tab's empty
- * "No agents yet" state instead. A behavioral/e2e test would only catch
- * this by loading the real page; this catches it at the config layer,
- * where the actual regression happened.
+ * That redirect existed from Phase 7A until 2026-08-13, when it was
+ * removed because Next's redirects() runs ahead of the router — the stale
+ * rule made the workspace root page permanently unreachable — every fresh
+ * signup, and every visit to the workspace root, was silently bounced into
+ * the Agents tab's empty "No agents yet" state instead. A behavioral/e2e
+ * test would only catch this by loading the real page; this catches it at
+ * the config layer, where the actual regression happened.
+ *
+ * As of 2026-08-20 frontend/app/(account)/w/[workspaceId]/page.tsx renders
+ * no content of its own — it does a real Next.js page-level redirect()
+ * into /projects (see that file's own comment for why, and why that is a
+ * different, safe mechanism from the next.config trap this test guards
+ * against). The invariant this test checks is unchanged either way: the
+ * bare route itself must stay reachable, whatever it does once reached.
  *
  * Run: npx tsx next.config.test.ts
  */

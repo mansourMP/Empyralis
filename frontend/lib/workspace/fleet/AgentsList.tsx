@@ -551,7 +551,7 @@ function AgentRow({
   // applied at all here since ::first-letter doesn't run inside a flex
   // container (.fleet-badge is inline-flex). Doing it once in JS sidesteps
   // both problems.
-  const presetRaw = (agent.capability_preset || agent.purpose_preset || "").toLowerCase().replace(/_/g, " ");
+  const presetRaw = (agent.capability_preset || "").toLowerCase().replace(/_/g, " ");
   const preset = presetRaw ? presetRaw.charAt(0).toUpperCase() + presetRaw.slice(1) : "";
   const brain = brainLabel(agent.model_config);
   const channel = (agent.channel || "").trim();

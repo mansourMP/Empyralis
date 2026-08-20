@@ -13,8 +13,8 @@ import type {
 export type WorkspaceSetupFormValues = CreateWorkspaceInput;
 export type WorkspaceRouteMode = 'absolute' | 'relative';
 
-// '' normalizes to the bare workspace route (FleetHome) -- the workspace
-// itself is the landing, never the Agents tab. '/sage' is a redirect into
+// '' normalizes to the bare workspace route, which redirects into Projects
+// -- the workspace's real content, never the Agents tab. '/sage' is a redirect into
 // '/agents' now, not a page of its own; using it here would land every new
 // workspace on an empty "No agents yet" screen.
 export const DEFAULT_ROUTE_BY_PROFILE: Record<WorkspaceShellProfileId, string> = {
@@ -46,7 +46,7 @@ function normalizeWorkspaceRoute(
   relativeRoute: string,
   routeMode: WorkspaceRouteMode,
 ): string {
-  // '' means "the bare workspace route" (FleetHome) -- no suffix to append.
+  // '' means "the bare workspace route" (redirects into Projects) -- no suffix to append.
   const cleanRoute =
     relativeRoute === '' || relativeRoute.startsWith('/') ? relativeRoute : `/${relativeRoute}`;
   if (routeMode === 'relative') {

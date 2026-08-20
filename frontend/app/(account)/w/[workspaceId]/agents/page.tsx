@@ -64,9 +64,10 @@ export default function AgentsPage() {
 
   // MAN-317 — "the fleet table has one row. Decide what replaces it": with
   // exactly one real agent, THIS surface redirects straight to that
-  // agent's own chat page, same as the workspace root does in
-  // FleetHome.tsx — a table of one is worse than no table, whether a
-  // reader lands here via the rail, a bookmark, or a direct URL.
+  // agent's own chat page — a table of one is worse than no table, whether
+  // a reader lands here via the rail, a bookmark, or a direct URL. The
+  // workspace root does NOT do this (CLAUDE.md's own correction on this
+  // point): it always lands on Projects regardless of agent count.
   // Reversible for free: recomputed from the live count on every render,
   // so a second real agent appearing simply stops the redirect. Guarded on
   // `!loading` so the transient agents.length===0 during the initial fetch

@@ -132,10 +132,10 @@ export default function JoinWorkspaceInvitePage() {
       actions.replaceSession(bootstrap);
     }
     // Bare workspace route, not /agents (project-as-spine nav, 2026-08-13
-    // — Agents is no longer a top-level, linked destination): this is
-    // FleetHome, the genuine landing page, and it works at any agent
-    // count, including the zero a person just-invited-in almost always
-    // has.
+    // — Agents is no longer a top-level, linked destination): the bare
+    // route redirects into Projects, a real rail-linked surface, and it
+    // works at any agent count, including the zero a person
+    // just-invited-in almost always has.
     router.replace(`/w/${encodeURIComponent(result.workspace_id)}`);
     // `actions` is intentionally excluded: it's a new object identity on
     // every account-shell state change (see account-shell-context.tsx), and
