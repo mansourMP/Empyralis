@@ -6143,6 +6143,76 @@ question that is a product decision rather than a bug, add it here in the
 same turn. Do not answer it with a guess and do not let it live only in
 chat. He has explicitly said the recurrence is the cost he cares about.
 
+## Production `.env` IS A DECOY — both Telegram doors were dead (2026-08-20)
+
+**Verdict: `/opt/empyralis-app/.env` is never read by the production backend.
+Only 2 of its 42 keys were in the running process. Both Telegram doors — the
+founder's #1 launch channel — were non-functional, silently.**
+
+```
+runtime_config._should_load_dotenv()
+  true only for  dev|development|local|test|testing
+  production is  EMPYRALIS_DEPLOY_ENV=self-hosted     ─▶ dotenv NEVER loads
+                 (deliberate, MAN-202: an unscoped load once handed a
+                  worktree the real repo's DATABASE_URL)
+
+so the app's config is pm2's SAVED ENV, and .env is a file that looks
+configured, reads as configured, and is inert.
+
+  measured on the box:  .env keys 42   present in live process: 2
+```
+
+Proven by running the app's OWN code under the live process's exact
+environment (reconstructed from `/proc/<pid>/environ`, not a fresh shell):
+
+```
+BEFORE                              AFTER
+is_configured()      False          True                  hosted bot
+webhook_base_url()   ''             'https://empyralis.ai'  BYO bot
+```
+
+`is_configured()` false means the hosted bot could not authenticate to
+Telegram at all; `webhook_base_url()` empty means `assign_byo_bot` could
+never register a webhook, so "paste your token, done" failed for every
+customer. Telegram's webhook WAS registered (`getWebhookInfo` → the right
+URL, 0 pending, no errors) — registered out of band, which is why nothing
+looked broken from outside.
+
+**Two independent defects, and fixing either alone leaves it broken.**
+`webhook_base_url()` looks for `ORION_TELEGRAM_AUTOPILOT_PUBLIC_BASE_URL` /
+`EMPYRALIS_PUBLIC_BASE_URL` / `PUBLIC_BASE_URL`; `.env` defines
+`EMPYRALIS_BASE_URL` and `EMPYRALIS_PUBLIC_API_URL`. So even a correctly
+loaded `.env` would not have fixed the BYO door — a key-name mismatch, not
+a loading problem.
+
+**`register_webhook_if_configured` had ZERO callers** (the signature defect
+again), so no deploy ever re-registers the webhook. Change the domain or
+rotate the bot and inbound dies with nothing saying why. It is now the
+thing that registered the current webhook, which also guarantees Telegram's
+`secret_token` matches the app's — previously unknowable, and a mismatch
+would 403 every real message.
+
+**Fixed SURGICALLY — three vars, never a bulk `.env` load**, and that
+restraint is the point: `.env` also carries `ORION_JWT_SECRET` (injecting it
+would invalidate every live session) and `CLOUD_SESSION_MANAGER_ENABLED` (a
+flag this file records as deleted). Bulk-loading a file nobody has verified
+against the running process is how a config fix becomes an outage. Env was
+rebuilt from `/proc/<pid>/environ` read as NUL-delimited bytes — `tr '\0'
+'\n'` corrupts any value containing a newline and silently invents
+variables (it produced 17 bogus entries named `0`..`16` here).
+
+Three rules. **A config file's presence is not evidence it is loaded** —
+check the live process, not the file. **`pm2 restart --update-env` from a
+bare shell REPLACES the process env**, so it strips DATABASE_URL and every
+secret; `/root/pm2-env.sh` (0600) is the authoritative snapshot and
+DEPLOY-RUNBOOK.md §7 now says so. And **a registered webhook proves nothing
+about the app** — inbound can be perfectly routed to a process that cannot
+authenticate to reply.
+
+Not proven, and do not claim it: no message was sent from a real Telegram
+account, because that needs the founder's own. Everything up to the
+delivery boundary is verified; the reply leg is verified only by code path.
+
 ## Channels: Telegram + Slack. Discord is OUT. (2026-08-20)
 
 **Founder's decision, final:** *"Slack and Telegram is the way to go.
