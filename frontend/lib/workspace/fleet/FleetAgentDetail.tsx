@@ -4117,7 +4117,7 @@ import {
   FREEFORM_MODEL_PROVIDERS, modelsForProvider, defaultModelForProvider,
   isRecommendedModel, isLargeModel, LARGE_MODEL_WARNING,
   REASONING_EFFORT_OPTIONS, REASONING_EFFORT_SUPPORTED_MODES, reasoningEffortLabel,
-  CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME, type CliSubscriptionRuntime,
+  type CliSubscriptionRuntime,
 } from "./fleet-provider-constants";
 import {
   GatewayBoxPicker,
@@ -4528,30 +4528,22 @@ function ModelTab({
     );
   }
 
-  // cli_subscription's own picker (Phase 1: reasoning-effort control) — the
-  // paired Gateway's llm.generate now forwards this into the CLI's own
-  // --effort (claude_code) / -c model_reasoning_effort= (codex) /
-  // --reasoning-effort (grok_build) flag, so unlike platform_credits/byok_api
-  // this can't share REASONING_EFFORT_OPTIONS: each CLI accepts a genuinely
-  // different value set (verified live against each CLI's own --help/docs —
-  // see CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME's own docstring). Cursor CLI
-  // has no reasoning-effort control at all (empty options list), so this
-  // falls back to the same unsupported note "local" gets rather than
-  // rendering an empty, misleading <select>. Gated by cliRuntime, which
-  // already tracks the Subscription <select> above, so switching the
-  // subscription provider swaps the option list (or the note) live.
-  // The model's OWN live reasoning-effort vocabulary (2026-08-20) — codex
-  // app-server's real model/list RPC self-describes this per model, and the
-  // gateway now forwards it (empyralis-gateway/src/llm/codex-app-server.ts
-  // + runtime.ts). Verified live against a real authenticated Codex install:
-  // levels genuinely differ between two models on ONE account, and include
-  // values no static table here ever had ("ultra" on gpt-5.6-terra).
+  // cli_subscription's reasoning-effort picker. ONE ladder, always
+  // rendered, identical to the platform_credits/byok_api picker above —
+  // the founder removed the per-runtime split on 2026-08-20 (his words are
+  // quoted verbatim in REASONING_EFFORT_LADDER's comment in
+  // fleet-provider-constants.ts). The paired Gateway still translates the
+  // chosen level into the bound CLI's OWN flag (`--effort` for claude_code,
+  // `-c model_reasoning_effort=` for codex, `--reasoning-effort` for
+  // grok_build), clamping it into that CLI's own vocabulary first — the
+  // wire stays native, only the picker is uniform.
   //
-  // The three-state decision (live / static fallback / no control at all)
+  // The live catalog (codex app-server's model/list, forwarded by the
+  // gateway) now ENRICHES rather than RESTRICTS: it names the model's own
+  // default, relays the model's own prose per level, and appends any level
+  // the model reports that the shared ladder does not carry. That rule
   // lives in planCodexReasoningPicker so it is testable without a browser —
-  // do not re-derive it here. Its `none` case is the "no dead controls"
-  // product law: a model that positively reports zero levels gets no
-  // <select>, rather than the static ladder it does not implement.
+  // do not re-derive it here.
   function renderCliReasoningEffortPicker() {
     const plan = planCodexReasoningPicker({
       runtime: cliRuntime,
@@ -4559,16 +4551,6 @@ function ModelTab({
       models: codexModelCatalog.models,
       selectedModel,
     });
-    const options = plan.kind === "live" ? plan.options : CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME[cliRuntime];
-    if (plan.kind === "none" || options.length === 0) {
-      return (
-        <p className="fleet-channel-expand-hint">
-          {plan.kind === "none"
-            ? `${selectedModel} has no reasoning-effort levels to choose from.`
-            : `${RUNTIME_LABELS[cliRuntime]} has no reasoning-effort control today.`}
-        </p>
-      );
-    }
     return (
       <>
         <label className="fleet-wizard-label">Reasoning effort</label>
@@ -4577,14 +4559,16 @@ function ModelTab({
           value={reasoningEffort}
           onChange={(e) => { setReasoningEffort(e.currentTarget.value); setSaved(false); }}
         >
-          {options.map((o) => (
+          {plan.options.map((o) => (
             <option key={o.value || "unset"} value={o.value}>{o.label}</option>
           ))}
         </select>
         <p className="fleet-channel-expand-hint">
           {plan.kind === "live"
-            ? `Levels this exact model reports supporting, straight from your own Codex account.`
-            : `Higher effort can solve harder problems but costs more and replies slower. Passed straight to ${RUNTIME_LABELS[cliRuntime]}’s own reasoning control.`}
+            ? `Annotated with what this exact model reports from your own ${RUNTIME_LABELS[cliRuntime]} account. Levels it doesn’t report stay selectable — ${RUNTIME_LABELS[cliRuntime]} decides what to do with them.`
+            : cliRuntime === "cursor_cli"
+              ? `Higher effort can solve harder problems but costs more and replies slower. Cursor CLI publishes no reasoning-effort control, so it ignores this today.`
+              : `Higher effort can solve harder problems but costs more and replies slower. Passed to ${RUNTIME_LABELS[cliRuntime]}’s own reasoning control.`}
         </p>
       </>
     );
@@ -4805,44 +4789,68 @@ function ModelTab({
               on whatever the CLI's own default happened to be. See
               MODELS_BY_PROVIDER's doc comment in fleet-provider-constants.ts
               for how each runtime's catalog (or lack of one) was sourced. */}
-          {FREEFORM_MODEL_PROVIDERS.has(provider) ? (
-            <>
-              <label className="fleet-wizard-label">Model ID (optional)</label>
-              <input
-                className="fleet-wizard-input"
-                value={selectedModel}
-                onChange={(e) => { setSelectedModel(e.currentTarget.value); setSaved(false); }}
-                placeholder="Leave blank to use the CLI's own default"
-              />
-              <p className="fleet-channel-expand-hint">
-                {RUNTIME_LABELS[cliRuntime]} has no published model-id catalog — enter one only if you know it accepts it.
-              </p>
-            </>
-          ) : (() => {
-            // URGENT fix (2026-08-14): for Codex, show what the paired box's
-            // OWN CLI reports it can actually run right now, not the static
-            // MODELS_BY_PROVIDER mirror — that mirror is exactly what let
-            // "gpt-5.4" (retired by OpenAI, unusable under this account's
-            // auth mode) sit in this list looking like a normal choice. See
-            // useCodexModelCatalog's doc comment in fleet-model-config.ts.
-            const liveModels = provider === "openai-codex" ? visibleCodexModels(codexModelCatalog) : null;
-            const options = liveModels
-              ? liveModels.map((m) => ({ id: m.id, label: m.isDefault ? `${m.displayName} (Recommended)` : m.displayName }))
-              : modelsForProvider(provider).map((m) => ({ id: m, label: modelOptionLabel(provider, m) }));
-            const showStaleNote = provider === "openai-codex" && !liveModels;
+          {(() => {
+            // The paired box's OWN CLI reports what it can actually run right
+            // now — asked in each CLI's own native way (codex's app-server
+            // model/list RPC, `cursor-agent models`, `grok models`; see the
+            // gateway's cli-model-list.ts). This replaced a hand-typed mirror
+            // that had already rotted: "gpt-5.4", retired by OpenAI and
+            // unusable under this account's auth mode, sat in the list
+            // looking like a normal choice.
+            const liveModels = visibleCodexModels(codexModelCatalog);
+            if (liveModels) {
+              const options = liveModels.map((m) => ({
+                id: m.id,
+                label: m.isDefault ? `${m.displayName} (Recommended)` : m.displayName,
+              }));
+              return (
+                <>
+                  <label className="fleet-wizard-label">Model</label>
+                  <select className="fleet-wizard-input" value={selectedModel} onChange={(e) => { setSelectedModel(e.currentTarget.value); setSaved(false); }}>
+                    {options.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+                  </select>
+                  <ModelSizeWarning provider={provider} model={selectedModel} />
+                </>
+              );
+            }
+            // No live catalog. For a runtime with no published model-id
+            // vocabulary either, a free-text field is the honest control —
+            // a <select> of guessed ids would hand the CLI a value it may
+            // not recognize. Where the CLI said WHY (Cursor's own "No models
+            // available for this account."), relay its words rather than our
+            // guess at them.
+            if (FREEFORM_MODEL_PROVIDERS.has(provider)) {
+              return (
+                <>
+                  <label className="fleet-wizard-label">Model ID (optional)</label>
+                  <input
+                    className="fleet-wizard-input"
+                    value={selectedModel}
+                    onChange={(e) => { setSelectedModel(e.currentTarget.value); setSaved(false); }}
+                    placeholder="Leave blank to use the CLI's own default"
+                  />
+                  <p className="fleet-channel-expand-hint">
+                    {codexModelCatalog.reason
+                      || (effectiveGatewayId
+                        ? `Couldn’t read this computer’s ${RUNTIME_LABELS[cliRuntime]} models right now — enter one only if you know it accepts it.`
+                        : `Pick a computer below to see this account’s real, currently-usable ${RUNTIME_LABELS[cliRuntime]} models.`)}
+                  </p>
+                </>
+              );
+            }
+            const options = modelsForProvider(provider).map((m) => ({ id: m, label: modelOptionLabel(provider, m) }));
             return (
               <>
                 <label className="fleet-wizard-label">Model</label>
                 <select className="fleet-wizard-input" value={selectedModel} onChange={(e) => { setSelectedModel(e.currentTarget.value); setSaved(false); }}>
                   {options.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
                 </select>
-                {showStaleNote && (
-                  <p className="fleet-channel-expand-hint">
-                    {effectiveGatewayId
-                      ? "Couldn't check this computer's actual Codex models right now — this list may include models that have since been renamed or retired."
-                      : "Pick a computer below to see this account's real, currently-usable Codex models."}
-                  </p>
-                )}
+                <p className="fleet-channel-expand-hint">
+                  {codexModelCatalog.reason
+                    || (effectiveGatewayId
+                      ? "Couldn't check this computer's actual models right now — this list may include models that have since been renamed or retired."
+                      : "Pick a computer below to see this account's real, currently-usable models.")}
+                </p>
                 <ModelSizeWarning provider={provider} model={selectedModel} />
               </>
             );

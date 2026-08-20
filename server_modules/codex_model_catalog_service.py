@@ -45,7 +45,21 @@ DEFAULT_TIMEOUT_SECONDS = 20
 # cli_subscription runtimes this capability can answer for today — mirrors
 # runtime.ts's own MODEL_LIST_CAPABLE_RUNTIMES so a caller can short-circuit
 # without a round trip for a runtime we already know has no live catalog.
-LIVE_MODEL_LIST_CAPABLE_RUNTIMES = frozenset({"codex"})
+#
+# Each is asked in ITS OWN native way on the box; nothing here normalises
+# them into a shared protocol (founder, 2026-08-20: "we are going to make it
+# work by how THEY provide the specific thing"):
+#   codex       `codex app-server` JSON-RPC model/list  — structured, and the
+#               only one carrying per-model reasoning-effort data
+#   cursor_cli  `cursor-agent models`  ("List available models for this
+#               account" — its own --help, read live 2026-08-20)
+#   grok_build  `grok models`          ("List available models and exit" —
+#               same, and verified live returning a real catalog)
+# claude_code is deliberately absent: `claude` is a compiled binary with no
+# models subcommand and no --list-models flag, so there is nothing to ask.
+# Filling it in from documentation would be transcription, which CLAUDE.md
+# already rules out as a source of truth.
+LIVE_MODEL_LIST_CAPABLE_RUNTIMES = frozenset({"codex", "cursor_cli", "grok_build"})
 
 
 class CodexModelCatalogError(RuntimeError):
@@ -85,7 +99,15 @@ async def fetch_codex_model_catalog(
     check right now" (the picker's own honest fallback).
     """
     if str(runtime or "").strip().lower() not in LIVE_MODEL_LIST_CAPABLE_RUNTIMES:
-        return {"supported": False, "auth_method": None, "models": []}
+        return {
+            "supported": False,
+            "auth_method": None,
+            "models": [],
+            "reason": (
+                f"No live model catalog exists for runtime \"{runtime}\" — "
+                "its CLI publishes no way to ask."
+            ),
+        }
 
     run_id = f"llm-models-list-{uuid4().hex[:12]}"
     trace_id = run_id

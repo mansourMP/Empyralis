@@ -112,19 +112,23 @@ export interface CliRunParams {
   /** Explicit model override. Empty means "let the CLI use its own default"
    *  — never fabricate a model name the CLI wouldn't recognize. */
   model?: string;
-  /** Reasoning-effort override, verified live against each CLI's own --help.
-   *  The two runtimes are DIFFERENT controls with different flags and
-   *  different accepted vocabularies — never flattened to one shape:
-   *    - claude_code: "low" | "medium" | "high" | "xhigh" | "max"
-   *      (no "off"/"minimal" — the Claude CLI's --effort has no such value).
-   *    - codex:       "off" | "minimal" | "low" | "medium" | "high" |
-   *                   "xhigh" | "max" (codex's own ReasoningEffort enum —
-   *                   see codex-app-server.ts's identical comment).
-   *  Validation of which value is legal for which runtime happens upstream
-   *  (server_modules/fleet_tools.py, server_modules/sage_agent_runtime_
-   *  service.py) — this module trusts what it's given and only decides
-   *  WHETHER to append a flag at all (empty/unset means "let the CLI use its
-   *  own configured default", same convention as `model` above). */
+  /** Reasoning-effort override, ALREADY CLAMPED into this runtime's own
+   *  native vocabulary by the control plane before it gets here — see
+   *  sage_agent_runtime_service.clamp_cli_reasoning_effort. The customer now
+   *  picks from ONE shared ladder regardless of which subscription is bound
+   *  (founder's rule, 2026-08-20), so a level THIS CLI's flag cannot accept
+   *  is an ordinary occurrence upstream and is resolved there; what reaches
+   *  this module is always a value the flag takes, or "".
+   *
+   *  The flags themselves stay genuinely different and are never flattened:
+   *    - claude_code: `--effort <level>`               low..max
+   *    - codex:       `-c model_reasoning_effort=`     off/minimal/low..max
+   *    - grok_build:  `--reasoning-effort <level>`     none/minimal/low..max
+   *    - cursor_cli:  NO FLAG EXISTS — nothing is appended, ever.
+   *
+   *  Empty/unset means "let the CLI use its own configured default", same
+   *  convention as `model` above. This module trusts what it is given and
+   *  only decides WHETHER to append a flag at all. */
   reasoningEffort?: string;
   timeoutMs: number;
 }
@@ -476,6 +480,35 @@ function spawnAndCollect(
   });
 }
 
+/** One event per line for the CLIs that emit a JSONL stream (claude_code,
+ *  codex), plus a whole-document fallback for the ones that PRETTY-PRINT a
+ *  single object.
+ *
+ *  The fallback is not defensive padding — it fixes a live, total BYO
+ *  failure found 2026-08-20 by driving a real signed-in `grok` through this
+ *  exact function. `grok -p <prompt> --output-format json` (0.2.112) emits
+ *  ONE indented JSON document, observed verbatim:
+ *
+ *      {
+ *        "text": "PONG",
+ *        "stopReason": "EndTurn",
+ *        ...
+ *      }
+ *
+ *  Line-scanning that yields ZERO events — the first line is a bare "{",
+ *  which JSON.parse rejects, and no other line starts with "{" — so
+ *  parseGrokBuildOutput threw `grok exited with code 0 and no parsable
+ *  result` on a turn the CLI had completed perfectly, with a real answer and
+ *  real usage sitting unread in stdout. Every grok_build turn failed that
+ *  way, on every box, since the runtime shipped.
+ *
+ *  (grok's own --help lists `streaming-json` as a separate output format —
+ *  that is the line-delimited one. Rather than switch formats and re-derive
+ *  a different envelope, this reads what the format we already ask for
+ *  actually produces.)
+ *
+ *  The fallback only fires when line-scanning found nothing, so a genuine
+ *  JSONL stream is untouched: claude_code and codex never reach it. */
 function parseJsonLines(raw: string): Record<string, unknown>[] {
   const events: Record<string, unknown>[] = [];
   for (const line of raw.split("\n")) {
@@ -492,6 +525,21 @@ function parseJsonLines(raw: string): Record<string, unknown>[] {
       // Stray non-JSON noise on stdout — never let one bad line corrupt an
       // otherwise-valid stream. The events we key off are looked up below;
       // if none are found, that's handled as a crash, not swallowed.
+    }
+  }
+  if (events.length === 0) {
+    const whole = raw.trim();
+    if (whole.startsWith("{")) {
+      try {
+        const parsed = JSON.parse(whole);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          events.push(parsed as Record<string, unknown>);
+        }
+      } catch {
+        // Not a whole JSON document either. Callers already treat "no
+        // events" as a crash with the CLI's own stderr attached, which is
+        // the honest outcome — never a fabricated empty success.
+      }
     }
   }
   return events;

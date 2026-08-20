@@ -2573,7 +2573,19 @@ class ResolveSdkEffortTests(unittest.TestCase):
         # from before the vocabulary was defined) must not silently become
         # valid here.
         self.assertIsNone(claude_agent_sdk_bridge.resolve_sdk_effort("banana"))
-        self.assertIsNone(claude_agent_sdk_bridge.resolve_sdk_effort("ultra"))
+
+    def test_ultra_clamps_to_max_rather_than_being_treated_as_unrecognized(self):
+        """SPLIT OUT of the test above on 2026-08-20. "ultra" used to be
+        garbage here and is now a real rung of the shared, always-offered
+        ladder (founder's rule — see fleet-provider-constants.ts's
+        REASONING_EFFORT_LADDER). The SDK's own EffortLevel union still has
+        no such member, and an Anthropic-served turn never reaches
+        openai_compat_adapter's system-instruction fallback — so returning
+        None here would make the picker's top rung do nothing at all on
+        exactly that path. It clamps to the SDK's own ceiling instead.
+        "banana" above is still None: only a level KNOWN to mean "more than
+        max" clamps, never anything merely unrecognized."""
+        self.assertEqual(claude_agent_sdk_bridge.resolve_sdk_effort("ultra"), "max")
 
 
 class RunClaudeAgentSdkTurnReasoningEffortTests(unittest.TestCase):

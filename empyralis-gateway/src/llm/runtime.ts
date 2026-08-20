@@ -3,6 +3,7 @@ import { runCliSubscription, CliRunError, type CliRunResult, type CliSubscriptio
 import { sharedCodexAppServer, codexAppServerEnabled, type CodexModelListResult } from "./codex-app-server";
 import { sharedClaudeCliPrewarmPool, claudeCliPrewarmEnabled } from "./claude-cli-prewarm";
 import { invalidatePassiveInventoryCache } from "../health/service-inventory";
+import { listModelsViaCli, TEXT_MODEL_LIST_RUNTIMES, type CliModelListOutcome } from "./cli-model-list";
 
 // BYO-brain Phase 2: the on-box LLM capability. This runs on the USER's paired
 // box and forwards a turn to the box's OWN local Ollama endpoint
@@ -31,14 +32,21 @@ export const LLM_MODELS_LIST_CAPABILITY = "llm.models.list";
 
 const SUPPORTED_CAPABILITIES = [LLM_GENERATE_CAPABILITY, LLM_MODELS_LIST_CAPABILITY];
 
-/** Runtimes this Gateway can enumerate a live model catalog for. Codex is
- *  the only one with a proven, non-inference introspection RPC (verified
- *  live against codex 0.144.1's `model/list` — see codex-app-server.ts).
- *  claude_code/grok_build/cursor_cli have no equivalent verified here yet;
- *  handleCapabilityInvoke returns an honest "not available" result for
- *  them rather than guessing, per this fix's own rule against fabricating
- *  a list. */
-const MODEL_LIST_CAPABLE_RUNTIMES = new Set(["codex"]);
+/** Runtimes this Gateway can enumerate a live model catalog for, each asked
+ *  in ITS OWN native way — never normalised into one protocol:
+ *
+ *    codex        `codex app-server` JSON-RPC `model/list`  (codex-app-server.ts)
+ *    cursor_cli   `cursor-agent models`                     (cli-model-list.ts)
+ *    grok_build   `grok models`                             (cli-model-list.ts)
+ *    claude_code  — nothing to ask. `claude` is a compiled binary with no
+ *                 models subcommand and no --list-models flag, so this
+ *                 returns an honest "not available" rather than a list
+ *                 transcribed from documentation.
+ *
+ *  Only codex's catalog carries per-model reasoning-effort data; the other
+ *  two print ids and a default, which is exactly what they publish and all
+ *  the picker needs from them. */
+const MODEL_LIST_CAPABLE_RUNTIMES = new Set(["codex", ...TEXT_MODEL_LIST_RUNTIMES]);
 
 const DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 const DEFAULT_MODEL = "llama3.2";
@@ -100,6 +108,9 @@ export interface GatewayLLMRuntimeConfig {
   /** Injectable for tests. Defaults to the shared codex app-server daemon's
    *  own listModels(). */
   codexModelsListImpl?: () => Promise<CodexModelListResult>;
+  /** Injectable for tests. Defaults to spawning each runtime's own native
+   *  `models` subcommand — see cli-model-list.ts. */
+  cliModelsListImpl?: (runtime: string) => Promise<CliModelListOutcome>;
 }
 
 function requireObject(value: unknown, message: string): Record<string, unknown> {
@@ -225,6 +236,7 @@ export class GatewayLLMRuntime {
   // Undefined until wired, and safely a no-op if it never is.
   private publishChunk?: (payload: { request_id: string; delta: string }) => Promise<void>;
   private readonly codexModelsListImpl: () => Promise<CodexModelListResult>;
+  private readonly cliModelsListImpl: (runtime: string) => Promise<CliModelListOutcome>;
 
   constructor(config: GatewayLLMRuntimeConfig = {}) {
     this.ollamaBaseUrl = (
@@ -237,6 +249,7 @@ export class GatewayLLMRuntime {
     this.cliRunner = config.cliRunner ?? runCliSubscription;
     this.invalidateReadinessCache = config.invalidateReadinessCache ?? invalidatePassiveInventoryCache;
     this.codexModelsListImpl = config.codexModelsListImpl ?? (() => sharedCodexAppServer().listModels());
+    this.cliModelsListImpl = config.cliModelsListImpl ?? ((runtime: string) => listModelsViaCli(runtime));
   }
 
   /** Wires the ability to stream partial-text `tool.invoke.chunk` events for
@@ -326,6 +339,36 @@ export class GatewayLLMRuntime {
           ? `This Gateway has no live model catalog for runtime "${runtime}" — no verified, non-inference way to ask it exists yet.`
           : "runtime is required.",
         models: [],
+      };
+    }
+    if (TEXT_MODEL_LIST_RUNTIMES.has(runtime)) {
+      // These CLIs print human text, not JSON, and answer for whatever
+      // account the box is signed into. A zero-model answer comes back as
+      // supported:false carrying the CLI's OWN sentence (e.g. "No models
+      // available for this account.") rather than as an empty catalog — an
+      // empty dropdown is a dead control, a relayed sentence is a fact.
+      const outcome = await this.cliModelsListImpl(runtime);
+      return {
+        supported: outcome.supported,
+        ...(outcome.reason ? { reason: outcome.reason } : {}),
+        // Deliberately null, not "": these runtimes publish no auth-mode
+        // field the way codex's model/list does, and inventing one would be
+        // a claim we cannot support.
+        auth_method: null,
+        models: outcome.models.map((m) => ({
+          id: m.id,
+          display_name: m.displayName,
+          description: "",
+          hidden: false,
+          is_default: m.isDefault,
+          default_reasoning_effort: "",
+          // NULL, never [] — "this runtime does not publish reasoning
+          // levels" is the same fact as "we could not tell you", and must
+          // never be flattened into the empty array that would mean the
+          // model positively reported none. See CodexModelListEntry's own
+          // field comment.
+          supported_reasoning_efforts: null,
+        })),
       };
     }
     const result = await this.codexModelsListImpl();

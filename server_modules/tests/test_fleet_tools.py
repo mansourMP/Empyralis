@@ -1888,12 +1888,35 @@ class FleetConfigureAgentReasoningEffortValidationTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("reasoning_effort", result["error"])
 
-    def test_cli_subscription_cursor_cli_rejects_any_reasoning_effort(self):
-        """Cursor CLI has no reasoning-effort flag documented at all — same
-        empty-set treatment as "local" (Ollama)."""
+    def test_cli_subscription_cursor_cli_accepts_the_shared_ladder(self):
+        """INVERTED 2026-08-20, not deleted. This used to assert that
+        cursor_cli REJECTED every reasoning_effort, because Cursor's CLI
+        publishes no reasoning flag. The founder overrode that: one shared
+        ladder, offered for every runtime ("If it works, it works otherwise
+        you can still choose it"). Cursor still drops the value on the wire
+        — that is reported to the customer in the picker's own hint — but a
+        save must not fail, or the offered control could never be used."""
         result = self._configure({"mode": "cli_subscription", "runtime": "cursor_cli", "reasoning_effort": "low"})
-        self.assertFalse(result["ok"])
-        self.assertIn("reasoning_effort", result["error"])
+        self.assertTrue(result["ok"], result.get("error"))
+
+    def test_every_cli_runtime_accepts_every_rung_of_the_shared_ladder(self):
+        """The founder's rule as one assertion: the ladder is never narrowed
+        per provider. If this fails, some runtime is offering a level in the
+        UI that its own save path rejects — a dead control with a 400."""
+        for runtime in ("claude_code", "codex", "grok_build", "cursor_cli"):
+            for effort in ("low", "medium", "high", "xhigh", "max", "ultra"):
+                result = self._configure({
+                    "mode": "cli_subscription", "runtime": runtime, "reasoning_effort": effort,
+                })
+                self.assertTrue(result["ok"], f"{runtime}/{effort}: {result.get('error')}")
+
+    def test_a_legacy_runtime_only_value_still_validates(self):
+        """A codex agent saved on "minimal" before the ladder was unified
+        must keep validating — the native rungs stay accepted even though no
+        picker offers them any more."""
+        self.assertTrue(self._configure({
+            "mode": "cli_subscription", "runtime": "codex", "reasoning_effort": "minimal",
+        })["ok"])
 
     def test_local_mode_rejects_any_reasoning_effort(self):
         """Ollama has no CLI reasoning-effort control today — same boundary

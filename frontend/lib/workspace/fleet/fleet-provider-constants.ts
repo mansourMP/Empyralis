@@ -243,30 +243,61 @@ export function defaultModelForProvider(providerId: string): string {
 }
 
 // ── Reasoning effort (Fleet Model tab, model_config.reasoning_effort) ──────
-// The SDK's own EffortLevel set (claude_agent_sdk/types.py:
-// Literal["low", "medium", "high", "xhigh", "max"]) — reasoning depth is an
-// SDK-level concept, so this list is all five levels it accepts, no
-// per-provider narrowing. "" means no override (provider/model default,
-// which the SDK documents as "high"), same convention as an unset
-// model_config.model.
-export type ReasoningEffort = "" | "low" | "medium" | "high" | "xhigh" | "max";
+// ONE LADDER, EVERY MODE, EVERY PROVIDER, ALWAYS SELECTABLE.
+//
+// Founder's rule, 2026-08-20, and it OVERRIDES the per-provider vocabularies
+// that used to live here: "I'm not going to change this effort level based
+// on like separated for each one provider... low medium high, extra high max
+// and ultra. If it works, it works otherwise you can still choose it — for
+// example that's how it works inside this Claude Code even if I use it with
+// DeepSeek, it doesn't have any effort level."
+//
+// So the PICKER is uniform and the WIRE stays native:
+//
+//   UI (this ladder)      low  medium  high  xhigh  max  ultra
+//          │
+//          ▼  clamped per runtime/provider at the seam that actually sends
+//   claude_code           low  medium  high  xhigh  max          ultra→max
+//   codex     off minimal low  medium  high  xhigh  max          ultra→max
+//   grok_build none minimal low medium high  xhigh  max          ultra→max
+//   cursor_cli            (no reasoning flag exists — nothing is appended)
+//   byok/platform         provider_profiles.reasoning_effort_levels_for_model
+//                         → native param, else a system-prompt instruction
+//
+// This is NOT a "no dead controls" violation: on the byok/platform path an
+// unsupported level degrades to a strong system instruction rather than
+// doing nothing (openai_compat_adapter._apply_reasoning_effort). On the
+// cli_subscription path it is passed to the CLI's own flag after being
+// clamped into that CLI's own vocabulary. cursor_cli is the ONE genuine
+// exception — Cursor's CLI publishes no reasoning control at all, so the
+// value is dropped there; that is reported honestly rather than papered
+// over by inventing a control Cursor does not provide.
+export type ReasoningEffort = "" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+
+/** The single shared ladder. Ordered weakest→strongest; the clamp seams read
+ *  that order. Never narrowed per provider — see the block comment above. */
+export const REASONING_EFFORT_LADDER: readonly ReasoningEffort[] = [
+  "low", "medium", "high", "xhigh", "max", "ultra",
+] as const;
 
 export const REASONING_EFFORT_OPTIONS: { value: ReasoningEffort; label: string }[] = [
   { value: "", label: "Model default" },
   { value: "low", label: "Low" },
   { value: "medium", label: "Medium" },
   { value: "high", label: "High" },
-  { value: "xhigh", label: "Extra high (Opus 4.7; falls back to High)" },
+  { value: "xhigh", label: "Extra high" },
   { value: "max", label: "Max" },
+  { value: "ultra", label: "Ultra" },
 ];
 
 // Superset label map — every value ANY reasoning-effort vocabulary in this
-// codebase can produce (the platform_credits/byok_api set above, PLUS
-// cli_subscription's off/minimal/max — see CLI_REASONING_EFFORT_OPTIONS_BY_
-// RUNTIME below). One shared map so a value coined under one mode always
-// renders the same human label wherever it's displayed (e.g. the Model
-// tab's "Current state" summary), even after the agent's mode has since
-// changed to one with a narrower picker.
+// codebase can produce. That is the shared ladder above PLUS the extra
+// levels an individual CLI natively accepts and may still have SAVED on an
+// agent from before the ladder was unified (codex's off/minimal, Grok's
+// none). Those legacy values are no longer OFFERED by any picker, but they
+// must still render as themselves wherever an already-saved value is
+// displayed (e.g. the Model tab's "Current state" summary) rather than
+// silently reading as "Model default".
 const REASONING_EFFORT_LABELS: Record<string, string> = {
   "": "Model default",
   none: "None",
@@ -277,75 +308,37 @@ const REASONING_EFFORT_LABELS: Record<string, string> = {
   high: "High",
   xhigh: "Extra high",
   max: "Max",
+  ultra: "Ultra",
 };
 
 export function reasoningEffortLabel(value: string): string {
   return REASONING_EFFORT_LABELS[value] || "Model default";
 }
 
-// Which model_config modes apply reasoning_effort via the SHARED
-// platform_credits/byok_api picker (REASONING_EFFORT_OPTIONS) — see
-// sage_agent_runtime_service.py's handle_sage_chat / _run_sage_action_
-// loop_v3: both reach stream_provider_backed_direct_chat, which applies
-// this natively for models it recognizes as reasoning-capable and as a
-// soft system-prompt instruction otherwise. cli_subscription has its OWN,
-// runtime-gated picker and vocabulary instead (see
-// CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME below — claude_code and codex
-// accept genuinely different values, verified live against each CLI's own
-// --help, so it can't share this flat list). local (Ollama) still has no
+// Which model_config modes apply reasoning_effort through the CLOUD provider
+// call — see sage_agent_runtime_service.py's handle_sage_chat /
+// _run_sage_action_loop_v3: both reach stream_provider_backed_direct_chat,
+// which applies this natively for models whose provider exposes the wire
+// param and as a strong system-prompt instruction otherwise. cli_subscription
+// applies the SAME ladder but through the CLI's own flag on the paired box
+// (see CLI_REASONING_EFFORT_OPTIONS below); local (Ollama) still has no
 // reasoning-effort control at all today.
 export const REASONING_EFFORT_SUPPORTED_MODES: ReadonlySet<ProviderMode> = new Set<ProviderMode>([
   "platform_credits",
   "byok_api",
 ]);
 
-// cli_subscription's reasoning-effort picker — the owner's own Claude Code /
-// Codex / Grok Build / Cursor CLI, spawned on their paired Gateway (BYO-brain
-// Phase 3). Verified live against each CLI's own --help/docs — genuinely
-// different vocabularies, never flattened to one shared list:
-//   - claude_code: `claude --effort <level>` — low/medium/high/xhigh/max.
-//     No "off"/"minimal" — the flag has no such value.
-//   - codex: `codex exec -c model_reasoning_effort=<level>` — codex's own
-//     ReasoningEffort enum (off/minimal/low/medium/high/xhigh/max — see
-//     empyralis-gateway/src/llm/codex-app-server.ts's identical comment).
-//   - grok_build: `grok --reasoning-effort <level>` — Grok's own canonical
-//     vocabulary (none/minimal/low/medium/high/xhigh/max — docs.x.ai/build's
-//     headless-mode guide, fetched 2026-07-24).
-//   - cursor_cli: no reasoning-effort control documented at all (empty list
-//     — the picker hides for it, same treatment "local" already gets).
-// Mirrors sage_agent_runtime_service.py's and fleet_tools.py's
-// _VALID_CLI_REASONING_EFFORTS_BY_RUNTIME (same duplicate-but-documented-
-// across-layers pattern as RUNTIME_FOR_PROVIDER, not a shared import).
+// cli_subscription's reasoning-effort picker. There used to be FOUR lists
+// here, one per runtime, each transcribed from that CLI's own --help. The
+// founder removed that split on 2026-08-20 (see REASONING_EFFORT_LADDER's
+// block comment above for his words): the customer sees ONE ladder no matter
+// which subscription is bound, and the per-runtime vocabulary lives at the
+// seam that actually sends the value, not in the picker.
+//
+// The runtime union stays — it is still the axis for binaries, login methods
+// and model catalogs, just no longer for this list.
 export type CliSubscriptionRuntime = "claude_code" | "codex" | "grok_build" | "cursor_cli";
 
-export const CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME: Record<CliSubscriptionRuntime, { value: string; label: string }[]> = {
-  claude_code: [
-    { value: "", label: "Model default" },
-    { value: "low", label: "Low" },
-    { value: "medium", label: "Medium" },
-    { value: "high", label: "High" },
-    { value: "xhigh", label: "Extra high" },
-    { value: "max", label: "Max" },
-  ],
-  codex: [
-    { value: "", label: "Model default" },
-    { value: "off", label: "Off" },
-    { value: "minimal", label: "Minimal" },
-    { value: "low", label: "Low" },
-    { value: "medium", label: "Medium" },
-    { value: "high", label: "High" },
-    { value: "xhigh", label: "Extra high" },
-    { value: "max", label: "Max" },
-  ],
-  grok_build: [
-    { value: "", label: "Model default" },
-    { value: "none", label: "None" },
-    { value: "minimal", label: "Minimal" },
-    { value: "low", label: "Low" },
-    { value: "medium", label: "Medium" },
-    { value: "high", label: "High" },
-    { value: "xhigh", label: "Extra high" },
-    { value: "max", label: "Max" },
-  ],
-  cursor_cli: [],
-};
+export const CLI_REASONING_EFFORT_OPTIONS: { value: string; label: string }[] = REASONING_EFFORT_OPTIONS.map(
+  (o) => ({ value: o.value, label: o.label }),
+);

@@ -14,6 +14,14 @@
  * "a fixture that invents its own input cannot notice the real input is
  * shaped differently."
  *
+ * WHAT CHANGED 2026-08-20 (founder override): these assertions used to
+ * require the picker to RESTRICT itself to whatever the live catalog
+ * reported, and to render NOTHING when a model reported zero levels. The
+ * founder overrode that — one shared ladder, always selectable, never
+ * narrowed per provider or per model. The assertions below were INVERTED
+ * rather than deleted so the old, overridden behaviour cannot be
+ * reinstated by accident.
+ *
  * Run: npx tsx lib/workspace/fleet/codex-reasoning-options.test.ts
  */
 
@@ -21,6 +29,11 @@ import {
   planCodexReasoningPicker,
   type CodexReasoningCatalogEntry,
 } from "./codex-reasoning-options";
+import { REASONING_EFFORT_LADDER } from "./fleet-provider-constants";
+
+/** The expected set is built from the REAL shared constant, never retyped —
+ *  otherwise this file could only ever confirm itself. */
+const LADDER: string[] = ["", ...(REASONING_EFFORT_LADDER as readonly string[])];
 
 let passed = 0;
 let failed = 0;
@@ -36,9 +49,9 @@ function assert(condition: boolean, label: string): void {
 
 // --- Observed live, 2026-08-20, verbatim from a real model/list response ---
 // gpt-5.6-terra is the account's own default model, and "ultra" is a real
-// level on it that exists in no documentation and in no static table in
-// this codebase. If this test ever has to be "fixed" by removing ultra,
-// the fix is wrong: the whole point is that the level set is open.
+// level on it that exists in no documentation. It is now also a rung of the
+// shared ladder — which is exactly why the ladder has to stay OPEN at the
+// bottom: the next such level will not be on it either.
 const LIVE_TERRA: CodexReasoningCatalogEntry = {
   id: "gpt-5.6-terra",
   defaultReasoningEffort: "medium",
@@ -53,8 +66,8 @@ const LIVE_TERRA: CodexReasoningCatalogEntry = {
 };
 
 // Same account, different model, genuinely DIFFERENT level set (4, no
-// max/ultra) — this is the observed fact that makes a single global ladder
-// wrong by construction, not a hypothetical.
+// max/ultra). Under the old rule this NARROWED the picker. Under the
+// founder's rule it only means there is less to annotate.
 const LIVE_GPT55: CodexReasoningCatalogEntry = {
   id: "gpt-5.5",
   defaultReasoningEffort: "medium",
@@ -81,81 +94,135 @@ function planFor(models: readonly CodexReasoningCatalogEntry[], selectedModel: s
   return planCodexReasoningPicker({ runtime: "codex", catalogSupported: true, models, selectedModel });
 }
 
-// --- live: the model's own vocabulary wins ---
+function values(plan: { options: { value: string }[] }): string {
+  return plan.options.map((o) => o.value).join(" ");
+}
+
+/** The unannotated ladder — what every "we could not verify this model"
+ *  input must produce, byte for byte. */
+function isPlainLadder(plan: { kind: string; options: { value: string; label: string }[] }): boolean {
+  return plan.kind === "fallback"
+    && values(plan) === LADDER.join(" ")
+    && plan.options[0].label === "Model default";
+}
+
+// --- live: the catalog ANNOTATES, it does not restrict ---
 
 const terra = planFor(MODELS, "gpt-5.6-terra");
-assert(terra.kind === "live", "a model reporting levels plans a live picker");
-if (terra.kind === "live") {
-  assert(
-    terra.options.map((o) => o.value).join(" ") === " low medium high xhigh max ultra",
-    "live options are the model's own levels, in the model's own order, behind a blank default",
-  );
-  assert(
-    terra.options.some((o) => o.value === "ultra"),
-    'an undocumented level ("ultra") survives to the picker — never filtered against a known ladder',
-  );
-  assert(
-    terra.options[0].label === "Model default (medium)",
-    "the blank option names the model's own reported default",
-  );
-  assert(terra.options[0].value === "", "the default option still submits an empty value, inventing nothing");
-  assert(
-    terra.options[6].label === "ultra — Maximum reasoning with automatic task delegation",
-    "the level's own id leads the label and the model's own prose is relayed verbatim",
-  );
-}
+assert(terra.kind === "live", "a model reporting levels plans a live (annotated) picker");
+assert(
+  values(terra) === LADDER.join(" "),
+  "the whole shared ladder is offered, in ladder order, behind a blank default",
+);
+assert(
+  terra.options.some((o) => o.value === "ultra"),
+  'a level that reached the ladder from a live catalog ("ultra") is still offered',
+);
+assert(
+  terra.options[0].label === "Model default (medium)",
+  "the blank option names the model's own reported default",
+);
+assert(terra.options[0].value === "", "the default option still submits an empty value, inventing nothing");
+assert(
+  terra.options.some((o) => o.label === "Ultra — Maximum reasoning with automatic task delegation"),
+  "the model's own prose is relayed verbatim, annotating the ladder's own human label",
+);
 
-// Two models on ONE account genuinely differ — the decision must be
-// per-model, never per-runtime.
+// Two models on ONE account genuinely differ in what they REPORT — and that
+// must no longer change what the customer is allowed to pick.
 const gpt55 = planFor(MODELS, "gpt-5.5");
 assert(gpt55.kind === "live", "a second model also plans a live picker");
-if (gpt55.kind === "live" && terra.kind === "live") {
-  assert(
-    gpt55.options.length !== terra.options.length,
-    "two models on the same account produce different option sets (per-model, not per-runtime)",
-  );
-  assert(
-    !gpt55.options.some((o) => o.value === "ultra"),
-    "a level one model offers is not leaked onto a model that does not offer it",
-  );
-}
-
-// --- fallback: every way of not knowing ---
-
 assert(
-  planCodexReasoningPicker({ runtime: "codex", catalogSupported: false, models: MODELS, selectedModel: "gpt-5.6-terra" }).kind === "fallback",
-  "a catalog that could not be fetched is unknown, never verified-empty",
+  values(gpt55) === LADDER.join(" "),
+  "a model reporting FEWER levels than the ladder still offers the whole ladder — the founder's override",
 );
 assert(
-  planCodexReasoningPicker({ runtime: "claude_code", catalogSupported: true, models: MODELS, selectedModel: "gpt-5.6-terra" }).kind === "fallback",
-  "a runtime with no live catalog falls back rather than borrowing codex's answer",
+  gpt55.options.some((o) => o.value === "ultra" && o.label === "Ultra"),
+  "a level this model does not report stays selectable, just unannotated",
 );
 assert(
-  planFor(MODELS, "gpt-5.4-retired").kind === "fallback",
-  "a selected model absent from the live catalog is unknown, not empty",
+  !gpt55.options.some((o) => o.label.startsWith("Ultra — ")),
+  "another model's prose is never leaked onto a model that did not report that level",
 );
 assert(
-  planFor([OLD_GATEWAY_TERRA], "gpt-5.6-terra").kind === "fallback",
-  "a gateway too old to forward the fields degrades to the static ladder — the majority fleet state",
+  values(gpt55) === values(terra),
+  "two models on one account offer the SAME choices — the ladder is never per-model",
 );
 
-// --- none: the no-dead-controls law ---
-// THIS is the case the two halves of this chain could not see separately:
-// before the null/[] split, a model positively reporting zero levels was
-// byte-identical to an old gateway, so it rendered the static ladder — a
-// <select> whose every option the model does not implement.
+// --- fallback: every way of not knowing still renders the ladder ---
+
+assert(
+  isPlainLadder(planCodexReasoningPicker({ runtime: "codex", catalogSupported: false, models: MODELS, selectedModel: "gpt-5.6-terra" })),
+  "a catalog that could not be fetched still renders the whole ladder, unannotated",
+);
+// The runtime no longer gates annotation — `catalogSupported` does. That is
+// deliberate: the gateway can now answer llm.models.list for more than one
+// runtime (cursor_cli and grok_build have their own native `models`
+// subcommands), so hardcoding "codex" here would have silently discarded
+// their catalogs. A runtime the gateway cannot enumerate comes back
+// supported:false and lands on the plain ladder, below.
+assert(
+  isPlainLadder(planCodexReasoningPicker({ runtime: "claude_code", catalogSupported: false, models: [], selectedModel: "claude-opus-4-8" })),
+  "a runtime the gateway cannot enumerate renders the ladder rather than borrowing another runtime's answer",
+);
+assert(
+  isPlainLadder(planFor(MODELS, "gpt-5.4-retired")),
+  "a selected model absent from the live catalog renders the ladder, unannotated",
+);
+assert(
+  isPlainLadder(planFor([OLD_GATEWAY_TERRA], "gpt-5.6-terra")),
+  "a gateway too old to forward the fields renders the ladder — the majority fleet state",
+);
+
+// --- the OVERRIDDEN "none" branch ---
+// This input used to render NO control at all ("no dead controls"). The
+// founder overrode it: "If it works, it works otherwise you can still
+// choose it." Inverted, not deleted.
+
 const NO_LEVELS: CodexReasoningCatalogEntry = {
   id: "some-future-model",
   defaultReasoningEffort: null,
   supportedReasoningEfforts: [],
 };
 assert(
-  planFor([NO_LEVELS], "some-future-model").kind === "none",
-  "a model positively reporting zero levels renders NO control, never a ladder it does not implement",
+  isPlainLadder(planFor([NO_LEVELS], "some-future-model")),
+  "a model reporting ZERO levels STILL offers the whole ladder — never a hidden control",
 );
 assert(
-  planFor([OLD_GATEWAY_TERRA], "gpt-5.6-terra").kind !== planFor([NO_LEVELS], "some-future-model").kind,
-  "absent and empty reach DIFFERENT renderings — the whole point of keeping null distinct from []",
+  planFor([NO_LEVELS], "some-future-model").options.length === LADDER.length,
+  "there is no input under which this planner returns an empty option list",
+);
+assert(
+  values(planFor([OLD_GATEWAY_TERRA], "gpt-5.6-terra")) === values(planFor([NO_LEVELS], "some-future-model")),
+  "absent and empty now reach the SAME rendering — there is nothing to annotate in either case",
+);
+
+// --- off-ladder levels are APPENDED, never dropped ---
+// This is the half of the live catalog that is still load-bearing: the
+// ladder is open at the bottom, exactly as codex's own open-string
+// ReasoningEffort type intends.
+
+const EXTRA_LEVEL: CodexReasoningCatalogEntry = {
+  id: "legacy-codex-model",
+  defaultReasoningEffort: "medium",
+  supportedReasoningEfforts: [
+    { reasoningEffort: "minimal", description: "Barely thinks" },
+    { reasoningEffort: "hyperdrive", description: "A level no label map has ever seen" },
+  ],
+};
+const extra = planFor([EXTRA_LEVEL], "legacy-codex-model");
+assert(extra.kind === "live", "a model reporting only off-ladder levels is still a live plan");
+assert(
+  values(extra) === `${LADDER.join(" ")} minimal hyperdrive`,
+  "off-ladder levels are appended after the shared ladder, in the model's own order",
+);
+assert(
+  extra.options.some((o) => o.label === "Minimal — Barely thinks"),
+  "an off-ladder level this codebase has a label for uses that label",
+);
+assert(
+  extra.options.some((o) => o.label === "hyperdrive — A level no label map has ever seen"),
+  "a level no label map knows keeps its raw id — never silently rendered as 'Model default'",
 );
 
 // --- a model that reports levels but no default ---
@@ -166,16 +233,14 @@ const NO_DEFAULT: CodexReasoningCatalogEntry = {
 };
 const noDefault = planFor([NO_DEFAULT], "no-default");
 assert(noDefault.kind === "live", "levels without a stated default still plan a live picker");
-if (noDefault.kind === "live") {
-  assert(
-    noDefault.options[0].label === "Model default",
-    "an unstated default gets a bare label rather than an invented level name",
-  );
-  assert(
-    noDefault.options[1].label === "high",
-    "a level with no description falls back to its bare id, never an empty-looking label",
-  );
-}
+assert(
+  noDefault.options[0].label === "Model default",
+  "an unstated default gets a bare label rather than an invented level name",
+);
+assert(
+  noDefault.options.some((o) => o.value === "high" && o.label === "High"),
+  "a level with no description keeps the ladder's own human label, never an empty-looking one",
+);
 
 // --- Summary ---
 
