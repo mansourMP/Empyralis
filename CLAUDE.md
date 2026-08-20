@@ -5928,6 +5928,20 @@ claude_code) that "max" expresses perfectly well. Save-time validation
 own legacy rungs, so a value saved before unification keeps validating and a
 level the picker offers can never 400.
 
+**The fallback is NOT reachable everywhere, and one path had to be fixed
+before the ladder was safe to widen.** Checked rather than assumed: on
+byok/platform an unsupported level degrades to a strong system instruction
+(`openai_compat_adapter._apply_reasoning_effort`) — but **a turn served by
+Anthropic's own API never reaches the adapter at all**. It goes through
+`claude_agent_sdk_bridge.resolve_sdk_effort`, whose `_VALID_SDK_REASONING_
+EFFORTS` is the SDK's own five-member `EffortLevel` union, and anything
+outside it returned `None`, i.e. the field is simply not set. So "ultra" on
+an Anthropic BYOK agent would have done *literally nothing*, with no
+instruction fallback to rescue it — the one place the widened ladder could
+have become a real dead control. It now clamps to the SDK's own ceiling.
+Deliberately an explicit `{"ultra"}` set, not "anything unrecognized": a typo
+or a hand-edited value must still resolve to `None` and let the model choose.
+
 **`cursor_cli` is the ONE place the control genuinely does nothing** —
 cursor-agent publishes no reasoning-effort flag at all. That is stated in the
 picker's own hint and asserted in a test, not papered over by inventing a

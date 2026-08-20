@@ -298,6 +298,15 @@ _ANTHROPIC_PROVIDER_IDS = frozenset({"", "anthropic"})
 # selectable from the picker.
 _VALID_SDK_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
 
+# The strongest level the SDK's own EffortLevel union expresses, and the
+# ladder rungs that sit ABOVE it and therefore clamp onto it. Kept as an
+# explicit set rather than "anything unrecognized" on purpose: a genuinely
+# unknown string (a typo, a hand-edited config) must still resolve to None
+# and let the model choose, exactly as before — only a level we KNOW means
+# "more than max" is clamped down to max.
+_SDK_REASONING_EFFORT_CEILING = "max"
+_ABOVE_SDK_CEILING_REASONING_EFFORTS = frozenset({"ultra"})
+
 
 def resolve_sdk_effort(reasoning_effort: str) -> Optional[str]:
     """Map Empyralis's stored `reasoning_effort` onto
@@ -330,9 +339,22 @@ def resolve_sdk_effort(reasoning_effort: str) -> Optional[str]:
     contract to get wrong and no 400 risk.
     """
     normalized = str(reasoning_effort or "").strip().lower()
-    if normalized not in _VALID_SDK_REASONING_EFFORTS:
-        return None
-    return normalized
+    if normalized in _VALID_SDK_REASONING_EFFORTS:
+        return normalized
+    # "ultra" joined the customer-facing ladder on 2026-08-20 (one shared
+    # ladder for every provider — founder's rule; see fleet-provider-
+    # constants.ts's REASONING_EFFORT_LADDER). The SDK's own EffortLevel
+    # union has no such member, and THIS PATH HAS NO SECOND CHANCE: a turn
+    # served by Anthropic's own API never reaches openai_compat_adapter's
+    # _apply_reasoning_effort, so its system-instruction fallback cannot
+    # rescue a dropped level here. Returning None would make picking "ultra"
+    # on an Anthropic BYOK agent do nothing at all — the dead control the
+    # ladder was widened specifically to avoid. Clamped to the SDK's own
+    # ceiling instead, the same posture as clamp_cli_reasoning_effort and
+    # openai_compat_adapter.clamp_reasoning_effort.
+    if normalized in _ABOVE_SDK_CEILING_REASONING_EFFORTS:
+        return _SDK_REASONING_EFFORT_CEILING
+    return None
 
 
 # Credential-shaped env vars claude_agent_sdk's spawned `claude` CLI

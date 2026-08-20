@@ -95,3 +95,39 @@ class CliReasoningEffortClampTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SdkReasoningEffortCeilingTests(unittest.TestCase):
+    """The Anthropic-served SDK path has NO system-instruction fallback.
+
+    openai_compat_adapter._apply_reasoning_effort degrades an unsupported
+    level into a strong system instruction — but a turn served by Anthropic's
+    own API never goes through the adapter at all. So a level dropped in
+    resolve_sdk_effort is dropped for good, and picking it would do literally
+    nothing. That is the one place the shared ladder could have become a dead
+    control, which is why it clamps.
+    """
+
+    def test_ultra_clamps_to_the_sdk_own_ceiling_rather_than_vanishing(self):
+        from server_modules.claude_agent_sdk_bridge import resolve_sdk_effort
+        self.assertEqual(resolve_sdk_effort("ultra"), "max")
+        self.assertEqual(resolve_sdk_effort("  ULTRA "), "max")
+
+    def test_every_ladder_rung_resolves_to_something_the_sdk_accepts(self):
+        from server_modules.claude_agent_sdk_bridge import (
+            resolve_sdk_effort, _VALID_SDK_REASONING_EFFORTS,
+        )
+        for level in SHARED_LADDER:
+            resolved = resolve_sdk_effort(level)
+            self.assertIsNotNone(resolved, f"{level} resolved to nothing on the SDK path")
+            self.assertIn(resolved, _VALID_SDK_REASONING_EFFORTS)
+
+    def test_unset_and_genuinely_unknown_still_leave_the_field_alone(self):
+        """"Model default" must stay model default, and a typo must not be
+        silently promoted to max — only a level KNOWN to mean "more than
+        max" clamps."""
+        from server_modules.claude_agent_sdk_bridge import resolve_sdk_effort
+        self.assertIsNone(resolve_sdk_effort(""))
+        self.assertIsNone(resolve_sdk_effort("   "))
+        self.assertIsNone(resolve_sdk_effort("maximum"))
+        self.assertIsNone(resolve_sdk_effort("turbo"))
