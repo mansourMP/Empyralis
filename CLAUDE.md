@@ -3858,7 +3858,31 @@ import workspace code).
 symlinks, and nothing says so.** `venv/`, `empyralis-runtime-kernel/target/`
 and `frontend/node_modules/` are untracked build artifacts that live only in
 the primary checkout, so `start-e2e-backend.sh` refuses to boot in a fresh
-worktree. Symlink all three from `/Users/mansur/empyralis`. Two more traps
+worktree.
+
+**Symlink `venv/` and `empyralis-runtime-kernel/target/` — but NOT
+`frontend/node_modules/`.** That third one was the standing advice here
+and it is WRONG under Turbopack, which is what `npm run dev` uses.
+`frontend/next.config.ts` pins `turbopack: { root: path.join(__dirname,
+'..') }` (added to fix a different root-inference bug involving the Tauri
+manifest at the repo root). A `frontend/node_modules` symlink pointing at
+the PRIMARY checkout resolves outside that pinned root, and Turbopack
+refuses at startup:
+
+```
+Error [TurbopackInternalError]: Symlink [project]/frontend/node_modules
+is invalid, it points out of the filesystem root
+```
+
+Worse, the obvious workaround also fails: `cp -R` of the primary tree
+carries its own internal self-referential symlink, so the copy is
+rejected too. Options that actually work, in order: run a real
+`npm ci`/`npm install` inside the worktree (slow but correct); or use the
+webpack dev server (`npm run dev:e2e`, which passes `--webpack`) where
+the symlink is fine; or hardlink-copy rather than symlink. Reported live
+from two independent worktrees on 2026-08-20.
+
+Two more traps
 in the same 20 minutes: preflight reports the kernel binary as STALE purely
 because a fresh checkout's mtimes are newer than the binary (`diff -r` the
 `src/` trees first — if identical, the staleness is mtime-only and
