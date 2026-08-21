@@ -51,12 +51,10 @@
   color: var(--warning-text);
 }
 
-/* The "these channels are covered above" note — same subtitle typography as
-   the section's own description, just muted a shade further since it is
-   context, not the primary description of what this panel does. */
-.openclaw-elsewhere-note {
-  color: var(--text-muted);
-}
+/* `.openclaw-elsewhere-note` is DELETED (2026-08-21) along with the sentence
+   it styled — "SMS connects elsewhere in Empyralis and isn't shown here."
+   When a shell is replaced, the CSS it needed goes with it; a leftover rule
+   is how the next author rebuilds the thing that was removed. */
 
 /* NO ROW SHELL LIVES HERE ANY MORE.
    A 2026-08-09 pass rendered every channel as a flat text row carrying a
