@@ -3246,12 +3246,20 @@ a.fleet-breadcrumb:hover {
 .fleet-channel-card:hover,
 .fleet-connector-card:hover {
   background: var(--bg-card-hover);
-  border-color: var(--border-strong); /* accent border is reserved for selected */
+  /* One step up from --border. The full-strength --text-primary edge below is
+     what "this card's panel is open" gets, so hover has to stop short of it. */
+  border-color: var(--border-strong);
 }
 
+/* The card whose panel is currently open. Neutral, never --accent: a card
+   grid is a picker, and UI-CONTRACT reserves the accent for the page's one
+   primary action and the top-level nav bar — not for "selected". No checkmark
+   here on purpose; a tick on a channel card face would read as "connected",
+   which is a different fact the pill already owns, and CLAUDE.md fixes that
+   face at icon + label + ONE pill. */
 .fleet-channel-card--active,
 .fleet-connector-card--active {
-  border-color: var(--accent);
+  border-color: var(--text-primary);
   background: var(--bg-inset);
 }
 
@@ -3698,12 +3706,14 @@ a.fleet-breadcrumb:hover {
 }
 
 .fleet-connector-picker-row:hover {
-  border-color: var(--border-strong); /* accent border is reserved for selected */
+  border-color: var(--border-strong);
   background: var(--bg-card-hover);
 }
 
+/* Neutral selection. The filled radio dot beside it is the non-colour half of
+   the signal, so this row needs no checkmark of its own. */
 .fleet-connector-picker-row.is-selected {
-  border-color: var(--accent);
+  border-color: var(--text-primary);
   background: var(--bg-inset);
 }
 
@@ -3722,7 +3732,7 @@ a.fleet-breadcrumb:hover {
 }
 
 .fleet-connector-picker-row.is-selected .fleet-connector-picker-radio {
-  border-color: var(--accent);
+  border-color: var(--text-primary);
 }
 
 .fleet-connector-picker-row.is-selected .fleet-connector-picker-radio::after {
@@ -3730,7 +3740,7 @@ a.fleet-breadcrumb:hover {
   position: absolute;
   inset: 2px;
   border-radius: 999px;
-  background: var(--accent);
+  background: var(--text-primary);
 }
 
 .fleet-connector-picker-account {
@@ -5357,11 +5367,13 @@ a.fleet-breadcrumb:hover {
 }
 
 .fleet-wizard-option {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 4px;
-  padding: 12px 14px;
+  /* right padding holds the checkmark's lane, selected or not */
+  padding: 12px 32px 12px 14px;
   border-radius: var(--radius-card);
   border: 1px solid var(--border);
   background: var(--bg-rail);
@@ -5390,6 +5402,25 @@ a.fleet-breadcrumb:hover {
   background: var(--bg-inset);
 }
 
+/* The non-colour half of the signal, identical to .agent-create-option's —
+   these two render the same radio-card in the same wizard, and a checkmark on
+   one but not the other would read as two different kinds of choice. Drawn
+   from two rotated borders, not a "✓" glyph, so no font stack can change it;
+   its lane is reserved by padding on the base rule above so selecting a card
+   never reflows its own label. */
+.fleet-wizard-option.is-selected::after {
+  content: "";
+  position: absolute;
+  right: 13px;
+  top: 50%;
+  width: 5px;
+  height: 10px;
+  margin-top: -7px;
+  border-right: 2px solid var(--text-primary);
+  border-bottom: 2px solid var(--text-primary);
+  transform: rotate(45deg);
+}
+
 /* Locked once the agent row exists (Name/Project/Preset can't retroactively
    edit an already-created agent from here) — dimmed, no hover/pointer, but
    still shows which one is selected. */
@@ -5401,8 +5432,12 @@ a.fleet-breadcrumb:hover {
   border-color: var(--border);
   background: var(--bg-rail);
 }
+/* A locked-but-selected card must not lose its mark on hover — and must not
+   get the accent back either. This rule was the one place the accent survived
+   the neutral rewrite above, because :disabled:hover is a state nobody looks
+   at twice. */
 .fleet-wizard-option:disabled.is-selected:hover {
-  border-color: var(--accent);
+  border-color: var(--text-primary);
   background: var(--bg-inset);
 }
 
@@ -9336,9 +9371,14 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
 .fleet-board-card:hover { background: var(--bg-card-hover); border-color: var(--border-strong); }
 /* Which card the open detail drawer is showing — the same "selected, not
    hovered" distinction the agent list draws. */
+/* Neutral, and the doubled edge is what carries it: --accent-muted was doing
+   the work with hue, so dropping to a plain --text-primary hairline would have
+   made "selected" and "hovered" nearly the same weight. border + inset ring
+   together read as a 2px edge without changing the card's box size, so a card
+   never shifts its neighbours the moment the drawer opens on it. */
 .fleet-board-card.is-selected {
-  border-color: var(--accent-muted);
-  box-shadow: inset 0 0 0 1px var(--accent-muted);
+  border-color: var(--text-primary);
+  box-shadow: inset 0 0 0 1px var(--text-primary);
 }
 .fleet-board-card.is-dragging { opacity: 0.4; }
 
@@ -11796,9 +11836,12 @@ h2.fleet-sage-console-title {
   background: var(--bg-card-hover);
   border-color: var(--border-strong);
 }
+/* Same doubled neutral edge as .fleet-board-card.is-selected — same question
+   ("which card is the open drawer showing"), so it must not get a second
+   answer. */
 .fleet-agent-board-card.is-selected {
-  border-color: var(--accent-muted);
-  box-shadow: inset 0 0 0 1px var(--accent-muted);
+  border-color: var(--text-primary);
+  box-shadow: inset 0 0 0 1px var(--text-primary);
 }
 
 .fleet-agent-board-card-head {

@@ -25922,10 +25922,18 @@ body[data-theme='dark'] .sage-integration-brand__image[src*='notion.svg'] {
   text-align: left;
 }
 
-.cloud-vps-plan-row:hover,
+/* Hover and selected used to SHARE one rule, so the row you happened to be
+   pointing at looked exactly like the size you had actually chosen. They are
+   two facts and now have two rules — and neither spends the accent, which is
+   reserved for the panel's one primary action. */
+.cloud-vps-plan-row:hover {
+  border-color: var(--app-border-strong);
+  background: var(--app-bg-overlay);
+}
+
 .cloud-vps-plan-row.is-selected {
-  border-color: color-mix(in srgb, var(--app-accent) 68%, var(--app-border-subtle) 32%);
-  background: color-mix(in srgb, var(--app-accent) 8%, var(--app-bg-panel) 92%);
+  border-color: var(--app-text-primary);
+  background: var(--app-bg-panel-elevated);
 }
 
 .cloud-vps-plan-row__radio {
@@ -25936,8 +25944,10 @@ body[data-theme='dark'] .sage-integration-brand__image[src*='notion.svg'] {
   border-radius: var(--radius-full);
 }
 
+/* The filled dot is the shape half of the signal — this row is a real radio
+   group, so it needs no checkmark on top of one. */
 .cloud-vps-plan-row.is-selected .cloud-vps-plan-row__radio {
-  border: 4px solid var(--app-accent);
+  border: 4px solid var(--app-text-primary);
 }
 
 .cloud-vps-plan-row strong {
