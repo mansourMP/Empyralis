@@ -23,7 +23,7 @@
  *  2 Model      the live catalog                  nothing committed yet
  *      └── "Create agent" ──▶ ONE atomic POST carrying all three
  *  3 Channel    the real Channels grid            the agent is real from here
- *  4 Tools      the real Connectors picker
+ *  4 Apps       the real Connectors picker
  *      └── "Finish" ──▶ into the agent
  * ```
  *
@@ -42,15 +42,72 @@
  * from step 3 or 4 goes INTO the agent rather than discarding, because the
  * agent exists.
  *
- * ── Skippable, but still a step ──────────────────────────────────────────
- * A person with no channel credential to hand must be able to move on. That
- * makes the forward button say "Skip for now" — but only when we actually
- * KNOW nothing is connected. While the channels fetch is still in flight,
- * "nothing is connected" and "I have not asked yet" are different facts and
- * may not share one label, so the neutral "Next" is used instead.
+ * ── THE CHANNEL STEP IS REQUIRED. It is DEFERRABLE, which is not the same
+ *    thing — corrected 2026-08-21 after the founder reviewed the first
+ *    version live. ─────────────────────────────────────────────────────────
+ *
+ * It used to say "Skip for now" and walk straight on to Finish. That was
+ * wrong on the product's own terms: chat left the platform (founder,
+ * 2026-08-19/20 — *"messaging would never be done inside this platform...
+ * go to Telegram and speak with the agent inside that channel"*), so an
+ * agent with no channel is unreachable by anybody. His words here:
+ * *"channels cannot be skipped, because it's something agents are going to
+ * speak."* A "Finish" that hands back an agent nobody can talk to is the
+ * outcome-honesty law broken at the last screen of setup.
+ *
+ * ```
+ *   channels not yet known  ─▶ forward BLOCKED, and SAYS NOTHING.
+ *                              "no channel connected" and "I have not asked
+ *                              yet" are different facts (CLAUDE.md) and a
+ *                              reason line claiming the first while the
+ *                              second is true is the lie, not the block.
+ *   known, 0 connected      ─▶ forward BLOCKED, with the one fact that
+ *                              explains it. The way out is DEFER, in the
+ *                              head — never a forward button that calls
+ *                              leaving "Skip" and then says "Finish".
+ *   known, 1+ connected     ─▶ forward moves. The step is done.
+ * ```
+ *
+ * Deferring is a real, first-class exit and always available: the agent is
+ * already saved, closing takes you into it, and the setup band on its page
+ * (agent-setup-steps.ts) carries the same unfinished channel step forward.
+ * What is NOT available is calling that state finished.
+ *
+ * ── NOTHING SAYS "CANCEL" ONCE THE AGENT EXISTS ──────────────────────────
+ *
+ * The founder pressed the head's X on step 3 and found an agent named
+ * Zephyr in his workspace afterwards. He was right to expect otherwise —
+ * an X is a cancel gesture, and the commit had already happened two screens
+ * earlier. Rather than make X delete a real agent (a destructive act behind
+ * a dismiss gesture, which is worse), the CONTROL changes when the fact
+ * changes: `dismiss` is "Cancel" while nothing exists and "Finish later"
+ * from the commit onward. Same rule as `agentCreateCloseIntent` below, one
+ * level up — the label and the behaviour move together, so neither can
+ * claim something the other does not do.
+ *
+ * ── THE FILL FOLLOWS THE MOVE THAT IS ACTUALLY AVAILABLE ─────────────────
+ *
+ * `forward.accent` is the view's single accent fill (CLAUDE.md: "One accent
+ * colour, spent on the single primary action in a view"), and it is spent
+ * only on a forward button that can actually be pressed. A blocked step's
+ * button is still rendered and still named — a disabled control that says
+ * what it would do is not a dead control — it just stops being the loud
+ * purple invitation to press it, which is exactly the thing it cannot
+ * accept. Everything else in the surface (the step numbers, the identity
+ * glyph) is neutral, so at most ONE accent-filled element is ever on
+ * screen.
  */
 
-export type AgentCreateStepId = "identity" | "model" | "channel" | "tools";
+/**
+ * "apps", never "tools". Step 4 embeds ConnectorsTab — the apps/MCP
+ * connector picker — while Configure carries a SEPARATE, genuinely
+ * different "Tools" section (the built-in capability toggles). Two
+ * different things were called Tools; the founder named the right word for
+ * this one: *"it's clearly applications, MCP applications... name is
+ * clearly not tools."* The id moves with the label so the collision cannot
+ * survive in the code either.
+ */
+export type AgentCreateStepId = "identity" | "model" | "channel" | "apps";
 
 export type AgentCreateStep = {
   id: AgentCreateStepId;
@@ -62,7 +119,7 @@ export const AGENT_CREATE_STEPS: readonly AgentCreateStep[] = [
   { id: "identity", label: "Identity" },
   { id: "model", label: "Model" },
   { id: "channel", label: "Channel" },
-  { id: "tools", label: "Tools" },
+  { id: "apps", label: "Apps" },
 ];
 
 /** The step whose forward button performs the one create call. Everything
@@ -109,32 +166,65 @@ export type AgentCreateFooterButton = {
   disabled: boolean;
 };
 
+/**
+ * The head's dismiss control. Its KIND is the whole point: before the commit
+ * there is something to cancel, and after it there is not. See this file's
+ * header for the founder's own instance of the bug this closes.
+ */
+export type AgentCreateDismissPlan = {
+  kind: "cancel" | "defer";
+  label: string;
+};
+
 export type AgentCreateFooterPlan = {
   /** null means the step offers no backward move at all — never a disabled
    *  Back button, which is a dead control (CLAUDE.md: "if a control cannot
    *  be used in the current state, it is not rendered"). */
   back: (AgentCreateFooterButton & { action: "cancel" | "back" }) | null;
-  forward: AgentCreateFooterButton & { action: "next" | "create" | "finish" };
+  forward: AgentCreateFooterButton & {
+    action: "next" | "create" | "finish";
+    /** Whether this button carries the view's ONE accent fill. */
+    accent: boolean;
+  };
+  dismiss: AgentCreateDismissPlan;
+  /** One short FACT explaining a blocked forward, or "" when there is none
+   *  worth stating — including while the answer is still unknown. */
+  blockedReason: string;
 };
+
+/** A blocked control is still a named control; it is just no longer the
+ *  loud invitation to press it. One rule, so no branch below can forget. */
+function forwardButton(
+  label: string,
+  action: "next" | "create" | "finish",
+  disabled: boolean,
+): AgentCreateFooterPlan["forward"] {
+  return { label, action, disabled, accent: !disabled };
+}
+
+function dismissPlan(created: boolean): AgentCreateDismissPlan {
+  return created ? { kind: "defer", label: "Finish later" } : { kind: "cancel", label: "Cancel" };
+}
 
 export function planAgentCreateFooter(state: AgentCreateWizardState): AgentCreateFooterPlan {
   const { step, created, busy, hasName, channelsKnown, connectedChannelCount } = state;
+  const dismiss = dismissPlan(created);
 
   if (step === "identity") {
     return {
       back: { label: "Cancel", action: "cancel", disabled: busy },
-      forward: { label: "Next", action: "next", disabled: busy || !hasName },
+      forward: forwardButton("Next", "next", busy || !hasName),
+      dismiss,
+      blockedReason: "",
     };
   }
 
   if (step === "model") {
     return {
       back: { label: "Back", action: "back", disabled: busy },
-      forward: {
-        label: busy ? "Creating…" : "Create agent",
-        action: "create",
-        disabled: busy || !hasName,
-      },
+      forward: forwardButton(busy ? "Creating…" : "Create agent", "create", busy || !hasName),
+      dismiss,
+      blockedReason: "",
     };
   }
 
@@ -142,19 +232,26 @@ export function planAgentCreateFooter(state: AgentCreateWizardState): AgentCreat
     // No way back: Identity and Model are committed by now, so a Back button
     // here could only ever return to a screen whose edits no longer go
     // anywhere. Better no control than one that lies.
+    const reachable = connectedChannelCount > 0;
     return {
       back: null,
-      forward: {
-        label: channelsKnown && connectedChannelCount === 0 ? "Skip for now" : "Next",
-        action: "next",
-        disabled: busy,
-      },
+      forward: forwardButton("Next", "next", busy || !reachable),
+      dismiss,
+      // Stated ONLY once we actually know. While the fetch is in flight the
+      // block is real and the explanation is not available yet, and naming
+      // the wrong one of two facts is worse than naming neither.
+      blockedReason:
+        channelsKnown && !reachable
+          ? "Nobody can reach this agent until a channel is connected."
+          : "",
     };
   }
 
   return {
     back: { label: "Back", action: "back", disabled: busy },
-    forward: { label: "Finish", action: "finish", disabled: busy },
+    forward: forwardButton("Finish", "finish", busy),
+    dismiss,
+    blockedReason: "",
   };
 }
 

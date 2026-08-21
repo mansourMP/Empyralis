@@ -72,7 +72,10 @@ const AGENT_TABS: { id: string; label: string; icon: LucideIcon }[] = [
   { id: "chat", label: "Chat", icon: MessageSquare },
   { id: "general", label: "General", icon: LayoutGrid },
   { id: "channels", label: "Channels", icon: Radio },
-  { id: "connectors", label: "Connectors", icon: Plug },
+  // "Apps", matching FleetAgentDetail.tsx's TABS and Breadcrumbs.tsx —
+  // a palette entry named for a section nobody can find by that name is
+  // worse than no entry.
+  { id: "connectors", label: "Apps", icon: Plug },
   { id: "tools", label: "Tools", icon: Wrench },
   { id: "model", label: "Model", icon: Sparkles },
   { id: "memory", label: "Memory", icon: Brain },

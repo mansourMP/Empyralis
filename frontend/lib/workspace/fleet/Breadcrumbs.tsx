@@ -179,7 +179,10 @@ export const STATIC_LABELS: Record<string, string> = {
   chat: "Chat",
   memory: "Memory",
   channels: "Channels",
-  connectors: "Connectors",
+  // "Apps" is the apps/MCP picker; "Tools" is the built-in capability
+  // toggles. Two different sections, so two different words — see
+  // FleetAgentDetail.tsx's TABS for the founder's own wording on it.
+  connectors: "Apps",
   tools: "Tools",
   model: "Model",
 };

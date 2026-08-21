@@ -82,6 +82,30 @@
   max-height: min(84vh, 760px);
   overflow: hidden;
 }
+
+/* THE TWO STEPS THAT HOST A WHOLE REAL TAB GET A FIXED HEIGHT, NOT A CAP.
+
+   Founder, on the channel step: *"if I press 'no computer needed' the card
+   becomes small — it's good. And if I press 'needs a computer' it instantly
+   becomes larger."* The two-tier filter swings the grid between 4 cards and
+   21, and under `max-height` the dialog tracked that — so a control whose
+   only job is to FILTER A LIST was resizing the window around it. Fixing
+   the height moves that change into the body's own scroll, where it
+   belongs, and removes the identical jump between step 3 and step 4 for
+   free. Deliberately not a transition: animating a dialog's own height on
+   every filter press is motion on something the person did not ask to
+   move, and the motion rule is "on state change only, never decorative".
+
+   520px is measured, not picked. The two embedded steps' natural heights
+   run 433px (the DEFAULT channel view — 4 hardware-free cards, the one the
+   founder called good) to 1063px (all 25), and anything above ~760 has to
+   scroll on a laptop whatever we do. Pinning at the top of that range left
+   327px of void under four cards; pinning near the bottom of it gives the
+   default view ~85px of breathing room and lets the long lists scroll,
+   which is what a filterable grid should do inside a fixed frame. */
+.agent-create-surface--embed {
+  height: min(84vh, 520px);
+}
 .agent-create-surface.is-closing {
   animation: fleet-modal-in var(--dur-2) var(--ease-in) reverse forwards;
 }
@@ -165,14 +189,22 @@
   font-variant-numeric: tabular-nums;
   line-height: 1;
 }
+/* NEUTRAL, all of it. This used to be an accent ring on the current step and
+   an accent-tinted chip on every finished one, which put two or three purple
+   elements on screen beside the identity glyph and the filled button — the
+   AMOUNT the founder objected to, not the hue. The accent is spent on the
+   single primary action (the footer's forward button) and nowhere else in
+   this surface. A stepper does not need colour to be read: the current step
+   is already the only one at full text weight and full contrast, and a done
+   step already carries a check. */
 .agent-create-step.is-current .agent-create-step-index {
-  border-color: var(--accent);
-  color: var(--accent);
+  border-color: var(--text-secondary);
+  color: var(--text-primary);
 }
 .agent-create-step.is-done .agent-create-step-index {
   border-color: transparent;
-  background: var(--accent-soft);
-  color: var(--accent);
+  background: var(--bg-card);
+  color: var(--text-muted);
 }
 .agent-create-step-label { white-space: nowrap; }
 .agent-create-step.is-current .agent-create-step-label { font-weight: var(--weight-medium); }
@@ -228,6 +260,10 @@
   border-bottom: 1px solid var(--border);
 }
 
+/* Neutral — it was an accent-tinted tile, which is decoration rather than an
+   action, and it sat directly beside a filled accent button on the very
+   first screen of the product. A glyph identifying what is being made is
+   exactly the kind of thing that should be quiet. */
 .agent-create-mark {
   display: inline-flex;
   align-items: center;
@@ -236,8 +272,9 @@
   width: 40px;
   height: 40px;
   border-radius: var(--radius-card);
-  background: var(--accent-soft);
-  color: var(--accent);
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+  color: var(--text-secondary);
 }
 
 .agent-create-name-field {
@@ -262,6 +299,9 @@
   color: var(--text-primary);
 }
 .agent-create-name::placeholder { color: var(--text-muted); }
+/* Focus keeps the accent: it is a transient state, only ever on one element
+   at a time, and it is the affordance a keyboard user navigates by — the
+   same reason globals.css's :focus-visible ring is never traded away. */
 .agent-create-name:focus { border-bottom-color: var(--accent); }
 
 /* The one place a caption is worth its ink: the name field carries no
@@ -317,6 +357,30 @@
    been on every other step, instead of sliding across the footer. */
 .agent-create-foot-spacer { flex: 1; }
 
+/* Why the forward button will not move, on the left of the footer rather
+   than under it — it is about the button, and it takes the spacer's place so
+   nothing shifts when it appears. Muted, one line: a professional tool
+   labels, it does not lecture. */
+.agent-create-blocked {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: var(--text-xs);
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+
+/* The head's post-commit exit. Neutral by construction (`.fleet-btn` with no
+   accent modifier) — it is a real, legitimate way to leave, but it is not the
+   view's primary action and it must never compete with one. Sized down to sit
+   in a 26px-tall head row beside a title. */
+.agent-create-defer {
+  flex-shrink: 0;
+  height: 26px;
+  padding-inline: var(--space-2);
+  font-size: var(--text-xs);
+}
+
 .agent-create-error {
   margin: 0;
   padding: 0 var(--space-5) var(--space-3);
@@ -349,6 +413,15 @@
     height: 34px;
     justify-content: center;
   }
+  /* At this width the reason cannot share a row with two full-width
+     buttons without becoming three words per line, so it takes its own row
+     above them. `flex-basis: 100%` on a wrapping row, not a second layout. */
+  .agent-create-foot { flex-wrap: wrap; }
+  .agent-create-blocked { flex: 0 0 100%; }
+  .agent-create-foot-spacer { display: none; }
+  /* The head is a title, and — post-commit — a named exit. Keep the exit
+     from squeezing the agent's own name down to an ellipsis. */
+  .agent-create-defer { max-width: 40%; }
 }
 
 /* Reduced motion: the surface still appears, it just does not scale in. */
