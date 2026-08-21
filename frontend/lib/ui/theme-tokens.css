@@ -211,10 +211,14 @@ html[data-theme="dark"] {
                   --bg-card         #292929  5.63:1
                   --bg-card-hover   #2e2e2e  5.26:1   <- worst case
 
-     The accent ring it replaces measured 2.11-2.38:1 across those same
+     The accent ring it replaces measured 2.08-2.36:1 across those same
      surfaces — i.e. the purple ring was BELOW the accessibility bar on every
      single surface in the product. This is not a trade; it is better on both
-     axes. Never point a :focus rule at --accent-ring again. */
+     axes. Those before/after figures are BROWSER-measured, not derived: the
+     old ring is an alpha color-mix over an oklch accent, so it was sampled by
+     compositing it onto each surface in a real canvas and reading the bytes
+     back, rather than by approximating oklch in a spreadsheet.
+     Never point a :focus rule at --accent-ring again. */
   --focus-ring: #a1a1a1;
 
   /* Destructive — one clear red, mirrors --accent's derived-step shape.
@@ -347,8 +351,9 @@ html[data-theme="light"] {
                   --bg-rail/canvas     #f4f4f5  4.57:1
                   --bg-inset           #eeeeef  4.33:1
 
-     The accent ring it replaces measured 1.85-1.92:1 here — worse than dark,
-     because a 42%-alpha violet over white composites to a pastel. */
+     The accent ring it replaces measured 1.71-1.78:1 here — worse than dark,
+     because a 42%-alpha violet over white composites to a pastel
+     (rgb(207,186,228) on --bg-page, browser-sampled). */
   --focus-ring: #6f6f6f;
 
   /* Destructive — same clear red, darken-on-hover like the light accent. */

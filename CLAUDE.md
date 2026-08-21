@@ -708,6 +708,86 @@ every turn.
 - A professional tool labels; it does not lecture. Multi-sentence policy prose
   above a group of controls is a signal the design is wrong. Empty states that
   teach are the exception — they have nothing else to show.
+- **FOCUS IS NEUTRAL, NEVER THE ACCENT.** `--focus-ring` (theme-tokens.css) is
+  the one token; `:focus` rules point at it and at nothing else. See the
+  section below.
+
+## The focus ring is neutral, and it is still a ring (2026-08-21)
+
+Founder, repeatedly: *"you will remove that purple ring everywhere. Nobody
+asked for this purple shit."* Focus is a CURSOR, not a state worth
+celebrating — spending the accent on whatever the keyboard happens to be
+sitting on is the opposite of "one accent, on the single primary action."
+
+**It was removed from the ACCENT, not removed.** This file already records
+the earlier incident verbatim: the ring *"is the only signal a keyboard user
+gets; hiding it to kill an unwanted trigger trades a cosmetic bug for an
+accessibility one."* Every control that had a ring still has one.
+
+```
+                       ring colour        vs every surface in its own ramp
+BEFORE  dark    rgb(101,70,132)..(111,80,142)   2.08 - 2.36 : 1   ← all FAIL
+        light   rgb(197,176,219)..(207,186,228) 1.71 - 1.78 : 1   ← all FAIL
+AFTER   dark    #a1a1a1  rgb(161,161,161)       5.26 - 6.94 : 1
+        light   #6f6f6f  rgb(111,111,111)       4.33 - 5.02 : 1
+                                        WCAG 2.1 SC 1.4.11 wants 3:1
+```
+
+**The purple ring was below the accessibility bar on every single surface in
+the product.** So this was never a taste-vs-a11y trade; it is better on both
+axes. Figures are BROWSER-measured (composited in a real canvas and read
+back), not derived — the old ring was an alpha `color-mix` over an `oklch`
+accent, and approximating that by hand is off by ~0.15.
+
+Opaque, not alpha-over-a-token, so the rendered colour is knowable instead of
+a function of whatever surface it lands on.
+
+**The line the sweep must not cross, and it is the whole discipline:**
+
+```
+CHANGE   a ring/outline/border drawn BECAUSE something is focused
+LEAVE    hover/active/selected styling that a :focus-visible selector
+         merely SHARES  (`.x:hover, .x:focus-visible { ... }`)
+```
+
+So the mechanical pass only rewrote rules where EVERY selector in the group
+is a focus selector. Verified in the shipped bundle rather than the source
+tree: of 185 focus-related colour declarations the browser actually loaded,
+the only 10 with any chroma are all `:hover, :focus-visible` or `--active`
+rules. No focus-only rule anywhere carries a hue.
+
+**Focus indicators wear shapes other than `:focus`, and grepping `:focus`
+misses them.** Four such, all found only by asking "what does this draw, and
+why does it appear": the properties-resizer hairline (its own sibling rule
+says `outline: none; /* the hairline IS the focus indicator here */`), the
+rail's `j`/`k` keyboard cursor `.fleet-rail-item--focus`, and the three
+click-to-edit inputs (`.fleet-overview-title-input`,
+`.fleet-task-page-title-input`, `.fleet-task-page-desc-input`) whose accent
+border only ever appears because they auto-focus the moment they exist.
+
+**`AgentCreateCard.tsx`'s `nameRef.current?.focus()` STAYS.** It is what made
+the ring most visible (the halo appeared before the customer touched
+anything), so it looks like the culprit and is not: the complaint was the
+colour. Removing it would leave a dialog whose focus is on `<body>` — Tab
+restarts from the top of the document and a screen reader announces nothing —
+which is a worse bug than the one being fixed, and it is the same mistake in
+the opposite direction as hiding the ring. Note the earlier incident this
+file records is NOT a precedent for removing it: that was a mount-time
+`.focus()` on a TAB STRIP, an interactive control nobody was about to type
+into. The first field of a dialog is the canonical case where auto-focus is
+correct.
+
+Found and fixed in passing: `.fleet-agents-conversation-search input` had NO
+focus indicator at all — borderless, transparent, `outline: none`. The one
+control the sweep turned up that had nothing rather than the wrong colour.
+
+**Harness note that cost real time, and it is not in the Browser-pane entry
+above:** a style recalc does NOT flush within a single `javascript_tool`
+call. `getComputedStyle` after injecting a rule — even `!important` — returns
+the PREVIOUS call's value, so a correct fix reads as broken and an injected
+probe reads as ignored. Mutate in call N, read in call N+1. Anything that
+does not depend on CSS recalc (canvas readback, inline `style` on an element
+you just created) is fine in-call.
 
 ## Recurring failure modes in this codebase
 
