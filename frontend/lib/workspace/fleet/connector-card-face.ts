@@ -31,12 +31,24 @@ export type ConnectorFaceState = "connected" | "reconnect" | "setup" | "locked";
 
 export type ConnectorFace = {
   state: ConnectorFaceState;
-  /** The one word on the card face. */
+  /** The one word on the card face, when the right-hand slot is a PILL. */
   pill: string;
   /** The same fact, restated at the top of the panel the card opens. */
   panelState: string;
   /** Quiet the icon + label. Never `:disabled` — the card still opens. */
   muted: boolean;
+  /**
+   * What sits at the right end of the row.
+   *
+   * The founder's own sketch is `[N] Notion … [Connect]` — the BUTTON is the
+   * affordance, which is why the "Set up" text label under the name is gone.
+   * But a button is an ACTION, and two of the four states have no action to
+   * offer: a connected app is done, and an app this deployment cannot connect
+   * has nothing a customer could press. Those states keep the pill, so the
+   * face still answers "what is true" without ever rendering a control that
+   * does nothing — the same slot, two different kinds of thing.
+   */
+  action: "connect" | "reconnect" | "none";
 };
 
 /**
@@ -54,13 +66,13 @@ export function connectorCardFace(input: {
   healthStatus: string;
 }): ConnectorFace {
   if (!input.configured && !input.connected) {
-    return { state: "locked", pill: "Unavailable", panelState: "Not available yet", muted: true };
+    return { state: "locked", pill: "Unavailable", panelState: "Not available yet", muted: true, action: "none" };
   }
   if (input.connected && input.healthStatus && input.healthStatus !== "healthy") {
-    return { state: "reconnect", pill: "Reconnect", panelState: "Needs reconnecting", muted: false };
+    return { state: "reconnect", pill: "Reconnect", panelState: "Needs reconnecting", muted: false, action: "reconnect" };
   }
   if (input.connected) {
-    return { state: "connected", pill: "Ready", panelState: "Connected", muted: false };
+    return { state: "connected", pill: "Ready", panelState: "Connected", muted: false, action: "none" };
   }
-  return { state: "setup", pill: "Set up", panelState: "Not connected", muted: false };
+  return { state: "setup", pill: "Set up", panelState: "Not connected", muted: false, action: "connect" };
 }

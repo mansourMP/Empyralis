@@ -213,6 +213,12 @@ export function ConnectorPicker({
 
   const open = useMemo(() => connectors.find((c) => c.id === openId) || null, [connectors, openId]);
 
+  const openPanel = useCallback((id: string) => {
+    setError(null);
+    setManualFieldsFor(null);
+    setOpenId(id);
+  }, []);
+
   const closePanel = useCallback(() => {
     setOpenId(null);
     setManualFieldsFor(null);
@@ -354,27 +360,80 @@ export function ConnectorPicker({
     );
   };
 
-  /** The face. Icon, name, one word. Nothing else, ever. */
+  /**
+   * The face: a ROW. Icon + name at the left, the action at the right,
+   * vertically centred against each other — the founder's own sketch, and
+   * Claude's own connector cards, which he named as the reference.
+   *
+   * TWO CLICK TARGETS, TWO REAL BUTTONS, AND NEITHER NESTED IN THE OTHER.
+   * `<button>` inside `<button>` is invalid HTML and browsers un-nest it, so
+   * the obvious shape is not available; a `<div onClick>` wrapping a button
+   * would work with a mouse and be unreachable without one. So the card is a
+   * plain container holding two siblings: the OPEN button, whose `::after`
+   * stretches over the whole card (connector-cards.css), and the ACTION
+   * button, which is painted above that stretch. The action never bubbles
+   * into the card because it was never inside its hit area — the same class
+   * of bug as MarkdownLite's "a click means edit this only when it was not
+   * already a click on something else", closed by geometry rather than by
+   * remembering to call stopPropagation. `stopPropagation` is on the handler
+   * anyway, as a second, cheap belt.
+   *
+   * Keyboard: two ordinary buttons in DOM order, so Tab reaches the card
+   * then its action, and Enter/Space activate each — nothing custom.
+   */
   const renderCard = (c: FleetConnector) => {
     const face = connectorCardFace(c);
+    const busy = busyKey === `${c.id}:new`;
     return (
-      <button
+      <div
         key={c.id}
-        type="button"
-        className={`fleet-connector-card${face.muted ? " fleet-connector-card--muted" : ""}${openId === c.id ? " fleet-connector-card--active" : ""}`}
-        onClick={() => {
-          setError(null);
-          setManualFieldsFor(null);
-          setOpenId(c.id);
-        }}
+        className={`fleet-connector-card fleet-connector-card--row${face.muted ? " fleet-connector-card--muted" : ""}${openId === c.id ? " fleet-connector-card--active" : ""}`}
       >
-        <span className="fleet-connector-card-icon" aria-hidden="true">{connectorIcon(c)}</span>
-        <span className="fleet-connector-card-label">{c.label}</span>
-        <span className={`fleet-connector-card-pill fleet-connector-card-pill--${face.state}`}>
-          {face.state === "connected" ? <span className="fleet-channel-card-dot" /> : null}
-          {face.pill}
-        </span>
-      </button>
+        <button
+          type="button"
+          className="fleet-connector-card-open"
+          onClick={() => openPanel(c.id)}
+          aria-haspopup="dialog"
+        >
+          <span className="fleet-connector-card-icon" aria-hidden="true">{connectorIcon(c)}</span>
+          <span className="fleet-connector-card-label">{c.label}</span>
+        </button>
+
+        {face.action === "none" ? (
+          <span className={`fleet-connector-card-pill fleet-connector-card-pill--${face.state}`}>
+            {face.state === "connected" ? <span className="fleet-channel-card-dot" /> : null}
+            {face.pill}
+          </span>
+        ) : (
+          // The HAIRLINE accent, not the fill. See connector-cards.css for the
+          // arithmetic: ~69 faces are on screen at once, so a filled button
+          // here is ~69 filled buttons in one view. The fill is spent on the
+          // single primary action inside the OPEN panel.
+          <button
+            type="button"
+            className="fleet-btn fleet-btn--accent fleet-connector-card-action"
+            onClick={(e) => {
+              e.stopPropagation();
+              // Opens the panel FIRST, then starts the connection. An OAuth
+              // app navigates away before the panel is ever painted, which is
+              // the "connects directly" the founder asked for; one that needs
+              // pasted fields, or that fails, has somewhere to put its form
+              // and its message instead of setting state nothing renders.
+              openPanel(c.id);
+              void startConnectNew(c);
+            }}
+            disabled={busy}
+          >
+            {busy ? (
+              <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} />
+            ) : face.action === "reconnect" ? (
+              "Reconnect"
+            ) : (
+              "Connect"
+            )}
+          </button>
+        )}
+      </div>
     );
   };
 
@@ -390,6 +449,12 @@ export function ConnectorPicker({
 
   return (
     <div>
+      {/* A failure that happened with no panel open (a card's own Connect
+          button) still has to be readable. Rendered here as well as inside
+          the panel, and only where the panel is NOT the thing showing it —
+          one message, never two copies of it on screen at once. */}
+      {error && !open ? <p className="fleet-channel-expand-error">{error}</p> : null}
+
       <div className="fleet-connector-grid">{priorityConnectors.map(renderCard)}</div>
 
       {catalogSize > 0 && (

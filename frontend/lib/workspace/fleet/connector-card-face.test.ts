@@ -53,6 +53,28 @@ for (const c of cases) {
   assert(pill.split(/\s+/).length <= 2, `pill "${pill}" stays a label, not a sentence`);
 }
 
+// ── The right-hand slot offers an ACTION only where one exists ─────────────
+// A button is a thing to press. A connected app has nothing left to press,
+// and a not-connectable one has nothing a customer could press — both keep
+// the pill instead. "No dead controls" decided here, once, rather than at the
+// render site where the next state added would forget it.
+assert(
+  connectorCardFace({ connected: false, configured: true, healthStatus: "" }).action === "connect",
+  "a connectable app offers Connect",
+);
+assert(
+  connectorCardFace({ connected: true, configured: true, healthStatus: "expired" }).action === "reconnect",
+  "an unwell connection offers Reconnect — a different word for a different act",
+);
+assert(
+  connectorCardFace({ connected: true, configured: true, healthStatus: "healthy" }).action === "none",
+  "a working connection offers no button",
+);
+assert(
+  connectorCardFace({ connected: false, configured: false, healthStatus: "" }).action === "none",
+  "an app this deployment cannot connect offers no button — pressing it could only fail",
+);
+
 // ── The one case a code reading gets wrong ─────────────────────────────────
 // The backend's default health_status for a NEVER-CONNECTED work_app_connector
 // is the literal string "not_configured" (connection_catalog_service.py's
@@ -88,19 +110,42 @@ function codeOnly(src: string): string {
 }
 const code = codeOnly(picker);
 
-// The card's own JSX block: from the className that makes it a card to the
-// closing tag of that button.
-const cardBlock = code.slice(code.indexOf("fleet-connector-card$"), code.indexOf("</button>", code.indexOf("fleet-connector-card$")));
-assert(cardBlock.length > 0, "found the card's JSX block to scan");
-assert(!/summary/i.test(cardBlock), "no summary/description prose on a card face");
-assert(!/fleet-btn/.test(cardBlock), "no button-shaped control on a card face");
-assert(!/accent/.test(cardBlock), "no accent anywhere on a card face");
+// renderCard's body, up to the block that builds the panel.
+const cardStart = code.indexOf("const renderCard");
+const cardEnd = code.indexOf("const catalogSize");
+const cardBlock = code.slice(cardStart, cardEnd);
+assert(cardStart > 0 && cardEnd > cardStart, "found renderCard's body to scan");
 
-// Exactly one accent-filled control in the whole component, and it is the
-// panel's action. Two would be two in one view the instant a panel opens.
-const accentFills = code.match(/fleet-btn--accent-fill/g) || [];
-assert(accentFills.length >= 1, "the panel spends the accent on its primary action");
-assert(!/fleet-btn--accent(?!-fill)/.test(code), "the hairline accent variant is not used — the founder named it as wrong");
+// PROSE is the thing that must never come back to a face. The founder's own
+// words: "why do we have those written text right there?"
+assert(!/summary/i.test(cardBlock), "no summary/description prose on a card face");
+
+// THE ACCENT ARITHMETIC, asserted rather than remembered. The face carries an
+// accent-COLOURED button (he asked for Connect in the accent) and must never
+// carry a FILLED one: ~69 faces render at once, so one fill here is ~69 fills
+// in one view — the exact shape CLAUDE.md calls a bug.
+assert(!/accent-fill/.test(cardBlock), "a card FACE never carries the accent FILL — 69 faces would be 69 fills");
+assert(/fleet-btn--accent(?!-fill)/.test(cardBlock), "…it carries the hairline accent, so Connect still reads as the action");
+
+// …and the panel is where the one fill lives.
+const panelBlock = code.slice(cardEnd);
+assert(/fleet-btn--accent-fill/.test(panelBlock), "the open panel spends the accent fill on its primary action");
+
+// TWO REAL BUTTONS, NEVER NESTED. `<button>` inside `<button>` is invalid and
+// browsers un-nest it; a div-with-onClick would be mouse-only. The card body
+// is its own button whose hit area is stretched in CSS.
+assert(/fleet-connector-card-open/.test(cardBlock), "the card body is a real button, not a div with onClick");
+assert(/stopPropagation/.test(cardBlock), "the action's click does not travel into the card");
+
+const css = readFileSync(new URL("./connector-cards.css", import.meta.url), "utf8");
+assert(
+  /\.fleet-connector-card-open::after\s*\{[^}]*inset:\s*0/.test(css),
+  "…and the card body's hit area is genuinely stretched over the whole card",
+);
+assert(
+  /\.fleet-connector-grid\.fleet-connector-grid\s*\{[^}]*repeat\(2,/.test(css),
+  "two per row at desktop — the founder's own correction, doubled so bundle order cannot decide it",
+);
 
 // The operator sentence the grid used to repeat nine times.
 assert(!/OAuth client configured/i.test(code), "the operator-language blocked sentence is gone");

@@ -19,16 +19,14 @@
  * unchanged, exactly as a channel card's panel is.
  *
  * ```
- * BEFORE (2 up, every card)              AFTER (4 up, one pattern)
- *  ┌───────────────────────────┐          ┌────────┐ ┌────────┐
- *  │ [L] Linear                │          │ [L]    │ │ [N]    │   face =
- *  │     Connect Linear for    │          │ Linear │ │ Notion │   icon
- *  │     teams, issues, pro…   │          │ Set up │ │ Ready  │   + name
- *  │     [ Connect ]           │          └────────┘ └────────┘   + 1 pill
- *  └───────────────────────────┘               │
- *   prose on the face ×69, and                 └── press ──▶ .fleet-channel-banner
- *   an accent-ish button ×69                       what it is · what it brings
- *                                                  · ONE accent-filled action
+ * BEFORE (2 up, prose on every face)     AFTER (2 up, a ROW)
+ *  ┌───────────────────────────┐          ┌──────────────────────────┐
+ *  │ [L] Linear                │          │ [L] Linear    [Connect]  │
+ *  │     Connect Linear for    │          └──────────────────────────┘
+ *  │     teams, issues, pro…   │            press the ROW ──▶ .fleet-channel-banner
+ *  │     [ Connect ]           │              what it is · what it brings
+ *  └───────────────────────────┘              · ONE accent-FILLED action
+ *   a full sentence ×69                      press the BUTTON ──▶ connect
  * ```
  *
  * WHAT IS ACTUALLY NEW HERE, and it is only three things: a muted (not
@@ -37,29 +35,150 @@
  * borrowed.
  *
  * Every value below is a shared token. No new colour, no new radius, no new
- * duration, and no accent anywhere on a card face — the accent fill is spent
- * on the single primary action inside an OPEN panel, which is why the two can
- * coexist: a grid of 69 faces carries zero accent fills, and an open panel
- * carries exactly one.
+ * duration.
+ *
+ * THE ACCENT ARITHMETIC, and it is a JUDGEMENT CALL worth overruling out loud
+ * rather than one buried in a class name. The founder asked for Connect in
+ * FULL accent fill, "just like this Next button". Taken literally on a card
+ * face that is ~69 filled purple buttons in one view — which is the thing he
+ * has been objecting to all night, and which CLAUDE.md calls a bug outright
+ * ("two accent-filled buttons in one view"). So the split is:
+ *
+ * ```
+ * card face   fleet-btn--accent        hairline. accent-COLOURED, not filled.
+ *                                      ~69 of them, zero filled backgrounds.
+ * open panel  fleet-btn--accent-fill   the single primary action in the view.
+ * ```
+ *
+ * Connect still reads as the accent action everywhere. If he wants every face
+ * filled anyway, it is one token in ConnectorPicker's card action className.
  */
 
-/* ── One card per row on a phone ───────────────────────────────────────────
-   fleet-theme.css steps both grids 4 -> 2 at 900px and stops there, so at
-   375px a card is ~166px wide and a two-word app name ("Microsoft 365",
-   "Google Workspace") sits on the edge of wrapping under its own icon. The
-   founder asked for one per row at phone width on BOTH surfaces, so the rule
-   is written once, for both, rather than forked per surface.
+/* ── TWO per row, and the card is a ROW ────────────────────────────────────
+   Founder's correction, from a live screenshot: *"in one line there should be
+   only two horizontally, not four — only two. In mobile they're gonna be only
+   one. And at the right side, the connect button. And if I press the entire
+   template itself that belongs to this specific application, it goes to its
+   settings showing what it is, tools and other things — just like as it is
+   inside this Claude application."*
 
-   The class is doubled deliberately. This file is imported by ConnectorPicker
-   and fleet-theme.css by the app shell; which of the two lands later in the
-   bundle is a property of the bundler, not of this file, and a rule that only
-   works in one of the two orderings is a rule that will silently stop working.
-   Doubling raises specificity to (0,2,0) so the ordering cannot decide it. */
+   So Apps diverges from Channels here, deliberately and for a reason that is
+   about the CONTENT rather than about taste: a channel face is icon + label +
+   a status word, which is a tile; an app face carries an ACTION, and an action
+   belongs at the end of a line, not stacked under the thing it acts on. Four
+   tiles per row cannot hold a button without shrinking it into the label.
+
+   ```
+   ┌──────────────────────────┐  ┌──────────────────────────┐
+   │ [N] Notion     [Connect] │  │ [L] Linear     [Connect] │   2 up
+   └──────────────────────────┘  └──────────────────────────┘   1 up <=560px
+   ```
+
+   Doubled class names throughout this block. This file is imported by
+   ConnectorPicker and fleet-theme.css by the app shell; which lands later in
+   the bundle is a property of the bundler, not of this file, and a rule that
+   only works in one of the two orderings is a rule that will silently stop
+   working. Doubling raises specificity to (0,2,0) so ordering cannot decide
+   it — and here that matters more than before, because these rules OVERRIDE
+   fleet-theme's own column-flex card rather than adding to it. */
+.fleet-connector-grid.fleet-connector-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 @media (max-width: 560px) {
   .fleet-connector-grid.fleet-connector-grid,
   .fleet-channel-grid.fleet-channel-grid {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+/* The card is now a CONTAINER, not the button — see ConnectorPicker's own
+   comment for why `<button>` inside `<button>` is not available and what
+   replaces it. `position: relative` is what the open button's stretched
+   `::after` is measured against, so it is load-bearing rather than tidiness.
+   `cursor` moves onto the two real controls; a container that shows a hand
+   over its own dead padding is claiming a hit area it does not have. */
+.fleet-connector-card.fleet-connector-card--row {
+  position: relative;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  cursor: default;
+}
+
+/* THE CARD BODY'S HIT AREA. The `::after` stretches this button over the
+   whole card — including the padding the container itself is not claiming —
+   so "press the entire template" is true without wrapping anything in a
+   div-with-onClick that a keyboard could never reach. The action button sits
+   above it (z-index below), so a press on Connect was never inside this
+   rectangle in the first place; bubbling is closed by geometry, not by
+   remembering to call stopPropagation. */
+.fleet-connector-card-open {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 0;
+  border: none;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+}
+.fleet-connector-card-open::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-card);
+}
+
+/* Hover and focus belong to the CARD, because the card is what opens — the
+   stretched button is invisible, so painting it would light up nothing a
+   person can see. `:focus-visible` is forwarded the same way, or a keyboard
+   user tabbing the grid gets no ring at all. */
+.fleet-connector-card--row:has(.fleet-connector-card-open:hover) {
+  background: var(--bg-card-hover);
+  border-color: var(--border-strong);
+}
+.fleet-connector-card--row:has(.fleet-connector-card-open:focus-visible) {
+  box-shadow: var(--app-shadow-focus);
+}
+/* …and the button's OWN ring is suppressed, or a keyboard user gets two: the
+   app-wide `:focus-visible { box-shadow: var(--app-shadow-focus) }` rings the
+   icon+label box while the rule above rings the card around it. Observed live
+   at 375px. The ring is never removed, only moved to the element it describes
+   — the card is what Enter opens. */
+.fleet-connector-card-open:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+/* Above the stretch, so it is its own click target. */
+.fleet-connector-card-action {
+  position: relative;
+  z-index: 1;
+  flex-shrink: 0;
+}
+
+/* The name may not push the action off the end — an app with a long name
+   ellipsises rather than shrinking the button it sits beside. */
+.fleet-connector-card--row .fleet-connector-card-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The right-hand slot when there is no action to offer (connected, or not
+   connectable here). Same end of the same line as the button it replaces, so
+   the column of right edges stays a column. */
+.fleet-connector-card--row .fleet-connector-card-pill {
+  position: relative;
+  z-index: 1;
+  flex-shrink: 0;
 }
 
 /* ── The one face state that is genuinely ours ─────────────────────────────

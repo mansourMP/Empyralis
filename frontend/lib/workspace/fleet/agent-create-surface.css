@@ -319,21 +319,27 @@
 
    Scoped to `.agent-create-embed` on purpose — the full-page Channels and
    Apps tabs have the whole content column and are correct at four across. */
-.agent-create-embed .fleet-channel-grid,
-.agent-create-embed .fleet-connector-grid {
+.agent-create-embed .fleet-channel-grid {
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
 }
 
-/* …except on a phone, where ONE per row is the founder's own instruction and
-   `auto-fill` would still fit two 140px cards into 330px. The same 560px
-   breakpoint connector-cards.css uses for the full-page grids, restated here
-   because this selector is the more specific one and would otherwise win.
-   Written as its own block rather than folded into that file: the reason is
-   about THIS dialog's inner width, and a reader debugging the wizard should
-   find both of its grid rules in one place. */
+/* Apps are ROW cards (icon + name … Connect) rather than tiles, so the same
+   478px holds exactly ONE of them — two would put a button and an ellipsised
+   name into 234px. Selector tripled on purpose: connector-cards.css's own
+   two-up rule is already doubled to survive bundle ordering, so matching it
+   at (0,2,0) would leave which one wins up to the bundler. */
+.agent-create-embed .fleet-connector-grid.fleet-connector-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* …and on a phone the channel tiles go one-per-row too — the founder's own
+   instruction, restated here because `auto-fill` would still fit two 140px
+   tiles into 330px and this selector outranks connector-cards.css's. Written
+   as its own block rather than folded into that file: the reason is about
+   THIS dialog's inner width, and a reader debugging the wizard should find
+   its grid rules in one place. */
 @media (max-width: 560px) {
-  .agent-create-embed .fleet-channel-grid,
-  .agent-create-embed .fleet-connector-grid {
+  .agent-create-embed .fleet-channel-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 }
