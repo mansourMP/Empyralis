@@ -506,7 +506,11 @@ conflate them if a third one turns up.**
    for every mouse user. Removed the mount-time focus call outright rather
    than suppressing the ring (the ring is the only signal a keyboard user
    gets; hiding it to kill an unwanted trigger trades a cosmetic bug for an
-   accessibility one). The SPA-landing-spot need this was reaching for
+   accessibility one — **that parenthetical was overridden by the founder on
+   2026-08-21; there is no focus ring in this product any more. See "THERE IS
+   NO FOCUS RING" below. Removing the mount-time `.focus()` is still the right
+   call, for the reason in the next sentence rather than for the ring.**).
+   The SPA-landing-spot need this was reaching for
    belongs on the page's own heading (`headingRef` + `tabIndex={-1}`,
    already the pattern in `TaskDetailView`/`DocumentDetailView`), never on
    an interactive control.
@@ -712,17 +716,99 @@ every turn.
   the one token; `:focus` rules point at it and at nothing else. See the
   section below.
 
-## The focus ring is neutral, and it is still a ring (2026-08-21)
+## THERE IS NO FOCUS RING. Founder decision, and it overrides the craft doctrine (2026-08-21)
 
-Founder, repeatedly: *"you will remove that purple ring everywhere. Nobody
-asked for this purple shit."* Focus is a CURSOR, not a state worth
-celebrating — spending the accent on whatever the keyboard happens to be
-sitting on is the opposite of "one accent, on the single primary action."
+**He said it three times. Read the third one as final and do not re-open it:
+*"I don't need that ring of yours in my platform."***
 
-**It was removed from the ACCENT, not removed.** This file already records
-the earlier incident verbatim: the ring *"is the only signal a keyboard user
-gets; hiding it to kill an unwanted trigger trades a cosmetic bug for an
-accessibility one."* Every control that had a ring still has one.
+```
+attempt 1   violet ring          rejected   "remove that purple shit"
+attempt 2   neutral grey ring    rejected   contrast was FIXED and it did not matter
+attempt 3   thinner grey ring    rejected   ← the objection was never colour or weight
+attempt 4   NO RING                         ← where this ended
+```
+
+Each pass fixed the complaint the previous pass had been given and handed
+him back a rectangle. **The objection is the rectangle.** A box drawn around
+whatever the keyboard is touching is chrome he does not want in a product
+people are meant to pass through rather than sit in — and note the
+positioning entry above: the platform is setup + observation, not a surface
+anyone spends the day inside.
+
+**THIS OVERRIDES THE CRAFT-DOCTRINE LINE THIS FILE HAS QUOTED TWICE** — *"the
+ring is the only signal a keyboard user gets; hiding it to kill an unwanted
+trigger trades a cosmetic bug for an accessibility one."* That reasoning is
+still SOUND; the founder has weighed it and decided against it for this
+product. It is recorded here as HIS decision, not as a bug that got fixed, so
+that the next agent does not "restore accessibility" and make it four.
+
+**What a control shows instead, and it is not nothing:** a field's own border
+steps up one level (`--border`/`--app-border-default` -> `--border-strong`/
+`--app-border-strong`) and its caret blinks. That is genuinely enough for a
+text input. Where it is NOT enough is written down below rather than paid for
+with a ring.
+
+```
+GUARDED BY   frontend/lib/ui/no-focus-ring-drift.test.ts   (in npm run test:unit)
+  scans every :focus/:focus-visible/:focus-within rule in every .css for a
+  drawn outline or a zero-blur spread box-shadow — by SHAPE, not by colour,
+  because the last two rings to survive a token sweep never referenced
+  --focus-ring at all. Plus: --app-shadow-focus must stay `none`, and
+  AgentCreateCard must not focus its Name field. All four proven red-before-
+  green; carries a canary so an unreachable scan fails loudly.
+```
+
+**WHAT IT COSTS, measured live, reported rather than fixed.** Three controls
+are now byte-identical focused and unfocused, so a keyboard user cannot tell
+where they are:
+- `.agent-create-option` — the placement choice cards (Cloud only / Cloud VPS
+  / Paired computer). Confirmed: focused card 2 and unfocused card 3 compute
+  the identical border and shadow; only the SELECTED card differs, and that is
+  selection, not focus.
+- `.fleet-rail-item` — rail rows. Mitigated in practice by the `j`/`k` cursor,
+  which is a real affordance and still renders (see below).
+- any `<select>` — it has no caret, so its stronger border is the whole signal.
+
+A text input, a textarea and a click-to-edit field are all fine: caret plus a
+visibly stronger edge.
+
+**`--focus-ring` STILL EXISTS and the name is now a leftover.** Zero `:focus`
+rules reference it. Two things that are NOT focus indicators borrow it as a
+neutral hairline colour and were deliberately kept: the rail/properties
+resizer's hover line, and `.fleet-rail-item--focus` — which is the `j`/`k`
+KEYBOARD CURSOR, a plain className `PrimaryRail` sets only while j/k are in
+use and clears on route change and first pointerdown. A mouse user never sees
+it; deleting it would leave j/k moving an invisible cursor.
+
+**`AgentCreateCard.tsx` no longer focuses its Name field, and the previous
+version of this entry argued the opposite — that argument lost.** It was what
+made the ring appear before the customer had touched anything, which is the
+screen he kept screenshotting. But the paragraph that defended it was RIGHT
+about one thing, and removing the focus without handling it would have been a
+real regression: that dialog is `role="dialog" aria-modal="true"` with **no
+focus trap**, so the Name field was also its only focus ENTRY point. Measured
+after removal — Tab walked straight out of the open dialog into the rail
+behind the backdrop. Fixed by focusing the dialog's own CONTAINER
+(`tabIndex={-1}`) on mount: not a form control, no border to step up, and the
+app draws no ring, so nothing is painted. Same heading-not-control idiom
+`TaskDetailView`/`DocumentDetailView` already use. On MOUNT only — the old
+effect keyed on `step`, so returning to step 1 yanked focus out of whatever
+the person was using.
+
+**Historical, kept only so nobody re-derives it:** the violet ring measured
+2.08-2.36:1 (dark) and 1.71-1.78:1 (light) against every surface in its own
+ramp, i.e. below WCAG 2.1 SC 1.4.11's 3:1 on every surface in the product;
+the neutral grey that replaced it measured 5.26-6.94:1 and 4.33-5.02:1.
+Browser-measured, not derived. None of it changed the outcome, which is the
+point worth remembering: **the ring was never rejected for being hard to
+see.**
+
+---
+
+The entry below is the 2026-08-21 NEUTRAL-RING pass, superseded the same day
+by the decision above. Its *mechanics* are still the best record of where
+focus indicators hide in this codebase, so it is kept for that alone. Its
+conclusion — that every control still has a ring — is dead.
 
 ```
                        ring colour        vs every surface in its own ramp
@@ -765,17 +851,10 @@ click-to-edit inputs (`.fleet-overview-title-input`,
 `.fleet-task-page-title-input`, `.fleet-task-page-desc-input`) whose accent
 border only ever appears because they auto-focus the moment they exist.
 
-**`AgentCreateCard.tsx`'s `nameRef.current?.focus()` STAYS.** It is what made
-the ring most visible (the halo appeared before the customer touched
-anything), so it looks like the culprit and is not: the complaint was the
-colour. Removing it would leave a dialog whose focus is on `<body>` — Tab
-restarts from the top of the document and a screen reader announces nothing —
-which is a worse bug than the one being fixed, and it is the same mistake in
-the opposite direction as hiding the ring. Note the earlier incident this
-file records is NOT a precedent for removing it: that was a mount-time
-`.focus()` on a TAB STRIP, an interactive control nobody was about to type
-into. The first field of a dialog is the canonical case where auto-focus is
-correct.
+~~**`AgentCreateCard.tsx`'s `nameRef.current?.focus()` STAYS.**~~ **REVERSED
+the same day — it is gone. See the section above.** Its warning about the
+dialog losing its focus entry was correct and was handled; its conclusion was
+not.
 
 Found and fixed in passing: `.fleet-agents-conversation-search input` had NO
 focus indicator at all — borderless, transparent, `outline: none`. The one

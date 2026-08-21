@@ -259,6 +259,7 @@ export function AgentCreateCard({
   const [createdAgent, setCreatedAgent] = useState<FleetAgent | null>(null);
 
   const nameRef = useRef<HTMLInputElement | null>(null);
+  const surfaceRef = useRef<HTMLDivElement | null>(null);
   const closeTimer = useRef<number | null>(null);
   // A vault credential a PRIOR attempt already created, when a LATER part of
   // the same commit then failed. Without it, pressing "Create agent" again
@@ -425,12 +426,28 @@ export function AgentCreateCard({
     };
   }, [workspaceId]);
 
+  /* THE CARD NO LONGER FOCUSES THE NAME FIELD. It used to, on every arrival at
+     the identity step, and that is why the founder kept seeing a focused
+     control before he had touched anything — programmatic .focus() satisfies
+     :focus-visible exactly like a real Tab press, the same trap CLAUDE.md
+     already records for FleetAgentDetail's tab strip. Removed 2026-08-21; a
+     previous pass argued to keep it for typing speed and that argument lost.
+     Do not point this at an INTERACTIVE control again.
+
+     What replaced it is deliberately the dialog's own container, and it is not
+     decoration: this dialog is role="dialog" aria-modal="true" with NO focus
+     trap, so the Name field was also its only focus ENTRY point. Measured
+     after removing it — Tab walked straight out of the open dialog into the
+     rail behind the backdrop, which makes aria-modal a false claim. Focusing
+     the surface (tabIndex={-1}) puts the keyboard inside the dialog with
+     nothing painted: the container is not a form control, it has no border of
+     its own to step up, and the app draws no focus ring at all. Same
+     heading-not-control idiom TaskDetailView/DocumentDetailView already use.
+     On MOUNT only — the old effect keyed on `step`, so returning to step 1
+     would yank focus out of whatever the person was using. */
   useEffect(() => {
-    if (step === "identity") {
-      nameRef.current?.focus();
-      nameRef.current?.select();
-    }
-  }, [step]);
+    surfaceRef.current?.focus({ preventScroll: true });
+  }, []);
 
   useEffect(
     () => () => {
@@ -740,6 +757,8 @@ export function AgentCreateCard({
           same object, never a second layout. */}
       <div
         className={`agent-create-surface${embedsFullTab ? " agent-create-surface--embed" : ""}${closing ? " is-closing" : ""}`}
+        ref={surfaceRef}
+        tabIndex={-1}
         role="dialog"
         aria-modal="true"
         aria-labelledby="agent-create-title"

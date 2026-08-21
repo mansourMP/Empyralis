@@ -96,6 +96,19 @@ main {
   color: var(--app-text-primary);
 }
 
+/* NO FOCUS RING, ANYWHERE. Founder decision, 2026-08-21, said three times and
+   finally: "I don't need that ring of yours in my platform."
+
+   This rule used to be the app-wide ring — it is now the app-wide SUPPRESSION
+   of one, including the browser's own default outline, which is what `outline:
+   0` is doing here. The box-shadow line stays because --app-shadow-focus is
+   `none`: it clears a stray inherited shadow rather than drawing anything.
+
+   A control still shows it is focused through its OWN styling — a field's
+   border steps up and its caret blinks. Nothing draws a rectangle around
+   anything. Do not reinstate a ring here to "restore accessibility": that
+   trade was made deliberately and is recorded in CLAUDE.md with his
+   reasoning. See --focus-ring in lib/ui/theme-tokens.css. */
 :focus-visible {
   outline: 0;
   box-shadow: var(--app-shadow-focus);

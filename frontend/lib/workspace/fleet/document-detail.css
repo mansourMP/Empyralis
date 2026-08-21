@@ -100,10 +100,6 @@
   background: var(--bg-inset);
   border-color: var(--border);
 }
-.fleet-doc-body--editable:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
-}
 
 /* The global reset (app/globals.css: `a { color: inherit; text-decoration:
    none; }`) makes a markdown [link](url) render indistinguishable from
