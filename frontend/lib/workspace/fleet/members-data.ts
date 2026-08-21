@@ -346,6 +346,63 @@ export async function joinPendingWorkspaceInvite(inviteId: string): Promise<Acce
   };
 }
 
+/** THE one implementation of "what actually happened when this person tried
+ *  to join" — shared by both in-app callers (the memberless invitee's
+ *  PendingWorkspaceInvitesBanner and the existing-member's
+ *  WorkspaceSwitcher). A second copy is the one the next branch forgets,
+ *  and this particular logic is exactly the kind that rots quietly: its
+ *  whole job is the failure paths nobody exercises by hand.
+ *
+ *  THREE OUTCOMES, NEVER TWO (CLAUDE.md's outcome-honesty law):
+ *
+ *    joined       the membership exists. Land the person in it.
+ *    failed       nothing was committed. Safe to say so, safe to retry.
+ *    unconfirmed  the request produced no response AND we could not read
+ *                 the pending list afterwards to find out. Reporting this
+ *                 as "failed" invites a retry of something that may already
+ *                 have happened; reporting it as "joined" navigates into a
+ *                 workspace this account may not be a member of. It gets
+ *                 its own words.
+ *
+ *  The ambiguous branch is why this is not just joinPendingWorkspaceInvite:
+ *  a lost response is not a rejection, so before ever showing failure we
+ *  ask the source of truth — if the invite is no longer pending, the join
+ *  went through and we must not report failure on a success. */
+export type SettledInviteJoin =
+  | { outcome: "joined"; workspace_id: string }
+  | { outcome: "failed"; error: string }
+  | { outcome: "unconfirmed"; error: string };
+
+export async function settlePendingInviteJoin(
+  inviteId: string,
+  fallbackWorkspaceId: string,
+): Promise<SettledInviteJoin> {
+  const result = await joinPendingWorkspaceInvite(inviteId);
+  if (result.ok) {
+    return { outcome: "joined", workspace_id: result.workspace_id || fallbackWorkspaceId };
+  }
+  if (!result.ambiguous) {
+    return { outcome: "failed", error: result.error };
+  }
+
+  // No response came back. The server may already have committed this.
+  let stillPending: boolean;
+  try {
+    stillPending = (await fetchMyPendingWorkspaceInviteIds()).includes(inviteId);
+  } catch {
+    return {
+      outcome: "unconfirmed",
+      error: "Couldn't confirm whether you joined — reload before trying again.",
+    };
+  }
+  if (!stillPending) {
+    return { outcome: "joined", workspace_id: fallbackWorkspaceId };
+  }
+  // Verified: the invite is still pending, so nothing was committed. This
+  // is a genuine failure and may be retried safely.
+  return { outcome: "failed", error: result.error };
+}
+
 /** Decline is a REAL, recorded state (server: status becomes 'declined'),
  *  never a silent client-side dismissal off the list — CLAUDE.md's own rule
  *  against collapsing distinct facts into one. */

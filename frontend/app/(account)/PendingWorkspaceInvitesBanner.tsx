@@ -22,8 +22,7 @@ import { Check, X } from 'lucide-react';
 import { useAccountShell } from '@/lib/shell/account-shell-context';
 import {
   declinePendingWorkspaceInvite,
-  fetchMyPendingWorkspaceInviteIds,
-  joinPendingWorkspaceInvite,
+  settlePendingInviteJoin,
   useMyPendingWorkspaceInvites,
   type MyPendingWorkspaceInvite,
 } from '@/lib/workspace/fleet/members-data';
@@ -70,9 +69,14 @@ export function PendingWorkspaceInvitesBanner() {
   async function handleJoin(invite: MyPendingWorkspaceInvite) {
     setBusyId(invite.id);
     clearError(invite.id);
-    const result = await joinPendingWorkspaceInvite(invite.id);
-    if (result.ok) {
-      setBusyId(null);
+    // settlePendingInviteJoin (members-data.ts) owns the whole
+    // joined/failed/unconfirmed decision, including the "the response was
+    // lost, ask the server what actually happened" check that used to live
+    // here inline. WorkspaceSwitcher answers the same invites and now shares
+    // that one implementation rather than growing a second copy of it.
+    const settled = await settlePendingInviteJoin(invite.id, invite.workspace_id);
+    setBusyId(null);
+    if (settled.outcome === 'joined') {
       // A brand-new membership means the account shell's server-resolved
       // workspace list (loadAccountShellSession) is stale -- a full
       // navigation rather than trying to splice a membership into client
@@ -83,26 +87,10 @@ export function PendingWorkspaceInvitesBanner() {
       // from: an invitee with no workspace of their own answers this on
       // /workspaces/new, and reloading there would put "Create a workspace"
       // in front of someone who just joined one.
-      landIn(result.workspace_id || invite.workspace_id);
+      landIn(settled.workspace_id);
       return;
     }
-    if (result.ambiguous) {
-      // The join request itself never produced a response -- the server may
-      // already have processed it. Before ever telling the person it
-      // failed, check the actual source of truth: if this invite no longer
-      // shows up as pending, the join went through and we must not report
-      // failure on a success.
-      const stillPending = await fetchMyPendingWorkspaceInviteIds()
-        .then((ids) => ids.includes(invite.id))
-        .catch(() => true); // can't verify -- fall through to the honest error below
-      if (!stillPending) {
-        setBusyId(null);
-        landIn(invite.workspace_id);
-        return;
-      }
-    }
-    setBusyId(null);
-    setErrorById((prev) => ({ ...prev, [invite.id]: result.error }));
+    setErrorById((prev) => ({ ...prev, [invite.id]: settled.error }));
   }
 
   async function handleDecline(invite: MyPendingWorkspaceInvite) {
