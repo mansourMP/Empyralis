@@ -47,16 +47,23 @@
 // `cargo build` never touches it and does not need it to be real.
 
 mod agent_computer_status;
+mod browser_pairing;
 
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, sleep};
 use std::time::{Duration, Instant, SystemTime};
+
+use browser_pairing::{
+    classify_callback, resolve_pair_view, AcceptedPairing, BrowserPairPhase, CallbackOutcome,
+    PairView, CALLBACK_PATH, CALLBACK_TIMEOUT_SECS, PAIRING_PAGE_PATH,
+};
 
 use agent_computer_status::{
     resolve_status, AgentComputerStatus, DockerProbe, HealthSnapshot, PowerControl, StatusInputs,
@@ -83,8 +90,12 @@ const OVERLAY_BRIDGE_PORT: &str = "7790";
 const OVERLAY_WINDOW_LABEL: &str = "computer-control-overlay";
 const WINDOW_LABEL: &str = "main";
 const WINDOW_TITLE: &str = "Empyralis";
-const WINDOW_WIDTH: f64 = 1280.0;
-const WINDOW_HEIGHT: f64 = 800.0;
+/// A SETUP surface, sized like one. The window used to be 1280x800 because
+/// it hosted the whole web app; it now holds a mark, a sentence and one
+/// button, and a full-screen chrome-less rectangle for that is exactly the
+/// "an app to live in" shape the founder rejected for this product.
+const WINDOW_WIDTH: f64 = 460.0;
+const WINDOW_HEIGHT: f64 = 420.0;
 const TRAY_ID: &str = "empyralis-agent-computer";
 const TRAY_MENU_STATUS_ID: &str = "empyralis_status";
 const TRAY_MENU_WORKSPACE_ID: &str = "empyralis_workspace";
@@ -1183,6 +1194,21 @@ impl TrayState {
 /// available at rest. The two are different vantage points on purpose — see
 /// `agent_computer_status`'s module doc comment.
 fn resolve_tray_render(app: &tauri::AppHandle, tray_state: &TrayState) -> TrayRender {
+    let status = resolve_agent_computer_status(app, tray_state);
+    TrayRender {
+        status,
+        workspace_line: workspace_menu_line(app, status),
+    }
+}
+
+/// This machine's own status, resolved from the files the gateway itself
+/// wrote plus a liveness check.
+///
+/// Extracted so the SETUP WINDOW and the MENU BAR resolve it with one rule
+/// rather than two that agree today. The window used to have no rule at all
+/// — it asked the control plane from an authenticated webview, which is a
+/// vantage point a local page does not have and never will.
+fn resolve_agent_computer_status(app: &tauri::AppHandle, tray_state: &TrayState) -> AgentComputerStatus {
     let state_dir = gateway_state_dir(app).ok();
     let ever_paired = state_dir
         .as_ref()
@@ -1192,7 +1218,7 @@ fn resolve_tray_render(app: &tauri::AppHandle, tray_state: &TrayState) -> TrayRe
     let process_alive = read_gateway_pid(app).map(process_running).unwrap_or(false);
     let health = state_dir.as_deref().and_then(read_gateway_health);
 
-    let status = resolve_status(&StatusInputs {
+    resolve_status(&StatusInputs {
         ever_paired,
         turned_off_by_owner: is_turned_off_by_owner(app),
         process_alive,
@@ -1206,12 +1232,7 @@ fn resolve_tray_render(app: &tauri::AppHandle, tray_state: &TrayState) -> TrayRe
         } else {
             DockerProbe::Unknown
         },
-    });
-
-    TrayRender {
-        status,
-        workspace_line: workspace_menu_line(app, status),
-    }
+    })
 }
 
 /// The "which workspace is this serving" line.
@@ -2347,7 +2368,21 @@ fn desktop_gateway_pair_and_start(
     state: tauri::State<'_, SidecarState>,
     request: GatewayPairRequest,
 ) -> Result<GatewayStartResult, String> {
-    let state_dir = gateway_state_dir(&app)?;
+    pair_and_start_gateway(&app, &state, request)
+}
+
+/// The body of the command above, callable from a plain thread.
+///
+/// Split out because the browser hand-off runs on its own thread and needs
+/// exactly this — not a near-copy of it. A second implementation of "start
+/// this machine" is how the two paths would end up disagreeing about the
+/// pairing context, the turned-off marker or the supervisor install.
+fn pair_and_start_gateway(
+    app: &tauri::AppHandle,
+    state: &SidecarState,
+    request: GatewayPairRequest,
+) -> Result<GatewayStartResult, String> {
+    let state_dir = gateway_state_dir(app)?;
 
     // Recorded BEFORE any early return, and refreshed on every launch rather
     // than written once at first pairing: this is what lets the menu bar name
@@ -2356,7 +2391,7 @@ fn desktop_gateway_pair_and_start(
     // either. Best-effort — failing to record a label must never cost a
     // customer their pairing.
     if let Err(error) = write_pairing_context(
-        &app,
+        app,
         &PairingContext {
             api_base_url: request.api_base_url.trim().trim_end_matches('/').to_string(),
             workspace_id: request.workspace_id.trim().to_string(),
@@ -2374,7 +2409,7 @@ fn desktop_gateway_pair_and_start(
     // the decision is theirs to revoke by acting. Leaving the marker in place
     // would have the menu bar report "Turned off" over a machine that is
     // demonstrably serving.
-    let _ = set_turned_off_by_owner(&app, false);
+    let _ = set_turned_off_by_owner(app, false);
 
     {
         let mut guard = state
@@ -2406,7 +2441,7 @@ fn desktop_gateway_pair_and_start(
     // acquireGatewayProcessLock) makes a redundant spawn exit harmlessly
     // regardless, but checking first avoids even trying and gives an
     // honest "already running" instead of a confusing extra process.
-    if let Some(pid) = read_gateway_pid(&app) {
+    if let Some(pid) = read_gateway_pid(app) {
         if process_running(pid) {
             return Ok(GatewayStartResult {
                 started: false,
@@ -2421,10 +2456,10 @@ fn desktop_gateway_pair_and_start(
                 },
             });
         }
-        clear_gateway_pid(&app);
+        clear_gateway_pid(app);
     }
 
-    let (node_bin, entry) = resolve_gateway_launcher(&app)?;
+    let (node_bin, entry) = resolve_gateway_launcher(app)?;
 
     let api_base_url = request.api_base_url.trim().trim_end_matches('/').to_string();
     if api_base_url.is_empty() {
@@ -2481,7 +2516,7 @@ fn desktop_gateway_pair_and_start(
         ));
     }
 
-    write_gateway_pid(&app, pid)?;
+    write_gateway_pid(app, pid)?;
     {
         let mut guard = state
             .0
@@ -2502,16 +2537,500 @@ fn desktop_gateway_pair_and_start(
     })
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// THE BROWSER HAND-OFF. See src/browser_pairing.rs for the rules; this is
+// only the plumbing that enforces them.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Bound to 127.0.0.1 and NOTHING ELSE, ever.
+///
+/// A literal rather than a parameter on purpose: making the bind address
+/// configurable is how a "0.0.0.0 for testing" ends up shipped, and this
+/// socket hands out a pairing token to whoever completes the callback.
+const PAIR_LISTENER_HOST: &str = "127.0.0.1";
+
+/// How often the accept loop wakes to check its deadline and its cancel flag.
+const PAIR_ACCEPT_TICK: Duration = Duration::from_millis(120);
+
+struct BrowserPairInner {
+    /// Bumped on every attempt. A thread whose generation is stale writes
+    /// nothing — that is what stops a cancelled attempt's late timeout from
+    /// stamping "your browser didn't come back" over a newer, working one.
+    generation: u64,
+    phase: BrowserPairPhase,
+    detail: String,
+    /// Set to true to end the attempt. Owned by the state so cancelling does
+    /// not need to reach into the thread.
+    cancel: Arc<AtomicBool>,
+}
+
+struct BrowserPairState(Mutex<BrowserPairInner>);
+
+impl BrowserPairState {
+    fn new() -> Self {
+        Self(Mutex::new(BrowserPairInner {
+            generation: 0,
+            phase: BrowserPairPhase::Idle,
+            detail: String::new(),
+            cancel: Arc::new(AtomicBool::new(false)),
+        }))
+    }
+}
+
+/// Writes a phase, but only if this thread still owns the attempt.
+fn set_pair_phase(app: &tauri::AppHandle, generation: u64, phase: BrowserPairPhase, detail: &str) {
+    let state = app.state::<BrowserPairState>();
+    let Ok(mut guard) = state.0.lock() else {
+        return;
+    };
+    if guard.generation != generation {
+        return;
+    }
+    guard.phase = phase;
+    guard.detail = detail.to_string();
+}
+
+/// This machine's own name, for the browser page to show so the customer can
+/// see WHICH computer is asking before they approve it.
+///
+/// Every failure falls back to a truthful generic label rather than an id or
+/// an error — a name is a courtesy on that page, never the thing being
+/// authorised.
+fn machine_display_name() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = sender.send(Command::new("scutil").arg("--get").arg("ComputerName").output());
+        });
+        if let Ok(Ok(output)) = receiver.recv_timeout(Duration::from_secs(2)) {
+            if output.status.success() {
+                let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !name.is_empty() {
+                    return name;
+                }
+            }
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if let Ok(raw) = fs::read_to_string("/etc/hostname") {
+            let name = raw.trim().to_string();
+            if !name.is_empty() {
+                return name;
+            }
+        }
+    }
+    "This computer".to_string()
+}
+
+/// The hosted page we send the customer's own browser to.
+///
+/// The callback we advertise is built HERE, from a port this process just
+/// bound, so it is 127.0.0.1 by construction. The hosted page re-validates it
+/// anyway (frontend/lib/desktop/desktop-pair-callback.ts) — without that the
+/// page would be an open redirect that mints a token straight to whatever URL
+/// a link asked for, which is the single sharpest hazard in this whole flow.
+fn pairing_page_url(port: u16, state: &str, machine_name: &str) -> Result<String, String> {
+    let mut url = Url::parse(&format!("{}{PAIRING_PAGE_PATH}", app_base_url()))
+        .map_err(|error| format!("Invalid Empyralis address: {error}"))?;
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair(
+            "callback",
+            &format!("http://{PAIR_LISTENER_HOST}:{port}{CALLBACK_PATH}"),
+        );
+        query.append_pair("state", state);
+        query.append_pair("name", machine_name);
+    }
+    Ok(url.to_string())
+}
+
+/// Reads just the request line's target. Bounded read, and nothing past the
+/// first line is looked at — a callback is a GET, so a body would be noise
+/// and reading one is an invitation to be held open.
+fn read_request_target(stream: &mut std::net::TcpStream) -> Result<String, String> {
+    // MEASURED, and it was a real silent drop: on macOS an accepted stream
+    // INHERITS the listener's non-blocking flag, so `read` returned
+    // EWOULDBLOCK the instant the request bytes had not landed yet and this
+    // function reported the callback "unreadable" — the accept loop then
+    // dropped a perfectly good pairing and kept waiting until it timed out.
+    // Caught by driving the real socket with a real HTTP client
+    // (`pair_listener_tests`); no amount of reasoning about
+    // `classify_callback` would have found it. The listener must stay
+    // non-blocking (the accept loop's deadline and cancel flag depend on it);
+    // the CONVERSATION must not.
+    stream
+        .set_nonblocking(false)
+        .map_err(|error| format!("Could not switch the callback stream to blocking: {error}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|error| format!("Could not set a read deadline: {error}"))?;
+    let mut buffer = [0u8; 4096];
+    let read = stream
+        .read(&mut buffer)
+        .map_err(|error| format!("Could not read the callback request: {error}"))?;
+    let request = String::from_utf8_lossy(&buffer[..read]);
+    let first_line = request.lines().next().unwrap_or_default();
+    Ok(first_line.split_whitespace().nth(1).unwrap_or("/").to_string())
+}
+
+/// The page the customer is left looking at in their own browser.
+///
+/// `history.replaceState` strips the query the moment it renders: the token
+/// travelled in a redirect URL (RFC 8252's loopback pattern, the same shape
+/// the OpenAI flow above uses), and while that URL never left this machine
+/// there is no reason to leave it sitting in the address bar or in the tab's
+/// history entry once it has been spent.
+fn pair_done_html(title: &str, message: &str, ok: bool) -> String {
+    format!(
+        concat!(
+            "<!doctype html><html lang='en'><head><meta charset='utf-8' />",
+            "<meta name='viewport' content='width=device-width, initial-scale=1' />",
+            "<title>{title}</title><style>",
+            "html{{color-scheme:light dark}}body{{margin:0;min-height:100vh;display:flex;align-items:center;",
+            "justify-content:center;padding:24px;font-family:ui-sans-serif,system-ui,-apple-system,",
+            "BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;text-align:center;background:#fff;color:#111}}",
+            "@media(prefers-color-scheme:dark){{body{{background:#0b0b0c;color:#fafafa}}}}",
+            "main{{max-width:420px}}h1{{margin:0 0 10px;font-size:22px;font-weight:640;line-height:1.2}}",
+            "p{{margin:0;line-height:1.6;font-size:14px;opacity:.72}}",
+            "</style></head><body><main><h1>{title}</h1><p>{message}</p></main>",
+            "<script>history.replaceState(null,'',location.pathname)</script>",
+            "</body></html>"
+        ),
+        title = title,
+        message = message
+    )
+    .replace("{ok}", if ok { "ok" } else { "no" })
+}
+
+/// How the wait ended. Every variant is a different fact the caller has to
+/// tell a person about — none of them share a sentence.
+#[derive(Debug)]
+enum PairWaitOutcome {
+    Accepted(AcceptedPairing),
+    Declined,
+    Cancelled,
+    TimedOut,
+    ListenerFailed(String),
+}
+
+/// The wait itself, over a REAL socket, split out so it can be driven by real
+/// HTTP in a test rather than reasoned about.
+///
+/// Takes the listener BY VALUE. That is the single-use and time-bound
+/// guarantee expressed in the type system rather than in a comment: this
+/// function owns the socket, every return path drops it, and there is no way
+/// for a caller to hold one open past the attempt it belongs to.
+fn await_pair_callback(
+    listener: TcpListener,
+    expected_state: &str,
+    timeout: Duration,
+    cancel: &AtomicBool,
+) -> PairWaitOutcome {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return PairWaitOutcome::Cancelled;
+        }
+        if Instant::now() >= deadline {
+            return PairWaitOutcome::TimedOut;
+        }
+        match listener.accept() {
+            Ok((mut stream, _addr)) => {
+                let target = match read_request_target(&mut stream) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        eprintln!("Empyralis ignored an unreadable callback: {error}");
+                        continue;
+                    }
+                };
+                match classify_callback(&target, expected_state) {
+                    CallbackOutcome::Accepted(pairing) => {
+                        let _ = write_http_response(
+                            &mut stream,
+                            "HTTP/1.1 200 OK",
+                            &pair_done_html(
+                                "This Mac is connected",
+                                "You can close this tab and go back to Empyralis.",
+                                true,
+                            ),
+                        );
+                        return PairWaitOutcome::Accepted(pairing);
+                    }
+                    CallbackOutcome::Declined => {
+                        let _ = write_http_response(
+                            &mut stream,
+                            "HTTP/1.1 200 OK",
+                            &pair_done_html("Nothing was connected", "You can close this tab.", false),
+                        );
+                        return PairWaitOutcome::Declined;
+                    }
+                    // Deliberately does NOT end the attempt — see
+                    // browser_pairing.rs's own doc comment. Anything that can
+                    // reach loopback could otherwise cancel a real pairing
+                    // with one junk request.
+                    CallbackOutcome::Rejected(reason) => {
+                        eprintln!("Empyralis refused a connection callback: {reason}");
+                        let _ = write_http_response(
+                            &mut stream,
+                            "HTTP/1.1 400 Bad Request",
+                            &pair_done_html("Not connected", reason, false),
+                        );
+                        continue;
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                sleep(PAIR_ACCEPT_TICK);
+                continue;
+            }
+            Err(error) => return PairWaitOutcome::ListenerFailed(error.to_string()),
+        }
+    }
+}
+
+/// One attempt, start to finish. Runs on its own thread.
+fn run_browser_pairing(app: tauri::AppHandle, generation: u64, cancel: Arc<AtomicBool>) {
+    // 1. The listener FIRST. Opening a browser at a callback nothing is
+    //    listening on would strand the customer on a page whose "Connect"
+    //    button can only ever fail.
+    let listener = match TcpListener::bind((PAIR_LISTENER_HOST, 0)) {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("Empyralis could not open a local connection point: {error}");
+            set_pair_phase(
+                &app,
+                generation,
+                BrowserPairPhase::CouldNotStart,
+                "This computer wouldn't let the app listen for your browser's answer. Try again.",
+            );
+            return;
+        }
+    };
+    let port = match listener.local_addr() {
+        Ok(addr) => addr.port(),
+        Err(error) => {
+            eprintln!("Empyralis could not resolve its local connection point: {error}");
+            set_pair_phase(
+                &app,
+                generation,
+                BrowserPairPhase::CouldNotStart,
+                "This computer wouldn't let the app listen for your browser's answer. Try again.",
+            );
+            return;
+        }
+    };
+    if let Err(error) = listener.set_nonblocking(true) {
+        eprintln!("Empyralis could not configure its local connection point: {error}");
+        set_pair_phase(
+            &app,
+            generation,
+            BrowserPairPhase::CouldNotStart,
+            "This computer wouldn't let the app listen for your browser's answer. Try again.",
+        );
+        return;
+    }
+
+    // 2. A fresh nonce per attempt, from the OS CSPRNG. 32 bytes: the only
+    //    thing standing between this port and anything else on the machine
+    //    that can reach loopback.
+    let mut nonce = [0u8; 32];
+    OsRng.fill_bytes(&mut nonce);
+    let expected_state = base64url_encode(&nonce);
+
+    let machine_name = machine_display_name();
+    let page = match pairing_page_url(port, &expected_state, &machine_name) {
+        Ok(page) => page,
+        Err(error) => {
+            set_pair_phase(&app, generation, BrowserPairPhase::CouldNotStart, &error);
+            return;
+        }
+    };
+    if let Err(error) = open_external(page) {
+        eprintln!("Empyralis could not open the browser: {error}");
+        set_pair_phase(
+            &app,
+            generation,
+            BrowserPairPhase::CouldNotStart,
+            "Your browser didn't open. Nothing was connected — try again.",
+        );
+        return;
+    }
+    set_pair_phase(&app, generation, BrowserPairPhase::Waiting, "");
+
+    // 3. Wait, bounded, single use. The listener is MOVED into the wait so
+    //    every path out of it drops the socket — the port closes with the
+    //    attempt whether it succeeded, timed out or was cancelled, rather
+    //    than depending on someone remembering to close it.
+    let accepted: AcceptedPairing = match await_pair_callback(
+        listener,
+        &expected_state,
+        Duration::from_secs(CALLBACK_TIMEOUT_SECS),
+        &cancel,
+    ) {
+        PairWaitOutcome::Accepted(pairing) => pairing,
+        PairWaitOutcome::Declined => {
+            set_pair_phase(&app, generation, BrowserPairPhase::Declined, "");
+            return;
+        }
+        PairWaitOutcome::Cancelled => {
+            set_pair_phase(&app, generation, BrowserPairPhase::Cancelled, "");
+            return;
+        }
+        PairWaitOutcome::TimedOut => {
+            set_pair_phase(&app, generation, BrowserPairPhase::TimedOut, "");
+            return;
+        }
+        PairWaitOutcome::ListenerFailed(error) => {
+            eprintln!("Empyralis stopped listening for your browser: {error}");
+            set_pair_phase(
+                &app,
+                generation,
+                BrowserPairPhase::CouldNotStart,
+                "This computer stopped listening for your browser's answer. Try again.",
+            );
+            return;
+        }
+    };
+
+    set_pair_phase(&app, generation, BrowserPairPhase::Starting, "");
+
+    let api_base_url = format!("{}/api", app_base_url());
+    let sidecars = app.state::<SidecarState>();
+    let result = pair_and_start_gateway(
+        &app,
+        &sidecars,
+        GatewayPairRequest {
+            api_base_url,
+            pairing_token: Some(accepted.pairing_token),
+            workspace_id: accepted.workspace_id,
+            display_name: Some(machine_name),
+            workspace_label: Some(accepted.workspace_label),
+        },
+    );
+
+    match result {
+        Ok(start) => {
+            if !start.supervisor.ok && start.supervisor.attempted {
+                // A real caveat, and the only place it is ever said: the
+                // machine is connected but will not come back after a
+                // restart. Not a failure — the phase stays Paired.
+                eprintln!("Empyralis could not set this computer to start automatically: {}", start.supervisor.detail);
+            }
+            set_pair_phase(&app, generation, BrowserPairPhase::Paired, "");
+        }
+        Err(error) => {
+            set_pair_phase(&app, generation, BrowserPairPhase::Failed, &error);
+        }
+    }
+
+    app.state::<TrayState>().invalidate();
+    refresh_tray(&app);
+}
+
+/// What the setup window renders right now.
+#[tauri::command]
+fn desktop_pair_view(app: tauri::AppHandle) -> Result<PairView, String> {
+    let (phase, detail) = {
+        let state = app.state::<BrowserPairState>();
+        let guard = state
+            .0
+            .lock()
+            .map_err(|_| "pairing state lock poisoned".to_string())?;
+        (guard.phase, guard.detail.clone())
+    };
+
+    // A window opened on an ALREADY-PAIRED machine (the "something is broken"
+    // case) must not be offered a fresh "Connect this Mac" as though nothing
+    // had ever been set up. Its real question is what this computer is doing,
+    // which is exactly the `Paired` view — and that view is resolved from the
+    // same status rule the menu bar renders, so the two cannot disagree.
+    let ever_paired = gateway_state_dir(&app)
+        .ok()
+        .and_then(|dir| fs::read_dir(dir).ok())
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false);
+    let effective = if matches!(phase, BrowserPairPhase::Idle) && ever_paired {
+        BrowserPairPhase::Paired
+    } else {
+        phase
+    };
+
+    // Only resolved where it can change the answer. Before a callback there
+    // is nothing on this machine for a status to describe, and the probe
+    // behind it opens a socket.
+    let status = if matches!(effective, BrowserPairPhase::Paired) {
+        Some(resolve_agent_computer_status(&app, &app.state::<TrayState>()))
+    } else {
+        None
+    };
+
+    Ok(resolve_pair_view(effective, &detail, status))
+}
+
+/// Starts one attempt. Idempotent-ish by generation: a second press while an
+/// attempt is live cancels the first rather than running two listeners.
+#[tauri::command]
+fn desktop_pair_begin(app: tauri::AppHandle) -> Result<PairView, String> {
+    let (generation, cancel) = {
+        let state = app.state::<BrowserPairState>();
+        let mut guard = state
+            .0
+            .lock()
+            .map_err(|_| "pairing state lock poisoned".to_string())?;
+        // Retire whatever was running. The old thread sees the flag, stops,
+        // and its stale generation stops it writing over this attempt.
+        guard.cancel.store(true, Ordering::SeqCst);
+        guard.generation += 1;
+        guard.phase = BrowserPairPhase::Waiting;
+        guard.detail = String::new();
+        guard.cancel = Arc::new(AtomicBool::new(false));
+        (guard.generation, guard.cancel.clone())
+    };
+
+    let handle = app.clone();
+    thread::spawn(move || run_browser_pairing(handle, generation, cancel));
+
+    desktop_pair_view(app)
+}
+
+/// Stops a live attempt, closing the listener.
+///
+/// Called by the window's own control AND by the window closing: a listener
+/// that outlives the attempt that opened it is an open door, and "the
+/// customer walked away" is the most likely way one gets left behind.
+#[tauri::command]
+fn desktop_pair_cancel(app: tauri::AppHandle) -> Result<PairView, String> {
+    cancel_pair_flow(&app);
+    desktop_pair_view(app)
+}
+
+/// The cancel itself, generic over the runtime so the window's own close
+/// handler — which is generic — can call exactly this rather than a
+/// near-copy of it.
+fn cancel_pair_flow<R: Runtime, M: Manager<R>>(app: &M) {
+    let state = app.state::<BrowserPairState>();
+    let Ok(mut guard) = state.0.lock() else {
+        return;
+    };
+    guard.cancel.store(true, Ordering::SeqCst);
+    // Retired here rather than left for the thread to notice: the caller is
+    // entitled to an immediate, truthful answer, and a thread that is
+    // mid-`accept` may take a tick to see the flag.
+    guard.generation += 1;
+    if matches!(guard.phase, BrowserPairPhase::Waiting) {
+        guard.phase = BrowserPairPhase::Cancelled;
+        guard.detail = String::new();
+    }
+}
+
 fn app_base_url() -> String {
     std::env::var(APP_URL_ENV)
         .ok()
         .map(|value| value.trim().trim_end_matches('/').to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| DEFAULT_APP_URL.to_string())
-}
-
-fn app_url() -> String {
-    app_base_url()
 }
 
 fn overlay_url() -> String {
@@ -2658,11 +3177,31 @@ fn ensure_main_window<R: Runtime, M: Manager<R>>(app: &M) -> Result<(), String> 
         return Ok(());
     }
 
-    let url = app_url()
-        .parse()
-        .map_err(|error| format!("Invalid app URL: {error}"))?;
+    // THE WINDOW IS A LOCAL PAGE. IT IS NOT A BROWSER.
+    //
+    // It used to load the hosted site and ask the customer to sign in inside
+    // it. Two things were wrong with that and neither is fixable by being
+    // careful: a password typed into a webview this process owns is a
+    // password this process can read — that is the shape of a phishing page
+    // whatever our intentions — and Google refuses OAuth in embedded webviews
+    // outright (`disallowed_useragent`), so "Continue with Google" could not
+    // work here even if we wanted it to. Sign-in now happens in the
+    // customer's own browser and this window only ever shows the result (see
+    // browser_pairing.rs).
+    //
+    // Loading a BUNDLED asset is the structural half of that, and it is worth
+    // more than the phishing fix on its own: with no remote content in our
+    // chrome, the entire class of "the server returned something else and it
+    // rendered inside our window" stops existing. That class is not
+    // hypothetical here — the overlay window this app used to create loaded
+    // `<host>/overlay.html`, a path that has never existed, so it rendered the
+    // site's own opaque 404 page full-screen and always-on-top. An old deploy,
+    // a moved route, or no network at all each produced the same shape.
+    let url = WebviewUrl::App("index.html".into());
 
-    // THIRD-PARTY SIGN-IN NEVER HAPPENS INSIDE THIS WINDOW.
+    // Defence in depth, kept even though the window now starts local: a
+    // bundled page can still contain a link, and a link must never turn this
+    // window into a browser again.
     //
     // Without this guard, clicking "Continue with Google" on our own login
     // page navigated the app's own webview to accounts.google.com — i.e. the
@@ -2675,16 +3214,13 @@ fn ensure_main_window<R: Runtime, M: Manager<R>>(app: &M) -> Result<(), String> 
     // Anything that is not our own origin is handed to the real browser,
     // where the customer has an address bar to check, their password manager,
     // and their existing sessions. Same-origin navigation is untouched.
-    let allowed_origin = app_base_url();
-    let window_builder = WebviewWindowBuilder::new(app, WINDOW_LABEL, WebviewUrl::External(url))
+    let window_builder = WebviewWindowBuilder::new(app, WINDOW_LABEL, url)
         .on_navigation(move |target| {
-            let same_origin = Url::parse(&allowed_origin)
-                .ok()
-                .and_then(|base| base.host_str().map(str::to_owned))
-                .zip(target.host_str().map(str::to_owned))
-                .map(|(base_host, target_host)| base_host == target_host)
-                .unwrap_or(false);
-            if same_origin {
+            // `tauri://localhost` (macOS) / `http://tauri.localhost` (others)
+            // is the bundled page itself. Everything else — including our own
+            // hosted origin, which is exactly where a sign-in link would go —
+            // is handed to the real browser.
+            if matches!(target.scheme(), "tauri") || target.host_str() == Some("tauri.localhost") {
                 return true;
             }
             // Non-http(s) schemes are refused rather than handed to `open`,
@@ -2729,9 +3265,16 @@ fn ensure_main_window<R: Runtime, M: Manager<R>>(app: &M) -> Result<(), String> 
     // it, in the menu, next to the sentence about what quitting costs.
     {
         let hide_target = window.clone();
+        let app_handle = window.app_handle().clone();
         window.on_window_event(move |event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
+                // A listener that outlives the window that opened it is an
+                // open door, and walking away from the window is the most
+                // likely way one gets left behind. Cancelling an attempt
+                // that already finished is a no-op, so this is safe on the
+                // success path too (where the page hides the window itself).
+                cancel_pair_flow(&app_handle);
                 let _ = hide_target.hide();
             }
         });
@@ -3036,6 +3579,9 @@ pub fn run() {
             desktop_app_update_install,
             desktop_gateway_status,
             desktop_gateway_pair_and_start,
+            desktop_pair_view,
+            desktop_pair_begin,
+            desktop_pair_cancel,
         ])
         .setup(|app| {
             // Accessory, set ONCE and never changed: no Dock icon, no entry in
@@ -3061,6 +3607,7 @@ pub fn run() {
 
             app.manage(SidecarState(Mutex::new(Sidecars::default())));
             app.manage(TrayState::new());
+            app.manage(BrowserPairState::new());
 
             if matches!(launch_state, DesktopShellAcquireResult::AlreadyRunning) {
                 app.manage(DesktopShellLockState {
@@ -3151,6 +3698,302 @@ pub fn run() {
                 _ => {}
             }
         });
+}
+
+/// The loopback listener, driven over REAL sockets with REAL HTTP.
+///
+/// Deliberately not a unit test around `classify_callback` — that already
+/// exists in browser_pairing.rs and it proves nothing about the socket. What
+/// these assert is the part a pure test structurally cannot: that a refused
+/// callback does not end the attempt, that the port is genuinely CLOSED
+/// afterwards (a listener that outlives its attempt is the open door this
+/// whole design is shaped around), and that the deadline is enforced by the
+/// loop rather than by anyone remembering to stop it.
+/// THE LIVE PROOF. `#[ignore]`d, because it needs a real backend, a real
+/// browser and a real person signing in — but when it runs, every line of it
+/// is production code: the real `pairing_page_url`, the real
+/// `await_pair_callback` over a real socket, and the real
+/// `pair_and_start_gateway` spawning a real gateway with the token a real
+/// browser minted.
+///
+/// Run it against a DISPOSABLE stack only:
+///
+/// ```text
+/// EMPYRALIS_DESKTOP_APP_URL=http://127.0.0.1:3041 \
+/// EMPYRALIS_PAIR_PROOF_STATE_DIR=/tmp/scratch/gateway-proof \
+///   cargo test --lib live_browser_pairing -- --ignored --nocapture
+/// ```
+///
+/// It prints the URL to open and then waits. It NEVER opens a browser itself
+/// — deliberately: this runs on a developer's own machine and taking over
+/// their screen is not something a test gets to do.
+#[cfg(test)]
+mod live_pairing_proof {
+    use super::*;
+
+    #[test]
+    #[ignore = "needs a disposable backend and a real browser sign-in"]
+    fn live_browser_pairing_end_to_end() {
+        let listener = TcpListener::bind((PAIR_LISTENER_HOST, 0)).expect("bind loopback");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let addr = listener.local_addr().expect("addr");
+        assert!(addr.ip().is_loopback(), "bound something other than loopback");
+        let port = addr.port();
+
+        let mut nonce = [0u8; 32];
+        OsRng.fill_bytes(&mut nonce);
+        let expected_state = base64url_encode(&nonce);
+
+        let machine_name = machine_display_name();
+        let page = pairing_page_url(port, &expected_state, &machine_name).expect("page url");
+        println!("\n=== OPEN THIS IN A REAL BROWSER ===\n{page}\n===\n");
+
+        let cancel = AtomicBool::new(false);
+        let accepted = match await_pair_callback(
+            listener,
+            &expected_state,
+            Duration::from_secs(CALLBACK_TIMEOUT_SECS),
+            &cancel,
+        ) {
+            PairWaitOutcome::Accepted(pairing) => pairing,
+            other => panic!("the browser did not complete the pairing: {other:?}"),
+        };
+
+        // The token itself is NEVER printed. Its shape is the assertion.
+        println!(
+            "callback accepted: workspace_id={} workspace_label={:?} token_len={}",
+            accepted.workspace_id,
+            accepted.workspace_label,
+            accepted.pairing_token.len()
+        );
+        assert!(!accepted.pairing_token.trim().is_empty());
+        assert!(!accepted.workspace_id.trim().is_empty());
+        assert!(port_is_closed(port), "the listener outlived the pairing it served");
+
+        // The gateway is started with the crate's OWN env-var constants and
+        // the crate's OWN entry resolution — the same four variables
+        // `pair_and_start_gateway` sets, read from the same constants, so a
+        // rename cannot make this proof drift away from the shipped path.
+        //
+        // Not `pair_and_start_gateway` itself: that takes a concrete
+        // `AppHandle<Wry>` and `tauri::test::mock_app()` produces an
+        // `AppHandle<MockRuntime>`. Making the whole chain generic purely so
+        // an ignored test could call it is a production change bought by a
+        // test, which is the wrong trade — so what that function adds on top
+        // of this (the pairing-context record, the turned-off marker, the
+        // already-running short circuit, the supervisor install) is stated
+        // here as NOT covered rather than pretended.
+        let state_dir = PathBuf::from(
+            std::env::var("EMPYRALIS_PAIR_PROOF_STATE_DIR")
+                .expect("EMPYRALIS_PAIR_PROOF_STATE_DIR must name a throwaway directory"),
+        );
+        assert!(
+            !state_dir.to_string_lossy().contains("com.empyralis.desktop"),
+            "refusing to write into a real install's own state: {}",
+            state_dir.display()
+        );
+        fs::create_dir_all(&state_dir).expect("state dir");
+
+        let entry = dev_gateway_entry();
+        assert!(entry.exists(), "build the gateway first: {}", entry.display());
+        let mut child = Command::new("node")
+            .arg(&entry)
+            .env(GATEWAY_API_URL_ENV, format!("{}/api", app_base_url()))
+            .env(GATEWAY_STATE_DIR_ENV, &state_dir)
+            .env(GATEWAY_PAIRING_TOKEN_ENV, &accepted.pairing_token)
+            .env(GATEWAY_DISPLAY_NAME_ENV, &machine_name)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn the gateway");
+        println!("gateway pid={}", child.id());
+
+        // identity.json appears ~16s in, partway through registering — so it
+        // is POLLED, never read once (the exact trap d17f8c1c fixed on the
+        // webview side).
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let mut gateway_id: Option<String> = None;
+        while Instant::now() < deadline && gateway_id.is_none() {
+            sleep(Duration::from_secs(2));
+            gateway_id = read_gateway_identity(&state_dir);
+        }
+        println!("gateway_id={gateway_id:?}");
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(gateway_id.is_some(), "the gateway never wrote an identity");
+    }
+
+    fn port_is_closed(port: u16) -> bool {
+        std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            Duration::from_millis(300),
+        )
+        .is_err()
+    }
+}
+
+#[cfg(test)]
+mod pair_listener_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader};
+    use std::net::TcpStream;
+
+    const STATE: &str = "s7Qk3Vb0aZnEXAMPLEstateValue";
+
+    /// A real HTTP GET over a real socket. Returns the status line.
+    fn get(port: u16, target: &str) -> String {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        stream
+            .write_all(format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").as_bytes())
+            .expect("write");
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read");
+        line.trim_end().to_string()
+    }
+
+    /// The property the whole design rests on: after the attempt, nothing is
+    /// listening. Asserted by trying to CONNECT, not by reading a flag.
+    fn port_is_closed(port: u16) -> bool {
+        TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            Duration::from_millis(300),
+        )
+        .is_err()
+    }
+
+    fn bind() -> (TcpListener, u16) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let port = listener.local_addr().expect("addr").port();
+        (listener, port)
+    }
+
+    #[test]
+    fn it_binds_loopback_only_and_never_the_world() {
+        let (listener, _port) = bind();
+        let addr = listener.local_addr().expect("addr");
+        assert_eq!(addr.ip().to_string(), "127.0.0.1");
+        assert!(addr.ip().is_loopback());
+    }
+
+    #[test]
+    fn a_hostile_callback_is_refused_and_the_real_one_still_lands() {
+        let (listener, port) = bind();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let waiter = {
+            let cancel = cancel.clone();
+            thread::spawn(move || {
+                await_pair_callback(listener, STATE, Duration::from_secs(20), &cancel)
+            })
+        };
+
+        // Three refusals in a row, each a real request on the real port. Not
+        // one of them may end the attempt: anything that can reach loopback
+        // could otherwise cancel a customer's pairing with a junk request.
+        assert!(get(port, "/desktop-pair/callback?state=guessed&pairing_token=x&workspace_id=y")
+            .contains("400"));
+        assert!(get(port, "/desktop-pair/callback?pairing_token=x&workspace_id=y").contains("400"));
+        assert!(get(port, "/steal?state=guessed").contains("400"));
+        // A cancel carrying the wrong nonce is refused too, not honoured.
+        assert!(get(port, "/desktop-pair/callback?state=guessed&error=denied").contains("400"));
+
+        let ok = get(
+            port,
+            &format!("/desktop-pair/callback?state={STATE}&pairing_token=pt_live&workspace_id=ws_1&workspace_label=Acme"),
+        );
+        assert!(ok.contains("200"), "the genuine callback was not accepted: {ok}");
+
+        match waiter.join().expect("waiter") {
+            PairWaitOutcome::Accepted(pairing) => {
+                assert_eq!(pairing.pairing_token, "pt_live");
+                assert_eq!(pairing.workspace_id, "ws_1");
+                assert_eq!(pairing.workspace_label, "Acme");
+            }
+            other => panic!("expected an accepted pairing, got {other:?}"),
+        }
+
+        assert!(port_is_closed(port), "the listener outlived the attempt it belongs to");
+    }
+
+    #[test]
+    fn a_second_callback_finds_nothing_listening() {
+        let (listener, port) = bind();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let waiter = {
+            let cancel = cancel.clone();
+            thread::spawn(move || {
+                await_pair_callback(listener, STATE, Duration::from_secs(20), &cancel)
+            })
+        };
+        let _ = get(
+            port,
+            &format!("/desktop-pair/callback?state={STATE}&pairing_token=pt_live&workspace_id=ws_1"),
+        );
+        waiter.join().expect("waiter");
+        // Single use, proven from the outside: a replay of the exact same URL
+        // cannot even open a connection.
+        assert!(port_is_closed(port));
+    }
+
+    #[test]
+    fn a_deadline_that_passes_closes_the_port() {
+        let (listener, port) = bind();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let outcome = await_pair_callback(listener, STATE, Duration::from_millis(300), &cancel);
+        assert!(matches!(outcome, PairWaitOutcome::TimedOut), "{outcome:?}");
+        assert!(port_is_closed(port), "a timed-out attempt left its port open");
+    }
+
+    #[test]
+    fn cancelling_closes_the_port() {
+        let (listener, port) = bind();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let waiter = {
+            let cancel = cancel.clone();
+            thread::spawn(move || {
+                await_pair_callback(listener, STATE, Duration::from_secs(20), &cancel)
+            })
+        };
+        sleep(Duration::from_millis(250));
+        cancel.store(true, Ordering::SeqCst);
+        assert!(matches!(waiter.join().expect("waiter"), PairWaitOutcome::Cancelled));
+        assert!(port_is_closed(port), "a cancelled attempt left its port open");
+    }
+
+    #[test]
+    fn a_cancel_from_the_page_ends_the_attempt_and_closes_the_port() {
+        let (listener, port) = bind();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let waiter = {
+            let cancel = cancel.clone();
+            thread::spawn(move || {
+                await_pair_callback(listener, STATE, Duration::from_secs(20), &cancel)
+            })
+        };
+        let response = get(port, &format!("/desktop-pair/callback?state={STATE}&error=denied"));
+        assert!(response.contains("200"), "{response}");
+        assert!(matches!(waiter.join().expect("waiter"), PairWaitOutcome::Declined));
+        assert!(port_is_closed(port));
+    }
+
+    #[test]
+    fn the_page_it_opens_is_our_own_origin_and_carries_a_loopback_callback() {
+        std::env::set_var(APP_URL_ENV, "https://empyralis.ai");
+        let url = pairing_page_url(53411, STATE, "Studio Mac").expect("url");
+        let parsed = Url::parse(&url).expect("parse");
+        assert_eq!(parsed.scheme(), "https");
+        assert_eq!(parsed.host_str(), Some("empyralis.ai"));
+        assert_eq!(parsed.path(), PAIRING_PAGE_PATH);
+        let query: std::collections::HashMap<_, _> = parsed.query_pairs().into_owned().collect();
+        assert_eq!(
+            query.get("callback").map(String::as_str),
+            Some(format!("http://127.0.0.1:53411{CALLBACK_PATH}").as_str()),
+        );
+        assert_eq!(query.get("state").map(String::as_str), Some(STATE));
+        assert_eq!(query.get("name").map(String::as_str), Some("Studio Mac"));
+        std::env::remove_var(APP_URL_ENV);
+    }
 }
 
 #[cfg(test)]
