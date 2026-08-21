@@ -15,7 +15,7 @@ import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fet
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { Cpu, Loader2, MemoryStick, MoreHorizontal, Plug, Radio, Server, Terminal, TriangleAlert } from "lucide-react";
+import { Cpu, Loader2, MemoryStick, MonitorSmartphone, MoreHorizontal, Server, Terminal, TriangleAlert } from "lucide-react";
 
 import { GatewayPairPanel } from "@/lib/gateway/GatewayPairPanel";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
@@ -25,7 +25,7 @@ import { FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import { StatusChip, TintTile } from "@/lib/workspace/fleet/fleet-indicators";
 import { formatDateTime } from "@/lib/workspace/fleet/fleet-presentation";
 import { HardwareRenameField } from "@/lib/workspace/fleet/hardware-rename-field";
-import { useFleetAgents, useWorkspaceStatusStrip } from "@/lib/workspace/fleet/fleet-data";
+import { useFleetAgents } from "@/lib/workspace/fleet/fleet-data";
 import {
   connectionPresentation,
   type FleetGateway,
@@ -40,6 +40,10 @@ import {
   type VpsProviderId,
 } from "@/lib/workspace/cloud-vps-setup-panel";
 import { SshServerConnectPanel } from "@/lib/workspace/ssh-server-connect-panel";
+import {
+  planHardwareAddOptions,
+  type HardwareAddOption,
+} from "@/lib/workspace/fleet/hardware-add-options";
 import {
   clearVpsProvisionWatch,
   formatElapsed,
@@ -158,53 +162,6 @@ function HardwareResourceChip({ resources }: { resources: GatewayResources | nul
   );
 }
 
-/** The three agent-hosting-plumbing counters that used to sit on the
- *  workspace home's status strip — reusing useWorkspaceStatusStrip
- *  unmodified (it already computes exactly these three, honestly: real
- *  connected counts for channels/connectors, no catalog denominator; a
- *  real online/total fraction for computers, since that total is the
- *  owner's own paired machines). Static stat tiles, not links: Computers
- *  is already the rest of this page, and there is no dedicated
- *  cross-agent Channels/Connectors surface to point at (each agent's own
- *  Configure tab is where those actually live) — a fabricated href would
- *  be the dead-control mistake this codebase keeps a standing rule
- *  against. */
-function InfrastructureStrip({ workspaceId }: { workspaceId: string }) {
-  const status = useWorkspaceStatusStrip(workspaceId);
-
-  if (status.loading) {
-    return (
-      <div className="fleet-status-strip">
-        {[0, 1, 2].map((i) => <div key={i} className="fleet-status-strip-skeleton" />)}
-      </div>
-    );
-  }
-
-  return (
-    <div className="fleet-status-strip">
-      <div className="fleet-status-strip-item">
-        <Radio size={16} strokeWidth={1.75} />
-        <span className="fleet-status-strip-value">{status.channelsConnected}</span>
-        <span className="fleet-status-strip-label">
-          {status.channelsConnected === 1 ? "Channel connected" : "Channels connected"}
-        </span>
-      </div>
-      <div className="fleet-status-strip-item">
-        <Plug size={16} strokeWidth={1.75} />
-        <span className="fleet-status-strip-value">{status.connectorsConnected}</span>
-        <span className="fleet-status-strip-label">
-          {status.connectorsConnected === 1 ? "Connector connected" : "Connectors connected"}
-        </span>
-      </div>
-      <div className="fleet-status-strip-item">
-        <Cpu size={16} strokeWidth={1.75} />
-        <span className="fleet-status-strip-value">{status.hardwareOnline}/{status.hardwareTotal}</span>
-        <span className="fleet-status-strip-label">Computers online</span>
-      </div>
-    </div>
-  );
-}
-
 export function HardwareSection({ workspaceId, heading = true }: { workspaceId: string; heading?: boolean }) {
   const router = useRouter();
   // The OAuth-resume effect below strips its own query string on arrival. It
@@ -249,7 +206,14 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
   // modal be dismissed while the build carries on server-side.
   const provisionWatch = useVpsProvisionWatch(workspaceId);
   const [sshPanelOpen, setSshPanelOpen] = useState(false);
-  const [showManualPairing, setShowManualPairing] = useState(false);
+  // "Connect your own computer" opens in place under the add row.
+  const [devicePanelOpen, setDevicePanelOpen] = useState(false);
+  // providerId -> can a customer complete this provider's flow today.
+  // `null` means "not answered yet", which hardware-add-options.ts reads as
+  // available (fail open) — a failed availability check must never be the
+  // reason a working provider looks broken.
+  const [providerAvailability, setProviderAvailability] =
+    useState<Partial<Record<VpsProviderId, boolean>> | null>(null);
   const [removingId, setRemovingId] = useState<string | null>(null);
   const [pendingRemove, setPendingRemove] = useState<{ gatewayId: string; label: string } | null>(null);
   // Cloud servers only: full destroy (tear down the provider droplet + revoke),
@@ -321,6 +285,30 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
       cancelled = true;
     };
   }, [loadRegistrations]);
+
+  // The same derived answer the setup modal already reads
+  // (vps_provisioning_service.provider_availability — an env-var presence
+  // check on the backend, no live provider call), pulled up to the LIST so
+  // a provider that could only fail after the click is honest before it.
+  // Fails open on any error: `null` renders every provider as available.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fleetAuthorizedFetch("/api/hardware/vps/provider-availability", {
+          credentials: "include",
+        });
+        if (!res.ok) throw new Error("unavailable");
+        const payload = (await res.json()) as { providers?: Partial<Record<VpsProviderId, boolean>> };
+        if (!cancelled) setProviderAvailability(payload?.providers ?? null);
+      } catch {
+        if (!cancelled) setProviderAvailability(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Resumes the DigitalOcean/Google cloud-VPS OAuth wizard when the browser
   // lands back here after the OAuth round-trip: CloudVpsSetupPanel now
@@ -661,78 +649,126 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
     );
   };
 
+  // A provider a customer ALREADY has a server from proved the operator side
+  // worked at least once — never taken away by an availability miss. Read
+  // off the boxes already in hand, no extra request.
+  const connectedProviderIds = useMemo(
+    () => Array.from(new Set(cloudServers.map((r) => String(r.hardware_provider || "").trim().toLowerCase()).filter(Boolean))),
+    [cloudServers],
+  );
+
+  // The rule lives in hardware-add-options.ts; this only supplies the real
+  // catalog (ids and labels still come from CLOUD_VPS_PROVIDERS, one place)
+  // and renders what it decided.
+  const addOptions = useMemo(
+    () =>
+      planHardwareAddOptions({
+        cloudProviders: CLOUD_VPS_PROVIDER_IDS.map((id) => ({
+          id,
+          label: CLOUD_VPS_PROVIDERS[id].label,
+          detail: CLOUD_VPS_PROVIDERS[id].tagline,
+        })),
+        providerAvailability,
+        connectedProviderIds,
+      }),
+    [providerAvailability, connectedProviderIds],
+  );
+
+  const addOptionIcon = (option: HardwareAddOption) => {
+    if (option.kind === "cloud") {
+      const provider = CLOUD_VPS_PROVIDERS[option.key as VpsProviderId];
+      return provider ? (
+        <img src={provider.logoSrc} alt="" className="fleet-provider-card-logo" aria-hidden="true" />
+      ) : (
+        <Server size={26} strokeWidth={1.5} aria-hidden="true" />
+      );
+    }
+    if (option.kind === "ssh") return <Terminal size={26} strokeWidth={1.5} aria-hidden="true" />;
+    return <MonitorSmartphone size={26} strokeWidth={1.5} aria-hidden="true" />;
+  };
+
+  const openAddOption = (option: HardwareAddOption) => {
+    if (option.kind === "cloud") {
+      openProviderPanel(option.key as VpsProviderId);
+      return;
+    }
+    if (option.kind === "ssh") {
+      setSshPanelOpen(true);
+      return;
+    }
+    setDevicePanelOpen((open) => !open);
+  };
+
+  const renderAddOption = (option: HardwareAddOption) => {
+    // NOT a <button disabled>. The founder's instruction for AWS
+    // specifically: visible, clearly not available yet, with a real reason,
+    // and never a broken button or an error. A disabled control still reads
+    // as something that ought to work and doesn't; an inert card reads as
+    // what it is.
+    if (option.state === "unavailable") {
+      return (
+        <div key={option.key} className="fleet-provider-card fleet-provider-card--inert">
+          <span className="fleet-provider-card-top">
+            {addOptionIcon(option)}
+            <span className="fleet-provider-card-badge">Not available yet</span>
+          </span>
+          <span className="fleet-provider-card-title">{option.label}</span>
+          <span className="fleet-provider-card-desc">{option.unavailableReason}</span>
+        </div>
+      );
+    }
+    return (
+      <button
+        key={option.key}
+        type="button"
+        className="fleet-provider-card"
+        // The badge sits ABOVE the title in the DOM (top-right of the card),
+        // which would otherwise flatten into an oddly-ordered accessible
+        // name. aria-label states it the way a person would say it.
+        aria-label={`${option.label} — ${option.detail}`}
+        aria-expanded={option.kind === "device" ? devicePanelOpen : undefined}
+        onClick={() => openAddOption(option)}
+      >
+        <span className="fleet-provider-card-top">{addOptionIcon(option)}</span>
+        <span className="fleet-provider-card-title">{option.label}</span>
+        <span className="fleet-provider-card-desc">{option.detail}</span>
+      </button>
+    );
+  };
+
   return (
     <>
       {heading ? (
-        <>
-          <h2 className="fleet-detail-section-title" style={{ marginTop: "var(--space-6)" }}>Hardware</h2>
-          <p className="fleet-subtitle" style={{ marginTop: 0 }}>
-            The computers your agents run on — a cloud server provisioned here, or your own machine
-            connected over SSH. Set up once; each agent then picks which box it runs on from its own
-            Hardware tab.
-          </p>
-        </>
+        <h2 className="fleet-detail-section-title" style={{ marginTop: "var(--space-6)" }}>Hardware</h2>
       ) : null}
-      {/* Infrastructure status — moved here from the workspace home
-          (CLAUDE.md, 2026-08-19 FleetHome pass): "this page's job is
-          workspace content, not agent-hosting status." Channels/Connectors/
-          Computers are all agent-hosting plumbing, and Hardware — the one
-          settings surface already about how agents run and connect — is
-          where that status actually belongs, not a workspace home meant to
-          show projects/tasks/documents. Renders on BOTH mounts of this
-          component (Settings and the standalone /hardware route), same as
-          everything else here. */}
-      <InfrastructureStrip workspaceId={workspaceId} />
-      {/* Each box row opens its own machine-detail ROUTE (hardware/[gatewayId]),
-          matching the Projects list -> project-detail pattern — a deliberate
-          departure from this list's earlier "a box row already says
-          everything, no right panel" note. That note ruled out a side PANEL
-          on this page; a dedicated detail page is a different shape, not a
-          reversal of it. */}
-      <h2 className="fleet-detail-section-title">Connect a cloud server</h2>
-          <div className="fleet-provider-grid">
-            {CLOUD_VPS_PROVIDER_IDS.map((providerId) => {
-              const provider = CLOUD_VPS_PROVIDERS[providerId];
-              return (
-                <button
-                  key={providerId}
-                  type="button"
-                  className="fleet-provider-card"
-                  // The badge sits ABOVE the title in the DOM (top-right of
-                  // the card, laid out via .fleet-provider-card-top), which
-                  // would otherwise flatten into an oddly-ordered accessible
-                  // name ("OAuth or API token DigitalOcean Simplest setup").
-                  // aria-label states it in the order a person would actually
-                  // say it — matches item 5 of the MAN-145 UI pass.
-                  aria-label={`${provider.label} — ${provider.accountMethod}. ${provider.tagline}.`}
-                  onClick={() => openProviderPanel(providerId)}
-                >
-                  <span className="fleet-provider-card-top">
-                    <img src={provider.logoSrc} alt="" className="fleet-provider-card-logo" aria-hidden="true" />
-                    <span className="fleet-provider-card-badge">{provider.accountMethod}</span>
-                  </span>
-                  <span className="fleet-provider-card-title">{provider.label}</span>
-                  <span className="fleet-provider-card-desc">{provider.tagline}</span>
-                </button>
-              );
-            })}
-            <button
-              type="button"
-              className="fleet-provider-card"
-              aria-label="Your own server — SSH key or password. Connect over SSH, host, port, and a password or key."
-              onClick={() => setSshPanelOpen(true)}
-            >
-              <span className="fleet-provider-card-top">
-                <Terminal size={26} strokeWidth={1.5} aria-hidden="true" />
-                {/* Badge parity with the three cloud-provider cards above
-                    (item 7) — otherwise this card's title sits one row
-                    higher than its siblings', breaking the grid's rhythm. */}
-                <span className="fleet-provider-card-badge">SSH key or password</span>
-              </span>
-              <span className="fleet-provider-card-title">Your own server</span>
-              <span className="fleet-provider-card-desc">Connect over SSH — host, port, and a password or key.</span>
-            </button>
-          </div>
+
+      {/* THE WAYS TO ADD A COMPUTER, and nothing else. This row used to be
+          preceded by a paragraph of prose and three stat tiles ("N Channels
+          connected · N Connectors connected · N/N Computers online") — two
+          of which are not properties of hardware at all. The founder
+          rejected that header outright; what belongs at the top of a page
+          whose job is "connect a computer" is the ways to connect one.
+
+          Which of them can actually be COMPLETED is derived, per option, by
+          hardware-add-options.ts from the backend's own
+          /hardware/vps/provider-availability answer — so a provider that
+          would only fail after the click says so before it, instead of one
+          screen too late. An unavailable option is an inert card carrying a
+          real reason, never a disabled button and never an error: AWS being
+          unwired is the founder's own standing decision, not a fault. */}
+      <h2 className="fleet-detail-section-title" style={heading ? undefined : { marginTop: 0 }}>Add a computer</h2>
+      <div className="fleet-provider-grid">
+        {addOptions.map((option) => renderAddOption(option))}
+      </div>
+
+      {/* Pairing your own computer opens in place, under the row, rather
+          than in a modal: the command it produces has to stay on screen
+          while you go and run it somewhere else. */}
+      {devicePanelOpen ? (
+        <div style={{ marginTop: "var(--space-4)" }}>
+          <GatewayPairPanel workspaceId={workspaceId} compact onPaired={() => void loadRegistrations()} />
+        </div>
+      ) : null}
 
           {/* The build in flight (or the one that just failed) — the whole
               point of letting the modal be dismissed. Sits above the real
@@ -789,13 +825,10 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
               <h2 className="fleet-empty-title">No computers connected yet</h2>
               {/* Instructive, not just descriptive (MAN-102 Linear-style empty
                   states): says what a connected computer actually gives an
-                  agent — the same "shell, filesystem, and browser" framing
-                  HardwareTab.tsx already uses for the per-agent access picker
-                  — rather than only restating "connect one above". */}
+                  agent, rather than only restating "pick one above". */}
               <div className="fleet-empty-desc">
-                Agents can’t touch a real computer until one is connected — no shell, no files, no
-                browser. Connect a cloud server above, or your own machine over SSH, and any agent can
-                use it.
+                Until one is connected, agents here can still write tasks and documents — they just
+                can’t run commands, open files, or use a browser.
               </div>
             </div>
           ) : (
@@ -815,18 +848,6 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
             </>
           )}
 
-          <div style={{ marginTop: "var(--space-6)" }}>
-            {showManualPairing ? (
-              <>
-                <h2 className="fleet-detail-section-title">Add your own computer</h2>
-                <GatewayPairPanel workspaceId={workspaceId} compact onPaired={() => void loadRegistrations()} />
-              </>
-            ) : (
-              <button type="button" className="fleet-secondary-toggle" onClick={() => setShowManualPairing(true)}>
-                Or add your own computer instead
-              </button>
-            )}
-          </div>
 
       <CloudVpsSetupPanel
         open={vpsPanelOpen}
