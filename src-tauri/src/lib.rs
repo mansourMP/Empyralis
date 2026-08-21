@@ -2121,7 +2121,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod tests {
+mod gateway_identity_tests {
     use super::read_gateway_identity;
 
     /// The fixture below is the REAL `identity.json` a real gateway wrote
