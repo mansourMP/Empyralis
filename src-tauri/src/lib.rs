@@ -46,6 +46,8 @@
 // overwrites it with a real, pinned Node before packaging; a plain
 // `cargo build` never touches it and does not need it to be real.
 
+mod agent_computer_status;
+
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -54,7 +56,11 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::sync::Mutex;
 use std::thread::{self, sleep};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
+
+use agent_computer_status::{
+    resolve_status, AgentComputerStatus, DockerProbe, HealthSnapshot, PowerControl, StatusInputs,
+};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -79,10 +85,38 @@ const WINDOW_LABEL: &str = "main";
 const WINDOW_TITLE: &str = "Empyralis";
 const WINDOW_WIDTH: f64 = 1280.0;
 const WINDOW_HEIGHT: f64 = 800.0;
-const HARDWARE_USAGE_TRAY_ID: &str = "empyralis-hardware-usage";
-const HARDWARE_USAGE_MENU_STATUS_ID: &str = "empyralis_hardware_status";
-const HARDWARE_USAGE_MENU_OPEN_ID: &str = "empyralis_hardware_open";
-const HARDWARE_USAGE_MENU_QUIT_ID: &str = "empyralis_hardware_quit";
+const TRAY_ID: &str = "empyralis-agent-computer";
+const TRAY_MENU_STATUS_ID: &str = "empyralis_status";
+const TRAY_MENU_WORKSPACE_ID: &str = "empyralis_workspace";
+const TRAY_MENU_POWER_ID: &str = "empyralis_power";
+const TRAY_MENU_QUIT_ID: &str = "empyralis_quit";
+
+/// How often the menu bar re-reads this machine's own state.
+///
+/// The gateway refreshes `checkpoints.json` every heartbeat (~10s), so
+/// anything faster than that only re-reads the same bytes. 5s keeps the menu
+/// responsive to the two transitions a person actually watches — a fresh
+/// pairing coming online, and Disconnect taking effect — without a busy loop
+/// behind an icon nobody is looking at.
+const TRAY_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// The Docker probe is the only part of a status tick that leaves this
+/// process, so its answer is cached. Docker starting or stopping is a
+/// human-scale event; noticing it within 30s is not a product problem, and
+/// pinging a socket every 5s forever is.
+const DOCKER_PROBE_CACHE: Duration = Duration::from_secs(30);
+
+/// Read and write deadlines on the Docker socket.
+///
+/// CLAUDE.md records at length that `docker info` on macOS can wait FOREVER on
+/// a wedged Docker Desktop, that `execFile`'s own `timeout` option does not
+/// actually kill it, and that a real gateway was found holding ~50 immortal
+/// children because of it. This probe cannot reproduce that: it never spawns
+/// anything, it talks to the daemon's own socket directly, and both directions
+/// carry an explicit deadline — so the worst case is one connection that
+/// answers `Unknown` a second later, which the status rule is built to treat
+/// as "no claim" rather than as bad news.
+const DOCKER_PROBE_TIMEOUT: Duration = Duration::from_millis(900);
 const OPENAI_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OPENAI_CODEX_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
 const OPENAI_CODEX_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
@@ -338,6 +372,37 @@ fn desktop_window_ready(app: tauri::AppHandle) -> Result<bool, String> {
         .map_err(|error| format!("Failed to show desktop window: {error}"))?;
     let _ = window.unminimize();
     let _ = window.set_focus();
+    Ok(true)
+}
+
+/// Steps out of the way once this machine is set up.
+///
+/// HIDE, never close. Closing would tear down a live webview and, on macOS,
+/// end the app's last window — and this app's whole point is to outlive its
+/// windows. Hiding leaves the process running with its menu bar item, which is
+/// what the founder asked for: "When pairing succeeds it hides (not closes —
+/// hiding keeps the process alive). It never reopens unless the customer
+/// explicitly asks or something is broken."
+///
+/// Called by the webview only on a CLEAN success. A pairing that ended in any
+/// other phase leaves the window up, because every one of those phases carries
+/// a fact the owner has not seen yet — hiding the window over one would be the
+/// outcome-honesty law broken by disappearance rather than by wording.
+#[tauri::command]
+fn desktop_window_hide(app: tauri::AppHandle) -> Result<bool, String> {
+    // The menu bar is about to become the only surface, so make sure it is
+    // already telling the truth before the window goes.
+    app.state::<TrayState>().invalidate();
+    refresh_tray(&app);
+
+    let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
+        // Nothing to hide is success, not an error: the caller asked for a
+        // state, and the state already holds.
+        return Ok(true);
+    };
+    window
+        .hide()
+        .map_err(|error| format!("Failed to hide the desktop window: {error}"))?;
     Ok(true)
 }
 
@@ -769,59 +834,951 @@ struct Sidecars {
 
 struct SidecarState(Mutex<Sidecars>);
 
-fn focus_main_window(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
+/// Why a window is being opened. Not decoration: the founder's rule allows a
+/// window in exactly three cases, so naming them at every call site is what
+/// keeps a fourth from being added without anyone noticing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowReason {
+    /// First run. Only a signed-in webview can mint a pairing intent, so this
+    /// is the one launch that genuinely needs a person.
+    FirstRunPairing,
+    /// Something failed with no window on screen to say so. Opening one is the
+    /// honest alternative to a menu bar that silently reports the wrong-looking
+    /// resting state with no way forward.
+    SomethingIsBroken,
+}
+
+/// Opens the window — creating it if it does not exist, un-hiding it if it
+/// does.
+///
+/// `hide()` rather than `close()` is what the pairing-success path uses (see
+/// `desktop_window_hide`), because closing the last window of an app whose
+/// whole point is to outlive its windows is a needless teardown of a live
+/// webview. So this has to handle both "never built" and "built and hidden".
+fn request_window(app: &tauri::AppHandle, reason: WindowReason) {
+    if let Err(error) = ensure_main_window(app) {
+        eprintln!("Empyralis could not open its window ({reason:?}): {error}");
         return;
     }
+    let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
+        return;
+    };
+    let _ = window.show();
+    let _ = window.unminimize();
+    // On an Accessory app this is also what brings the process forward far
+    // enough to take keyboard focus — a sign-in form that cannot be typed into
+    // is the failure mode to watch for here.
+    let _ = window.set_focus();
+}
 
-    if let Err(error) = ensure_main_window(app) {
-        eprintln!("Empyralis desktop failed to open from the hardware status item: {error}");
+/// Is a Docker daemon answering on this machine right now?
+///
+/// Deliberately NOT `docker info`, and not any subprocess at all — see
+/// `DOCKER_PROBE_TIMEOUT`'s own comment for the incident that rules that out.
+/// This opens the daemon's own Unix socket and asks its documented liveness
+/// endpoint, with a deadline on both directions, so it cannot hang and cannot
+/// leave anything behind.
+///
+/// The answer is a CAVEAT on a connected machine, never the primary fact, so
+/// every failure resolves to `Unknown` and the status rule treats that as "no
+/// claim" (`agent_computer_status`'s own doc comment explains why it fails
+/// open rather than closed).
+#[cfg(unix)]
+fn probe_docker() -> DockerProbe {
+    use std::os::unix::net::UnixStream;
+
+    for path in docker_socket_candidates() {
+        if !path.exists() {
+            continue;
+        }
+        let Ok(mut stream) = UnixStream::connect(&path) else {
+            // The socket file exists but nothing is listening — Docker Desktop
+            // leaves the path behind when it stops, so this is the ordinary
+            // "Docker is installed and not running" case and it is a real
+            // answer, not a failed probe.
+            return DockerProbe::NotReady;
+        };
+        if stream.set_read_timeout(Some(DOCKER_PROBE_TIMEOUT)).is_err()
+            || stream.set_write_timeout(Some(DOCKER_PROBE_TIMEOUT)).is_err()
+        {
+            // Refuse to talk to a socket we could not put a deadline on. An
+            // unbounded read here is exactly the failure mode this whole
+            // approach exists to avoid.
+            return DockerProbe::Unknown;
+        }
+        // `/_ping` is Docker's own documented liveness endpoint and answers
+        // `OK` with no auth and no version negotiation.
+        if stream
+            .write_all(b"GET /_ping HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n")
+            .is_err()
+        {
+            return DockerProbe::Unknown;
+        }
+        let mut response = [0u8; 64];
+        return match stream.read(&mut response) {
+            Ok(0) => DockerProbe::NotReady,
+            Ok(read) => {
+                if String::from_utf8_lossy(&response[..read]).contains("200") {
+                    DockerProbe::Ready
+                } else {
+                    // Something answered but not with success — a daemon that
+                    // is up but not serving. Not "ready", and not a probe
+                    // failure either.
+                    DockerProbe::NotReady
+                }
+            }
+            // Connected, then silence. Genuinely unknown: this is what a
+            // wedged Docker Desktop looks like, and guessing either way about
+            // it is worse than saying nothing.
+            Err(_) => DockerProbe::Unknown,
+        };
+    }
+    // No socket anywhere we know to look. Docker is not installed, or it is
+    // reachable only somewhere this probe cannot see (a remote DOCKER_HOST, a
+    // non-default context). Both are "we cannot say", never "it is off".
+    DockerProbe::Unknown
+}
+
+#[cfg(not(unix))]
+fn probe_docker() -> DockerProbe {
+    DockerProbe::Unknown
+}
+
+/// Where a Docker daemon socket lives, in the order Docker's own tooling
+/// prefers. `DOCKER_HOST` wins when it names a unix socket — a customer who
+/// pointed their tooling somewhere specific means it — but a `tcp://` or
+/// `ssh://` host is deliberately not followed: that is a remote daemon, and
+/// this machine's ability to run an agent's commands is not a question about
+/// someone else's computer.
+#[cfg(unix)]
+fn docker_socket_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(host) = std::env::var("DOCKER_HOST") {
+        if let Some(path) = host.trim().strip_prefix("unix://") {
+            if !path.is_empty() {
+                candidates.push(PathBuf::from(path));
+            }
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        // Docker Desktop's own per-user socket on macOS. Checked before
+        // /var/run/docker.sock, which is usually a symlink to exactly this and
+        // is absent entirely when "allow the default socket" is switched off.
+        candidates.push(PathBuf::from(&home).join(".docker/run/docker.sock"));
+        candidates.push(PathBuf::from(&home).join(".colima/default/docker.sock"));
+    }
+    candidates.push(PathBuf::from("/var/run/docker.sock"));
+    candidates
+}
+
+/// The gateway's own last written word about its connection, read out of
+/// `<state_dir>/checkpoints.json` (state/checkpoints.ts).
+///
+/// Returns the state AND how stale it is, because the second is what makes
+/// the first safe to repeat — see `agent_computer_status`'s doc comment.
+/// `updatedAt` is preferred over the file's mtime: mtime moves for reasons
+/// that have nothing to do with the gateway reporting in (a backup, a
+/// restore, a `touch`), and `updatedAt` is written by the same call that
+/// writes the health state, so the two can never disagree about which moment
+/// they describe.
+fn read_gateway_health(state_dir: &Path) -> Option<HealthSnapshot> {
+    let raw = fs::read_to_string(state_dir.join("checkpoints.json")).ok()?;
+    let parsed: Value = serde_json::from_str(&raw).ok()?;
+    let health_state = parsed
+        .get("healthState")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let age = parsed
+        .get("updatedAt")
+        .and_then(|value| value.as_str())
+        .and_then(parse_rfc3339_millis)
+        .and_then(|written| SystemTime::now().duration_since(written).ok());
+    Some(HealthSnapshot { health_state, age })
+}
+
+/// Parses the exact shape `new Date().toISOString()` produces — the only
+/// producer of this field — into a `SystemTime`.
+///
+/// Hand-rolled rather than pulling in `chrono`/`time` for one field: this
+/// crate ships in a customer-facing bundle, the input format is fixed by its
+/// single JavaScript producer, and every parse failure resolves to "unknown
+/// age", which the status rule already treats as not-fresh. So the cost of
+/// being wrong here is a conservative reading, never a confident one.
+fn parse_rfc3339_millis(value: &str) -> Option<SystemTime> {
+    let value = value.trim();
+    // "2026-08-21T10:31:07.482Z"
+    let (date, rest) = value.split_once('T')?;
+    let time = rest.trim_end_matches('Z');
+    let mut date_parts = date.split('-');
+    let year: i64 = date_parts.next()?.parse().ok()?;
+    let month: i64 = date_parts.next()?.parse().ok()?;
+    let day: i64 = date_parts.next()?.parse().ok()?;
+    let mut time_parts = time.split(':');
+    let hour: i64 = time_parts.next()?.parse().ok()?;
+    let minute: i64 = time_parts.next()?.parse().ok()?;
+    let seconds_field = time_parts.next()?;
+    let second: i64 = seconds_field.split('.').next()?.parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+
+    // Days from the Unix epoch, by the civil-from-days algorithm (Howard
+    // Hinnant's, the same one every date library uses) — correct across leap
+    // years and centuries, and short enough to read.
+    let year_adjusted = if month <= 2 { year - 1 } else { year };
+    let era = if year_adjusted >= 0 { year_adjusted } else { year_adjusted - 399 } / 400;
+    let year_of_era = year_adjusted - era * 400;
+    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+
+    let total = days * 86_400 + hour * 3_600 + minute * 60 + second;
+    if total < 0 {
+        return None;
+    }
+    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(total as u64))
+}
+
+/// What the webview told us at pairing time, so the menu bar can name the
+/// workspace and reconnect on its own with no window and no session.
+///
+/// The workspace LABEL cannot be derived here — only the signed-in webview
+/// knows a workspace's human name — and the id alone (`ws_9f3c…`) is not an
+/// answer to "what is this computer serving". So it is recorded once, by the
+/// side that knows, at the one moment it is certainly known.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PairingContext {
+    #[serde(default)]
+    api_base_url: String,
+    #[serde(default)]
+    workspace_id: String,
+    #[serde(default)]
+    workspace_label: String,
+}
+
+fn pairing_context_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(app_state_dir(app)?.join("pairing-context.json"))
+}
+
+fn read_pairing_context(app: &tauri::AppHandle) -> Option<PairingContext> {
+    let path = pairing_context_path(app).ok()?;
+    let raw = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn write_pairing_context(app: &tauri::AppHandle, context: &PairingContext) -> Result<(), String> {
+    let path = pairing_context_path(app)?;
+    let body = serde_json::to_string_pretty(context)
+        .map_err(|error| format!("Failed to encode the pairing context: {error}"))?;
+    fs::write(&path, body)
+        .map_err(|error| format!("Failed to write {}: {error}", path.display()))
+}
+
+/// Marks a DELIBERATE stop, so the menu can tell "the owner turned this off"
+/// from "this went down" — nothing else can, because both look identical from
+/// the outside (no process running). See `AgentComputerStatus::TurnedOff`.
+fn turned_off_marker_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(app_state_dir(app)?.join("turned-off.marker"))
+}
+
+fn is_turned_off_by_owner(app: &tauri::AppHandle) -> bool {
+    turned_off_marker_path(app)
+        .map(|path| path.exists())
+        .unwrap_or(false)
+}
+
+fn set_turned_off_by_owner(app: &tauri::AppHandle, turned_off: bool) -> Result<(), String> {
+    let path = turned_off_marker_path(app)?;
+    if turned_off {
+        fs::write(&path, current_utc_timestamp())
+            .map_err(|error| format!("Failed to write {}: {error}", path.display()))
+    } else {
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("Failed to remove {}: {error}", path.display())),
+        }
     }
 }
 
-fn install_hardware_usage_tray(app: &tauri::App) -> Result<(), String> {
-    let status = MenuItemBuilder::with_id(
-        HARDWARE_USAGE_MENU_STATUS_ID,
-        "Empyralis is using this computer",
-    )
-    .enabled(false)
-    .build(app)
-    .map_err(|error| format!("Failed to build hardware status menu item: {error}"))?;
-    let open = MenuItemBuilder::with_id(HARDWARE_USAGE_MENU_OPEN_ID, "Open Empyralis")
-        .build(app)
-        .map_err(|error| format!("Failed to build hardware open menu item: {error}"))?;
-    let quit = MenuItemBuilder::with_id(HARDWARE_USAGE_MENU_QUIT_ID, "Quit Empyralis")
-        .build(app)
-        .map_err(|error| format!("Failed to build hardware quit menu item: {error}"))?;
-    let menu = MenuBuilder::new(app)
-        .item(&status)
-        .separator()
-        .item(&open)
-        .item(&quit)
-        .build()
-        .map_err(|error| format!("Failed to build hardware status menu: {error}"))?;
+// ─────────────────────────────────────────────────────────────────────────
+// The menu bar item.
+//
+// The founder's brief, and the shape is Ollama's: "only menu bar would be
+// cool — for example Ollama has an application but it's always on top of this
+// menu bar even though application is closed." So there is no Dock icon and no
+// persistent window; this item IS the app once the machine is paired.
+//
+// What the menu holds is a CLOSED list, stated by the founder and not extended
+// here: the status, which workspace this machine serves, one on/off control,
+// and Quit. No preferences, no log viewer, no update check, no "open
+// dashboard" — each of those would be a surface earning its place by habit
+// rather than by need (CLAUDE.md's "a surface must earn its place"), and the
+// window that used to justify an "open" item no longer exists at rest.
+// ─────────────────────────────────────────────────────────────────────────
 
-    let mut tray = TrayIconBuilder::with_id(HARDWARE_USAGE_TRAY_ID)
-        .title("Empyralis")
-        .tooltip("Empyralis is using this computer")
-        .menu(&menu)
-        .show_menu_on_left_click(true)
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            HARDWARE_USAGE_MENU_OPEN_ID => focus_main_window(app),
-            HARDWARE_USAGE_MENU_QUIT_ID => app.exit(0),
-            _ => {}
-        });
+/// What the tray last rendered, plus the cached Docker answer.
+///
+/// Kept so the poll loop can skip a menu rebuild when nothing changed — an
+/// unconditional rebuild every 5s makes an OPEN menu close under the
+/// customer's cursor on macOS, which reads as the app fighting them.
+struct TrayState {
+    rendered: Mutex<Option<TrayRender>>,
+    docker: Mutex<Option<(DockerProbe, Instant)>>,
+}
 
-    if let Some(icon) = app.default_window_icon().cloned() {
-        tray = tray.icon(icon).icon_as_template(true);
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrayRender {
+    status: AgentComputerStatus,
+    workspace_line: String,
+}
+
+impl TrayState {
+    fn new() -> Self {
+        Self {
+            rendered: Mutex::new(None),
+            docker: Mutex::new(None),
+        }
     }
 
-    tray.build(app)
+    /// Cached because it is the only part of a status tick that leaves this
+    /// process. `Unknown` is cached exactly like a real answer: a probe that
+    /// could not run will not start working within 30s, and retrying it every
+    /// tick would be the busy loop the cache exists to prevent.
+    fn docker_probe(&self) -> DockerProbe {
+        if let Ok(guard) = self.docker.lock() {
+            if let Some((cached, at)) = *guard {
+                if at.elapsed() < DOCKER_PROBE_CACHE {
+                    return cached;
+                }
+            }
+        }
+        let probed = probe_docker();
+        if let Ok(mut guard) = self.docker.lock() {
+            *guard = Some((probed, Instant::now()));
+        }
+        probed
+    }
+
+    /// Forces the next tick to re-probe. Called straight after an action that
+    /// changes the answer, so the menu reflects a Disconnect immediately
+    /// instead of up to 30s later.
+    fn invalidate(&self) {
+        if let Ok(mut guard) = self.docker.lock() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = self.rendered.lock() {
+            *guard = None;
+        }
+    }
+}
+
+/// Everything the menu bar knows about this machine, resolved fresh.
+///
+/// Deliberately reads the gateway's OWN files rather than asking the control
+/// plane: this has to be right with no window, no session and no network, and
+/// the webview's control-plane answer (desktop-pairing-state.ts) is simply not
+/// available at rest. The two are different vantage points on purpose — see
+/// `agent_computer_status`'s module doc comment.
+fn resolve_tray_render(app: &tauri::AppHandle, tray_state: &TrayState) -> TrayRender {
+    let state_dir = gateway_state_dir(app).ok();
+    let ever_paired = state_dir
+        .as_ref()
+        .and_then(|dir| fs::read_dir(dir).ok())
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false);
+    let process_alive = read_gateway_pid(app).map(process_running).unwrap_or(false);
+    let health = state_dir.as_deref().and_then(read_gateway_health);
+
+    let status = resolve_status(&StatusInputs {
+        ever_paired,
+        turned_off_by_owner: is_turned_off_by_owner(app),
+        process_alive,
+        health,
+        // Only probed when it could change the answer. On an offline or
+        // turned-off machine the Docker caveat is unreachable by the rule
+        // above, so paying for a socket round trip to compute an input that
+        // cannot matter is pure cost.
+        docker: if ever_paired && process_alive {
+            tray_state.docker_probe()
+        } else {
+            DockerProbe::Unknown
+        },
+    });
+
+    TrayRender {
+        status,
+        workspace_line: workspace_menu_line(app, status),
+    }
+}
+
+/// The "which workspace is this serving" line.
+///
+/// Three different facts, and none of them may wear another's clothes: a real
+/// name, a machine that has not been set up (nothing to name yet), and a
+/// machine that IS paired but whose name we never recorded — the last one is
+/// what an app upgraded from a build that predates `pairing-context.json`
+/// looks like, and printing an opaque `ws_9f3c…` at a customer would be an
+/// answer only a developer could read.
+fn workspace_menu_line(app: &tauri::AppHandle, status: AgentComputerStatus) -> String {
+    if matches!(status, AgentComputerStatus::NotPaired) {
+        return "No workspace yet".to_string();
+    }
+    match read_pairing_context(app) {
+        Some(context) if !context.workspace_label.trim().is_empty() => {
+            format!("Serving {}", context.workspace_label.trim())
+        }
+        _ => "Serving your workspace".to_string(),
+    }
+}
+
+/// The Quit label carries its own consequence.
+///
+/// The founder was explicit that "the menu must make clear that quitting takes
+/// the customer's agents offline. Quitting is not neutral here; do not present
+/// it as if it is." Putting that in the LABEL rather than in a caption beneath
+/// it is what makes it unmissable — a caption is read once and then never
+/// again, and it would also be a fifth item in a menu whose contents are a
+/// closed list.
+///
+/// It is not stated when it is not true: on a machine that is not serving,
+/// quitting really is neutral, and a warning about a consequence that cannot
+/// occur is how a real warning stops being read.
+fn quit_menu_label(status: AgentComputerStatus) -> &'static str {
+    if status.quit_takes_agents_offline() {
+        "Quit — your agents lose this computer"
+    } else {
+        "Quit Empyralis"
+    }
+}
+
+fn build_tray_menu(
+    app: &tauri::AppHandle,
+    render: &TrayRender,
+) -> Result<tauri::menu::Menu<tauri::Wry>, String> {
+    let status_item = MenuItemBuilder::with_id(TRAY_MENU_STATUS_ID, render.status.menu_line())
+        .enabled(false)
+        .build(app)
+        .map_err(|error| format!("Failed to build the status line: {error}"))?;
+    let workspace_item = MenuItemBuilder::with_id(TRAY_MENU_WORKSPACE_ID, &render.workspace_line)
+        .enabled(false)
+        .build(app)
+        .map_err(|error| format!("Failed to build the workspace line: {error}"))?;
+
+    let mut builder = MenuBuilder::new(app).item(&status_item).item(&workspace_item);
+
+    // Rendered, or absent — never present-and-greyed. A control whose own
+    // state admits it does nothing is a design bug, not a caption.
+    if let Some(power) = render.status.power_control() {
+        let power_item = MenuItemBuilder::with_id(TRAY_MENU_POWER_ID, power.label())
+            .build(app)
+            .map_err(|error| format!("Failed to build the connect control: {error}"))?;
+        builder = builder.separator().item(&power_item);
+    } else {
+        builder = builder.separator();
+    }
+
+    let quit_item = MenuItemBuilder::with_id(TRAY_MENU_QUIT_ID, quit_menu_label(render.status))
+        .build(app)
+        .map_err(|error| format!("Failed to build the quit control: {error}"))?;
+
+    builder
+        .item(&quit_item)
+        .build()
+        .map_err(|error| format!("Failed to build the menu: {error}"))
+}
+
+/// How the ICON itself carries the state, so a glance at the menu bar answers
+/// the question without opening anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrayGlyph {
+    /// Working. A solid disc — the calm, "nothing to do here" shape.
+    Solid,
+    /// In motion. A ring: visibly not the resting shape, without being an
+    /// alarm.
+    Ring,
+    /// Idle by choice, or not set up. The same ring at a fraction of the
+    /// weight, so it recedes rather than nags.
+    Faint,
+    /// Something a person should look at. The ONLY glyph that leaves template
+    /// rendering and paints its own colour — see `tray_icon_is_template`.
+    Alert,
+}
+
+fn tray_glyph(status: AgentComputerStatus) -> TrayGlyph {
+    // Asks the status itself which states deserve attention rather than
+    // re-listing them here. A second list would agree today and drift the
+    // first time a state is added — and the way it would drift is silent: a
+    // new attention-worthy state would render the calm icon.
+    if status.needs_attention() {
+        return TrayGlyph::Alert;
+    }
+    match status {
+        AgentComputerStatus::Connected => TrayGlyph::Solid,
+        AgentComputerStatus::NotPaired | AgentComputerStatus::TurnedOff => TrayGlyph::Faint,
+        // Connecting, and anything added later that is not an alarm. `Ring`
+        // is the honest default for "in motion or unclassified": it is
+        // visibly not the resting shape, so a state nobody thought about here
+        // reads as unsettled rather than as fine.
+        _ => TrayGlyph::Ring,
+    }
+}
+
+/// macOS tints a TEMPLATE image itself, so it tracks light/dark menu bars, an
+/// accented menu bar and the pressed state for free — which is why the three
+/// resting glyphs are templates and carry their state in SHAPE.
+///
+/// `Alert` deliberately opts out: a state a person needs to notice should not
+/// be rendered in the same ink as a state that is fine, and shape alone in a
+/// 16pt monochrome glyph is not enough of a difference to catch an eye that is
+/// not looking. It is the one place colour earns its keep.
+fn tray_icon_is_template(glyph: TrayGlyph) -> bool {
+    !matches!(glyph, TrayGlyph::Alert)
+}
+
+const TRAY_ICON_SIZE: u32 = 36;
+
+/// Draws the glyph as raw RGBA.
+///
+/// Rendered rather than shipped as four asset files because the shapes are
+/// two circles and a bar: four PNGs would be four things to keep in step with
+/// each other, and a missing one is a silent blank square in the menu bar.
+/// Supersampled 3x3 for edges that do not look like a screenshot of 2004.
+fn tray_icon_rgba(glyph: TrayGlyph) -> Vec<u8> {
+    const SAMPLES: u32 = 3;
+    let size = TRAY_ICON_SIZE as f32;
+    let center = size / 2.0;
+    let outer = size * 0.34;
+    let inner = match glyph {
+        TrayGlyph::Solid | TrayGlyph::Alert => 0.0,
+        TrayGlyph::Ring => outer * 0.52,
+        TrayGlyph::Faint => outer * 0.62,
+    };
+    // Template images are tinted by the OS, so their RGB is irrelevant and
+    // only alpha is read. Alert paints itself: amber, which reads as "look at
+    // this" without the finality of red — nothing here is broken beyond
+    // repair, and every alert state is something the owner can fix.
+    let (r, g, b) = match glyph {
+        TrayGlyph::Alert => (0xE0u8, 0x8Cu8, 0x1Au8),
+        _ => (0x00u8, 0x00u8, 0x00u8),
+    };
+    let peak_alpha: f32 = match glyph {
+        TrayGlyph::Faint => 0.42,
+        _ => 1.0,
+    };
+
+    let mut pixels = Vec::with_capacity((TRAY_ICON_SIZE * TRAY_ICON_SIZE * 4) as usize);
+    for y in 0..TRAY_ICON_SIZE {
+        for x in 0..TRAY_ICON_SIZE {
+            let mut covered = 0u32;
+            for sy in 0..SAMPLES {
+                for sx in 0..SAMPLES {
+                    let px = x as f32 + (sx as f32 + 0.5) / SAMPLES as f32;
+                    let py = y as f32 + (sy as f32 + 0.5) / SAMPLES as f32;
+                    let dx = px - center;
+                    let dy = py - center;
+                    let distance = (dx * dx + dy * dy).sqrt();
+                    let in_disc = distance <= outer && distance >= inner;
+                    // The exclamation is CUT OUT of the disc rather than drawn
+                    // on top of it, so it stays legible whatever the menu bar
+                    // behind it is doing.
+                    if in_disc && !(glyph == TrayGlyph::Alert && in_exclamation(px, py, size)) {
+                        covered += 1;
+                    }
+                }
+            }
+            let coverage = covered as f32 / (SAMPLES * SAMPLES) as f32;
+            pixels.extend_from_slice(&[r, g, b, (coverage * peak_alpha * 255.0).round() as u8]);
+        }
+    }
+    pixels
+}
+
+/// The exclamation punched out of the alert disc: a bar with a gap and a dot,
+/// both centred.
+fn in_exclamation(px: f32, py: f32, size: f32) -> bool {
+    let half_width = size * 0.055;
+    let dx = (px - size / 2.0).abs();
+    if dx > half_width {
+        return false;
+    }
+    let bar = py >= size * 0.335 && py <= size * 0.575;
+    let dot = py >= size * 0.625 && py <= size * 0.695;
+    bar || dot
+}
+
+fn tray_icon(glyph: TrayGlyph) -> tauri::image::Image<'static> {
+    tauri::image::Image::new_owned(tray_icon_rgba(glyph), TRAY_ICON_SIZE, TRAY_ICON_SIZE)
+}
+
+/// Pushes a freshly resolved state into the menu bar, skipping the work when
+/// nothing changed.
+fn refresh_tray(app: &tauri::AppHandle) {
+    let tray_state = app.state::<TrayState>();
+    let render = resolve_tray_render(app, &tray_state);
+
+    if let Ok(guard) = tray_state.rendered.lock() {
+        if guard.as_ref() == Some(&render) {
+            return;
+        }
+    }
+
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+    match build_tray_menu(app, &render) {
+        Ok(menu) => {
+            if let Err(error) = tray.set_menu(Some(menu)) {
+                eprintln!("Empyralis menu bar could not update its menu: {error}");
+                return;
+            }
+        }
+        Err(error) => {
+            eprintln!("Empyralis menu bar could not build its menu: {error}");
+            return;
+        }
+    }
+
+    let glyph = tray_glyph(render.status);
+    let _ = tray.set_icon(Some(tray_icon(glyph)));
+    let _ = tray.set_icon_as_template(tray_icon_is_template(glyph));
+    // Hovering says the same thing the menu says. Two surfaces, one sentence
+    // — never a second opinion that can drift.
+    let _ = tray.set_tooltip(Some(format!(
+        "Empyralis — {}",
+        render.status.menu_line()
+    )));
+
+    if let Ok(mut guard) = tray_state.rendered.lock() {
+        *guard = Some(render);
+    };
+}
+
+fn install_tray(app: &tauri::AppHandle) -> Result<(), String> {
+    let render = {
+        let tray_state = app.state::<TrayState>();
+        resolve_tray_render(app, &tray_state)
+    };
+    let menu = build_tray_menu(app, &render)?;
+    let glyph = tray_glyph(render.status);
+
+    TrayIconBuilder::with_id(TRAY_ID)
+        .icon(tray_icon(glyph))
+        .icon_as_template(tray_icon_is_template(glyph))
+        .tooltip(format!("Empyralis — {}", render.status.menu_line()))
+        .menu(&menu)
+        // Ollama-shaped: one click opens the menu. Nothing else happens on a
+        // left click, because there is nothing else this app does — it has no
+        // window to toggle at rest.
+        .show_menu_on_left_click(true)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            TRAY_MENU_POWER_ID => handle_power_menu_click(app),
+            TRAY_MENU_QUIT_ID => app.exit(0),
+            _ => {}
+        })
+        .build(app)
+        .map_err(|error| format!("Failed to install the menu bar item: {error}"))?;
+
+    if let Ok(mut guard) = app.state::<TrayState>().rendered.lock() {
+        *guard = Some(render);
+    }
+    Ok(())
+}
+
+/// The menu's one on/off control, resolved from the state it was rendered for
+/// rather than from a second read — so a click can never do the opposite of
+/// what its own label said.
+fn handle_power_menu_click(app: &tauri::AppHandle) {
+    let rendered = app
+        .state::<TrayState>()
+        .rendered
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone());
+    let Some(power) = rendered.and_then(|render| render.status.power_control()) else {
+        return;
+    };
+    let app = app.clone();
+    // Off the menu-event thread: both actions shell out (launchctl, or a
+    // gateway spawn with a 1.5s boot grace), and a menu that stays stuck open
+    // while that happens looks like the app has hung.
+    thread::spawn(move || {
+        let outcome = match power {
+            PowerControl::Disconnect => disconnect_agent_computer(&app),
+            PowerControl::Reconnect => reconnect_agent_computer(&app),
+        };
+        if let Err(error) = outcome {
+            // Nothing on screen can carry this at rest — there is no window.
+            // The menu's own next tick will show the real resulting state,
+            // which is the honest report; this line is for a developer
+            // reading the log, and deliberately does not pretend to be the
+            // customer-facing account of what happened.
+            eprintln!("Empyralis menu bar action failed: {error}");
+        }
+        app.state::<TrayState>().invalidate();
+        refresh_tray(&app);
+    });
+}
+
+/// Stop being an Agent Computer, without uninstalling.
+///
+/// Deliberately does NOT delete the gateway's state directory. "Disconnect"
+/// is the founder's own framing — stop serving — and wiping the state would
+/// silently make it something else: an unpairing that also discards the
+/// undelivered outbound queue sitting in that directory, and that forces a
+/// full re-pair to undo. Stopping is completely reversible; deleting is not,
+/// and the two must not share one button.
+fn disconnect_agent_computer(app: &tauri::AppHandle) -> Result<(), String> {
+    // The marker goes down FIRST. If anything below fails halfway, the owner's
+    // decision is still recorded, the menu still reads "Turned off", and
+    // Reconnect is still the control they are offered — rather than a machine
+    // that quietly keeps serving under a menu that says it stopped.
+    set_turned_off_by_owner(app, true)?;
+
+    let mut problems: Vec<String> = Vec::new();
+    if let Err(error) = remove_gateway_supervision() {
+        problems.push(error);
+    }
+    if let Err(error) = stop_gateway_process(app) {
+        problems.push(error);
+    }
+
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join(" "))
+    }
+}
+
+/// Start serving again, using what was recorded at pairing time.
+///
+/// No pairing token is minted and none is needed: the gateway resumes from its
+/// own persisted registration. That is what makes this reachable with no
+/// window and no signed-in session — the whole reason Disconnect is safe to
+/// offer from a menu in the first place.
+fn reconnect_agent_computer(app: &tauri::AppHandle) -> Result<(), String> {
+    let context = read_pairing_context(app).unwrap_or_default();
+    let resumable =
+        !context.api_base_url.trim().is_empty() && !context.workspace_id.trim().is_empty();
+
+    let outcome = if resumable {
+        desktop_gateway_pair_and_start(
+            app.clone(),
+            app.state::<SidecarState>(),
+            GatewayPairRequest {
+                api_base_url: context.api_base_url.clone(),
+                // Never minted here. A resume uses the registration already on
+                // disk; asking for a token would need a signed-in session this
+                // process does not have.
+                pairing_token: None,
+                workspace_id: context.workspace_id.clone(),
+                display_name: None,
+                workspace_label: Some(context.workspace_label.clone()),
+            },
+        )
         .map(|_| ())
-        .map_err(|error| format!("Failed to install hardware status menu item: {error}"))
+    } else {
+        // An install upgraded from a build that predates `pairing-context.json`
+        // has a perfectly good registration on disk and no record of where to
+        // point it. That is not a failure to report at somebody — it is the
+        // window's job, and the window can do it because it holds the session.
+        Err("This computer's connection details aren't recorded here.".to_string())
+    };
+
+    // Cleared either way, and this is deliberate. The owner just asked for
+    // this machine to be ON; leaving the marker set would have the menu keep
+    // reporting "Turned off" over a request they made and can see failing.
+    let _ = set_turned_off_by_owner(app, false);
+
+    if let Err(error) = outcome {
+        // Nothing at rest can carry a failure — there is no window. So the
+        // failure is exactly the case the founder's own rule reserves the
+        // window for: it "never reopens unless the customer explicitly asks
+        // or SOMETHING IS BROKEN". Opening it lands on the real pairing
+        // surface, which holds the session, states what happened and offers a
+        // retry — rather than a menu bar silently reading "Offline" with no
+        // way forward.
+        request_window(app, WindowReason::SomethingIsBroken);
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Removes this machine's OS-level gateway supervision, so a disconnect
+/// survives a reboot instead of being undone by the thing that exists to
+/// bring the gateway back.
+///
+/// Best-effort and reported: a machine that was never supervised has nothing
+/// to remove, and that is success, not a failure to report at somebody.
+fn remove_gateway_supervision() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let label = std::env::var("EMPYRALIS_LAUNCHD_LABEL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            // Matches gateway-supervisor-install.ts's own
+            // DEFAULT_LAUNCHD_LABEL. A drift here is silent — a bootout of a
+            // label nothing uses "succeeds" — so the env override is honoured
+            // for exactly the same reason the installer honours it.
+            .unwrap_or_else(|| "ai.empyralis.agent-computer".to_string());
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or_else(|| "Could not resolve this user's home directory.".to_string())?;
+        let plist = home.join("Library/LaunchAgents").join(format!("{label}.plist"));
+
+        let uid = unsafe { libc_getuid() };
+        // `bootout` on a label that is not loaded exits non-zero, which is a
+        // correct report of "nothing was loaded" and not a problem — so the
+        // exit status is deliberately not checked. What matters is the plist
+        // being gone, which is what stops it coming back at next login.
+        let _ = Command::new("launchctl")
+            .args(["bootout", &format!("gui/{uid}/{label}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+
+        match fs::remove_file(&plist) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!(
+                "Automatic start could not be turned off ({}: {error}), so this computer may \
+                 start serving again after you restart it.",
+                plist.display()
+            )),
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let unit = "empyralis-gateway.service";
+        let _ = Command::new("systemctl")
+            .args(["--user", "disable", "--now", unit])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+extern "C" {
+    #[link_name = "getuid"]
+    fn libc_getuid() -> u32;
+}
+
+/// Stops the gateway child, whether this app spawned it or a supervisor did.
+///
+/// SIGTERM first so the gateway can flush its outbox and close its socket
+/// cleanly, then SIGKILL for anything that ignores it. CLAUDE.md records what
+/// a SIGTERM with no escalation costs — a whole fleet of immortal children —
+/// so the deadline is enforced here rather than assumed.
+fn stop_gateway_process(app: &tauri::AppHandle) -> Result<(), String> {
+    let pid = match read_gateway_pid(app) {
+        Some(pid) if process_running(pid) => pid,
+        _ => {
+            // Nothing running. Clear a stale pid file so the next status tick
+            // does not keep asking the OS about a process that is long gone.
+            clear_gateway_pid(app);
+            return Ok(());
+        }
+    };
+
+    let _ = Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if !process_running(pid) {
+            break;
+        }
+        sleep(Duration::from_millis(150));
+    }
+    if process_running(pid) {
+        let _ = Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        sleep(Duration::from_millis(300));
+    }
+
+    if let Ok(mut guard) = app.state::<SidecarState>().0.lock() {
+        // Reap it, so this process does not leave a zombie behind, and so a
+        // later `try_wait` cannot report a dead child as running.
+        if let Some(child) = guard.gateway.as_mut() {
+            let _ = child.wait();
+        }
+        guard.gateway = None;
+    }
+    clear_gateway_pid(app);
+
+    if process_running(pid) {
+        Err("This computer could not be stopped. It may still be serving your agents.".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+/// Acts on `plan_launch` — the one place the "a window appears exactly once"
+/// rule turns into behaviour.
+fn run_launch_plan(app: &tauri::AppHandle) {
+    let state_dir = gateway_state_dir(app).ok();
+    let ever_paired = state_dir
+        .as_ref()
+        .and_then(|dir| fs::read_dir(dir).ok())
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false);
+    let inputs = StatusInputs {
+        ever_paired,
+        turned_off_by_owner: is_turned_off_by_owner(app),
+        process_alive: read_gateway_pid(app).map(process_running).unwrap_or(false),
+        health: None,
+        // Irrelevant to the launch decision, and a socket round trip on the
+        // startup path is a cost with no buyer.
+        docker: DockerProbe::Unknown,
+    };
+
+    match agent_computer_status::plan_launch(&inputs) {
+        agent_computer_status::LaunchPlan::ShowWindowToPair => {
+            request_window(app, WindowReason::FirstRunPairing);
+        }
+        agent_computer_status::LaunchPlan::StayInMenuBar
+        | agent_computer_status::LaunchPlan::RespectTurnedOff => {}
+        agent_computer_status::LaunchPlan::ResumeSilently => {
+            // Paired, nothing running, and nobody asked for that. Started here
+            // rather than waiting for a window: on a menu bar app no window is
+            // coming, so leaving this to the webview would mean an already-
+            // paired machine silently stops being an Agent Computer whenever
+            // OS-level supervision does not fire.
+            let app = app.clone();
+            thread::spawn(move || {
+                if let Err(error) = reconnect_agent_computer(&app) {
+                    // `reconnect_agent_computer` has already opened the window
+                    // so the failure lands somewhere a person can see it.
+                    eprintln!("Empyralis could not resume this Agent Computer: {error}");
+                }
+                app.state::<TrayState>().invalidate();
+                refresh_tray(&app);
+            });
+        }
+    }
+}
+
+/// Keeps the menu honest while nothing else is running.
+fn start_tray_status_loop(app: tauri::AppHandle) {
+    thread::spawn(move || loop {
+        sleep(TRAY_POLL_INTERVAL);
+        refresh_tray(&app);
+    });
 }
 
 fn repo_root() -> PathBuf {
@@ -1197,6 +2154,13 @@ struct GatewayPairRequest {
     pairing_token: Option<String>,
     workspace_id: String,
     display_name: Option<String>,
+    /// The workspace's HUMAN name, recorded so the menu bar can say which
+    /// workspace this computer serves while no window exists. Only the
+    /// signed-in webview knows it — see `PairingContext`. Optional so an older
+    /// webview against a newer shell still pairs; the menu falls back to a
+    /// truthful generic line rather than printing a raw id.
+    #[serde(default)]
+    workspace_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1384,6 +2348,33 @@ fn desktop_gateway_pair_and_start(
     request: GatewayPairRequest,
 ) -> Result<GatewayStartResult, String> {
     let state_dir = gateway_state_dir(&app)?;
+
+    // Recorded BEFORE any early return, and refreshed on every launch rather
+    // than written once at first pairing: this is what lets the menu bar name
+    // the workspace and reconnect with no window, so a resume path that
+    // skipped it would leave an upgraded install permanently unable to do
+    // either. Best-effort — failing to record a label must never cost a
+    // customer their pairing.
+    if let Err(error) = write_pairing_context(
+        &app,
+        &PairingContext {
+            api_base_url: request.api_base_url.trim().trim_end_matches('/').to_string(),
+            workspace_id: request.workspace_id.trim().to_string(),
+            workspace_label: request
+                .workspace_label
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+        },
+    ) {
+        eprintln!("Empyralis could not record this computer's workspace: {error}");
+    }
+    // Starting up is the opposite of the owner's "turn this off" decision, and
+    // the decision is theirs to revoke by acting. Leaving the marker in place
+    // would have the menu bar report "Turned off" over a machine that is
+    // demonstrably serving.
+    let _ = set_turned_off_by_owner(&app, false);
 
     {
         let mut guard = state
@@ -1638,10 +2629,13 @@ fn mark_window_non_restorable<R: Runtime>(_window: &tauri::WebviewWindow<R>) -> 
 }
 
 fn ensure_main_window<R: Runtime, M: Manager<R>>(app: &M) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        let _ = app.app_handle().set_activation_policy(tauri::ActivationPolicy::Regular);
-    }
+    // NOTE: this deliberately no longer flips the activation policy to
+    // Regular. The founder's brief is that the app "never appears in the Dock
+    // or the app switcher" — a policy that switches to Regular whenever a
+    // window opens would put it in both for the whole of first-run sign-in,
+    // which is the only time anyone would be looking. Accessory is set once at
+    // startup and never changed; `request_window`'s `set_focus()` is what
+    // gives an accessory app's window keyboard focus.
 
     if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
         window
@@ -1954,6 +2948,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             open_external,
             desktop_window_ready,
+            desktop_window_hide,
             desktop_window_state,
             desktop_window_minimize,
             desktop_window_toggle_maximize,
@@ -1967,8 +2962,17 @@ pub fn run() {
             desktop_gateway_pair_and_start,
         ])
         .setup(|app| {
+            // Accessory, set ONCE and never changed: no Dock icon, no entry in
+            // the app switcher, no menu bar menus of its own — the app lives in
+            // the status bar and nowhere else, which is the founder's whole
+            // brief ("only menu bar would be cool… Ollama has an application
+            // but it's always on top of this menu bar even though application
+            // is closed"). Info.plist's LSUIElement does the same thing one
+            // moment earlier, before this code runs, so there is not even a
+            // flash of a Dock icon at launch; both are deliberate and neither
+            // is redundant.
             #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Regular);
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             if let Err(error) = clear_macos_saved_window_state() {
                 return Err(Box::new(std::io::Error::other(error)));
@@ -1980,6 +2984,7 @@ pub fn run() {
             )?;
 
             app.manage(SidecarState(Mutex::new(Sidecars::default())));
+            app.manage(TrayState::new());
 
             if matches!(launch_state, DesktopShellAcquireResult::AlreadyRunning) {
                 app.manage(DesktopShellLockState {
@@ -2007,7 +3012,11 @@ pub fn run() {
                 skip_launch: false,
             });
 
-            if let Err(error) = install_hardware_usage_tray(app) {
+            // The menu bar item goes up FIRST, before any window decision
+            // below. It is the app's only permanent surface, so a launch that
+            // fails to reach a window must still leave something on screen
+            // that says what happened.
+            if let Err(error) = install_tray(&app_handle) {
                 eprintln!("{error}");
             }
 
@@ -2023,33 +3032,22 @@ pub fn run() {
                         return;
                     }
 
-                    if let Err(error) = ensure_main_window(app_handle) {
-                        eprintln!("Empyralis desktop failed to create the main window: {error}");
-                        let lock_state = app_handle.state::<DesktopShellLockState>();
-                        if let Some(path) = &lock_state.start_meta_path {
-                            release_desktop_start_metadata(path);
-                        }
-                        if let Some(path) = &lock_state.lock_path {
-                            release_desktop_shell_lock(path);
-                        }
-                        app_handle.exit(1);
-                        return;
-                    }
+                    run_launch_plan(app_handle);
 
+                    // Downgraded from fatal ON PURPOSE. The overlay is an
+                    // optional surface for a separate feature; before this,
+                    // failing to build it exited the whole process — which on
+                    // a menu bar app means the customer's Agent Computer loses
+                    // its only status surface because an unrelated window
+                    // could not be created. The app must survive everything
+                    // that is not its own reason for existing.
                     if let Err(error) = create_overlay_window(app_handle) {
                         eprintln!("Empyralis desktop failed to create the overlay window: {error}");
-                        let lock_state = app_handle.state::<DesktopShellLockState>();
-                        if let Some(path) = &lock_state.start_meta_path {
-                            release_desktop_start_metadata(path);
-                        }
-                        if let Some(path) = &lock_state.lock_path {
-                            release_desktop_shell_lock(path);
-                        }
-                        app_handle.exit(1);
-                        return;
+                    } else {
+                        start_overlay_bridge(app_handle.clone());
                     }
 
-                    start_overlay_bridge(app_handle.clone());
+                    start_tray_status_loop(app_handle.clone());
                 }
                 RunEvent::Exit | RunEvent::ExitRequested { .. } => {
                     // Deliberately does NOT touch the gateway child — see this
@@ -2109,6 +3107,198 @@ mod tests {
         // missing build is a clear, actionable error rather than a panic.
         let entry = dev_gateway_entry();
         assert!(entry.ends_with("empyralis-gateway/dist/index.js"));
+    }
+
+    /// The timestamp parser is hand-rolled date maths, so it gets known-answer
+    /// vectors rather than a round trip through itself. Every expected value
+    /// below is an independently-derived Unix second (`date -u -j -f ...
+    /// +%s`), never a number this code produced — a parser checked against its
+    /// own output is a parser that agrees with itself.
+    #[test]
+    fn parses_the_exact_shape_javascript_writes() {
+        let cases: [(&str, u64); 6] = [
+            ("1970-01-01T00:00:00.000Z", 0),
+            ("2026-08-21T10:31:07.482Z", 1_787_308_267),
+            // A leap day, and the day after it — the case naive month-length
+            // arithmetic gets wrong.
+            ("2024-02-29T00:00:00.000Z", 1_709_164_800),
+            ("2024-03-01T00:00:00.000Z", 1_709_251_200),
+            // 2000 is a leap year (divisible by 400) and 2100 is not
+            // (divisible by 100). Both are the century rules that a
+            // simplified algorithm drops.
+            ("2000-12-31T23:59:59.999Z", 978_307_199),
+            // 4_107_542_400, not 4_108_320_000 — the nine days' difference is
+            // exactly the century rule. Written wrong by hand the first time
+            // and caught by this test, which is the argument for cross-checked
+            // vectors over a round trip.
+            ("2100-03-01T00:00:00.000Z", 4_107_542_400),
+        ];
+        for (input, expected_epoch_secs) in cases {
+            let parsed = parse_rfc3339_millis(input)
+                .unwrap_or_else(|| panic!("{input} should parse"))
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_else(|_| panic!("{input} should be after the epoch"))
+                .as_secs();
+            assert_eq!(parsed, expected_epoch_secs, "{input}");
+        }
+    }
+
+    #[test]
+    fn a_timestamp_it_cannot_read_is_unknown_age_never_a_guess() {
+        // Every one of these resolves to `None`, which the status rule treats
+        // as NOT fresh. Returning a plausible wrong instant instead would let
+        // a garbled file assert a confident "Connected".
+        for input in [
+            "",
+            "not a date",
+            "2026-08-21",
+            "2026-08-21T10:31Z",
+            "2026-13-01T00:00:00.000Z",
+            "2026-08-32T00:00:00.000Z",
+            "1969-12-31T23:59:59.000Z",
+        ] {
+            assert!(
+                parse_rfc3339_millis(input).is_none(),
+                "{input:?} must not parse into a confident instant",
+            );
+        }
+    }
+
+    #[test]
+    fn reads_the_health_state_and_its_age_out_of_a_real_checkpoints_file() {
+        // The fixture is the shape state/db.ts's `GatewayStateSnapshot`
+        // actually writes, fields and casing included — not a two-key
+        // invention. CLAUDE.md's own recurring failure: "a fixture that
+        // invents its own input cannot notice the real input is shaped
+        // differently."
+        let dir = tempfile::tempdir().expect("temp dir");
+        let written = SystemTime::now() - Duration::from_secs(12);
+        let written_secs = written
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("after epoch")
+            .as_secs();
+        let iso = format_epoch_secs_as_iso(written_secs);
+        fs::write(
+            dir.path().join("checkpoints.json"),
+            format!(
+                r#"{{"lastAck":41,"lastServerSeq":41,"lastClientSeq":17,"sessionId":"gwsess_5b1",
+                     "sessionExpiresAt":"2026-08-22T10:31:07.000Z","healthState":"online",
+                     "resumeReady":true,"pendingOutboxCount":0,"uncertainOutboxCount":0,
+                     "updatedAt":"{iso}"}}"#
+            ),
+        )
+        .expect("write fixture");
+
+        let snapshot = read_gateway_health(dir.path()).expect("a readable checkpoints file");
+        assert_eq!(snapshot.health_state, "online");
+        let age = snapshot.age.expect("an age");
+        assert!(
+            age >= Duration::from_secs(10) && age <= Duration::from_secs(20),
+            "age should be ~12s, got {age:?}",
+        );
+    }
+
+    #[test]
+    fn a_missing_or_unparseable_checkpoints_file_is_no_snapshot_at_all() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        assert!(read_gateway_health(dir.path()).is_none());
+
+        fs::write(dir.path().join("checkpoints.json"), "{not json").expect("write");
+        assert!(read_gateway_health(dir.path()).is_none());
+    }
+
+    #[test]
+    fn a_checkpoints_file_with_no_timestamp_reports_unknown_age_not_zero_age() {
+        // The dangerous direction: an absent `updatedAt` read as "just now"
+        // would let a file written days ago assert Connected forever.
+        let dir = tempfile::tempdir().expect("temp dir");
+        fs::write(
+            dir.path().join("checkpoints.json"),
+            r#"{"healthState":"online"}"#,
+        )
+        .expect("write");
+        let snapshot = read_gateway_health(dir.path()).expect("a readable file");
+        assert_eq!(snapshot.health_state, "online");
+        assert_eq!(snapshot.age, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_remote_docker_host_is_not_followed() {
+        // A `tcp://` or `ssh://` DOCKER_HOST names somebody else's computer,
+        // and whether THIS machine can run an agent's commands is not a
+        // question about it. Only a unix socket is ever added.
+        std::env::set_var("DOCKER_HOST", "tcp://10.0.0.4:2375");
+        assert!(
+            !docker_socket_candidates()
+                .iter()
+                .any(|path| path.to_string_lossy().contains("10.0.0.4")),
+            "a remote DOCKER_HOST must never become a socket path",
+        );
+        std::env::set_var("DOCKER_HOST", "unix:///tmp/custom-docker.sock");
+        assert_eq!(
+            docker_socket_candidates().first().map(|p| p.to_string_lossy().to_string()),
+            Some("/tmp/custom-docker.sock".to_string()),
+            "an explicitly configured unix socket must be tried first",
+        );
+        std::env::remove_var("DOCKER_HOST");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_that_never_answers_resolves_to_unknown_within_its_deadline() {
+        // The whole justification for not shelling out to `docker info`. This
+        // drives the real probe against a listener that accepts and then says
+        // nothing — a stand-in for the wedged Docker Desktop CLAUDE.md
+        // documents — and requires it to give up on its own.
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let socket = dir.path().join("silent-docker.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        let accepted = thread::spawn(move || {
+            // Accept and hold the connection open without ever replying.
+            let _connection = listener.accept();
+            sleep(Duration::from_secs(3));
+        });
+
+        std::env::set_var("DOCKER_HOST", format!("unix://{}", socket.display()));
+        let started = Instant::now();
+        let probe = probe_docker();
+        let elapsed = started.elapsed();
+        std::env::remove_var("DOCKER_HOST");
+
+        assert_eq!(probe, DockerProbe::Unknown, "silence is not an answer");
+        assert!(
+            elapsed < DOCKER_PROBE_TIMEOUT * 4,
+            "the probe must give up on its own deadline, took {elapsed:?}",
+        );
+        let _ = accepted.join();
+    }
+
+    /// Test-only inverse of `parse_rfc3339_millis`, so the fixture above can
+    /// be built from a real instant. Deliberately not production code — the
+    /// app never writes this format, it only reads it.
+    fn format_epoch_secs_as_iso(epoch_secs: u64) -> String {
+        let days = (epoch_secs / 86_400) as i64;
+        let seconds_of_day = epoch_secs % 86_400;
+        let z = days + 719_468;
+        let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+        let day_of_era = z - era * 146_097;
+        let year_of_era =
+            (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+        let year = year_of_era + era * 400;
+        let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+        let mp = (5 * day_of_year + 2) / 153;
+        let day = day_of_year - (153 * mp + 2) / 5 + 1;
+        let month = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = if month <= 2 { year + 1 } else { year };
+        format!(
+            "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.000Z",
+            seconds_of_day / 3_600,
+            (seconds_of_day % 3_600) / 60,
+            seconds_of_day % 60,
+        )
     }
 
     #[test]

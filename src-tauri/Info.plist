@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Tauri merges this file into the bundled app's own Info.plist at package
+    time (src-tauri/Info.plist is picked up by convention — there is no
+    tauri.conf.json key pointing at it, which is exactly why this comment
+    exists: deleting this file removes the behaviour below with nothing in the
+    config to say it ever applied).
+
+    LSUIElement makes this an "agent" application: no Dock icon, no entry in
+    the app switcher, no application menu bar of its own. It lives in the
+    status bar and nowhere else.
+
+    This is the founder's brief, verbatim: "only menu bar would be cool — for
+    example Ollama has an application but it's always on top of this menu bar
+    even though application is closed."
+
+    lib.rs ALSO sets ActivationPolicy::Accessory at startup, and the pair is
+    not redundant. LSUIElement is read by the OS before any of this app's code
+    runs, so there is not even a flash of a Dock icon at launch; the runtime
+    policy is what keeps the behaviour true for a `cargo tauri dev` run and any
+    other launch that does not go through the packaged bundle's Info.plist.
+
+    The app still opens a real, focusable window for first-run sign-in. An
+    LSUIElement app is allowed to — it just never claims a Dock tile for it.
+  -->
+  <key>LSUIElement</key>
+  <true/>
+</dict>
+</plist>

@@ -118,3 +118,9 @@ crash.log
 .gateway-state/
 /venv
 target
+
+# A build artifact that git sees as a FILE, not a directory: the `dist/`
+# rule above has a trailing slash, so it matches directories only and this
+# symlink slipped past it into `git status` as untracked. Named explicitly so
+# a `git add -A` cannot stage a link to 20MB of built gateway output.
+empyralis-gateway/dist
