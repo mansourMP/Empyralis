@@ -3649,6 +3649,12 @@ export function ConnectorsTab({
   // Same one-liner treatment as ChannelsTab's own subtitle just above, kept
   // visible across every body state (loading/empty/picker) — the whole
   // point is telling the two tabs apart at a glance, not just once loaded.
+  //
+  // In the picker branch it is HANDED TO ConnectorPicker rather than drawn
+  // above it, because the search field has to sit above everything it
+  // filters and the founder's own sketch puts it above this line too. The
+  // words stay defined here, once; only their POSITION belongs to the
+  // picker. See ConnectorPicker's file header.
   const subtitle = <p className="fleet-tab-subtitle">Apps this agent can use</p>;
 
   if (!agent) {
@@ -3679,10 +3685,12 @@ export function ConnectorsTab({
   }
 
   return (
-    <div>
-      {subtitle}
-      <ConnectorPicker workspaceId={workspaceId} projectId={projectId} agentId={agentId} />
-    </div>
+    <ConnectorPicker
+      workspaceId={workspaceId}
+      projectId={projectId}
+      agentId={agentId}
+      heading={subtitle}
+    />
   );
 }
 
