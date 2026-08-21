@@ -463,7 +463,6 @@
    the customer had touched anything. See --focus-ring in theme-tokens.css. */
 .agent-create-name-field:focus-within {
   border-color: var(--focus-ring);
-  box-shadow: 0 0 0 2px var(--focus-ring);
 }
 
 /* Neutral — it was an accent-tinted tile, which is decoration rather than an
@@ -532,7 +531,6 @@
 .agent-create-input:focus,
 .agent-create-select:focus {
   border-color: var(--focus-ring);
-  box-shadow: 0 0 0 2px var(--focus-ring);
 }
 
 /* ── Choice cards: placement, and who pays ────────────────────────────────

@@ -54,10 +54,6 @@
 .fleet-doc-tree-row:hover {
   background: var(--bg-card-hover);
 }
-.fleet-doc-tree-row:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: -2px;
-}
 
 .fleet-doc-tree-chevron {
   flex: none;

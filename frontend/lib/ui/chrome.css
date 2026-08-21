@@ -2723,7 +2723,6 @@ body[data-theme='dark'] .app-auth-card--elevated {
   /* Login/signup fields. Neutral focus — this is the first screen a customer
      ever sees, and it used to bloom violet on the email input. */
   border-color: var(--focus-ring);
-  box-shadow: 0 0 0 2px var(--focus-ring);
   outline: none;
 }
 
@@ -9112,10 +9111,6 @@ body[data-workstation-app-surface='open'] .app-shell-viewport {
   background: color-mix(in srgb, var(--app-bg-panel-elevated) 88%, transparent);
 }
 
-.workstation-titlebar__surface-link:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 2px;
-}
 
 .workstation-titlebar__surface-link:hover .workstation-titlebar__surface {
   color: var(--text-primary);
@@ -9427,10 +9422,6 @@ body[data-workstation-app-surface='open'] .app-shell-viewport {
   color: var(--text-primary);
 }
 
-.workstation-hardware-status__trigger:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 2px;
-}
 
 .workstation-hardware-status__dot {
   width: 7px;
@@ -13370,11 +13361,6 @@ body.theme-light .studio-agents-nav__agent[aria-selected='true'] {
   box-shadow: 0 18px 42px -36px color-mix(in srgb, var(--app-text-primary) 38%, transparent);
 }
 
-.studio-agent-overview__check-card:focus-visible,
-.studio-agent-overview__setup-card:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: -2px;
-}
 
 .studio-agent-overview__check-mark {
   display: inline-flex;

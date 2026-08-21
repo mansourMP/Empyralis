@@ -83,10 +83,6 @@
   margin: 0;
 }
 
-.fleet-root *:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 2px;
-}
 
 /* Dark canvas needs a stronger, darker shadow to read as elevation at all —
    the light-mode rgba(0,0,0,..) values above all but disappear on near-black. */
@@ -1300,11 +1296,6 @@ a.fleet-breadcrumb:hover {
   resize: none;
 }
 
-.fleet-bugreport-textarea:focus-visible,
-.fleet-bugreport-popover .fleet-wizard-input:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
-}
 
 .fleet-bugreport-error {
   font-size: 11px;
@@ -1864,7 +1855,6 @@ a.fleet-breadcrumb:hover {
 .fleet-agents-conversation-search input:focus { outline: none; }
 .fleet-agents-conversation-search:focus-within {
   border-color: var(--focus-ring);
-  box-shadow: 0 0 0 2px var(--focus-ring);
 }
 .fleet-agents-conversation-search input::placeholder { color: var(--text-muted); }
 .fleet-agents-conversation-list-rows {
@@ -1897,10 +1887,6 @@ a.fleet-breadcrumb:hover {
 .fleet-agents-conversation-list-rows .fleet-conversation-row:last-child { border-bottom: none; }
 .fleet-conversation-row:hover { background: var(--bg-card-hover); }
 .fleet-conversation-row--active { background: var(--rail-active); }
-.fleet-conversation-row:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: -2px;
-}
 .fleet-conversation-row-avatar {
   position: relative;
   flex-shrink: 0;
@@ -2001,10 +1987,6 @@ a.fleet-breadcrumb:hover {
 .fleet-inbox-list .fleet-inbox-row:last-child { border-bottom: none; }
 .fleet-inbox-row:hover { background: var(--bg-card-hover); }
 .fleet-inbox-row.is-selected { background: var(--rail-active); }
-.fleet-inbox-row:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: -2px;
-}
 /* A Needs-you row with no resolvable href (see inbox-needs-you.ts: never a
    link to nowhere) renders as plain text — no pointer cursor, no hover
    highlight suggesting a click does something it doesn't. */
@@ -4566,10 +4548,6 @@ a.fleet-breadcrumb:hover {
   border-color: var(--border);
 }
 
-.fleet-overview-title:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
-}
 
 .fleet-overview-title-pencil {
   flex: none;
@@ -4772,8 +4750,6 @@ a.fleet-breadcrumb:hover {
   cursor: not-allowed;
 }
 .fleet-toggle:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 2px;
 }
 
 .fleet-toggle-row {
@@ -4834,10 +4810,6 @@ a.fleet-breadcrumb:hover {
 }
 .fleet-persona-textarea--expanded {
   min-height: 240px;
-}
-.fleet-persona-textarea:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
 }
 
 /* ── Command palette (Cmd+K) ─────────────────────────────────────────────── */
@@ -5368,10 +5340,6 @@ a.fleet-breadcrumb:hover {
   font-size: 13px;
 }
 
-.fleet-wizard-input:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
-}
 
 .fleet-wizard-options {
   display: flex;
@@ -5688,10 +5656,6 @@ a.fleet-breadcrumb:hover {
   line-height: 1.7;
 }
 
-.fleet-memory-editor-textarea:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
-}
 
 /* Preview (read) mode — clean prose, not the raw source file. Proportional
    font + generous line-height/paragraph spacing so hard-wrapped source text
@@ -5935,8 +5899,6 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 .fleet-agents-list .fleet-agent-row:last-child { border-bottom: none; }
 .fleet-agent-row:hover { background: var(--bg-card-hover); }
 .fleet-agent-row:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: -2px;
 }
 
 /* Agent column: [health dot] [avatar] [name+badge / preview]. The dot on the
@@ -6301,8 +6263,6 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 .fleet-projects-list .fleet-project-row:last-child { border-bottom: none; }
 .fleet-project-row:hover { background: var(--bg-card-hover); }
 .fleet-project-row:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: -2px;
 }
 
 .fleet-project-cell-name {
@@ -9050,8 +9010,6 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
 .fleet-tasks-list .fleet-task-row:last-child { border-bottom: none; }
 .fleet-task-row:hover { background: var(--bg-card-hover); }
 .fleet-task-row:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: -2px;
 }
 
 /* The assignee cell is clickable to reassign, so it has to be a real button.
@@ -9070,8 +9028,6 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   cursor: pointer;
 }
 .fleet-task-assignee-btn:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 2px;
   border-radius: var(--radius-control);
 }
 .fleet-task-cell-title { min-width: 0; }
@@ -9361,10 +9317,6 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   transition: background-color var(--dur-1) var(--ease-out), border-color var(--dur-1) var(--ease-out);
 }
 .fleet-board-card:hover { background: var(--bg-card-hover); border-color: var(--border-strong); }
-.fleet-board-card:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: -1px;
-}
 /* Which card the open detail drawer is showing — the same "selected, not
    hovered" distinction the agent list draws. */
 .fleet-board-card.is-selected {
@@ -9490,11 +9442,6 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   -webkit-appearance: none;
 }
 /* Focus is otherwise invisible — the control itself is transparent, so the
-   ring underneath has to show the state. */
-.fleet-board-card-statuspick:has(.fleet-board-card-status:focus-visible) {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 2px;
-}
 .fleet-board-card-statuspick:hover {
   box-shadow: 0 0 0 3px var(--rail-active);
   background: var(--rail-active);
@@ -9622,8 +9569,6 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   border-color: var(--border);
 }
 .fleet-task-page-title-edit:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
 }
 .fleet-task-page-title-pencil {
   flex: none;
@@ -9671,8 +9616,6 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   border-color: var(--border);
 }
 .fleet-task-page-desc--editable:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
 }
 .fleet-task-page-desc-input {
   display: block;
@@ -9825,8 +9768,6 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   color: var(--text-muted);
 }
 .fleet-task-page-comment-input:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
 }
 .fleet-task-page-comment-input:disabled {
   opacity: 0.6;
@@ -9917,10 +9858,6 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
 .fleet-task-detail-select:hover {
   border-color: var(--border);
   background: var(--bg-card-hover);
-}
-.fleet-task-detail-select:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
 }
 
 /* MAN-294: the honest amendment to the Status row directly above it — "In
@@ -10536,10 +10473,6 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
 }
 .fleet-label-chip-x:hover { background: var(--rail-active); color: var(--text-primary); }
 .fleet-label-chip-x:disabled { cursor: default; opacity: 0.5; }
-.fleet-label-chip-x:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
-}
 .fleet-label-add {
   display: inline-flex;
   align-items: center;
@@ -10558,8 +10491,6 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
 .fleet-label-add:hover,
 .fleet-label-add.is-open { background: var(--rail-active); color: var(--text-secondary); }
 .fleet-label-add:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
 }
 /* The picker is .fleet-composer-pop (one menu style for the whole surface);
    this only re-anchors it, since the properties column is 300px wide and a
@@ -10608,10 +10539,6 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
     0 0 0 3.5px var(--text-secondary);
   transition: box-shadow var(--dur-1) var(--ease-out);
 }
-.fleet-label-swatch:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 2px;
-}
 
 /* ── Recolouring an existing label (TaskLabelEditor's vocabulary list) ──────
    The only place a label's colour can be changed after creation. The dot is
@@ -10639,10 +10566,6 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
 .fleet-label-swatch-trigger:hover:not(:disabled),
 .fleet-label-swatch-trigger:focus-visible { background: var(--rail-active); }
 .fleet-label-swatch-trigger:disabled { cursor: default; opacity: 0.5; }
-.fleet-label-swatch-trigger:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: -2px;
-}
 /* Overrides .fleet-composer-pop-item's width:100% — inside this row the name
    button shares space with the swatch trigger next to it. */
 .fleet-label-vocab-name { width: auto; flex: 1; min-width: 0; }
@@ -10689,8 +10612,6 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
 .fleet-board-column-btn.is-open { background: var(--rail-active); color: var(--text-primary); }
 .fleet-board-column-btn:focus-visible {
   opacity: 1;
-  outline: 2px solid var(--focus-ring);
-  outline-offset: -1px;
 }
 /* The count sits between the title and these controls; it keeps its
    margin-left:auto push, so the controls simply follow it. */
@@ -10766,8 +10687,6 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   border-bottom-color: var(--text-primary);
 }
 .fleet-glist-tab:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 2px;
   border-radius: 4px;
 }
 .fleet-glist-tab-count {
@@ -10818,10 +10737,6 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   cursor: pointer;
 }
 .fleet-glist-header-btn:hover { background: var(--rail-active); }
-.fleet-glist-header-btn:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: -1px;
-}
 .fleet-glist-chevron {
   flex-shrink: 0;
   color: var(--text-muted);
@@ -10866,8 +10781,6 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
 .fleet-glist-header-add:hover { background: var(--rail-active); color: var(--text-primary); }
 .fleet-glist-header-add:focus-visible {
   opacity: 1;
-  outline: 2px solid var(--focus-ring);
-  outline-offset: -1px;
 }
 
 .fleet-glist-rows { display: flex; flex-direction: column; }
@@ -10897,8 +10810,6 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
 .fleet-glist-rows .fleet-glist-row:last-child { border-bottom: none; }
 .fleet-glist-row:hover { background: var(--bg-card-hover); }
 .fleet-glist-row:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: -2px;
 }
 
 .fleet-glist-cell-prio,
@@ -11194,10 +11105,6 @@ h2.fleet-sage-console-title {
 .fleet-view-options-select:hover {
   border-color: var(--border-strong);
 }
-.fleet-view-options-select:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
-}
 
 /* The sort-direction toggle. Deliberately the same 26px box as the select it
    trails, so the pair reads as one control rather than a control plus an
@@ -11219,10 +11126,6 @@ h2.fleet-sage-console-title {
 .fleet-view-options-dir:hover {
   color: var(--text-primary);
   border-color: var(--border-strong);
-}
-.fleet-view-options-dir:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
 }
 
 .fleet-view-options-section {
@@ -11271,8 +11174,6 @@ h2.fleet-sage-console-title {
   font-weight: var(--weight-medium);
 }
 .fleet-view-options-chip:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
 }
 
 .fleet-view-options-footer {
@@ -11296,10 +11197,6 @@ h2.fleet-sage-console-title {
 .fleet-view-options-reset:hover {
   background: var(--bg-card-hover);
   color: var(--text-primary);
-}
-.fleet-view-options-reset:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
 }
 
 /* The grouped list's row grid, rebuilt per display state. Overridden here
@@ -11476,8 +11373,6 @@ h2.fleet-sage-console-title {
   font-size: var(--text-xs);
 }
 .fleet-member-invite-input:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
 }
 
 .fleet-member-invite-select {
@@ -11492,8 +11387,6 @@ h2.fleet-sage-console-title {
   cursor: pointer;
 }
 .fleet-member-invite-select:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
 }
 
 .fleet-member-invite-submit {
@@ -11667,10 +11560,6 @@ h2.fleet-sage-console-title {
 .fleet-agent-view-options-select:hover {
   border-color: var(--border-strong);
 }
-.fleet-agent-view-options-select:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
-}
 
 .fleet-agent-view-options-dir {
   display: inline-flex;
@@ -11689,10 +11578,6 @@ h2.fleet-sage-console-title {
 .fleet-agent-view-options-dir:hover {
   color: var(--text-primary);
   border-color: var(--border-strong);
-}
-.fleet-agent-view-options-dir:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
 }
 
 .fleet-agent-view-options-section {
@@ -11739,8 +11624,6 @@ h2.fleet-sage-console-title {
   font-weight: var(--weight-medium);
 }
 .fleet-agent-view-options-chip:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
 }
 
 .fleet-agent-view-options-footer {
@@ -11764,10 +11647,6 @@ h2.fleet-sage-console-title {
 .fleet-agent-view-options-reset:hover {
   background: var(--bg-card-hover);
   color: var(--text-primary);
-}
-.fleet-agent-view-options-reset:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
 }
 
 /* ── Board (AgentsBoard.tsx) ───────────────────────────────────────────── */
@@ -11892,10 +11771,6 @@ h2.fleet-sage-console-title {
   background: var(--bg-card-hover);
   border-color: var(--border-strong);
 }
-.fleet-agent-board-card:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: -1px;
-}
 .fleet-agent-board-card.is-selected {
   border-color: var(--accent-muted);
   box-shadow: inset 0 0 0 1px var(--accent-muted);
@@ -11995,8 +11870,6 @@ h2.fleet-sage-console-title {
   background: var(--rail-active);
 }
 .fleet-agent-glist-header-btn:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: -1px;
 }
 .fleet-agent-glist-chevron {
   flex-shrink: 0;
@@ -12044,8 +11917,6 @@ h2.fleet-sage-console-title {
   background: var(--bg-card-hover);
 }
 .fleet-agent-glist-row:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: -2px;
 }
 @media (max-width: 768px) {
   .fleet-agent-glist-row {
