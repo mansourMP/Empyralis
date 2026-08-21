@@ -710,10 +710,91 @@ cannot silently drop it from one branch the way this file has repeatedly
 documented happening elsewhere. ~125 words, ~160 cl100k tokens, paid on
 every turn.
 
+## Purple only on primary buttons (2026-08-21)
+
+**Founder's rule, verbatim: "do that, purple only on primary buttons."**
+`--accent` may be used ONLY on the filled primary action button. Not on
+selected states, active tabs, badges, dots, links, toggle tracks, hover
+washes, icon tiles, rings, or anything else. There is no second legitimate
+home for it, and the two that this file used to name — the rail's active
+left bar, and `--task-done` — are both closed.
+
+It took five passes to get here because the first four were the wrong shape.
+Each removed one purple ring (a focus ring, then a neutral focus ring, then
+a thinner one, then the selection border on the wizard's placement cards) and
+purple reappeared somewhere else, because `--accent` is a token that reads as
+"important" and every author who wanted something to look important reached
+for it. Measured over `lib/workspace/fleet/*.css` + `app/**/*.css` the morning
+this landed: **48 declarations painted with it, and 9 of them were the primary
+button.** Removing instance 49 was never going to work.
+
+**Selection is now WEIGHT and SHAPE, never hue.** The house pattern, already
+half-present in `.fleet-tier-picker-option` and `.fleet-wizard-option` and
+now applied everywhere:
+
+| signal | unselected | selected |
+| --- | --- | --- |
+| border | `--border` | `--text-primary` |
+| fill | `--bg-inset` / `--bg-rail` | `--bg-card` / `--bg-inset` |
+| shape | nothing | a drawn checkmark, or a filled radio dot |
+
+The checkmark is what makes this not colour-alone. It is drawn from two
+rotated borders rather than a `"✓"` glyph so no font stack can change it, and
+its lane is reserved by padding on the BASE rule — reserving it only on the
+selected rule reflows the card's own label the moment you pick it. Cards that
+already carry a real radio dot (the connector picker, the VPS plan rows) get
+no checkmark; the dot is already the shape half. Channel/connector cards get
+neither — a tick on a channel card face reads as "connected", which is a
+different fact the pill already owns.
+
+**`.fleet-btn--accent` is fully neutral now, and that is not an oversight.**
+It is the class `create-accent.ts` hands out precisely when something ELSE
+owns the view's primary action, so by definition it is not the primary
+button. It stays visibly the emphatic one by weight: a `--text-primary` edge
+and label against a plain `.fleet-btn`'s `--border` / `--text-secondary`.
+
+**Guarded by `frontend/lib/ui/accent-restraint.test.ts`** (wired into
+`npm run test:unit`), which scans every CSS file under `lib/` and `app/` and
+fails on any declaration referencing the accent outside a six-entry
+primary-button allowlist. Aliases (`--app-accent`, `--interactive-accent`,
+`--accent-soft`, …) are followed transitively and DERIVED from the token
+files rather than hand-listed, so a new alias is covered the day it is
+defined. Four canaries: the scan must reach real CSS and real rules, alias
+resolution must still follow the graph, the allowlisted buttons must still
+BE painted (zero allowed uses means the product has no primary action
+anywhere — a different bug that passes a "no violations" test happily), and
+the matcher must classify both directions correctly. Proven red-before-green
+by putting the founder's own screenshotted ring back.
+
+`lib/ui/chrome.css` is excluded from that scan **with a written reason in the
+test's header**: ~130 remaining accent declarations there belong to selectors
+with no consumer outside that one file (`studio-*`, `marketplace-*`,
+`deployed-agents-*`, `app-filter-pill`, `sage-unified-card` — all verified
+dead by grep). Its LIVE surfaces were swept by hand. Do not widen the scan
+there without deleting the dead CSS first; a scan that fails on 130 dead
+rules is a scan someone disables.
+
+**`--task-done` no longer aliases `--accent`** — a status dot is not a
+button. It takes the success hue its own comment already said it meant
+(`#2f9e68` dark / `#0f6b34` light), one shade off `--task-review`'s green so
+the two adjacent good states stay apart; the glyph carries a solid disc and a
+white check that no other status draws, so they separate without colour too.
+Revert = put `var(--accent)` back on both lines in `theme-tokens.css`.
+
+**The hue itself is still violet, and UI-CONTRACT.md still says blue.**
+`theme-tokens.css` defines `--accent: oklch(57% 0.155 305)` (light) /
+`oklch(64% 0.17 305)` (dark) — violet, and that is what production renders.
+`docs/UI-CONTRACT.md` describes the accent as "a calm unambiguous BLUE,
+`oklch(57% 0.155 259)` — never violet or indigo". The CODE is in force; the
+doc is stale. Not changed here: which one is right is the founder's call, and
+nothing in this pass depends on the answer.
+
 ## Craft doctrine
 
 - One accent colour, spent on the single primary action in a view. Everything
   else is neutral. Two accent-filled buttons in one view is a bug.
+  **This line is now MACHINE-ENFORCED, and it had to be — see "Purple only on
+  primary buttons" below.**
 - Dense inside a group, airy between groups.
 - Motion 100–150ms, ease-out, on state change only. Never decorative.
 - Real heading structure (`h1`/`h2`), not styled divs.

@@ -502,7 +502,7 @@ textarea {
   border-radius: calc(var(--app-radius-xl) + 2px);
   background:
     linear-gradient(180deg,
-      color-mix(in srgb, var(--app-bg-panel) 94%, var(--app-accent-soft) 6%) 0%,
+      var(--app-bg-panel) 0%,
       color-mix(in srgb, var(--app-bg-panel) 82%, var(--app-surface-inset) 18%) 100%);
   box-shadow: var(--app-shadow-panel);
 }
@@ -706,7 +706,7 @@ textarea {
       105deg,
       transparent 0%,
       transparent 34%,
-      color-mix(in srgb, var(--app-text-primary) 92%, var(--app-accent-strong) 8%) 50%,
+      var(--app-text-primary) 50%,
       transparent 66%,
       transparent 100%
     );
@@ -836,8 +836,8 @@ textarea {
 }
 
 .app-surface-list-item:hover {
-  border-color: color-mix(in srgb, var(--app-accent) 28%, var(--app-border-subtle) 72%);
-  background: color-mix(in srgb, var(--app-surface-hover) 74%, var(--app-accent-soft) 26%);
+  border-color: var(--app-border-strong);
+  background: var(--app-surface-hover);
 }
 
 .app-surface-list-item__row {
@@ -1660,7 +1660,7 @@ textarea {
 .app-field:hover,
 .app-select:hover,
 .app-textarea:hover {
-  background: color-mix(in srgb, var(--app-bg-panel-elevated) 88%, var(--app-accent-soft) 12%);
+  background: var(--app-bg-panel-elevated);
 }
 
 .app-field:focus,
@@ -1733,7 +1733,7 @@ body[data-theme='dark'] .app-textarea:focus {
   border-radius: calc(var(--app-radius-xl) - 2px);
   background:
     linear-gradient(180deg,
-      color-mix(in srgb, var(--app-bg-panel) 92%, var(--app-accent-soft) 8%) 0%,
+      var(--app-bg-panel) 0%,
       color-mix(in srgb, var(--app-bg-panel) 80%, var(--app-surface-inset) 20%) 100%);
   box-shadow: var(--app-shadow-subtle);
 }
@@ -2746,7 +2746,7 @@ body[data-theme='dark'] .app-auth-card--elevated {
 }
 
 .app-auth-input::selection {
-  background: var(--app-accent-soft);
+  background: var(--app-bg-overlay);
   color: var(--app-text-primary);
 }
 
@@ -4472,7 +4472,7 @@ body[data-theme='dark'] .app-auth-divider > span[aria-hidden="true"] {
   max-width: 75%;
   padding: 8px 14px;
   border-radius: 18px;
-  background: color-mix(in srgb, var(--app-accent) 15%, var(--app-surface-2) 40%);
+  background: var(--app-bg-overlay);
   color: var(--text-primary);
   font-size: var(--app-font-15);
   line-height: 1.5;
@@ -4554,8 +4554,8 @@ a.app-chat-message__attachment-chip:hover {
   font-size: 0.9em;
 }
 .app-chat-message .fleet-link {
-  color: var(--app-accent);
-  text-decoration: none;
+  color: var(--app-text-primary);
+  text-decoration: underline;
 }
 .app-chat-message .fleet-link:hover {
   text-decoration: underline;
@@ -24339,7 +24339,7 @@ body[data-theme='dark'] .sage-integration-brand__image[src*='notion.svg'] {
 
 .gateway-operator-pane .app-surface-card {
   background: color-mix(in srgb, var(--app-bg-panel) 86%, var(--app-surface-1) 14%);
-  border-color: color-mix(in srgb, var(--app-border-muted) 88%, var(--accent-subtle) 12%);
+  border-color: var(--app-border-muted);
 }
 
 .gateway-operator-pane .app-surface-card__header {
@@ -24364,8 +24364,8 @@ body[data-theme='dark'] .sage-integration-brand__image[src*='notion.svg'] {
 }
 
 .gateway-operator-pane .app-surface-list-item:hover {
-  border-color: color-mix(in srgb, var(--accent) 18%, var(--app-border-muted) 82%);
-  background: color-mix(in srgb, var(--app-surface-inset) 58%, var(--accent-subtle) 42%);
+  border-color: var(--app-border-strong);
+  background: var(--app-surface-inset);
 }
 
 .gateway-operator-pane code {
@@ -24625,7 +24625,7 @@ body[data-theme='dark'] .sage-integration-brand__image[src*='notion.svg'] {
 
 .invite-landing__spinner {
   animation: spin 1s linear infinite;
-  color: var(--app-accent);
+  color: var(--app-text-secondary);
 }
 
 @keyframes spin {
@@ -25698,7 +25698,7 @@ body[data-theme='dark'] .sage-integration-brand__image[src*='notion.svg'] {
 }
 
 .cloud-vps-provider-row:hover {
-  border-color: color-mix(in srgb, var(--app-accent) 38%, var(--app-border-subtle) 62%);
+  border-color: var(--app-border-strong);
   background: color-mix(in srgb, var(--app-bg-panel-elevated) 82%, var(--app-bg-panel) 18%);
 }
 
@@ -25922,10 +25922,18 @@ body[data-theme='dark'] .sage-integration-brand__image[src*='notion.svg'] {
   text-align: left;
 }
 
-.cloud-vps-plan-row:hover,
+/* Hover and selected used to SHARE one rule, so the row you happened to be
+   pointing at looked exactly like the size you had actually chosen. They are
+   two facts and now have two rules — and neither spends the accent, which is
+   reserved for the panel's one primary action. */
+.cloud-vps-plan-row:hover {
+  border-color: var(--app-border-strong);
+  background: var(--app-bg-overlay);
+}
+
 .cloud-vps-plan-row.is-selected {
-  border-color: color-mix(in srgb, var(--app-accent) 68%, var(--app-border-subtle) 32%);
-  background: color-mix(in srgb, var(--app-accent) 8%, var(--app-bg-panel) 92%);
+  border-color: var(--app-text-primary);
+  background: var(--app-bg-panel-elevated);
 }
 
 .cloud-vps-plan-row__radio {
@@ -25936,8 +25944,10 @@ body[data-theme='dark'] .sage-integration-brand__image[src*='notion.svg'] {
   border-radius: var(--radius-full);
 }
 
+/* The filled dot is the shape half of the signal — this row is a real radio
+   group, so it needs no checkmark on top of one. */
 .cloud-vps-plan-row.is-selected .cloud-vps-plan-row__radio {
-  border: 4px solid var(--app-accent);
+  border: 4px solid var(--app-text-primary);
 }
 
 .cloud-vps-plan-row strong {

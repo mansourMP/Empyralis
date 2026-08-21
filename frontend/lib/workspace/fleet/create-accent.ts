@@ -60,9 +60,17 @@ export function createOwnsAccent(control: CreateControl, state: CreateAccentStat
 }
 
 /** The full className for one of those controls. `fleet-btn--accent` is the
- *  quiet hairline variant — still an accent-coloured control, still
- *  reachable, just not the filled one (no dead controls: a button that loses
- *  the fill is never removed or disabled by this rule). */
+ *  quiet variant — still reachable, just not the filled one (no dead
+ *  controls: a button that loses the fill is never removed or disabled by
+ *  this rule).
+ *
+ *  It used to be an accent-coloured control too (an accent hairline and an
+ *  accent label). It is fully NEUTRAL as of 2026-08-21: the founder's rule is
+ *  that the accent belongs to the filled primary button and to nothing else,
+ *  and this class is by definition handed out to the control that is NOT the
+ *  primary action. It stays visibly the emphatic button by weight instead —
+ *  a --text-primary edge and label against a plain .fleet-btn's --border /
+ *  --text-secondary. See fleet-theme.css and accent-restraint.test.ts. */
 export function createButtonClass(control: CreateControl, state: CreateAccentState): string {
   return `fleet-btn ${createOwnsAccent(control, state) ? "fleet-btn--accent-fill" : "fleet-btn--accent"}`;
 }

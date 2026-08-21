@@ -94,7 +94,8 @@
   font-weight: var(--app-weight-semibold);
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--app-accent);
+  /* An eyebrow is a label, not an action — neutral since 2026-08-21. */
+  color: var(--app-text-secondary);
 }
 
 .landing-hero__title {

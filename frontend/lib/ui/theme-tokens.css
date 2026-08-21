@@ -273,7 +273,16 @@ html[data-theme="dark"] {
   --task-input: #5e9cf5;
   --task-blocked: #ef4444;
   --task-review: #4cb782;
-  --task-done: var(--accent);
+  /* WAS var(--accent). The founder closed the accent's last non-button home
+     on 2026-08-21 ("purple only on primary buttons"), and a status dot is not
+     a button. This token's own comment already said what Done MEANS — "a
+     completed task IS the product's success state" — so it takes the success
+     hue rather than a grey, which would have collapsed it into --task-backlog
+     / --task-todo. It is a shade deeper than --task-review's green so the two
+     adjacent good states stay apart, and the glyph carries a solid disc + a
+     white check that no other status draws, so the two are separable without
+     colour at all. Revert = put var(--accent) back on both of these lines. */
+  --task-done: #2f9e68;
 
   /* Priority (Linear's integer convention: 1 urgent … 4 low). Only URGENT
      carries colour; high/medium/low are grey bar glyphs, so a wall of cards
@@ -364,7 +373,7 @@ html[data-theme="light"] {
   --task-input: #2563eb;
   --task-blocked: #dc2626;
   --task-review: #15803d;
-  --task-done: var(--accent);
+  --task-done: #0f6b34;
 
   --priority-urgent: #d9481c;
   --priority-bar: var(--text-secondary);
