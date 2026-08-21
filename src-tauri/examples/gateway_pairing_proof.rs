@@ -21,11 +21,23 @@
 //! `/api/gateway/*` API and spawns the real gateway's `dist/index.js`. The
 //! shape survives; the target does not.
 //!
-//! Not shipped product code. Run manually against a disposable local stack
-//! (see CLAUDE.md's "Testing the UI" section) — never against production or
-//! the founder's own account. Usage:
+//! Not shipped product code — and it lives in `examples/` rather than
+//! `src/bin/` for a reason that cost a whole broken release. As a second
+//! `[[bin]]` target of this crate it was the binary Tauri's bundler chose
+//! as `CFBundleExecutable`: the built `Empyralis.app` launched THIS
+//! argument parser instead of the desktop shell, printed
+//! "missing required --api-url" to a console nobody sees, and exited. A
+//! double-clicked app that appears to do nothing at all, with the real
+//! 13.6MB shell binary sitting un-bundled next to it in `target/release`.
+//! An `examples/` target is never a bin target, so it can never be picked
+//! again; `tauri.conf.json` additionally names `mainBinaryName` outright,
+//! so a future second binary cannot reintroduce this either.
 //!
-//!   gateway_pairing_proof \
+//! Run manually against a disposable local stack (see CLAUDE.md's
+//! "Testing the UI" section) — never against production or the founder's
+//! own account. Usage:
+//!
+//!   cargo run --example gateway_pairing_proof -- \
 //!     --api-url http://127.0.0.1:8001/api \
 //!     --bearer <access_token> \
 //!     --pairing-token <gpair_...> \

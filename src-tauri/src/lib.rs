@@ -977,8 +977,36 @@ fn existing_desktop_process() -> Option<u32> {
         if pid == 0 || pid == current_pid {
             continue;
         }
-        let command = parts.collect::<Vec<_>>().join(" ");
-        if command.contains(&exe_path) || command.contains(&exe_name) {
+        // Identity is argv[0] — the program this process IS — never a
+        // substring search of the whole command line.
+        //
+        // `command.contains(&exe_name)` looked equivalent and was not: it
+        // matches any process that merely MENTIONS the binary, and on a
+        // developer's machine that is routinely several. Measured here with
+        // the app not running at all, `ps -ax -o command=` matched three
+        // shell wrappers (`/bin/zsh -c … empyralis-tauri-shell …`) and a
+        // live `grep` for the name. Each one resolved to "already running",
+        // so `acquire_desktop_shell_lock` reported AlreadyRunning, the app
+        // tried to focus a zsh process, and then EXITED — status 0, no
+        // window, nothing printed. An app that silently refuses to start
+        // whenever its own name appears in a terminal is unlaunchable from
+        // a shell, which is how every installer, every CI job and every
+        // developer starts it.
+        //
+        // A real second instance always has the executable as argv[0], so
+        // taking only the first token is both stricter and complete. The
+        // file-name fallback stays for the copied/renamed-bundle case (the
+        // path differs, the program does not) but is now applied to argv[0]
+        // alone, where it cannot match a wrapper.
+        let argv0 = parts.next().unwrap_or_default();
+        if argv0.is_empty() {
+            continue;
+        }
+        let argv0_name = std::path::Path::new(argv0)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        if argv0 == exe_path || (!exe_name.is_empty() && argv0_name == exe_name) {
             return Some(pid);
         }
     }
@@ -1186,7 +1214,49 @@ struct GatewayStartResult {
     already_running: bool,
     pid: Option<u32>,
     state_dir: String,
+    /// See `read_gateway_identity`. Usually absent on a FIRST pair — the
+    /// gateway writes its identity during registration, which happens after
+    /// this returns — so the caller re-reads it while polling rather than
+    /// treating an absent id here as "no identity".
+    gateway_id: Option<String>,
     supervisor: GatewaySupervisorOutcome,
+}
+
+/// This machine's own gateway id, read straight out of the state directory
+/// the gateway itself owns (`identity.json`, written by
+/// empyralis-gateway/src/pairing/device-identity.ts at pairing time).
+///
+/// This exists so the webview can ask "is THIS computer connected" rather
+/// than "is any computer in this workspace connected". Those are different
+/// questions and only the second one is answerable without an id: the
+/// founder's own workspace holds a permanently online production VPS, so a
+/// status surface polling `items.some(online)` — which is exactly what
+/// examples/gateway_pairing_proof.rs does, correctly, for its own narrower
+/// purpose — would report a confident "Connected" on a Mac that has never
+/// paired and never will.
+///
+/// Returns None rather than an error on every failure (no file yet, half-
+/// written file, unreadable directory). An unknown identity is a real state
+/// — it is what a never-paired machine looks like — and the caller is built
+/// to treat it as "cannot confirm", never as "not connected" and never as a
+/// reason to fall back to matching any machine at all.
+///
+/// Deliberately NOT read from `registration.json`, which sits beside it and
+/// looks like a better source because it carries the richer server-side
+/// payload: that file is written by the cloud WebSocket client on connect
+/// (ws-client.ts), so it lags, and on a re-paired machine it can hold a
+/// STALE id from a previous pairing while `identity.json` holds the current
+/// one. Observed live on this developer's own box: the two files disagreed,
+/// with `identity.json` the newer of the two.
+fn read_gateway_identity(state_dir: &Path) -> Option<String> {
+    let raw = fs::read_to_string(state_dir.join("identity.json")).ok()?;
+    let parsed: Value = serde_json::from_str(&raw).ok()?;
+    parsed
+        .get("gatewayId")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1202,6 +1272,10 @@ struct GatewayStatus {
     /// top-of-file doc comment for why that lives in JS, not here).
     ever_paired: bool,
     state_dir: String,
+    /// See `read_gateway_identity` — the id the caller matches against when
+    /// polling `GET /gateway/registrations`, so "connected" means THIS
+    /// machine and never merely some machine.
+    gateway_id: Option<String>,
 }
 
 /// Best-effort: audits and, if needed, installs this machine's OS-level
@@ -1299,6 +1373,7 @@ fn desktop_gateway_status(
         running,
         ever_paired,
         state_dir: state_dir.display().to_string(),
+        gateway_id: read_gateway_identity(&state_dir),
     })
 }
 
@@ -1322,6 +1397,7 @@ fn desktop_gateway_pair_and_start(
                     already_running: true,
                     pid: Some(child.id()),
                     state_dir: state_dir.display().to_string(),
+                    gateway_id: read_gateway_identity(&state_dir),
                     supervisor: GatewaySupervisorOutcome {
                         attempted: false,
                         ok: true,
@@ -1346,6 +1422,7 @@ fn desktop_gateway_pair_and_start(
                 already_running: true,
                 pid: Some(pid),
                 state_dir: state_dir.display().to_string(),
+                gateway_id: read_gateway_identity(&state_dir),
                 supervisor: GatewaySupervisorOutcome {
                     attempted: false,
                     ok: true,
@@ -1429,6 +1506,7 @@ fn desktop_gateway_pair_and_start(
         already_running: false,
         pid: Some(pid),
         state_dir: state_dir.display().to_string(),
+        gateway_id: read_gateway_identity(&state_dir),
         supervisor,
     })
 }
@@ -2039,5 +2117,86 @@ mod tests {
         // only) — this pins that decision so a future edit cannot silently
         // reintroduce a "node.exe" branch.
         assert_eq!(node_binary_name(), "node");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_gateway_identity;
+
+    /// The fixture below is the REAL `identity.json` a real gateway wrote
+    /// during a real first pairing against a real backend (2026-08-21), with
+    /// only the tenant/user ids replaced. CLAUDE.md's own rule: a test that
+    /// constructs its own input is asserting a shape nobody observed — this
+    /// codebase has been bitten by exactly that (a private-memory tool keyed
+    /// on a flat `user_id` production never produced). The file the gateway
+    /// actually writes is the only fixture worth pinning here.
+    const REAL_IDENTITY_JSON: &str = r#"{
+      "gatewayId": "gateway_33e9b207-ec34-4b62-bb1e-ba9eb9cd272d",
+      "deviceId": "device_3fc0c758-f134-489e-bc75-7ccd919a32d0",
+      "tenantId": "tenant-1",
+      "workspaceId": "ws-1",
+      "userId": "00000000-0000-0000-0000-000000000000",
+      "createdAt": "2026-08-21T10:07:57.258Z",
+      "updatedAt": "2026-08-21T10:08:15.427Z"
+    }"#;
+
+    fn write_state_dir(contents: Option<&str>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("temp dir");
+        if let Some(body) = contents {
+            std::fs::write(dir.path().join("identity.json"), body).expect("write identity");
+        }
+        dir
+    }
+
+    #[test]
+    fn reads_the_gateway_id_the_real_gateway_writes() {
+        let dir = write_state_dir(Some(REAL_IDENTITY_JSON));
+        assert_eq!(
+            read_gateway_identity(dir.path()).as_deref(),
+            Some("gateway_33e9b207-ec34-4b62-bb1e-ba9eb9cd272d"),
+        );
+    }
+
+    /// A machine that has never paired has no identity file at all. That must
+    /// resolve to None — an UNKNOWN identity — which the webview treats as
+    /// "cannot confirm". It must never become an error (there is nothing
+    /// wrong) and must never let the caller fall back to matching any machine
+    /// in the workspace, which would report a never-paired Mac as connected.
+    #[test]
+    fn a_never_paired_machine_has_no_identity_and_that_is_not_an_error() {
+        let dir = write_state_dir(None);
+        assert_eq!(read_gateway_identity(dir.path()), None);
+    }
+
+    /// Half-written or malformed files are a real possibility: the gateway
+    /// writes this during registration while the app may be polling. Fail
+    /// closed and quietly rather than surfacing a parse error as a pairing
+    /// failure.
+    #[test]
+    fn malformed_or_empty_identity_fails_closed() {
+        for body in ["", "{", "{}", r#"{"gatewayId": ""}"#, r#"{"gatewayId": "   "}"#, r#"{"gatewayId": 5}"#] {
+            let dir = write_state_dir(Some(body));
+            assert_eq!(read_gateway_identity(dir.path()), None, "body: {body:?}");
+        }
+    }
+
+    /// `registration.json` sits beside `identity.json` and carries a richer
+    /// payload, which makes it look like the better source. It is not: it is
+    /// written by the cloud WebSocket client on connect, so it lags, and on a
+    /// re-paired machine it can hold a stale id from a previous pairing.
+    /// Observed live on this developer's own box — the two files disagreed.
+    #[test]
+    fn identity_json_wins_over_a_stale_registration_json() {
+        let dir = write_state_dir(Some(REAL_IDENTITY_JSON));
+        std::fs::write(
+            dir.path().join("registration.json"),
+            r#"{"gateway_id": "gateway_STALE_FROM_A_PREVIOUS_PAIRING"}"#,
+        )
+        .expect("write registration");
+        assert_eq!(
+            read_gateway_identity(dir.path()).as_deref(),
+            Some("gateway_33e9b207-ec34-4b62-bb1e-ba9eb9cd272d"),
+        );
     }
 }

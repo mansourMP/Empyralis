@@ -1,0 +1,147 @@
+/*
+ * Status chrome for "this computer is connecting / connected / needs you".
+ * Only ever rendered inside the desktop app (see the component), so this
+ * never costs an ordinary browser tab anything.
+ *
+ * Deliberately a small floating card, not a full-width banner: it reports
+ * on a background task the person did not explicitly start, so it must be
+ * readable and dismissible without displacing the workspace they came here
+ * to use. Every colour is an existing theme token — no new palette — so it
+ * follows light/dark with the rest of the app.
+ */
+
+.desktop-pairing {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  z-index: 60;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  max-width: 380px;
+  padding: 12px 12px 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-card);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  /* Motion on state change only, 100-150ms, ease-out. */
+  animation: desktop-pairing-in 140ms ease-out;
+}
+
+@keyframes desktop-pairing-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .desktop-pairing {
+    animation: none;
+  }
+  .desktop-pairing-dot--working {
+    animation: none;
+  }
+}
+
+.desktop-pairing-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--unknown-dot);
+}
+
+/* The status colour is carried by the dot alone — the card itself stays
+   neutral. A whole card tinted red for something the person did not do
+   reads as an alarm; a dot reads as a state. */
+.desktop-pairing[data-phase='connected'] .desktop-pairing-dot {
+  background: var(--online-dot);
+}
+.desktop-pairing[data-phase='degraded'] .desktop-pairing-dot,
+.desktop-pairing[data-phase='couldNotConfirm'] .desktop-pairing-dot {
+  background: var(--degraded-dot);
+}
+.desktop-pairing[data-phase='failed'] .desktop-pairing-dot {
+  background: var(--offline-dot);
+}
+
+.desktop-pairing-dot--working {
+  background: var(--text-muted);
+  animation: desktop-pairing-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes desktop-pairing-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.desktop-pairing-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.desktop-pairing-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 550;
+  line-height: 1.35;
+  color: var(--text-primary);
+}
+
+.desktop-pairing-detail {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.desktop-pairing-action {
+  flex: 0 0 auto;
+  align-self: center;
+  padding: 5px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: background 120ms ease-out;
+}
+
+/* Not accent-filled on purpose: the primary action in whatever view the
+   person is actually working in owns the one accent, and this card is not
+   it. CLAUDE.md: two accent-filled buttons in one view is a bug. */
+.desktop-pairing-action:hover {
+  background: var(--bg-card-hover);
+}
+
+.desktop-pairing-dismiss {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  margin: -2px -4px 0 0;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 15px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.desktop-pairing-dismiss:hover {
+  color: var(--text-primary);
+}

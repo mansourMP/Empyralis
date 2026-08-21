@@ -108,39 +108,88 @@ export function describePairing(phase: DesktopPairingPhase, detail = ""): Deskto
 }
 
 /**
- * Whether a registrations item is THIS machine, online, right now.
+ * What the control plane currently says about THIS machine.
  *
- * Both conditions are required and they are different facts:
- * `connection_status` is the registration's own view, `latest_session_status`
- * is whether a live WebSocket session is actually up. A registration can sit
- * at `online` with a dead session after an ungraceful disconnect — reporting
- * that as connected is the "a gateway-published snapshot goes stale the
- * moment the box goes offline" trap CLAUDE.md already records for channel
- * health pills. Mirrors gateway_pairing_proof.rs's own predicate exactly, so
- * the proof and the product agree on what "online" means.
+ * `limited` is not a smaller version of `connected` — it is its own fact,
+ * and it is the one a fresh Mac almost always lands on first.
  */
-export function matchesThisMachine(item: GatewayRegistrationItem, gatewayId: string): boolean {
+export type ThisMachineState = "connected" | "limited" | "absent";
+
+/**
+ * `execution_blocked` is a DEMOTION FROM `online`, not a failure — and
+ * getting this wrong would have shipped a lie on the most common machine
+ * there is.
+ *
+ * Observed live, on a real first pairing against a real backend: a freshly
+ * paired Mac reports `connection_status: "execution_blocked"` with
+ * `latest_session_status: "connected"`. gateway_registry_service.py only
+ * ever assigns it to a box that was ALREADY computed as `online` (live
+ * session, fresh heartbeat) and then demotes it because Docker is not ready,
+ * so `shell.execute`/`filesystem.read_write` are blocked. Docker not running
+ * is the DEFAULT state of a Mac nobody has set up yet.
+ *
+ * So the predicate this module started with — `connection_status ===
+ * "online"`, copied from examples/gateway_pairing_proof.rs, which is correct
+ * for its own narrower purpose — would have told a customer whose machine
+ * had just paired perfectly that we "couldn't confirm the connection". That
+ * is the outcome-honesty law broken in the worst direction: reporting
+ * failure on success, which makes a person retry something that already
+ * worked.
+ *
+ * Connectivity and execution-readiness are two different facts and the
+ * backend deliberately keeps them apart (its own comment says so). This
+ * mirrors that split rather than flattening it back out.
+ */
+export function classifyThisMachine(
+  item: GatewayRegistrationItem,
+  gatewayId: string,
+): ThisMachineState {
   const id = String(item.gateway_id ?? "").trim();
   if (!id || id !== gatewayId.trim()) {
-    return false;
+    return "absent";
   }
-  return (
-    String(item.connection_status ?? "").trim() === "online" &&
-    String(item.latest_session_status ?? "").trim() === "connected"
-  );
+  // A live session is required either way. A registration can sit at
+  // `online` with a dead session after an ungraceful disconnect — reporting
+  // that as connected is the "a published snapshot goes stale the moment the
+  // box goes offline" trap CLAUDE.md already records for channel pills.
+  if (String(item.latest_session_status ?? "").trim() !== "connected") {
+    return "absent";
+  }
+  const connection = String(item.connection_status ?? "").trim();
+  if (connection === "online") {
+    return "connected";
+  }
+  if (connection === "execution_blocked") {
+    return "limited";
+  }
+  // degraded / reconnecting / offline / revoked each carry their own more
+  // urgent reason and are NOT a connected machine. Anything unrecognised
+  // fails closed here too — a status vocabulary that grows must not
+  // silently start reading as connected.
+  return "absent";
 }
 
 export function findThisMachine(
   items: readonly GatewayRegistrationItem[],
   gatewayId: string | null,
-): boolean {
+): ThisMachineState {
   if (!gatewayId || !gatewayId.trim()) {
     // No identity to match against. NEVER fall back to "any gateway online"
     // — see this module's own doc comment; that is the exact shape that
     // would report a never-paired Mac as connected.
-    return false;
+    return "absent";
   }
-  return items.some((item) => matchesThisMachine(item, gatewayId));
+  let best: ThisMachineState = "absent";
+  for (const item of items) {
+    const state = classifyThisMachine(item, gatewayId);
+    if (state === "connected") {
+      return "connected";
+    }
+    if (state === "limited") {
+      best = "limited";
+    }
+  }
+  return best;
 }
 
 /**
@@ -155,14 +204,23 @@ export function findThisMachine(
  * while it is fine.
  */
 export function resolveStartOutcome(input: {
-  confirmed: boolean;
+  machine: ThisMachineState;
   supervisorOk: boolean;
   supervisorDetail?: string;
 }): DesktopPairingState {
-  if (!input.confirmed) {
+  if (input.machine === "absent") {
     return describePairing(
       "couldNotConfirm",
       "This computer started up but hasn't shown up in your workspace yet. It may still connect on its own. Check your internet connection, or try again.",
+    );
+  }
+  // Connected but unable to run commands outranks the restart caveat: it is
+  // about whether the machine can do work AT ALL right now, where the other
+  // is only about what happens after a reboot.
+  if (input.machine === "limited") {
+    return describePairing(
+      "degraded",
+      "This computer is connected, but it can't run commands yet because Docker isn't running. Start Docker Desktop and it'll pick it up on its own.",
     );
   }
   if (!input.supervisorOk) {
