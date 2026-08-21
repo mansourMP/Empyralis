@@ -184,41 +184,34 @@ html[data-theme="dark"] {
   --accent-muted: color-mix(in oklch, var(--accent) 24%, transparent);
   --accent-ring: color-mix(in oklch, var(--accent) 55%, transparent);
 
-  /* FOCUS IS NEUTRAL, NEVER THE ACCENT. 2026-08-21, founder's instruction:
-     "you will remove that purple ring everywhere." Focus is not a *state
-     worth celebrating* — it is a cursor. The accent is spent on the single
-     primary action in a view (craft doctrine); a halo that follows the
-     keyboard around was spending it on whatever happened to be focused,
-     which is the opposite of restraint. It was also most visible where
-     nobody asked for it: the agent-creation card focuses its Name field on
-     open, so the ring appeared before the customer touched anything.
+  /* THERE IS NO FOCUS RING IN THIS PRODUCT. Founder decision, 2026-08-21,
+     final, said three times over two passes and last stated as: "I don't
+     need that ring of yours in my platform."
 
-     The ring is REMOVED FROM THE ACCENT, NOT REMOVED. CLAUDE.md records the
-     earlier incident verbatim — the ring "is the only signal a keyboard user
-     gets; hiding it to kill an unwanted trigger trades a cosmetic bug for an
-     accessibility one." So every control that had a ring still has one.
+     THE NAME IS A LEFTOVER. This token survives only because two things that
+     are NOT focus indicators borrow it as a neutral hairline colour — the
+     rail/properties resizer's hover line, and .fleet-rail-item--focus, which
+     is the j/k keyboard cursor PrimaryRail sets as a plain className. Zero
+     :focus / :focus-visible rules point at it. Do not read the name as
+     permission to add one.
 
-     Opaque, not alpha-over-accent, so the rendered colour is knowable rather
-     than a function of whatever surface it lands on. Measured against every
-     surface in this theme's own ramp (WCAG 2.1 SC 1.4.11 wants 3:1 for a
-     non-text indicator):
+     THE HISTORY, SO NOBODY RE-RUNS IT. The ring was violet (--accent-ring,
+     1.71-2.36:1 across every surface — below the bar it was supposedly
+     serving). Recoloured to this neutral grey: contrast fixed, still
+     rejected. Made thinner: still rejected, because the objection was never
+     the colour or the weight. A rectangle drawn around whatever the keyboard
+     is touching is chrome he does not want in a product people are meant to
+     pass through, not sit in.
 
-       #a1a1a1 on --bg-canvas      #171717   6.94:1
-                  --bg-page/content #1a1a1a  6.74:1
-                  --bg-inset        #1d1d1d  6.52:1
-                  --bg-panel        #222222  6.16:1
-                  --bg-rail         #232323  6.08:1
-                  --bg-card         #292929  5.63:1
-                  --bg-card-hover   #2e2e2e  5.26:1   <- worst case
-
-     The accent ring it replaces measured 2.08-2.36:1 across those same
-     surfaces — i.e. the purple ring was BELOW the accessibility bar on every
-     single surface in the product. This is not a trade; it is better on both
-     axes. Those before/after figures are BROWSER-measured, not derived: the
-     old ring is an alpha color-mix over an oklch accent, so it was sampled by
-     compositing it onto each surface in a real canvas and reading the bytes
-     back, rather than by approximating oklch in a spreadsheet.
-     Never point a :focus rule at --accent-ring again. */
+     WHAT REPLACED IT, AND WHAT IT COSTS. A control shows focus with its own
+     styling: a field's border steps up one level and its caret blinks. That
+     is enough for a text input and it is thin for a <select>, which has no
+     caret — the honest cost is written down in CLAUDE.md rather than paid
+     for by putting the ring back. CLAUDE.md's craft doctrine used to say the
+     ring "is the only signal a keyboard user gets"; the founder has
+     explicitly overridden that for this product, and the override is
+     recorded there as his decision. A future pass that "restores
+     accessibility" here is handing him the ring for a fourth time. */
   --focus-ring: #a1a1a1;
 
   /* Destructive — one clear red, mirrors --accent's derived-step shape.
@@ -342,18 +335,10 @@ html[data-theme="light"] {
   --accent-muted: color-mix(in oklch, var(--accent) 18%, transparent);
   --accent-ring: color-mix(in oklch, var(--accent) 42%, transparent);
 
-  /* Neutral focus ring — see the long note on --focus-ring in the dark block
-     above for why focus is never the accent. Light theme measured against
-     this theme's own surface ramp:
-
-       #6f6f6f on --bg-page/card/panel #ffffff  5.02:1   <- worst case
-                  --bg-card-hover      #fafafa  4.81:1
-                  --bg-rail/canvas     #f4f4f5  4.57:1
-                  --bg-inset           #eeeeef  4.33:1
-
-     The accent ring it replaces measured 1.71-1.78:1 here — worse than dark,
-     because a 42%-alpha violet over white composites to a pastel
-     (rgb(207,186,228) on --bg-page, browser-sampled). */
+  /* NOT A FOCUS RING — read the long note on --focus-ring in the dark block
+     above. Nothing in this product draws a focus ring (founder, 2026-08-21);
+     this is the light-theme value of a neutral hairline that two non-focus
+     things borrow (the rail resizer, the j/k rail cursor). */
   --focus-ring: #6f6f6f;
 
   /* Destructive — same clear red, darken-on-hover like the light accent. */

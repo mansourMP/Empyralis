@@ -449,20 +449,20 @@
   border-radius: var(--radius-control);
 }
 .agent-create-name-field:hover { border-color: var(--border-strong); }
-/* ONE focus treatment, on the whole control, and it is NEUTRAL. It used to be
-   two at once: the app-wide :focus-visible ring drawn round the input AND an
-   accent underline inside it — the "two treatments" the founder was looking
-   at. The ring now belongs to the box that IS the field.
+/* NO RING — this control is where the ring died. Its whole history: an accent
+   underline, then a violet halo, then a neutral 2px one that stacked with a
+   1px border of the SAME grey into a ~3px slab that redrew the field. Every
+   version was rejected. The founder's last word on it: "I don't need that
+   ring of yours in my platform."
 
-   CORRECTION 2026-08-21: this comment used to describe the app-wide ring as
-   "a 2px neutral halo" and claim focus as one of the accent's three reserved
-   roles. Both were wrong. The app-wide ring was `--accent-ring`, i.e. violet,
-   and focus is no longer an accent role at all — the founder revoked it
-   ("remove that purple ring everywhere"). This card is where it was worst:
-   AgentCreateCard focuses the Name field on open, so the ring appeared before
-   the customer had touched anything. See --focus-ring in theme-tokens.css. */
+   What is left is the field's own edge going one step stronger, exactly as it
+   already does on hover — and the caret. AgentCreateCard no longer focuses
+   this field on open either (see the note where that effect used to be), so
+   the card opens with nothing highlighted at all, which is the state he kept
+   screenshotting. See --focus-ring in theme-tokens.css before adding any
+   focus treatment here. */
 .agent-create-name-field:focus-within {
-  border-color: var(--focus-ring);
+  border-color: var(--border-strong);
 }
 
 /* Neutral — it was an accent-tinted tile, which is decoration rather than an
@@ -524,13 +524,14 @@
 .agent-create-input::placeholder { color: var(--text-muted); }
 .agent-create-input:hover,
 .agent-create-select:hover { border-color: var(--border-strong); }
-/* Same one treatment as the name control above — and these two had NO focus
-   style of their own at all, only `outline: none` plus whatever the app-wide
-   ring happened to draw. Every field on this card now says "focused" the
-   same way. */
+/* Same as the name control above: the edge, and nothing else. NOTE the
+   `<select>` half of this — a select has no caret, so its stronger border is
+   the ONLY thing separating focused from resting. That is the thinnest signal
+   left anywhere in the product and it is a deliberate cost of the no-ring
+   decision, recorded in CLAUDE.md rather than paid for with a ring. */
 .agent-create-input:focus,
 .agent-create-select:focus {
-  border-color: var(--focus-ring);
+  border-color: var(--border-strong);
 }
 
 /* ── Choice cards: placement, and who pays ────────────────────────────────

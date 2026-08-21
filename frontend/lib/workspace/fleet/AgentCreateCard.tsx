@@ -394,12 +394,15 @@ export function AgentCreateCard({
     };
   }, [workspaceId]);
 
-  useEffect(() => {
-    if (step === "identity") {
-      nameRef.current?.focus();
-      nameRef.current?.select();
-    }
-  }, [step]);
+  /* THE CARD DOES NOT FOCUS ITSELF. Removed 2026-08-21 on the founder's
+     instruction, and it is the reason he kept seeing a ring he had already
+     asked to be rid of twice: this effect focused the Name field the instant
+     the card opened, so the focused state was painted before anyone had
+     touched anything. Programmatic .focus() satisfies :focus-visible exactly
+     like a real Tab press — the browser cannot tell them apart — which is the
+     same trap CLAUDE.md already records for FleetAgentDetail's tab strip.
+     A previous pass argued to keep this for typing-speed; that argument lost.
+     The customer clicks the field they want. Do not put it back. */
 
   useEffect(
     () => () => {

@@ -1853,8 +1853,12 @@ a.fleet-breadcrumb:hover {
    The ring goes on the box that reads as the field, same idiom as
    .agent-create-name-field:focus-within. */
 .fleet-agents-conversation-search input:focus { outline: none; }
+/* The input inside is borderless and transparent — it IS this wrapper
+   visually — so the wrapper's own edge is the field's edge, and stepping it
+   up is the whole focused state. No ring (founder, 2026-08-21); the caret in
+   the input carries the rest. */
 .fleet-agents-conversation-search:focus-within {
-  border-color: var(--focus-ring);
+  border-color: var(--border-strong);
 }
 .fleet-agents-conversation-search input::placeholder { color: var(--text-muted); }
 .fleet-agents-conversation-list-rows {
@@ -4567,7 +4571,12 @@ a.fleet-breadcrumb:hover {
   padding: 4px 11px;
   margin-left: -8px;
   border-radius: var(--radius-control);
-  border: 1px solid var(--focus-ring);
+  /* --border-strong, not --focus-ring. This input only exists while you are
+     editing, so its edge appeared the moment focus moved here — i.e. it WAS
+     a rectangle drawn around the control, in the ring's own colour, and it
+     read as one. The inset background plus the caret already say "this is a
+     field now"; the edge only has to be findable (founder, 2026-08-21). */
+  border: 1px solid var(--border-strong);
   background: var(--bg-inset);
   color: var(--text-primary);
   font-family: inherit;
@@ -6402,6 +6411,14 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 .fleet-rail-subnav-toggle:hover { background: var(--rail-active); color: var(--text-primary); }
 .fleet-rail-subnav-toggle svg { transition: transform var(--dur-2) var(--ease-out); }
 .fleet-rail-subnav-toggle.is-expanded svg { transform: rotate(90deg); }
+/* KEPT THROUGH THE 2026-08-21 no-ring sweep, and it is NOT a focus ring —
+   read the class name as "the j/k cursor", not as ":focus". It is a plain
+   className PrimaryRail sets only while j/k navigation is actively in use,
+   and clears on route change and on the first pointerdown; a mouse user
+   never sees it and it never appears unprompted. Deleting it would leave
+   j/k moving an invisible cursor, i.e. a keyboard feature with no output.
+   It borrows --focus-ring purely as a neutral hairline colour (so does the
+   rail resizer above) — nothing here is drawn by :focus-visible. */
 .fleet-rail-item--focus { box-shadow: inset 0 0 0 1px var(--focus-ring); }
 .fleet-rail-item-caret {
   display: inline-flex;
@@ -9584,7 +9601,12 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   width: 100%;
   padding: 2px 5px;
   margin: 0 0 0 -6px;
-  border: 1px solid var(--focus-ring);
+  /* --border-strong, not --focus-ring. This input only exists while you are
+     editing, so its edge appeared the moment focus moved here — i.e. it WAS
+     a rectangle drawn around the control, in the ring's own colour, and it
+     read as one. The inset background plus the caret already say "this is a
+     field now"; the edge only has to be findable (founder, 2026-08-21). */
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-control);
   background: var(--bg-inset);
   color: var(--text-primary);
@@ -9615,15 +9637,18 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   background: var(--bg-inset);
   border-color: var(--border);
 }
-.fleet-task-page-desc--editable:focus-visible {
-}
 .fleet-task-page-desc-input {
   display: block;
   width: 100%;
   box-sizing: border-box;
   margin-top: 16px;
   padding: 6px 8px;
-  border: 1px solid var(--focus-ring);
+  /* --border-strong, not --focus-ring. This input only exists while you are
+     editing, so its edge appeared the moment focus moved here — i.e. it WAS
+     a rectangle drawn around the control, in the ring's own colour, and it
+     read as one. The inset background plus the caret already say "this is a
+     field now"; the edge only has to be findable (founder, 2026-08-21). */
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-control);
   background: var(--bg-inset);
   color: var(--text-primary);
