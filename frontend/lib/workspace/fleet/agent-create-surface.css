@@ -127,22 +127,31 @@
      at 249px while the Channel step rendered at 520px, so a Next press moved
      the footer 271px down the screen and the eye had to find it again.
 
+     BOTH NUMBERS ARE MEASURED, from the real steps in a real browser at
+     1680x1050, and the gap between them is the whole point: 80px, which is
+     "almost the same size" rather than a range wide enough to notice.
+
      ```
-     floor    min-height  480px   the tallest SHORT step (Brain, in its
-                                  widest branch: 4 payer options + provider
-                                  + model) sits just under it, so no step
-                                  renders as a stub and none of them differ
-     ceiling  max-height  720px   or 88vh, whichever is smaller — a 900px
-                                  laptop keeps its own margin
+     natural heights, no frame           frame
+       Brain, cloud placement    480       560   ← grows to the floor
+       Identity, cloud           586       586   ← untouched, sits between
+       Identity, a machine       ~680      640   ← body scrolls the overflow
+       Reach (two whole tabs)   1000+      640   ← ditto
      ```
+
+     The dialog is vertically CENTRED, so an unframed height change moves
+     both its edges: measured across one Next press before this, top and
+     bottom each travelled 53px and the eye had to find the footer again.
+     Inside the frame the worst case is 40px per edge, and the common
+     Identity -> Brain press is 13.
 
      Between them the BODY scrolls and nothing else does: head and stepper
      stay put at the top, the footer stays put at the bottom, on every step.
      That is the whole mechanism — `overflow: hidden` here, `overflow-y:
      auto` on .agent-create-body, and `flex-shrink: 0` on the two chrome
      rows so a long body can never squeeze them. */
-  min-height: min(480px, 88vh);
-  max-height: min(88vh, 720px);
+  min-height: min(560px, 88vh);
+  max-height: min(88vh, 640px);
   overflow: hidden;
 }
 
@@ -164,7 +173,7 @@
    filter press is motion on something the person did not ask to move, and
    the motion rule is "on state change only, never decorative". */
 .agent-create-surface--embed {
-  min-height: min(88vh, 720px);
+  min-height: min(88vh, 640px);
 }
 .agent-create-surface.is-closing {
   animation: fleet-modal-in var(--dur-2) var(--ease-in) reverse forwards;
@@ -673,6 +682,20 @@
   height: 26px;
   padding-inline: var(--space-2);
   font-size: var(--text-xs);
+}
+
+/* THE SCROLL EDGE IS MARKED ONCE, ON WHICHEVER PINNED ROW COMES FIRST.
+   Found live on Reach: with an error present, the footer's own border sat
+   BELOW it, so the body's cut-off content ran straight into red text with
+   nothing between them — a channel card sliced in half and a sentence
+   starting 10px under it read as overlap. The line belongs at the top of
+   the pinned block, not at the top of the last row in it. */
+.agent-create-surface--embed .agent-create-error {
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+.agent-create-surface--embed .agent-create-error + .agent-create-foot {
+  border-top-color: transparent;
 }
 
 .agent-create-error {

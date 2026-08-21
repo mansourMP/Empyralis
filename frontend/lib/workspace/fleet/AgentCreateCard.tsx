@@ -646,15 +646,21 @@ export function AgentCreateCard({
   const brainOptions = agentCreateBrainOptionsFor(placement);
   const placementNote = agentCreateBrainPlacementNote(placement);
 
-  const nodeList = (emptyLabel: string, addControls: React.ReactNode) => (
+  /* An EMPTY list renders no sentence — just the control that fixes it.
+     Measured live with the first build: "No computers paired yet." appeared
+     twice on one screen, once here and once as the footer's blocked reason.
+     The footer owns that fact (it is what explains a Next that will not
+     move); here the "Pair this computer" button IS the empty state, per the
+     founder's standing rule that a setup control does the work rather than
+     explaining it. The LOADING line stays, because "still looking" is a
+     different fact the footer deliberately refuses to state. */
+  const nodeList = (addControls: React.ReactNode) => (
     <div className="agent-create-nodes">
       {!nodesKnown ? (
         <p className="agent-create-note" aria-busy="true">
           Looking for your machines…
         </p>
-      ) : placementNodes.length === 0 ? (
-        <p className="agent-create-note">{emptyLabel}</p>
-      ) : (
+      ) : placementNodes.length === 0 ? null : (
         <div className="agent-create-options">
           {placementNodes.map((n) => {
             const id = hardwareNodeId(n);
@@ -820,7 +826,6 @@ export function AgentCreateCard({
 
                 {placement === "vps" &&
                   nodeList(
-                    "No cloud servers connected yet.",
                     <>
                       <button type="button" className="fleet-btn" onClick={() => setVpsPanelOpen(true)}>
                         Start a server
@@ -838,7 +843,6 @@ export function AgentCreateCard({
                     </div>
                   ) : (
                     nodeList(
-                      "No computers paired yet.",
                       <button type="button" className="fleet-btn" onClick={() => setPairPanelOpen(true)}>
                         Pair this computer
                       </button>,
