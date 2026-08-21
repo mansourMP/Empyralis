@@ -410,17 +410,26 @@ export function AgentCreateCard({
         <div className="agent-create-body">
           {step === "identity" && (
             <>
-              {/* The mark and the name are one row — this is the thing being
-                  made, not a title field on a form. Deliberately NOT a
+              {/* The mark and the name are ONE CONTROL — this is the thing
+                  being made, not a title field on a form. Deliberately NOT a
                   preview of the agent's real sigil: AgentSigil hashes the
                   agent's id, which does not exist yet, so anything drawn
                   from the typed name would not be the mark this agent ends
-                  up wearing. */}
+                  up wearing.
+
+                  The glyph used to be a separate 40px bordered tile beside
+                  the field, centred against a two-line [input + caption]
+                  stack — which put it 9px below the name it belonged to
+                  (measured). Inside the control it cannot drift at all, and
+                  the card loses a border it did not need. Same word, same
+                  <label for>, same field: only the geometry moved, and the
+                  label now sits above like Instructions' and Model's do. */}
               <div className="agent-create-identity">
-                <span className="agent-create-mark" aria-hidden="true">
-                  <Bot size={20} strokeWidth={1.75} />
-                </span>
+                <label className="agent-create-label" htmlFor="agent-create-name">Name</label>
                 <div className="agent-create-name-field">
+                  <span className="agent-create-mark" aria-hidden="true">
+                    <Bot size={18} strokeWidth={1.75} />
+                  </span>
                   <input
                     ref={nameRef}
                     id="agent-create-name"
@@ -437,7 +446,6 @@ export function AgentCreateCard({
                       }
                     }}
                   />
-                  <label className="agent-create-name-caption" htmlFor="agent-create-name">Name</label>
                 </div>
               </div>
 
@@ -517,8 +525,20 @@ export function AgentCreateCard({
           ) : (
             <span className="agent-create-foot-spacer" aria-hidden="true" />
           )}
+          {/* `agent-create-back` is presentation only — it makes the
+              SECONDARY action look secondary (ghost: no border, no fill).
+              The one-accent rule was already satisfied before this, but a
+              bordered slab the same size and weight as the filled primary
+              still read as a matched pair, so the eye had to read the labels
+              to find the way forward. Same control, same size, same
+              behaviour. */}
           {footer.back ? (
-            <button type="button" className="fleet-btn" onClick={goBack} disabled={footer.back.disabled}>
+            <button
+              type="button"
+              className="fleet-btn agent-create-back"
+              onClick={goBack}
+              disabled={footer.back.disabled}
+            >
               {footer.back.label}
             </button>
           ) : null}
