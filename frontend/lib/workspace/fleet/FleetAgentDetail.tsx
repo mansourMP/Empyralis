@@ -761,6 +761,8 @@ export function FleetAgentDetail({
   agent,
   projectId,
   projectName,
+  backHref,
+  backLabel,
   onChat,
   initialTab,
   onTabChange,
@@ -781,6 +783,19 @@ export function FleetAgentDetail({
    *  fall back to the raw project_id here — that's the "raw ids on first
    *  paint" bug. */
   projectName?: string;
+  /** Where the header's "‹" goes, and what it is called. Defaults to this
+   *  agent's PROJECT — correct for the project-scoped route, which is the
+   *  door you came through there.
+   *
+   *  The workspace-level route (/w/{ws}/agents/{id}/…) overrides both,
+   *  because "up" from there is the agents list, not a project the reader
+   *  may never have opened. That is what Breadcrumbs.tsx already derives
+   *  for this route (Agents › {agent}), so the two agreeing is the fix, not
+   *  a new opinion — and below 768px it stops being cosmetic: the list pane
+   *  collapses away (agents-split-pane.ts) and this arrow becomes the only
+   *  way back to it. */
+  backHref?: string;
+  backLabel?: string;
   onChat: (agentId: string) => void;
   initialTab?: TabId;
   onTabChange?: (tab: TabId) => void;
@@ -1213,8 +1228,8 @@ export function FleetAgentDetail({
         statusTone={status.tone}
         statusLabel={status.label}
         sheetOpen={sheetOpen}
-        backHref={`/w/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(projectId)}`}
-        backLabel={projectName || "Project"}
+        backHref={backHref || `/w/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(projectId)}`}
+        backLabel={backLabel || projectName || "Project"}
         configureHref={tabHref(sheetOpen ? activeTab : CONFIGURE_GROUPS[0].tabs[0])}
         profileHref={tabHref(profileOpen ? activeTab : defaultAgentProfileSegment(isMaster))}
         onOpenProperties={() => setPropertiesOpen(true)}

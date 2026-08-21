@@ -78,6 +78,34 @@ assert(
   "agents/layout.tsx does not hardcode the split class back in",
 );
 
+// ── The way BACK, which is what makes one-pane usable rather than a trap ─
+// With the list pane collapsed away below 768px, the agent header's "‹" is
+// the only control that returns to it. On the workspace-level route it used
+// to point at the agent's PROJECT (FleetAgentDetail's own default, correct
+// for the project-scoped door), which on a phone meant the only way "back"
+// left the agents surface entirely and the list became unreachable.
+const workspaceAgentPage = readFileSync(
+  new URL("../../../app/(account)/w/[workspaceId]/agents/[agentId]/[tab]/page.tsx", import.meta.url),
+  "utf8",
+);
+assert(workspaceAgentPage.length > 500, "CANARY: the workspace agent page source was actually read");
+assert(
+  /backHref=\{`\$\{base\}\/agents`\}/.test(workspaceAgentPage),
+  "the workspace-level agent route sends its back arrow to the agents list",
+);
+assert(
+  /backLabel="Agents"/.test(workspaceAgentPage),
+  "…and names it Agents, matching the breadcrumb chain Breadcrumbs.tsx already derives for this route",
+);
+// The project-scoped door keeps its own answer — this override must not
+// have been pushed down into the shared component.
+const agentDetail = readFileSync(new URL("./FleetAgentDetail.tsx", import.meta.url), "utf8");
+assert(agentDetail.length > 5000, "CANARY: FleetAgentDetail.tsx was actually read");
+assert(
+  /backHref \|\| `\/w\/\$\{encodeURIComponent\(workspaceId\)\}\/projects\//.test(agentDetail),
+  "FleetAgentDetail still defaults to the project — the list is an OVERRIDE, not a new global answer",
+);
+
 // ── The CSS half — the actual fix, and the part no unit test can render ──
 const css = readFileSync(new URL("./fleet-theme.css", import.meta.url), "utf8");
 assert(css.length > 100_000, "CANARY: fleet-theme.css was actually read");
