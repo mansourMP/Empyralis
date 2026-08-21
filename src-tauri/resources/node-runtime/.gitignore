@@ -1,0 +1,18 @@
+# The portable Node runtime is a BUILD ARTIFACT, fetched per-platform at
+# build time (CI's "Fetch portable Node runtime" step in
+# .github/workflows/build.yml, or the same curl+tar by hand for a local
+# `cargo tauri build`). It is ~154MB unpacked with an 88MB `bin/node`.
+#
+# This file exists because it WAS committed once, by accident, in this
+# branch's own history: a `git add -A src-tauri` after a local build staged
+# 2,375 files including the 88MB binary. Caught before push and rewritten
+# out. An ignore rule is cheaper than remembering.
+#
+# README.placeholder is deliberately NOT ignored — it is the only thing that
+# should ever be tracked here, and its presence is what keeps the directory
+# in git so tauri-build's resource resolution finds a real path.
+*
+!.gitignore
+!bin/
+bin/*
+!bin/README.placeholder

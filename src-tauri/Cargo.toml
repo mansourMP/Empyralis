@@ -24,3 +24,7 @@ base64 = "0.22"
 url = "2"
 objc2-app-kit = { version = "0.3.2", features = ["NSWindow", "NSWindowRestoration"] }
 objc2-foundation = { version = "0.3.2", features = ["NSString", "NSUserDefaults"] }
+
+[dev-dependencies]
+# Already in the build graph via tauri, so this adds no new download.
+tempfile = "3"

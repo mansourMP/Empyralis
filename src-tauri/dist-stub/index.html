@@ -1,10 +1,198 @@
 <!doctype html>
 <!--
-  This directory exists only to satisfy Tauri's `frontendDist` config
-  requirement. Nothing in this app ever loads it: every window this crate
-  creates uses WebviewUrl::External pointed at the real hosted app (see
-  lib.rs's app_base_url()/ensure_main_window). There is no bundled
-  frontend anymore — the webview always renders the deployed Empyralis
-  app, or a developer-configured EMPYRALIS_DESKTOP_APP_URL override.
+  THE SETUP WINDOW. A BUNDLED asset, and that is the point.
+
+  This window used to load the hosted site (WebviewUrl::External) and ask the
+  customer to sign in inside it. That is two problems at once: a password
+  typed into a webview this process owns is a password this process can read,
+  and Google blocks OAuth in embedded webviews outright. Sign-in now happens
+  in the customer's own browser (see src/browser_pairing.rs) and this page
+  only ever shows what came back.
+
+  Being local is worth more than the phishing fix on its own: with no remote
+  content in our chrome, "the server returned something else and it rendered
+  inside our window" stops being possible. That was not hypothetical — the
+  overlay window this app used to create pointed at `<host>/overlay.html`, a
+  path that has never existed, and rendered the site's own 404 page
+  full-screen and always-on-top.
+
+  No network, no external fonts, no external images. If this page cannot
+  render, nothing can.
 -->
-<html><body></body></html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Empyralis</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #ffffff;
+        --text: #111113;
+        --muted: #6b6b70;
+        --border: #e2e2e4;
+        --btn-bg: #111113;
+        --btn-text: #ffffff;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0f0f10;
+          --text: #f5f5f6;
+          --muted: #9a9aa0;
+          --border: #2a2a2d;
+          --btn-bg: #f5f5f6;
+          --btn-text: #111113;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 28px 26px;
+        background: var(--bg);
+        color: var(--text);
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", Roboto, sans-serif;
+        -webkit-font-smoothing: antialiased;
+        user-select: none;
+        cursor: default;
+      }
+      main { width: 100%; max-width: 360px; text-align: center; }
+      .mark { width: 46px; height: 46px; margin: 0 auto 20px; display: block; }
+      h1 { margin: 0 0 8px; font-size: 17px; font-weight: 640; line-height: 1.25; }
+      p { margin: 0; font-size: 13px; line-height: 1.55; color: var(--muted); }
+      .actions { margin-top: 22px; display: flex; flex-direction: column; gap: 9px; align-items: center; }
+      button {
+        font: inherit;
+        font-size: 13px;
+        font-weight: 550;
+        border-radius: 8px;
+        padding: 0 18px;
+        height: 32px;
+        cursor: pointer;
+        border: 1px solid transparent;
+      }
+      .primary { background: var(--btn-bg); color: var(--btn-text); }
+      .quiet { background: transparent; color: var(--muted); border-color: var(--border); }
+      /* Motion only on state change, 100-150ms, never decorative. This one is
+         the exception the doctrine allows: a working state genuinely is
+         ongoing, and a still page during a wait reads as a hang. */
+      .spinner {
+        width: 15px; height: 15px; margin: 0 auto 14px;
+        border: 2px solid var(--border);
+        border-top-color: var(--muted);
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      [hidden] { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <!-- The founder's own mark, geometry and hex values unedited. -->
+      <svg class="mark" viewBox="0 0 512 512" role="img" aria-label="Empyralis" xmlns="http://www.w3.org/2000/svg">
+        <rect x="128" y="136" width="256" height="56" rx="28" fill="#F2A65A" />
+        <rect x="128" y="228" width="168" height="56" rx="28" fill="#E8853D" />
+        <circle cx="352" cy="256" r="30" fill="#E8853D" />
+        <rect x="128" y="320" width="256" height="56" rx="28" fill="#C95F27" />
+      </svg>
+      <div class="spinner" id="spinner" hidden></div>
+      <h1 id="title">Starting up…</h1>
+      <p id="detail"></p>
+      <div class="actions">
+        <button type="button" class="primary" id="start" hidden></button>
+        <button type="button" class="quiet" id="cancel" hidden>Stop</button>
+      </div>
+    </main>
+    <script>
+      (() => {
+        "use strict";
+        const el = {
+          title: document.getElementById("title"),
+          detail: document.getElementById("detail"),
+          spinner: document.getElementById("spinner"),
+          start: document.getElementById("start"),
+          cancel: document.getElementById("cancel"),
+        };
+
+        function invoke(command, args) {
+          const internals = window.__TAURI_INTERNALS__;
+          if (!internals || typeof internals.invoke !== "function") {
+            return Promise.reject(new Error("no bridge"));
+          }
+          return internals.invoke(command, args || {});
+        }
+
+        // Every field the window shows comes from ONE resolved view
+        // (src/browser_pairing.rs's resolve_pair_view), so the sentence, the
+        // spinner and the buttons cannot end up describing different states.
+        // This page decides nothing.
+        function render(view) {
+          el.title.textContent = view.title;
+          el.detail.textContent = view.detail;
+          el.spinner.hidden = !view.busy;
+          el.start.hidden = !view.canStart;
+          el.start.textContent = view.startLabel || "";
+          el.cancel.hidden = !view.canCancel;
+        }
+
+        // A clean success and nothing else. Hide, never close: closing the
+        // last window of an app whose whole point is to outlive its windows
+        // takes the menu bar item down with it. Every other resting state
+        // keeps the window, because each carries a fact the owner has not
+        // seen yet — making the window vanish over one of those would be
+        // outcome dishonesty by disappearance rather than by wording.
+        let hiding = false;
+        function maybeHide(view) {
+          if (!view.done || hiding) return;
+          hiding = true;
+          setTimeout(() => {
+            invoke("desktop_window_hide").catch(() => undefined);
+          }, 2200);
+        }
+
+        let failures = 0;
+        function refresh() {
+          return invoke("desktop_pair_view")
+            .then((view) => {
+              failures = 0;
+              render(view);
+              maybeHide(view);
+            })
+            .catch(() => {
+              // Says what is true rather than freezing on the last thing that
+              // was true. One dropped call is not an answer, so this only
+              // speaks up once it has actually lost track.
+              failures += 1;
+              if (failures < 3) return;
+              render({
+                title: "Can't tell what this computer is doing",
+                detail: "Quit Empyralis from the menu bar and open it again.",
+                busy: false,
+                canStart: false,
+                canCancel: false,
+                startLabel: "",
+                done: false,
+              });
+            });
+        }
+
+        el.start.addEventListener("click", () => {
+          el.start.hidden = true;
+          invoke("desktop_pair_begin").then(render).catch(() => refresh());
+        });
+        el.cancel.addEventListener("click", () => {
+          el.cancel.hidden = true;
+          invoke("desktop_pair_cancel").then(render).catch(() => refresh());
+        });
+
+        refresh();
+        setInterval(refresh, 1200);
+      })();
+    </script>
+  </body>
+</html>

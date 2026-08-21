@@ -2,6 +2,7 @@
   "productName": "Empyralis",
   "version": "0.1.0",
   "identifier": "com.empyralis.desktop",
+  "mainBinaryName": "empyralis-tauri-shell",
   "build": {
     "frontendDist": "dist-stub",
     "beforeDevCommand": "",
