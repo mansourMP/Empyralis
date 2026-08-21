@@ -12152,3 +12152,172 @@ h2.fleet-sage-console-title {
   font-size: var(--text-sm);
 }
 .fleet-mywork-empty .fleet-btn { margin-top: var(--space-2); }
+
+/* ── "Finish setting up {agent}" band ────────────────────────────────────────
+   2026-08-21. Creation is two fields on purpose (AgentCreateCard) and the
+   4-step wizard is not coming back, so everything it used to ask is DEFERRED
+   — this band is where the deferral becomes visible. It sits between the
+   agent's header and .fleet-detail-columns, i.e. OUTSIDE the scrolling
+   .fleet-detail-body: the steps are about the agent, not about the
+   conversation list under them, and a band in the flow would inherit that
+   container's reading-measure cap and its :has()-driven zero padding.
+
+   Which rows exist, and the two that deliberately never do, is
+   agent-setup-steps.ts's job — this file only draws them.
+
+   ONE ACCENT. Exactly one row carries --primary (the rule lives in
+   planAgentSetupSteps, never in a second CSS-side judgement), and it is a
+   TINT plus a ring — never a filled button, because the header's own "⋯"
+   and any future page action must still be able to own the fill.
+   Everything else is neutral. */
+.fleet-agent-setup {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) 28px var(--space-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-surface-2);
+  animation: fleet-fade var(--dur-2) var(--ease-out);
+}
+
+.fleet-agent-setup-title {
+  margin: 0;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  color: var(--text-muted);
+}
+
+/* Dense inside the group, airy around it. Wraps rather than scrolls: three
+   rows at ~240px each fit a laptop, and a narrow window stacks them instead
+   of hiding one behind an edge. */
+.fleet-agent-setup-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.fleet-agent-setup-step {
+  flex: 1 1 220px;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  text-decoration: none;
+  transition: background var(--dur-2) var(--ease-out), border-color var(--dur-2) var(--ease-out);
+}
+
+.fleet-agent-setup-step:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border-strong);
+}
+
+.fleet-agent-setup-step--primary {
+  border-color: var(--accent-ring);
+  background: var(--accent-soft);
+}
+
+.fleet-agent-setup-step--primary:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.fleet-agent-setup-step-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: var(--bg-surface-2);
+  color: var(--text-secondary);
+}
+
+.fleet-agent-setup-step--primary .fleet-agent-setup-step-icon {
+  background: transparent;
+  color: var(--accent);
+}
+
+.fleet-agent-setup-step-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+
+.fleet-agent-setup-step-label {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fleet-agent-setup-step-hint {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fleet-agent-setup-step-chevron {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+/* At phone width the band is the same rows, stacked, with the page's own
+   narrower gutter — never a horizontal scroller. */
+@media (max-width: 720px) {
+  .fleet-agent-setup {
+    padding: var(--space-3) var(--space-4) var(--space-4);
+  }
+  .fleet-agent-setup-step {
+    flex: 1 1 100%;
+  }
+}
+
+/* ── The agent create card's own identity ────────────────────────────────────
+   2026-08-21. AgentCreateCard borrows TaskComposer's .fleet-composer shell —
+   correct, that shell is the "paper, not a form" doctrine and the card is
+   still two bare fields — but borrowing it wholesale meant a task, a document
+   and an agent all opened the same grey breadcrumb, and the founder read the
+   result as generic ("as if it's asking for issue or document or something").
+
+   This adds NO fields and no chrome: the head names what is being made, with
+   the product's own agent glyph in the accent, at the weight of a title
+   rather than of a crumb. Everything below the head is unchanged. */
+.fleet-agent-composer-head {
+  gap: var(--space-2);
+  padding-top: var(--space-3);
+  padding-bottom: 2px;
+}
+
+.fleet-agent-composer-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.fleet-agent-composer-crumb {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--text-secondary);
+  letter-spacing: -0.01em;
+}

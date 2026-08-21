@@ -37,10 +37,11 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { X } from "lucide-react";
+import { Bot, X } from "lucide-react";
 
 import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
 
+import { agentCreateButtonClass } from "./agent-create-accent";
 import { resolveAgentCreateName } from "./agent-create-card";
 import { createAgentQuickly, quickCreateAgentChatPath } from "./agent-quick-create";
 import type { FleetProject } from "./fleet-data";
@@ -163,16 +164,32 @@ export function AgentCreateCard({
       }}
     >
       <div
-        className={`fleet-composer${closing ? " is-closing" : ""}`}
+        className={`fleet-composer fleet-agent-composer${closing ? " is-closing" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-label="New agent"
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <div className="fleet-composer-head">
-          <span className="fleet-composer-crumb">
-            <span>New agent</span>
+        {/* IT HAS TO READ AS AN AGENT, not as "some dialog" (founder,
+            2026-08-21, on the version before this: it "opens a fucking
+            sheet, as if it's asking for issue or document or something").
+            He was right and the cause is literal — this card was built on
+            TaskComposer's own .fleet-composer shell, so a task, a document
+            and an agent all opened the identical grey crumb.
+
+            The fix adds NO FIELDS. It is the same two-field paper; what
+            changed is that the head names the thing being made with the
+            product's own agent glyph, in the agent's own accent, instead of
+            a muted breadcrumb word. Deliberately NOT a preview of the
+            agent's generated sigil: AgentSigil is a deterministic hash of
+            the agent's ID, which does not exist yet, so anything drawn here
+            from the typed name would not be the mark the agent ends up
+            with — a small lie on the first screen a new customer sees. */}
+        <div className="fleet-composer-head fleet-agent-composer-head">
+          <span className="fleet-agent-composer-mark" aria-hidden="true">
+            <Bot size={15} strokeWidth={1.75} />
           </span>
+          <span className="fleet-agent-composer-crumb">New agent</span>
           <button type="button" className="fleet-composer-close" onClick={requestClose} aria-label="Close">
             <X size={14} strokeWidth={2} />
           </button>
@@ -221,7 +238,16 @@ export function AgentCreateCard({
           <button type="button" className="fleet-btn" onClick={requestClose} disabled={busy}>
             Cancel
           </button>
-          <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => void create()} disabled={!canCreate}>
+          {/* The card is the modal, so while it is open it owns the view's
+              single accent fill — the header "+ New agent" and
+              FirstAgentEmpty's own CTA behind it both drop to the hairline
+              variant. One rule, agent-create-accent.ts, four controls. */}
+          <button
+            type="button"
+            className={agentCreateButtonClass("card", { listIsEmpty: false, createCardOpen: true })}
+            onClick={() => void create()}
+            disabled={!canCreate}
+          >
             {busy ? "Creating…" : "Create agent"}
           </button>
         </div>

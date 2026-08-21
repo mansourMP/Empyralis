@@ -16,7 +16,7 @@
  *
  * Pulled into its own pure, dependency-light module (no next/navigation, no
  * React) for the same reason primary-rail-nav.ts, my-work.ts and
- * project-agents-rail-shape.ts already are — a plain test can import the
+ * my-work.ts already are — a plain test can import the
  * REAL boundary-detection function PrimaryRail.tsx renders against, instead
  * of re-typing the regex and risking the test and the component drifting
  * apart on what counts as "inside a project."

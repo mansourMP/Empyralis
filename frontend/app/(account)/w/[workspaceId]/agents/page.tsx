@@ -11,6 +11,7 @@ import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
 import { FleetListSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import { HeaderAction, useBreadcrumbBadge } from "@/lib/workspace/fleet/Breadcrumbs";
 import { planAgentCountShape } from "@/lib/workspace/fleet/agent-count-shape";
+import { agentCreateButtonClass } from "@/lib/workspace/fleet/agent-create-accent";
 
 /**
  * The bare workspace /agents index. Its own job shrank sharply in the
@@ -143,23 +144,23 @@ export default function AgentsPage() {
 
   return (
     <main className="fleet-content">
-      {/* FILLED, 2026-08-01, EXCEPT WHEN THE LIST IS EMPTY (2026-08-13) —
-          this was unconditionally filled, which meant a brand-new
-          workspace rendered this header button AND FirstAgentEmpty's own
-          centred "Create your first agent" filled at the same time:
-          CLAUDE.md, "Two accent-filled buttons in one view is a bug." The
-          centred empty-state CTA wins the fill while the list is empty (a
-          first-run empty state is the one moment its own big button IS
-          the primary action); this button earns it back the moment the
-          list pane holds a row, since it's the persistent primary action
-          used every day past that point. At 2+ agents this still portals
-          into the shell topbar, which stays visible for the bare index
-          (only an agent's own tab pages suppress it — see
+      {/* WHO OWNS THE VIEW'S ONE ACCENT FILL is decided by
+          agent-create-accent.ts, not here — three controls can create an
+          agent and up to two are on screen at once. This button used to be
+          unconditionally filled (a brand-new workspace rendered it AND
+          FirstAgentEmpty's own centred CTA filled at the same time), which
+          was fixed 2026-08-13 by a hand-inlined ternary; that ternary was
+          still blind to the THIRD case, so opening AgentCreateCard left this
+          filled behind the card's own filled "Create agent" — the exact
+          violation of "two accent-filled buttons in one view is a bug" that
+          the comment sitting here used to quote. At 2+ agents this still
+          portals into the shell topbar, which stays visible for the bare
+          index (only an agent's own tab pages suppress it — see
           FleetContentFrame.tsx's WORKSPACE_AGENT_DETAIL_ROUTE). */}
       <HeaderAction>
         <button
           type="button"
-          className={`fleet-btn${agents.length === 0 ? " fleet-btn--accent" : " fleet-btn--accent-fill"}`}
+          className={agentCreateButtonClass("header", { listIsEmpty: agents.length === 0, createCardOpen: cardOpen })}
           onClick={openCreateCard}
         >
           <span className="fleet-btn-plus">+</span>
@@ -177,6 +178,7 @@ export default function AgentsPage() {
             title="No agents yet"
             desc="Agents do the work — they handle customer chats, run tasks, and use your tools. Create your first one to get started."
             onCreate={openCreateCard}
+            createCardOpen={cardOpen}
           />
         ) : (
           // 2+ agents: agents/layout.tsx's own list pane (beside this pane,
