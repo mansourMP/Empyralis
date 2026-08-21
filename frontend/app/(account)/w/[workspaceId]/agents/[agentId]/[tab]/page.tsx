@@ -55,6 +55,13 @@ export default function WorkspaceAgentDetailPage() {
       agent={agent}
       projectId={projectId}
       projectName={projectName}
+      // "Up" from HERE is the agents list, not the agent's project — this
+      // route's whole reason to exist is reaching an agent without knowing
+      // which project it lives in, and Breadcrumbs.tsx already crumbs it
+      // Agents › {agent}. Below 768px the list pane collapses away
+      // (agents-split-pane.ts) and this is the ONLY way back to it.
+      backHref={`${base}/agents`}
+      backLabel="Agents"
       initialTab={tab}
       onTabChange={(t) => router.replace(`${agentBase}/${t}`)}
       onChat={() => router.replace(`${agentBase}/chat`)}

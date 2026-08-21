@@ -41,7 +41,7 @@ import { Bot, X } from "lucide-react";
 
 import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
 
-import { agentCreateButtonClass } from "./agent-create-accent";
+import { composerSubmitButtonClass } from "./create-accent";
 import { resolveAgentCreateName } from "./agent-create-card";
 import { createAgentQuickly, quickCreateAgentChatPath } from "./agent-quick-create";
 import type { FleetProject } from "./fleet-data";
@@ -241,10 +241,11 @@ export function AgentCreateCard({
           {/* The card is the modal, so while it is open it owns the view's
               single accent fill — the header "+ New agent" and
               FirstAgentEmpty's own CTA behind it both drop to the hairline
-              variant. One rule, agent-create-accent.ts, four controls. */}
+              variant. One rule, create-accent.ts, every create control
+              on every surface. */}
           <button
             type="button"
-            className={agentCreateButtonClass("card", { listIsEmpty: false, createCardOpen: true })}
+            className={composerSubmitButtonClass()}
             onClick={() => void create()}
             disabled={!canCreate}
           >

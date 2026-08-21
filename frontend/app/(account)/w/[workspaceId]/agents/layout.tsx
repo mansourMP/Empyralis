@@ -7,6 +7,7 @@ import { useFleetAgents } from "@/lib/workspace/fleet/fleet-data";
 import { findSageAgent } from "@/lib/workspace/fleet/fleet-presentation";
 import { planAgentCountShape } from "@/lib/workspace/fleet/agent-count-shape";
 import { AgentConversationList } from "@/lib/workspace/fleet/AgentConversationList";
+import { agentsSplitClassName } from "@/lib/workspace/fleet/agents-split-pane";
 
 /**
  * The workspace Agents surface, 2026-08-20 redesign — see
@@ -50,7 +51,12 @@ export default function AgentsLayout({ children }: { children: ReactNode }) {
   if (!showsList) return <>{children}</>;
 
   return (
-    <div className="fleet-content fleet-content--split">
+    // At phone width this row collapses to ONE pane — the list at the bare
+    // index, the picked agent's own surface once one is selected — because
+    // a 320px-floored list beside a flex:1 detail leaves the detail 55px of
+    // a 375px screen. agents-split-pane.ts owns that rule (and only ever
+    // feeds a max-width:768px block; the desktop row is unchanged).
+    <div className={agentsSplitClassName(activeAgentId)}>
       <AgentConversationList workspaceId={workspaceId} agents={agents} activeAgentId={activeAgentId} />
       <div className="fleet-agents-detail-pane">{children}</div>
     </div>

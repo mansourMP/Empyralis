@@ -47,6 +47,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { CalendarDays, Check, MoreHorizontal, X } from "lucide-react";
 
+import { composerSubmitButtonClass } from "./create-accent";
 import { AgentSigil } from "./fleet-indicators";
 import { MemberAvatar } from "./MemberAvatarStack";
 import type { WorkspaceMember } from "./members-data";
@@ -633,9 +634,14 @@ export function TaskComposer({
             </span>
             Create more
           </button>
+          {/* The composer is the modal, so while it is open it owns the
+              view's single accent fill — the header "+ New task" and the
+              empty state's own CTA behind it both drop to the hairline
+              variant. One rule, create-accent.ts, every create control on
+              every surface. */}
           <button
             type="button"
-            className="fleet-btn fleet-btn--accent-fill"
+            className={composerSubmitButtonClass()}
             onClick={() => void create()}
             disabled={!canCreate}
           >

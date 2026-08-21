@@ -11,7 +11,7 @@ import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
 import { FleetListSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import { HeaderAction, useBreadcrumbBadge } from "@/lib/workspace/fleet/Breadcrumbs";
 import { planAgentCountShape } from "@/lib/workspace/fleet/agent-count-shape";
-import { agentCreateButtonClass } from "@/lib/workspace/fleet/agent-create-accent";
+import { createButtonClass } from "@/lib/workspace/fleet/create-accent";
 
 /**
  * The bare workspace /agents index. Its own job shrank sharply in the
@@ -145,7 +145,7 @@ export default function AgentsPage() {
   return (
     <main className="fleet-content">
       {/* WHO OWNS THE VIEW'S ONE ACCENT FILL is decided by
-          agent-create-accent.ts, not here — three controls can create an
+          create-accent.ts, not here — three controls can create an
           agent and up to two are on screen at once. This button used to be
           unconditionally filled (a brand-new workspace rendered it AND
           FirstAgentEmpty's own centred CTA filled at the same time), which
@@ -160,7 +160,7 @@ export default function AgentsPage() {
       <HeaderAction>
         <button
           type="button"
-          className={agentCreateButtonClass("header", { listIsEmpty: agents.length === 0, createCardOpen: cardOpen })}
+          className={createButtonClass("header", { listIsEmpty: agents.length === 0, composerOpen: cardOpen })}
           onClick={openCreateCard}
         >
           <span className="fleet-btn-plus">+</span>

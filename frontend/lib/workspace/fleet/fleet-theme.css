@@ -8895,6 +8895,56 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   }
 }
 
+/* ── Workspace Agents: master-detail → ONE PANE AT A TIME (<=768px),
+   2026-08-21. Same idiom as the Inbox block immediately below, same
+   reasoning; see agents-split-pane.ts for the measurement and for why this
+   one is derived from the ROUTE rather than from React state.
+
+   MEASURED at 375x812 before this rule existed: .fleet-content--split is a
+   fixed-30%-plus-320px-floor row with `max-width: none`, so the list took
+   320px of a 375px viewport and .fleet-agents-detail-pane got the 55px
+   left over — the agent's header, content and empty state all clipped
+   mid-word behind the split's own `overflow: hidden`, with no way to
+   scroll to them. The SAME agent surface rendered correctly at the same
+   width on the project-scoped route, which mounts it without this layout:
+   the bug was the shell, never the surface.
+
+   Both panes stay in the DOM at every width (desktop never reflows). The
+   list is the default pane because the bare /agents index IS the picker;
+   hiding it instead would have made choosing an agent impossible on a
+   phone, which is a worse bug than the one being fixed. Getting back to it
+   needs no new control: Breadcrumbs.tsx's mobile parent crumb for this
+   route already resolves to /w/{ws}/agents, and so does the browser's own
+   Back. */
+@media (max-width: 768px) {
+  /* Counter the desktop flex:0 0 30% / min-width:320px — the same reset
+     .fleet-work-list and .fleet-inbox-list already take, needed here for
+     the same reason: without it 320px still wins inside a 375px row. */
+  .fleet-agents-conversation-list,
+  .fleet-agents-detail-pane {
+    flex: 1 1 auto;
+    width: 100%;
+    min-width: 0;
+  }
+  .fleet-agents-conversation-list {
+    /* The divider separated two side-by-side panes. One pane at a time has
+       nothing to divide from, and a hairline down the screen edge reads as
+       a rendering fault. */
+    border-right: none;
+  }
+  .fleet-agents-detail-pane {
+    display: none;
+  }
+  .fleet-agents-split--detail-open .fleet-agents-conversation-list {
+    display: none;
+  }
+  .fleet-agents-split--detail-open .fleet-agents-detail-pane {
+    /* flex, not block — .fleet-agents-detail-pane is a column flex parent
+       and FleetAgentDetail's own height:100% chain binds against it. */
+    display: flex;
+  }
+}
+
 /* ── Inbox: master-detail → list, then push-in detail (<=768px) — Truth Map
    mobile pass, 2026-07-11. .fleet-content--split lays list+detail out as a
    fixed-30%-plus-320px-floor row with no wrap — the worst offender the

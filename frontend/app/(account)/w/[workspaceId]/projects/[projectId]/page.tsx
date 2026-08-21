@@ -38,7 +38,7 @@ import { AgentSigil, StatusDot } from "@/lib/workspace/fleet/fleet-indicators";
 import { ProjectIcon } from "@/lib/workspace/fleet/fleet-project-identity";
 import { UsageStat, bucketSeries, type UsageBucket } from "@/lib/workspace/fleet/fleet-sparkline";
 import { planAgentCountShape } from "@/lib/workspace/fleet/agent-count-shape";
-import { agentCreateButtonClass } from "@/lib/workspace/fleet/agent-create-accent";
+import { createButtonClass } from "@/lib/workspace/fleet/create-accent";
 import { FleetToolbar } from "@/lib/workspace/fleet/FleetToolbar";
 import { TaskViewOptions } from "@/lib/workspace/fleet/TaskViewOptions";
 import {
@@ -589,13 +589,15 @@ export default function ProjectDetailPage() {
           something and this is genuinely the button used every day. */}
       <HeaderAction>
         {view === "agents" ? (
-          // agent-create-accent.ts decides which of the three agent-creation
-          // controls owns the view's one accent fill — including the case
-          // this hand-inlined ternary was blind to: AgentCreateCard open in
-          // front of this button, both filled at once.
+          // create-accent.ts decides which of the three create controls
+          // owns the view's one accent fill — including the case these
+          // hand-inlined ternaries were blind to: a composer open in front
+          // of this button, both filled at once. All three views answer to
+          // one rule now; Tasks and Documents carried the identical bug the
+          // Agents fix left behind by name.
           <button
             type="button"
-            className={agentCreateButtonClass("header", { listIsEmpty: inProject.length === 0, createCardOpen: agentCardOpen })}
+            className={createButtonClass("header", { listIsEmpty: inProject.length === 0, composerOpen: agentCardOpen })}
             onClick={openCreateCard}
           >
             <span className="fleet-btn-plus">+</span> New agent
@@ -603,7 +605,7 @@ export default function ProjectDetailPage() {
         ) : view === "tasks" ? (
           <button
             type="button"
-            className={`fleet-btn${tasks.length === 0 ? " fleet-btn--accent" : " fleet-btn--accent-fill"}`}
+            className={createButtonClass("header", { listIsEmpty: tasks.length === 0, composerOpen: composer !== null })}
             onClick={() => setComposer({})}
           >
             <span className="fleet-btn-plus">+</span> New task
@@ -617,7 +619,7 @@ export default function ProjectDetailPage() {
           // resolving) included.
           <button
             type="button"
-            className={`fleet-btn${documents.length === 0 ? " fleet-btn--accent" : " fleet-btn--accent-fill"}`}
+            className={createButtonClass("header", { listIsEmpty: documents.length === 0, composerOpen: documentComposerOpen })}
             onClick={() => setDocumentComposerOpen(true)}
           >
             <span className="fleet-btn-plus">+</span> New document
@@ -831,7 +833,14 @@ export default function ProjectDetailPage() {
                   Tasks live inside this project and can be assigned to an agent or a person to work on.
                 </div>
                 <div className="fleet-empty-actions">
-                  <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setComposer({})}>
+                  {/* Filled only while nothing is in front of it — with
+                      TaskComposer open this sits behind a 45% backdrop and
+                      the composer's own Create owns the fill. */}
+                  <button
+                    type="button"
+                    className={createButtonClass("empty_state", { listIsEmpty: true, composerOpen: composer !== null })}
+                    onClick={() => setComposer({})}
+                  >
                     <span className="fleet-btn-plus">+</span> New task
                   </button>
                 </div>
@@ -907,7 +916,11 @@ export default function ProjectDetailPage() {
                 </div>
                 {canWriteProject ? (
                   <div className="fleet-empty-actions">
-                    <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setDocumentComposerOpen(true)}>
+                    <button
+                      type="button"
+                      className={createButtonClass("empty_state", { listIsEmpty: true, composerOpen: documentComposerOpen })}
+                      onClick={() => setDocumentComposerOpen(true)}
+                    >
                       <span className="fleet-btn-plus">+</span> New document
                     </button>
                   </div>
