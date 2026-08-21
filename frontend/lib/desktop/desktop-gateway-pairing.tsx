@@ -91,7 +91,16 @@ type EmpyralisDesktopBridge = {
     pairingToken?: string;
     workspaceId: string;
     displayName?: string;
+    /** The workspace's HUMAN name. Recorded natively so the menu bar can say
+     *  which workspace this computer serves while no window exists — only a
+     *  signed-in webview knows it, and a raw `ws_9f3c…` in a menu is not an
+     *  answer to "what is this computer doing". */
+    workspaceLabel?: string;
   }) => Promise<GatewayStartResult>;
+  /** Present only on shells that ship the menu bar app. Optional so an older
+   *  shell keeps its window rather than throwing — the window staying up is a
+   *  strictly safer degradation than a pairing that ends in an error. */
+  hideWindow?: () => Promise<boolean>;
 };
 
 declare global {
@@ -219,7 +228,15 @@ async function pollForThisMachine(
   return best;
 }
 
-export function DesktopGatewayPairing({ workspaceId }: { workspaceId: string }) {
+export function DesktopGatewayPairing({
+  workspaceId,
+  workspaceLabel,
+}: {
+  workspaceId: string;
+  /** Passed straight through to the native shell, which records it so the
+   *  menu bar can name this workspace with no window open. */
+  workspaceLabel?: string;
+}) {
   const [state, setState] = useState<DesktopPairingState>(() => describePairing('inactive'));
   const [dismissed, setDismissed] = useState(false);
   const attempted = useRef(false);
@@ -282,6 +299,7 @@ export function DesktopGatewayPairing({ workspaceId }: { workspaceId: string }) 
         ...(pairingToken ? { pairingToken } : {}),
         workspaceId,
         displayName,
+        ...(workspaceLabel?.trim() ? { workspaceLabel: workspaceLabel.trim() } : {}),
       });
     } catch (error) {
       // The native shell's own message is already customer-shaped prose
@@ -311,7 +329,7 @@ export function DesktopGatewayPairing({ workspaceId }: { workspaceId: string }) 
         supervisorDetail: result.supervisor?.detail,
       }),
     );
-  }, [workspaceId]);
+  }, [workspaceId, workspaceLabel]);
 
   useEffect(() => {
     if (attempted.current) {
@@ -325,13 +343,33 @@ export function DesktopGatewayPairing({ workspaceId }: { workspaceId: string }) 
     };
   }, [run]);
 
-  // Only a clean success fades. Every other resting phase carries a fact the
-  // owner has not acted on, so it stays until they dismiss it.
+  // Only a clean success fades — and in the menu bar app, the whole WINDOW
+  // goes with it.
+  //
+  // This is the founder's "the window appears exactly once" rule reaching its
+  // one exit: pairing has succeeded, there is nothing left for a person to do
+  // here, and from now on the menu bar item is the surface. `hideWindow` is
+  // hide-not-close on purpose (see its own comment in lib.rs) — the process
+  // has to outlive the window or the machine stops being an Agent Computer
+  // the moment it disappears.
+  //
+  // Every OTHER resting phase keeps the window, because each carries a fact
+  // the owner has not acted on. Hiding the window over one of those would be
+  // the outcome-honesty law broken by disappearance rather than by wording:
+  // the customer would be left with a menu bar icon and no idea that anything
+  // needed them.
   useEffect(() => {
     if (state.phase !== 'connected') {
       return;
     }
-    const timer = setTimeout(() => setDismissed(true), CONNECTED_VISIBLE_MS);
+    const timer = setTimeout(() => {
+      setDismissed(true);
+      // Failing to hide is not worth reporting and not worth retrying: the
+      // window simply stays, showing a banner that says the machine is
+      // connected — which is true. A shell without this bridge method (an
+      // older build) lands here too, and gets exactly that.
+      void window.empyralisDesktop?.hideWindow?.().catch(() => undefined);
+    }, CONNECTED_VISIBLE_MS);
     return () => clearTimeout(timer);
   }, [state.phase]);
 

@@ -80,7 +80,10 @@ export default async function WorkspaceRouteLayout({
         Outside the desktop app (window.empyralisDesktop absent) this is a
         no-op on every ordinary browser tab.
       */}
-      <DesktopGatewayPairing workspaceId={resolvedWorkspaceId} />
+      <DesktopGatewayPairing
+        workspaceId={resolvedWorkspaceId}
+        workspaceLabel={bootstrap.workspace.label}
+      />
       <FleetShell
         workspaceId={resolvedWorkspaceId}
         shellSlot={null}

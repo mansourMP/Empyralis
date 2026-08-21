@@ -2537,6 +2537,17 @@ fn desktop_bridge_script() -> String {
       }}
       return false;
     }},
+    // Steps out of the way once this machine is set up. HIDE, never close --
+    // this app outlives its windows, and the menu bar item is what remains.
+    // Only ever called on a CLEAN success: every other pairing phase carries a
+    // fact the owner has not seen yet, and making the window vanish over one
+    // would break outcome honesty by disappearance rather than by wording.
+    hideWindow: async () => {{
+      if (window.__TAURI_INTERNALS__ && typeof window.__TAURI_INTERNALS__.invoke === "function") {{
+        return await window.__TAURI_INTERNALS__.invoke("desktop_window_hide");
+      }}
+      return false;
+    }},
     getWindowState: async () => {{
       if (window.__TAURI_INTERNALS__ && typeof window.__TAURI_INTERNALS__.invoke === "function") {{
         return await window.__TAURI_INTERNALS__.invoke("desktop_window_state");
