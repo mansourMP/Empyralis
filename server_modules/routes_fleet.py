@@ -3051,7 +3051,17 @@ async def fleet_agent_channels(
             agent_bindings = await _bindings.list_agent_channel_bindings(
                 tenant_id=tenant_id, workspace_id=resolved_workspace_id, agent_install_id=agent_id,
             )
-            slack_binding = next((b for b in agent_bindings if b.get("channel_key") == "slack"), None)
+            # agent_bindings_repository._list SELECTs `{key_col} AS key`, so a
+            # binding row carries "key", never "channel_key". Reading
+            # b.get("channel_key") here was ALWAYS None, so a bound Slack
+            # channel could never read as connected anywhere in the fleet UI
+            # -- undercounted in Properties, and the grid pill showed "Set up"
+            # on a live channel. Both keys are accepted so this cannot break
+            # again if the alias is ever dropped.
+            slack_binding = next(
+                (b for b in agent_bindings if (b.get("key") or b.get("channel_key")) == "slack"),
+                None,
+            )
             if slack_binding:
                 endpoint_key = str((slack_binding.get("binding") or {}).get("endpoint_key") or "").strip()
                 slack_channel_binding = endpoint_key or None
