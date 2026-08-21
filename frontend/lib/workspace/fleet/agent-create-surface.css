@@ -31,9 +31,10 @@
      no labels — bare paper              real labels. you are specifying a thing
      invisible, borderless fields        fields with visible chrome, on --bg-inset
      one flat sheet                      three groups, separated by SPACE
-     drops in from 12vh, 640px wide      centred, 520px — a card, not a page
+     drops in from 12vh, 640px wide      centred, 620px — a card, not a page
      a grey breadcrumb                   an identity row: glyph + the name field
-     one sheet, no steps                 a stepper: Identity · Brain · Reach
+     one sheet, no steps                 a stepper: Identity · Brain ·
+                                         Channels · Apps
    ```
 
    ── A THIRD CORRECTION, 2026-08-21: THE RULES AND THE BAND ────────────────
@@ -106,8 +107,39 @@
   animation: fleet-fade var(--dur-2) var(--ease-in) reverse forwards;
 }
 
+/* ── THE WIDTH IS DECIDED BY THE CHANNEL GRID, NOT PICKED ─────────────────
+   Founder, on the Channels step: *"It must be a little wider."* At 520px the
+   three channel cards were 153px each and a card's own three lines — icon,
+   name, "Needs Gateway" — stacked into a column narrow enough to wrap.
+
+   620 is not a round number, it is the TOP OF THE THREE-COLUMN BAND, and
+   that band is the whole subtlety here: the embedded grid is `auto-fill,
+   minmax(140px, 1fr)` (see below), so widening does not widen cards
+   smoothly — past a threshold it ADDS A COLUMN and every card gets
+   *narrower* than it is today.
+
+   ```
+   inner = W - 2 (border) - 40 (body padding)     gap 10px
+   cols  = floor((inner + 10) / 150)              card = (inner - 10·(cols-1)) / cols
+
+     W = 520   inner 478   3 cols   card 153   ← today. cramped.
+     W = 620   inner 578   3 cols   card 186   ← +22% per card
+     W = 632   inner 590   4 cols   card 140   ← the cliff. WORSE than today.
+     W = 700   inner 658   4 cols   card 157   ← barely better than 520, at
+                                                 35% more screen
+   ```
+
+   So the useful range is 520–631 and the best value in it is its top edge,
+   held 12px clear of the cliff so a body scrollbar or a font that measures
+   slightly differently cannot tip it over. Shrinking is safe (fewer pixels
+   per card, still three); growing is the failure, and the width is fixed, so
+   the only direction it can move is the safe one.
+
+   "A little wider" is exactly what this is: +100px, 19% — the dialog still
+   occupies 37% of a 1680px monitor. `max-width: 100%` is unchanged, so a
+   phone still gets the full-width sheet. */
 .agent-create-surface {
-  width: 520px;
+  width: 620px;
   max-width: 100%;
   display: flex;
   flex-direction: column;
@@ -136,7 +168,7 @@
        Brain, cloud placement    480       560   ← grows to the floor
        Identity, cloud           586       586   ← untouched, sits between
        Identity, a machine       ~680      640   ← body scrolls the overflow
-       Reach (two whole tabs)   1000+      640   ← ditto
+       Channels / Apps (a whole tab) 1000+  640   ← ditto
      ```
 
      The dialog is vertically CENTRED, so an unframed height change moves
@@ -170,9 +202,10 @@
 
    This is NOT a second frame: it raises the FLOOR to the ceiling the frame
    already has, so the surface stops growing and shrinking under a filter and
-   the change happens in the body's own scroll instead. Reach genuinely has
-   more content than fits at any size (two full tabs), so its floor and its
-   ceiling are the same number and the size is simply stable.
+   the change happens in the body's own scroll instead. Channels and Apps
+   each genuinely have more content than fits at any size (a whole real tab),
+   so their floor and their ceiling are the same number and the size is
+   simply stable.
 
    Deliberately not a transition: animating a dialog's own height on every
    filter press is motion on something the person did not ask to move, and
@@ -343,17 +376,19 @@
 /* ── The embedded grids are sized by THIS CARD, not by the window ─────────
    Both card grids are `repeat(4, 1fr)` in fleet-theme.css, stepping to 2 at a
    900px VIEWPORT. Inside this dialog that measurement is about the wrong box:
-   the card is 520px wide on a 1680px monitor, so the viewport query never
-   fires and four cards divide 478px into 112px each. Measured, on the Channel
-   step: "WeChat / WeCom" broke over two lines and "Not configured here" over
-   two more — the squashed, label-wrapping face the founder objected to,
-   arriving on a desktop rather than on a phone.
+   the card is 620px wide on a 1680px monitor, so the viewport query never
+   fires and four cards would divide 578px into 137px each. Measured, on the
+   Channel step at the old 520px: "WeChat / WeCom" broke over two lines and
+   "Not configured here" over two more — the squashed, label-wrapping face the
+   founder objected to, arriving on a desktop rather than on a phone.
 
    `auto-fill` + a real minimum lets the CONTENT decide instead of a
    breakpoint: three across here, and it degrades on its own as the card
    narrows rather than needing a second breakpoint per width this dialog can
    take. 140px is the width at which a two-word app or channel name sits on
-   one line at --text-sm inside the card's 14px padding.
+   one line at --text-sm inside the card's 14px padding — and it is also the
+   number the dialog's own width is chosen against (see `width` above: 620 is
+   the widest value that still yields THREE of these rather than four).
 
    Scoped to `.agent-create-embed` on purpose — the full-page Channels and
    Apps tabs have the whole content column and are correct at four across. */
@@ -361,11 +396,18 @@
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
 }
 
-/* Apps are ROW cards (icon + name … Connect) rather than tiles, so the same
-   478px holds exactly ONE of them — two would put a button and an ellipsised
-   name into 234px. Selector tripled on purpose: connector-cards.css's own
-   two-up rule is already doubled to survive bundle ordering, so matching it
-   at (0,2,0) would leave which one wins up to the bundler. */
+/* Apps are ROW cards (icon + name … Connect) rather than tiles, so this
+   column holds exactly ONE of them. At the old 478px two would have been
+   234px each; at 578px they would be 281px, which is still well under the
+   ~430px each the full-page Apps tab gives its own two-up grid — a 40px
+   logo, a name and a Connect button in 281px is the ellipsised face that
+   made this rule necessary in the first place. So the extra 100px goes into
+   ONE row card rather than into two cramped ones, and the two-per-row spec
+   is unchanged where it was measured: the full-page tab.
+
+   Selector tripled on purpose: connector-cards.css's own two-up rule is
+   already doubled to survive bundle ordering, so matching it at (0,2,0)
+   would leave which one wins up to the bundler. */
 .agent-create-embed .fleet-connector-grid.fleet-connector-grid {
   grid-template-columns: minmax(0, 1fr);
 }
@@ -386,8 +428,8 @@
    Dense inside a group, airy between groups (craft doctrine) — and that is
    the WHOLE separation now. The hairline that used to sit under each group
    was doing spacing's job: 20px of air between two labelled groups already
-   reads as two groups, and four of those hairlines in one 520px card read
-   as four stacked boxes. Spacing lives on .agent-create-body above. */
+   reads as two groups, and four of those hairlines in one card read as four
+   stacked boxes. Spacing lives on .agent-create-body above. */
 .agent-create-group {
   padding: 0;
 }
@@ -544,8 +586,10 @@
    collapsed dropdown showing one of them hides the other's cost until after
    it has been picked.
 
-   Stacked, never a grid: at 520px two of these side by side gives each ~230px,
-   which wraps the second line of every one of them. Each card is dense inside
+   Stacked, never a grid: two of these side by side gives each ~285px at the
+   card's current width (and gave ~230px at its old one), which wraps the
+   second line of every one of them either way — the widening did not make
+   them a row, it made each one's consequence line fit. Each card is dense inside
    (2px between its two lines) and the stack is airy between (--space-2) —
    craft doctrine, at the smallest scale it applies at.
 
@@ -696,7 +740,7 @@
 }
 
 /* THE SCROLL EDGE IS MARKED ONCE, ON WHICHEVER PINNED ROW COMES FIRST.
-   Found live on Reach: with an error present, the footer's own border sat
+   Found live on the embedded steps: with an error present, the footer's own border sat
    BELOW it, so the body's cut-off content ran straight into red text with
    nothing between them — a channel card sliced in half and a sentence
    starting 10px under it read as overlap. The line belongs at the top of
