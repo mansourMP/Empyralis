@@ -124,3 +124,6 @@ target
 # symlink slipped past it into `git status` as untracked. Named explicitly so
 # a `git add -A` cannot stage a link to 20MB of built gateway output.
 empyralis-gateway/dist
+
+# Staged desktop bundle inputs (built, never committed)
+src-tauri/resources/gateway-node-modules/

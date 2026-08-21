@@ -10,9 +10,10 @@
     "tray:build": "npm run tauri:build --prefix apps/empyralis-tray",
     "tray:build:dmg": "bash scripts/build_empyralis_tray_dmg.sh",
     "tauri:dev": "cd src-tauri && cargo tauri dev",
-    "tauri:build": "npm run build --prefix empyralis-gateway && npm run desktop:node-runtime && cd src-tauri && cargo tauri build",
-    "tauri:build:release": "python3 scripts/write_tauri_release_config.py && npm run build --prefix empyralis-gateway && npm run desktop:node-runtime && cd src-tauri && cargo tauri build --config tauri.release.conf.json",
-    "desktop:node-runtime": "bash scripts/fetch-desktop-node-runtime.sh"
+    "tauri:build": "npm run build --prefix empyralis-gateway && npm run desktop:node-runtime && npm run desktop:gateway-deps && cd src-tauri && cargo tauri build",
+    "tauri:build:release": "python3 scripts/write_tauri_release_config.py && npm run build --prefix empyralis-gateway && npm run desktop:node-runtime && npm run desktop:gateway-deps && cd src-tauri && cargo tauri build --config tauri.release.conf.json",
+    "desktop:node-runtime": "bash scripts/fetch-desktop-node-runtime.sh",
+    "desktop:gateway-deps": "bash scripts/stage-desktop-gateway-deps.sh"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0"

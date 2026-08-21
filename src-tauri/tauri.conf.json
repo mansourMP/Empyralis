@@ -17,7 +17,12 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg", "deb", "appimage"],
+    "targets": [
+      "app",
+      "dmg",
+      "deb",
+      "appimage"
+    ],
     "icon": [
       "icons/icon.icns",
       "icons/icon.png",
@@ -27,7 +32,8 @@
     ],
     "resources": {
       "../empyralis-gateway/dist": "gateway/dist",
-      "resources/node-runtime": "node-runtime"
+      "resources/node-runtime": "node-runtime",
+      "resources/gateway-node-modules": "gateway/node_modules"
     }
   },
   "plugins": {
