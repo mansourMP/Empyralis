@@ -33,11 +33,12 @@ import { ProjectMemberAdd } from "@/lib/workspace/fleet/ProjectMemberAdd";
 import { ProjectPeople } from "@/lib/workspace/fleet/ProjectPeople";
 import { ProjectSettings } from "@/lib/workspace/fleet/ProjectSettings";
 import { useBreadcrumbLabel, useBreadcrumbIcon, useBreadcrumbBadge, HeaderAction } from "@/lib/workspace/fleet/Breadcrumbs";
-import { breadcrumbCount, formatDate, formatNumber } from "@/lib/workspace/fleet/fleet-presentation";
+import { breadcrumbCount, deriveStatus, formatDate, formatNumber } from "@/lib/workspace/fleet/fleet-presentation";
+import { AgentSigil, StatusDot } from "@/lib/workspace/fleet/fleet-indicators";
 import { ProjectIcon } from "@/lib/workspace/fleet/fleet-project-identity";
 import { UsageStat, bucketSeries, type UsageBucket } from "@/lib/workspace/fleet/fleet-sparkline";
 import { planAgentCountShape } from "@/lib/workspace/fleet/agent-count-shape";
-import { projectAgentsSpaceIsActive } from "@/lib/workspace/fleet/project-agents-rail-shape";
+import { agentCreateButtonClass } from "@/lib/workspace/fleet/agent-create-accent";
 import { FleetToolbar } from "@/lib/workspace/fleet/FleetToolbar";
 import { TaskViewOptions } from "@/lib/workspace/fleet/TaskViewOptions";
 import {
@@ -162,16 +163,15 @@ function DocumentsListSkeleton() {
 }
 
 // The old flat 7-column agents table (and its own skeleton/filter/sort
-// machinery) is gone from this view — project-as-spine nav (CLAUDE.md,
-// 2026-08-13): a project's Agents section browses through the PRIMARY
-// rail, which morphs into the project-agents space here (2026-08-16,
-// primary-rail-space.ts — "the rail is where you pick; the content is
-// what you picked"; the earlier in-content list, ProjectAgentsRail.tsx +
-// agents/layout.tsx, is deleted). See the `view === "agents"` branch below
-// for what this pane shows: an empty state (0 agents, unchanged), a quiet
-// redirect (1 agent — straight into its chat, no list for a list of one),
-// or a plain "select an agent" prompt (2+, the rail is doing the
-// browsing).
+// machinery) is gone from this view, and so is its successor — the primary
+// rail's project-agents space, deleted 2026-08-21 because an agent belongs
+// to the WORKSPACE and not to a project (founder, 2026-08-20; see
+// primary-rail-space.ts's header). This route is unlinked legacy now: the
+// project tab bar is Tasks · Documents (project-views.ts) and nothing in
+// the product points here. It stays live for bookmarks, and the
+// `view === "agents"` branch below still renders honestly — an empty state
+// (0 agents), a quiet redirect (1 agent), or a plain list of this project's
+// agents linking out to where each one actually lives (2+).
 
 export default function ProjectDetailPage() {
   const params = useParams();
@@ -442,30 +442,21 @@ export default function ProjectDetailPage() {
     [inProject, cost],
   );
 
-  // Where an agent's own page lives — used below both to build the solo
-  // redirect and, at 2+ agents, to build the "select an agent" prompt's
-  // implicit destination (the primary rail's project-agents space is what
-  // actually links there now — see primary-rail-space.ts).
+  // Where an agent's own page lives — the WORKSPACE's own routed agent page,
+  // never the project-scoped `${projectBase}/agents/{id}/chat` twin. An
+  // agent belongs to the workspace (founder, 2026-08-20), so that is where
+  // links point; the project-scoped route stays live for old bookmarks and
+  // is simply not linked from anywhere any more, the same treatment
+  // /people and /conversations already get.
   const agentHref = (agentId: string) =>
-    `${projectBase}/agents/${encodeURIComponent(agentId)}/chat`;
+    `${base}/agents/${encodeURIComponent(agentId)}/chat`;
 
-  // MAN-317, composed via project-agents-rail-shape.ts's identical rule —
-  // never a second one. "none": the empty state below, unchanged. "solo": a
-  // rail of one is worse than no rail (same call agent-count-shape.ts's own
-  // doc comment makes for a table of one), so this view redirects straight
-  // into that one agent's chat instead of showing anything here. "fleet":
-  // the rail's project-agents space is doing the browsing now, so this
-  // pane just prompts a selection.
+  // MAN-317, composed via agent-count-shape.ts's rule — never a second one.
+  // "none": the empty state below, unchanged. "solo": a list of one is worse
+  // than no list, so this view redirects straight into that one agent
+  // instead of showing anything here. "fleet": this pane lists them.
   const agentCountMode = useMemo(() => planAgentCountShape(inProject.length), [inProject.length]);
   const soloAgent = agentCountMode === "solo" ? inProject[0] : null;
-  // The SAME predicate PrimaryRail.tsx calls to decide whether it morphs
-  // into the project-agents space — never a second rule that could drift
-  // from it. When it's active the rail is already showing "‹ Back /
-  // {project} / agent rows", so this page's own Tasks·Documents·Agents tab
-  // strip is a second surface claiming to be "where you pick" at the same
-  // moment; hidden below, content-toolbar's other controls (people, panel
-  // toggle) are unaffected — they aren't pick-lists.
-  const projectAgentsRailActive = projectAgentsSpaceIsActive(view === "agents", inProject.length);
   useEffect(() => {
     if (view === "agents" && !loading && soloAgent) {
       router.replace(agentHref(soloAgent.agent_id));
@@ -598,9 +589,13 @@ export default function ProjectDetailPage() {
           something and this is genuinely the button used every day. */}
       <HeaderAction>
         {view === "agents" ? (
+          // agent-create-accent.ts decides which of the three agent-creation
+          // controls owns the view's one accent fill — including the case
+          // this hand-inlined ternary was blind to: AgentCreateCard open in
+          // front of this button, both filled at once.
           <button
             type="button"
-            className={`fleet-btn${inProject.length === 0 ? " fleet-btn--accent" : " fleet-btn--accent-fill"}`}
+            className={agentCreateButtonClass("header", { listIsEmpty: inProject.length === 0, createCardOpen: agentCardOpen })}
             onClick={openCreateCard}
           >
             <span className="fleet-btn-plus">+</span> New agent
@@ -654,33 +649,27 @@ export default function ProjectDetailPage() {
             (the avatar stack + "+" in this same row ARE the people
             surface; its route stays live, unlinked).
 
-            HIDDEN when the rail has morphed into the project-agents space
-            (2+ agents, on the Agents route — projectAgentsSpaceIsActive
-            above). At that moment the rail's own "‹ Back / {project} /
-            agent rows" IS the picker; rendering this strip too — with
-            "Agents" highlighted, above an empty "Select an agent" pane —
-            was two navigation surfaces both claiming that job at once
-            (CLAUDE.md, "the rail is where you pick; the content is what
-            you picked"). Reaching Tasks/Documents from inside the space is
-            the rail's own Back row, exactly like Settings' space already
-            works. At 0 or 1 agents the rail never morphs, so this stays
-            visible there, unchanged. */}
-        {!projectAgentsRailActive ? (
-          <div className="fleet-segmented" role="tablist" aria-label="Project view">
-            {PROJECT_TAB_VIEWS.map((v) => (
-              <Link
-                key={v}
-                href={viewHref(v)}
-                replace
-                role="tab"
-                aria-selected={view === v}
-                className={`fleet-segmented-btn${view === v ? " fleet-segmented-btn--active" : ""}`}
-              >
-                {PROJECT_TAB_LABEL[v]}
-              </Link>
-            ))}
-          </div>
-        ) : null}
+            It used to be HIDDEN whenever the rail morphed into the
+            project-agents space (2+ agents on the Agents route). That space
+            is deleted (2026-08-21 — see primary-rail-space.ts's header: an
+            agent belongs to the workspace, not to a project), so there is no
+            longer a second surface claiming to be "where you pick" and this
+            strip renders unconditionally again. It never was a pick-list for
+            agents in the first place — it is Tasks · Documents. */}
+        <div className="fleet-segmented" role="tablist" aria-label="Project view">
+          {PROJECT_TAB_VIEWS.map((v) => (
+            <Link
+              key={v}
+              href={viewHref(v)}
+              replace
+              role="tab"
+              aria-selected={view === v}
+              className={`fleet-segmented-btn${view === v ? " fleet-segmented-btn--active" : ""}`}
+            >
+              {PROJECT_TAB_LABEL[v]}
+            </Link>
+          ))}
+        </div>
         {/* Trails the view/layout switches, LEFT of centre — the people on a
             project read as context for the view you are choosing, so they sit
             with those controls rather than out at the edge (founder's call
@@ -784,9 +773,8 @@ export default function ProjectDetailPage() {
             </div>
           </div>
         ) : null}
-        {/* Filters/sort are gone — the compact rail beside this pane
-            (the rail's project-agents space) is the browse surface now, and a narrow
-            scan-and-pick list has nothing for a status/channel dropdown to
+        {/* Filters/sort are gone — a short scan-and-pick list of one
+            project's agents has nothing for a status/channel dropdown to
             narrow. The panel toggle stays: it's the only entry point to
             this project's cost/properties drawer (below), unrelated to how
             agents are browsed. */}
@@ -948,6 +936,7 @@ export default function ProjectDetailPage() {
               title="No agents in this project"
               desc="Create one — it’ll be assigned here."
               onCreate={openCreateCard}
+              createCardOpen={agentCardOpen}
             />
           ) : soloAgent ? (
             // The redirect effect above is already firing — this is the one
@@ -955,9 +944,37 @@ export default function ProjectDetailPage() {
             // workspace-level Agents page uses for its own solo redirect.
             <div className="fleet-page-state-body">Opening {soloAgent.label || "your agent"}…</div>
           ) : (
-            // 2+ agents: the rail's project-agents space
-            // is the browse surface now — this pane just prompts a pick.
-            <div className="fleet-project-agents-placeholder">Pick an agent to watch it work.</div>
+            // 2+ agents. This pane used to say "Pick an agent to watch it
+            // work." and rely on the primary rail having morphed into a
+            // project-agents pick-list beside it. That space is deleted
+            // (2026-08-21), so a prompt with nothing to pick from would be a
+            // dead end — the list lives here instead, in the content area,
+            // reusing the same `.fleet-conversation-row` markup the
+            // workspace-level list pane already renders rather than a second
+            // set of styles. Rows link to the WORKSPACE agent page, which is
+            // where an agent actually lives now.
+            <nav className="fleet-agents-conversation-list-rows" aria-label="Agents in this project">
+              {inProject.map((agent) => {
+                const status = deriveStatus(
+                  agent.hardware_status || "unknown",
+                  Boolean(agent.stopped?.active),
+                  Boolean(agent.current_run_id),
+                );
+                return (
+                  <Link key={agent.agent_id} href={agentHref(agent.agent_id)} className="fleet-conversation-row">
+                    <span className="fleet-conversation-row-avatar">
+                      <AgentSigil seed={agent.agent_id} size={32} />
+                      <StatusDot tone={status.tone} size={9} />
+                    </span>
+                    <span className="fleet-conversation-row-text">
+                      <span className="fleet-conversation-row-line1">
+                        <span className="fleet-conversation-row-name">{agent.label || "Unnamed agent"}</span>
+                      </span>
+                    </span>
+                  </Link>
+                );
+              })}
+            </nav>
           )}
         </div>
 

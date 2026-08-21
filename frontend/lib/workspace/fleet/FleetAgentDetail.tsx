@@ -42,6 +42,7 @@ import { MemoryTab } from "./tabs/MemoryTab";
 import { ProfileFilesSection } from "./tabs/ProfileFilesSection";
 import { GroupedRail, type GroupedRailGroup } from "./GroupedRail";
 import { defaultAgentProfileSegment, isProfileTab, planAgentProfileSegments, type AgentProfileSegmentId } from "./agent-profile-shape";
+import { agentSetupHeading, planAgentSetupSteps } from "./agent-setup-steps";
 
 import {
   resumeFleetAgent,
@@ -829,8 +830,8 @@ export function FleetAgentDetail({
   // instead of a fixed id nothing ever selected. null until WorkTab has
   // loaded at least one real conversation to select.
   const [threadId, setThreadId] = useState<string | null>(null);
-  const { channels, refresh: refreshChannels, telegramBotConnected, slackChannelBinding } = useFleetAgentChannels(workspaceId, agentId);
-  const { connectors } = useFleetAgentConnectors(workspaceId, agentId);
+  const { channels, loading: channelsLoading, refresh: refreshChannels, telegramBotConnected, slackChannelBinding } = useFleetAgentChannels(workspaceId, agentId);
+  const { connectors, loading: connectorsLoading } = useFleetAgentConnectors(workspaceId, agentId);
   const [costPeriod, setCostPeriod] = useState<CostPeriod>("day");
   const [costToday, setCostToday] = useState<number | null>(null);
   const [costBuckets, setCostBuckets] = useState<UsageBucket[]>([]);
@@ -967,6 +968,46 @@ export function FleetAgentDetail({
   // navigation is real links" rule GroupedRail.tsx itself already follows.
   const pathname = usePathname();
   const tabHref = useCallback((tab: TabId) => pathname.replace(/\/[^/]+$/, `/${tab}`), [pathname]);
+
+  // ── "This agent isn't set up yet" (2026-08-21) ───────────────────────────
+  // Creation is two fields on purpose and the deleted 4-step wizard is not
+  // coming back — so the things it used to ask are DEFERRED, and this is
+  // where they become visible again. The rule lives in agent-setup-steps.ts
+  // (pure + tested); everything here is the rendering of its answer.
+  //
+  // The band is gated on the agent being UNREACHABLE (zero channels), not on
+  // "something is outstanding": with chat gone from the platform, a channel
+  // is the only way anybody can talk to an agent, and a finished cloud-only
+  // agent with no connectors must never be nagged. `channelsLoading` /
+  // `connectorsLoading` are passed through so "nothing is connected" and "I
+  // have not asked yet" never share a screen — both fetches return [] in
+  // either state.
+  const setupSteps = useMemo(
+    () =>
+      planAgentSetupSteps({
+        channelsKnown: !channelsLoading,
+        channels,
+        connectedChannelCount: connectedChannels,
+        hardwareAccess: String(agent?.hardware_access || ""),
+        // Bound BY CONFIGURATION, not by resolution: `gateways` loads
+        // asynchronously, so asking whether the box resolves right now would
+        // flash "Pick its computer" at an agent that already has one.
+        hardwareBound: Boolean(boundGatewayId),
+        connectorsKnown: !connectorsLoading,
+        connectedConnectorCount: connectedConnectors,
+        hasProject: Boolean(String(agent?.project_id || "").trim()),
+      }),
+    [
+      channelsLoading,
+      channels,
+      connectedChannels,
+      agent?.hardware_access,
+      agent?.project_id,
+      boundGatewayId,
+      connectorsLoading,
+      connectedConnectors,
+    ],
+  );
 
   // Esc returns to wherever the user came from (browser back) — not a
   // hardcoded destination, so the flat /agents list, a project's list, or
@@ -1179,6 +1220,43 @@ export function FleetAgentDetail({
         onOpenProperties={() => setPropertiesOpen(true)}
         onAgentChanged={onRenamed}
       />
+
+      {/* Everything the two-field create card deferred, made visible — a
+          band under the agent's own name, above the observation surface,
+          never a gate in front of it. Each row is a real <Link> straight
+          into the Configure section that fixes it (the sheet is derived
+          from the URL segment, so a deep link opens on the right section on
+          first paint). It disappears row by row as each thing is done and
+          vanishes entirely the moment a channel connects. See
+          agent-setup-steps.ts for which steps exist, which two deliberately
+          do not, and why nothing here routes to `context`. */}
+      {setupSteps.length > 0 && (
+        <section className="fleet-agent-setup" aria-label="Setup">
+          <h2 className="fleet-agent-setup-title">{agentSetupHeading(agent?.label || "")}</h2>
+          <div className="fleet-agent-setup-steps">
+            {setupSteps.map((step) => {
+              const StepIcon = step.id === "channel" ? Radio : step.id === "hardware" ? Cpu : Plug;
+              return (
+                <Link
+                  key={step.id}
+                  href={tabHref(step.tab)}
+                  replace
+                  className={`fleet-agent-setup-step${step.primary ? " fleet-agent-setup-step--primary" : ""}`}
+                >
+                  <span className="fleet-agent-setup-step-icon">
+                    <StepIcon size={15} strokeWidth={1.75} aria-hidden="true" />
+                  </span>
+                  <span className="fleet-agent-setup-step-text">
+                    <span className="fleet-agent-setup-step-label">{step.label}</span>
+                    {step.hint ? <span className="fleet-agent-setup-step-hint">{step.hint}</span> : null}
+                  </span>
+                  <ChevronRight size={14} strokeWidth={1.75} aria-hidden="true" className="fleet-agent-setup-step-chevron" />
+                </Link>
+              );
+            })}
+          </div>
+        </section>
+      )}
 
       {/* The relative anchor the Properties overlay below floats against —
           .fleet-detail-body is this container's only normal-flow child and

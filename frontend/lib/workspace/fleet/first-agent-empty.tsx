@@ -7,6 +7,7 @@ import { Bot } from "lucide-react";
 import { useFleetProjects } from "./fleet-data";
 import { quickCreateAgentChatPath } from "./agent-quick-create";
 import { AgentCreateCard } from "./AgentCreateCard";
+import { agentCreateButtonClass } from "./agent-create-accent";
 
 /**
  * The single first-run call to action, shared by every fresh-workspace empty
@@ -25,11 +26,17 @@ export function FirstAgentEmpty({
   desc,
   onCreate,
   busy,
+  createCardOpen = false,
 }: {
   title: string;
   desc: string;
   onCreate: () => void;
   busy?: boolean;
+  /** Whether AgentCreateCard is open in front of this empty state. The card
+   *  then owns the view's single accent fill and this button drops to the
+   *  quiet hairline variant — the rule lives in agent-create-accent.ts, not
+   *  here, because four controls answer to it. */
+  createCardOpen?: boolean;
 }) {
   return (
     <div className="fleet-empty">
@@ -39,7 +46,12 @@ export function FirstAgentEmpty({
       <div className="fleet-empty-title">{title}</div>
       <div className="fleet-empty-desc">{desc}</div>
       <div className="fleet-empty-actions">
-        <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={onCreate} disabled={busy}>
+        <button
+          type="button"
+          className={agentCreateButtonClass("empty_state", { listIsEmpty: true, createCardOpen })}
+          onClick={onCreate}
+          disabled={busy}
+        >
           {busy ? "Creating…" : "Create your first agent"}
         </button>
       </div>
@@ -78,7 +90,7 @@ export function CreateFirstAgentEmpty({
 
   return (
     <>
-      <FirstAgentEmpty title={title} desc={desc} onCreate={() => setCardOpen(true)} />
+      <FirstAgentEmpty title={title} desc={desc} onCreate={() => setCardOpen(true)} createCardOpen={cardOpen} />
       {cardOpen && (
         <AgentCreateCard workspaceId={workspaceId} projects={projects} onClose={() => setCardOpen(false)} onCreated={handleAgentCreated} />
       )}

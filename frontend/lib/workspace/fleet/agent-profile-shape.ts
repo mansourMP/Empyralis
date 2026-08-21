@@ -18,8 +18,8 @@
  * FleetAgentDetail.tsx (a set of [tab] route segments that render inside a
  * sheet instead of as a top-level tab) — kept in its own pure module rather
  * than inlined so a test can assert the membership directly instead of
- * re-deriving it, the same discipline project-agents-rail-shape.ts already
- * applies one surface over.
+ * re-deriving it, the same discipline primary-rail-nav.ts already applies
+ * one surface over.
  */
 export type AgentProfileSegmentId = "persona" | "memory";
 

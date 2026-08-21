@@ -5,15 +5,19 @@
  * and the actual set come from two different sources, per the house rule a
  * self-confirming test is worth nothing.
  *
+ * TWO SPACES HAVE BEEN DELETED FROM THIS SURFACE and their assertions are
+ * INVERTED here rather than removed: `workspace-agents` (2026-08-20) and
+ * `project-agents` (2026-08-21). primary-rail-space.ts's own header carries
+ * the founder's words for both. project-agents-rail-shape.ts — the count
+ * gate that decided whether the project-agents space morphed the rail — was
+ * deleted with it; its composition assertions had no subject left to make a
+ * claim about, and the rule they composed (planAgentCountShape) keeps its
+ * own test.
+ *
  * Run: npx tsx lib/workspace/fleet/primary-rail-space.test.ts
  */
 
-import {
-  projectAgentsSpaceLinks,
-  railSpaceFromPathname,
-  settingsSpaceLinks,
-  spaceBackHref,
-} from "./primary-rail-space";
+import { railSpaceFromPathname, settingsSpaceLinks, spaceBackHref } from "./primary-rail-space";
 
 // Narrowing helper for the union — throws (fails the run) rather than
 // silently skipping if a pathname stops parsing as the Settings space.
@@ -61,53 +65,46 @@ assert(railSpaceFromPathname("/w/ws1") === null, "the workspace root is not a sp
 assert(railSpaceFromPathname("/login") === null, "paths outside /w are never a space");
 assert(railSpaceFromPathname("/w/ws1/settingsx") === null, "a segment merely starting with 'settings' is not the space");
 
-// ── The project-agents space ──────────────────────────────────────────────
-const agentsIndex = railSpaceFromPathname("/w/ws1/projects/p1/agents");
-assert(agentsIndex?.kind === "project-agents", "a project's /agents section is the project-agents space");
-assert(agentsIndex?.kind === "project-agents" && agentsIndex.projectId === "p1", "the space carries its project id");
-assert(agentsIndex?.kind === "project-agents" && agentsIndex.activeAgentId === null, "the bare index has no active agent");
-
-const agentChat = railSpaceFromPathname("/w/ws1/projects/p1/agents/ainstall_ab12/chat");
+// ── THE PROJECT-AGENTS SPACE IS DELETED (2026-08-21) ─────────────────────
+// EVERY ASSERTION IN THIS BLOCK IS AN INVERSION OF ONE THAT USED TO PIN THE
+// OPPOSITE. It is kept, rather than removed, so nobody re-adds the space
+// believing it was simply forgotten.
+//
+// The space matched /w/{ws}/projects/{pid}/agents and replaced the whole
+// rail with "‹ Back / {project} / one row per agent of THAT project" — i.e.
+// it asserted, in navigation, that an agent belongs to a project and is
+// browsed through it. On 2026-08-20 the founder settled the opposite and
+// called it core: an agent belongs to the WORKSPACE, and its reach into
+// projects is a per-agent GRANT, never a location ("an agent belongs to the
+// workspace not to the project it's correct and I want you to remember
+// that"). On this exact navigation shape: "it's fundamentally wrong... what
+// we are building is not kind of like Telegram surface."
+//
+// The ROUTE stays live and unlinked — deleting it strands bookmarks, and
+// making it a redirect target risks the "a redirect runs ahead of the
+// router" trap CLAUDE.md records. It simply is not a rail space any more.
 assert(
-  agentChat?.kind === "project-agents" && agentChat.activeAgentId === "ainstall_ab12",
-  "an agent's own page marks that agent active — any tab, only the id segment matters",
+  railSpaceFromPathname("/w/ws1/projects/p1/agents") === null,
+  "a project's /agents section is NOT a rail space any more — an agent belongs to the workspace, not a project (2026-08-21)",
+);
+assert(
+  railSpaceFromPathname("/w/ws1/projects/p1/agents/") === null,
+  "a trailing slash on it is still not a rail space",
+);
+assert(
+  railSpaceFromPathname("/w/ws1/projects/p1/agents/ainstall_ab12/chat") === null,
+  "an agent's own page under a project's URL is NOT a rail space either — the route is live and unlinked, not decorated",
 );
 assert(
   railSpaceFromPathname("/w/ws1/projects/p1/tasks") === null,
-  "a project's Tasks view is not a space — only /agents morphs the rail",
+  "a project's Tasks view is not a space — nothing under a project morphs the rail now",
 );
 assert(
   railSpaceFromPathname("/w/ws1/projects/p1/documents/doc1") === null,
   "a project's document page is not a space",
 );
 
-if (agentChat?.kind === "project-agents") {
-  const agentLinks = projectAgentsSpaceLinks(agentChat, [
-    { agent_id: "ainstall_ab12", label: "Scout" },
-    { agent_id: "ainstall_cd34", label: null },
-  ]);
-  assert(
-    agentLinks.map((l) => l.href).join(" ") ===
-      "/w/ws1/projects/p1/agents/ainstall_ab12/chat /w/ws1/projects/p1/agents/ainstall_cd34/chat",
-    "every agent row links straight into that agent's chat — real hrefs, cmd-clickable",
-  );
-  assert(
-    agentLinks.map((l) => l.label).join("|") === "Scout|Unnamed agent",
-    "an unlabelled agent reads 'Unnamed agent', never a raw id",
-  );
-  assert(
-    agentLinks.filter((l) => l.active).map((l) => l.key).join(",") === "ainstall_ab12",
-    "exactly the URL's own agent is active",
-  );
-  // Back from an agent space is ALWAYS the owning project, never cameFrom —
-  // an agent belongs to its project.
-  assert(
-    spaceBackHref(agentChat, "/w/ws1/inbox") === "/w/ws1/projects/p1",
-    "project-agents Back goes to the project, ignoring cameFrom by design",
-  );
-}
-
-// ── The workspace-level /agents tree is NOT a rail space (2026-08-20) ─────
+// ── The workspace-level /agents tree is NOT a rail space either (2026-08-20)
 // It briefly was (2026-08-19's "workspace-agents" kind) — see this file's
 // module header for why that was reverted. The bare index, an agent's own
 // tab page, and a stray "agentsx" segment must all read as "not a space":
@@ -122,17 +119,23 @@ assert(
 assert(railSpaceFromPathname("/w/ws1/agentsx") === null, "a segment merely starting with 'agents' is not a space");
 assert(railSpaceFromPathname("/w/ws1/inbox") === null, "Inbox is still not any space");
 
-// This is the load-bearing disjointness assertion: a project's own agent
-// pages, under /projects/{pid}/agents/…, must stay the project-agents
-// space exactly as pinned above — nothing about the workspace-level tree
-// existing may ever repoint them.
+// SETTINGS IS THE WHOLE UNION. Anything that ever asks "which kind?" of a
+// non-null space can only be answered one way — proven here rather than
+// assumed, so a second kind cannot be slipped back in silently.
+const everySpace = [
+  "/w/ws1/settings",
+  "/w/ws1/settings/account",
+  "/w/ws1/settings/workspace",
+  "/w/ws1/settings/connections",
+  "/w/ws1/settings/shortcuts",
+  "/w/ws1/settings/bogus",
+]
+  .map((path) => railSpaceFromPathname(path))
+  .filter((space): space is NonNullable<typeof space> => space !== null);
+assert(everySpace.length === 6, "every /settings pathname above still resolves to a space");
 assert(
-  railSpaceFromPathname("/w/ws1/projects/p1/agents")?.kind === "project-agents",
-  "a project's own /agents section is still the project-agents space, unchanged",
-);
-assert(
-  railSpaceFromPathname("/w/ws1/projects/p1/agents/ainstall_ab12/chat")?.kind === "project-agents",
-  "an agent's own chat page under a project's URL is still the project-agents space, unchanged",
+  everySpace.every((space) => space.kind === "settings"),
+  "'settings' is the only RailSpace kind there is",
 );
 
 // ── The Settings pick-list ────────────────────────────────────────────────
@@ -220,29 +223,49 @@ assert(
   /spaceBackHref\s*\(/.test(railSource),
   "PrimaryRail's Back row resolves through spaceBackHref",
 );
+// INVERTED, 2026-08-21 — these two used to assert PrimaryRail RENDERED the
+// project-agents pick-list and gated it on projectAgentsSpaceIsActive. The
+// space is deleted (see the block above for the founder's reasoning), so
+// the reintroduction guard is what stands in their place: a component-level
+// re-implementation would pass every pathname assertion above while putting
+// the rejected shape straight back on screen.
 assert(
-  /projectAgentsSpaceLinks\s*\(/.test(railSource),
-  "PrimaryRail renders the project-agents pick-list from projectAgentsSpaceLinks",
+  !/projectAgentsSpaceLinks/.test(railSource),
+  "PrimaryRail no longer renders a project-agents pick-list — an agent belongs to the workspace, not a project",
 );
 assert(
-  /projectAgentsSpaceIsActive\s*\(/.test(railSource),
-  "the agents space is gated by the SAME predicate ProjectDetailPage hides its tab strip with (project-agents-rail-shape.ts's projectAgentsSpaceIsActive), never a second one",
+  !/projectAgentsSpaceIsActive/.test(railSource),
+  "PrimaryRail no longer gates a project-agents rail morph",
+);
+assert(
+  !/project-agents-rail-shape/.test(railSource),
+  "the deleted count gate is not imported back into the rail",
 );
 
-// And the content-area half of that same predicate: ProjectDetailPage must
-// call the identical function to decide its own tab strip, not a hand-rolled
-// re-check of the count — this is the drift guard for the bug this fixed
-// (rail morphed into the agents space while the content area's own
-// Tasks/Documents/Agents strip rendered on top of it, both claiming to be
-// the picker at once).
+// The content-area half: ProjectDetailPage used to HIDE its own tab strip
+// while the rail was morphed, because two surfaces both claiming to be
+// "where you pick" is the bug that shape kept producing. With no space to
+// morph into, that conditional is gone and the strip (Tasks · Documents —
+// never an agent picker) renders unconditionally again.
 const projectPageSource = readFileSync(
   new URL("../../../app/(account)/w/[workspaceId]/projects/[projectId]/page.tsx", import.meta.url),
   "utf8",
 );
 assert(
-  projectPageSource.includes('from "@/lib/workspace/fleet/project-agents-rail-shape"') &&
-    /projectAgentsSpaceIsActive\s*\(/.test(projectPageSource),
-  "ProjectDetailPage hides its tab strip via the same projectAgentsSpaceIsActive, not a second check",
+  !projectPageSource.includes('from "@/lib/workspace/fleet/project-agents-rail-shape"'),
+  "ProjectDetailPage no longer imports the deleted project-agents count gate",
+);
+assert(
+  !/projectAgentsSpaceIsActive\s*\(/.test(projectPageSource),
+  "ProjectDetailPage no longer hides its tab strip for a rail space that cannot exist",
+);
+// And the pane that space used to serve is not a dead end: at 2+ agents the
+// project's own /agents route lists them in the CONTENT area (the same
+// .fleet-conversation-row markup the workspace list pane renders), instead
+// of prompting "pick an agent" beside a rail that no longer offers one.
+assert(
+  /fleet-conversation-row/.test(projectPageSource),
+  "the project's /agents route lists its agents in the content area rather than prompting a pick with nothing to pick from",
 );
 
 // ── The workspace-level /agents picker is NOT on the rail (2026-08-20) ────
@@ -277,10 +300,10 @@ assert(
 
 // The actual "only one surface may be the picker" guard: the bare index
 // must show the quiet prompt, never a second list of its own, once the
-// layout's pane is showing — the same class the project-agents space's
-// own placeholder already uses (fleet-theme.css's
-// .fleet-project-agents-placeholder), reused rather than a second CSS rule
-// for an identical shape.
+// layout's pane is showing — reusing fleet-theme.css's
+// .fleet-project-agents-placeholder (named for the deleted space it was
+// written for; the CLASS is a generic quiet-prompt shape and stays) rather
+// than a second CSS rule for an identical shape.
 const agentsPageSource = readFileSync(
   new URL("../../../app/(account)/w/[workspaceId]/agents/page.tsx", import.meta.url),
   "utf8",
