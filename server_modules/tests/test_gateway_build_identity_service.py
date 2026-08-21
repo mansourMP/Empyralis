@@ -208,5 +208,119 @@ class GatewayUpdateStatusLivePathTests(unittest.TestCase):
         self.assertIsNone(status["gateway_update_refusal_code"])
 
 
+class DesktopAppManagedGatewayTests(unittest.TestCase):
+    """A gateway that ships inside Empyralis.app is updated BY THE APP.
+
+    Advertising a gateway self-update to one of those boxes is MAN-331 in its
+    purest form: the update would download, install into
+    <stateDir>/../gateway-releases, report success — and the next start would
+    run the same build out of the .app bundle, forever, because both launch
+    paths point into the bundle.
+    """
+
+    def test_a_desktop_box_is_refused_and_told_why(self) -> None:
+        plan = identity.plan_gateway_update_advertisement(
+            current_version="0.1.0",
+            latest_version="0.2.0",
+            current_fingerprint="aaaa",
+            published_fingerprint="bbbb",
+            version_is_newer=True,
+            desktop_managed=True,
+        )
+        self.assertFalse(plan["update_available"])
+        self.assertEqual(
+            plan["refusal_code"], identity.REFUSAL_DESKTOP_APP_MANAGES_GATEWAY
+        )
+        # The reason is what a customer reads on the Hardware page, so it has
+        # to name the real update path rather than a mechanism.
+        self.assertIn("Empyralis app", plan["reason"])
+        for mechanism in ("launchctl", "systemctl", "ExecStart", "symlink", "tarball"):
+            self.assertNotIn(mechanism, plan["reason"])
+
+    def test_it_outranks_the_launch_path_refusal(self) -> None:
+        """ORDER, and it is the whole reason this code exists.
+
+        A desktop box's login item deliberately starts the gateway from inside
+        the .app, so gateway-launch-updatability.ts reports "not_updatable" —
+        a true answer to the wrong question. Answering with
+        LAUNCH_PATH_NOT_UPDATABLE would put a block of launchctl commands in
+        front of someone whose machine is working perfectly.
+        """
+        plan = identity.plan_gateway_update_advertisement(
+            current_version="0.1.0",
+            latest_version="0.2.0",
+            current_fingerprint="aaaa",
+            published_fingerprint="bbbb",
+            version_is_newer=True,
+            launch_updatability="not_updatable",
+            desktop_managed=True,
+        )
+        self.assertEqual(
+            plan["refusal_code"], identity.REFUSAL_DESKTOP_APP_MANAGES_GATEWAY
+        )
+
+    def test_every_existing_box_is_unaffected(self) -> None:
+        """The blast radius is exactly the boxes that set the marker.
+
+        `desktop_managed` defaults to False and no VPS gateway reports it, so
+        every existing box plans byte-identically to before this parameter
+        existed.
+        """
+        common = dict(
+            current_version="0.1.0",
+            latest_version="0.2.0",
+            current_fingerprint="aaaa",
+            published_fingerprint="bbbb",
+            version_is_newer=True,
+        )
+        self.assertEqual(
+            identity.plan_gateway_update_advertisement(**common),
+            identity.plan_gateway_update_advertisement(**common, desktop_managed=False),
+        )
+        self.assertTrue(
+            identity.plan_gateway_update_advertisement(**common)["update_available"]
+        )
+
+    def test_absent_metadata_is_never_read_as_desktop_managed(self) -> None:
+        """Absent must mean False here, not unknown.
+
+        Every box in the fleet predates this field, and reading a missing
+        value as desktop-managed would silently stop gateway updates for all
+        of them at once.
+        """
+        self.assertFalse(identity.is_desktop_managed({}))
+        self.assertFalse(identity.is_desktop_managed({"metadata": {}}))
+        self.assertFalse(identity.is_desktop_managed({"metadata": None}))
+        # Only a real boolean true counts — the connect handler coerces it, so
+        # a stray string must not be promoted here either.
+        self.assertFalse(
+            identity.is_desktop_managed({"metadata": {"gateway_desktop_managed": "1"}})
+        )
+        self.assertTrue(
+            identity.is_desktop_managed({"metadata": {"gateway_desktop_managed": True}})
+        )
+
+    def test_the_live_path_reads_it_from_the_registration(self) -> None:
+        """Reachability, not behaviour: gateway_update_status() is what the
+        Hardware page calls, and a planner nothing passes this to would be
+        the 'built, tested, and never wired' shape one level up."""
+        status = gateway_self_update_service.gateway_update_status(
+            {
+                "platform": "darwin-aarch64",
+                "metadata": {
+                    "gateway_version": "0.1.0",
+                    "gateway_build_fingerprint": "aaaa",
+                    "gateway_desktop_managed": True,
+                },
+            }
+        )
+        self.assertFalse(status["gateway_update_available"])
+        self.assertEqual(
+            status["gateway_update_refusal_code"],
+            identity.REFUSAL_DESKTOP_APP_MANAGES_GATEWAY,
+        )
+        self.assertIsNone(status["latest_gateway_artifact_url"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -48,6 +48,12 @@ export interface GatewayRuntimeMetadata {
    *  behaviour. Only an explicit "not_updatable" ever takes an update
    *  away. */
   launchUpdatability: GatewayLaunchUpdatabilityReport | null;
+  /** True when the Empyralis DESKTOP APP owns this gateway — it ships inside
+   *  the .app bundle and is replaced by an app update, so a gateway
+   *  self-update here could complete, report success, and change nothing.
+   *  The backend refuses to advertise one rather than loop the box forever
+   *  (CLAUDE.md, MAN-331). See update/gateway-desktop-managed.ts. */
+  desktopManaged: boolean;
   hostname: string;
   platform: string;
   pid: number;
@@ -62,6 +68,7 @@ export function buildRuntimeMetadata(
   requestedCapabilities: string[] = [],
   buildFingerprint: string | null = null,
   launchUpdatability: GatewayLaunchUpdatabilityReport | null = null,
+  desktopManaged = false,
 ): GatewayRuntimeMetadata {
   const nativeRuntime: GatewayNativeRuntimeMetadata = {
     os: process.platform,
@@ -75,6 +82,7 @@ export function buildRuntimeMetadata(
     gatewayVersion,
     buildFingerprint,
     launchUpdatability,
+    desktopManaged,
     hostname: nativeRuntime.hostname,
     platform: `${process.platform}-${process.arch}`,
     pid: process.pid,

@@ -178,6 +178,17 @@ export interface ResolveExpectedSupervisorUnitOptions {
   entryPath: string;
   /** Directory launchd-adjacent stdout/stderr logs should land in. */
   logDir: string;
+  /** Environment the supervised process must start with, or undefined for
+   *  none.
+   *
+   *  UNDEFINED IS THE DEFAULT AND MUST STAY THAT WAY. Every VPS box renders
+   *  its unit with no environment today; supplying one here would change the
+   *  expected contents of a unit that lives at /etc/systemd/system, which
+   *  the unprivileged service user cannot write — so the audit would report
+   *  drift it can never repair, forever, on the whole fleet. Only the
+   *  desktop app supplies this (see gateway-desktop-managed.ts), and only
+   *  for units in the user's own home. */
+  environment?: Record<string, string>;
 }
 
 const DEFAULT_LAUNCHD_LABEL = "ai.empyralis.agent-computer";
@@ -349,6 +360,7 @@ export function resolveExpectedSupervisorUnit(
         programArguments: [opts.execPath, opts.entryPath],
         workingDirectory,
         logPath,
+        environment: opts.environment,
       }),
     };
   }
@@ -582,6 +594,9 @@ export interface RunGatewaySupervisorInstallOptions {
   execPath?: string;
   entryPath: string;
   logDir: string;
+  /** Passed straight through to resolveExpectedSupervisorUnit — see its own
+   *  field for why undefined must remain the default. */
+  environment?: Record<string, string>;
   readFile?: (filePath: string) => Promise<string>;
   writeFile?: (filePath: string, contents: string) => Promise<void>;
   mkdir?: (dirPath: string) => Promise<void>;
@@ -624,6 +639,7 @@ export async function auditAndRepairGatewaySupervisorInstall(
     execPath,
     entryPath: opts.entryPath,
     logDir: opts.logDir,
+    environment: opts.environment,
   });
   if (!definition) {
     return { supported: false, definition: null, fileState: "not_applicable" };

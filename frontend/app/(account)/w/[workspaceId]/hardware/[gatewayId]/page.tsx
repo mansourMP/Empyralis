@@ -1335,6 +1335,11 @@ function CliSetupControl({
   );
 }
 
+/** Refusal codes that are NOT a fault of this computer, and so must NOT be
+ *  dressed up as one. Everything else — including a code this build has never
+ *  heard of — is a real refusal and is reported as one. */
+const QUIET_UPDATE_REFUSAL_CODES = new Set(["no_published_build"]);
+
 /** Platform-triggered gateway self-update — one button, no SSH. Dispatches
  *  through routes_gateway.py's POST .../self-update (member-gated), which
  *  routes the SAME tool-invoke transport CliSetupControl's install button
@@ -1364,10 +1369,27 @@ function GatewaySelfUpdateControl({
   // code since the build fingerprint shipped and nothing on this page ever
   // read it. That is this codebase's own outcome-honesty law broken on the
   // one screen where a stuck box is visible.
+  // Four facts, four renderings, never sharing a line: up to date · update
+  // available · updating · can't receive updates (and why). Only ONE code was
+  // ever branched on here, so the other four rendered "Up to date" and the
+  // reason the backend had already computed was shown to nobody.
+  const refusalCode = String(gateway.gateway_update_refusal_code || "").trim();
+  const refusalReason = String(gateway.gateway_update_refusal_reason || "").trim();
+  // `no_published_build` is deliberately quiet, and it is the only code that
+  // is. It means "nothing has been published to compare this computer
+  // against" — a fact about our own release config, not about this machine —
+  // and EMPYRALIS_GATEWAY_LATEST_VERSION is unset on production, so it is what
+  // EVERY box in the fleet reports today. "Can't receive updates" across the
+  // whole fleet at once would be alarm with no action behind it, and nothing
+  // is stuck: publish a build and these boxes offer it with no change on the
+  // machine. Every other code, known or not, is a real refusal — an
+  // unrecognised code reading as healthy is the exact lie this control had.
+  const cannotUpdate = Boolean(refusalCode) && !QUIET_UPDATE_REFUSAL_CODES.has(refusalCode);
+  // The repair commands fix ONE cause — a supervisor unit pointing outside the
+  // release layout — and are nonsense under any other code, so they stay gated
+  // on that code rather than on `cannotUpdate`.
   const launchRepair =
-    gateway.gateway_update_refusal_code === "launch_path_not_updatable"
-      ? gateway.gateway_launch_repair ?? null
-      : null;
+    refusalCode === "launch_path_not_updatable" ? gateway.gateway_launch_repair ?? null : null;
 
   const [busy, setBusy] = useState(false);
   const [verifying, setVerifying] = useState(false);
@@ -1420,9 +1442,9 @@ function GatewaySelfUpdateControl({
   // Nothing meaningful to show for a box whose gateway_version this backend
   // has never recorded (a gateway build old enough to predate self-update
   // reports no version at all) AND has no known newer build to offer either.
-  // A box that reports itself un-updatable is the exception: that is the one
+  // A box refusing updates for a real reason is the exception: that is the one
   // state a person most needs to see, whatever its version says.
-  if (!currentVersion && !updateAvailable && !launchRepair) {
+  if (!currentVersion && !updateAvailable && !cannotUpdate) {
     return null;
   }
 
@@ -1440,50 +1462,56 @@ function GatewaySelfUpdateControl({
             {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
             {busy ? "Starting…" : `Update to v${latestVersion}`}
           </button>
-        ) : launchRepair ? (
+        ) : cannotUpdate ? (
           <span className="fleet-list-row-desc">Can&apos;t receive updates</span>
         ) : (
           <span className="fleet-list-row-desc">Up to date</span>
         )}
       </span>
-      {launchRepair && (
+      {cannotUpdate && (Boolean(refusalReason) || Boolean(launchRepair)) && (
         <div
           className="fleet-hw-note"
           style={{ paddingTop: 10, width: "100%", display: "flex", flexDirection: "column", gap: 8 }}
         >
-          <span>{gateway.gateway_update_refusal_reason}</span>
-          {/* Each blocker is its own fact with its own fix. Merging them into
-              one sentence sends someone to correct half of the problem. */}
-          {(launchRepair.blockers ?? []).map((blocker) => (
-            <span key={String(blocker?.code)} className="fleet-list-row-desc">
-              {blocker?.detail}
-            </span>
-          ))}
-          {launchRepair.state === "ready" && (launchRepair.commands ?? []).length > 0 ? (
+          {/* The backend's own words, whatever the code. A code this build does
+              not recognise still lands here rather than disappearing. */}
+          {refusalReason ? <span>{refusalReason}</span> : null}
+          {launchRepair && (
             <>
-              <span className="fleet-list-row-desc">{launchRepair.detail}</span>
-              {/* Shown rather than performed, and that is not a shortcut: the
-                  gateway runs unprivileged inside a read-only mount namespace
-                  with NoNewPrivileges set, so no button here could ever work,
-                  and a button that cannot work is a dead control. */}
-              <pre
-                style={{
-                  margin: 0,
-                  padding: 10,
-                  overflowX: "auto",
-                  fontSize: 12,
-                  lineHeight: 1.5,
-                  background: "var(--bg-inset)",
-                  border: "1px solid var(--border)",
-                  borderRadius: 6,
-                  whiteSpace: "pre",
-                }}
-              >
-                {(launchRepair.commands ?? []).join("\n")}
-              </pre>
+              {/* Each blocker is its own fact with its own fix. Merging them into
+                  one sentence sends someone to correct half of the problem. */}
+              {(launchRepair.blockers ?? []).map((blocker) => (
+                <span key={String(blocker?.code)} className="fleet-list-row-desc">
+                  {blocker?.detail}
+                </span>
+              ))}
+              {launchRepair.state === "ready" && (launchRepair.commands ?? []).length > 0 ? (
+                <>
+                  <span className="fleet-list-row-desc">{launchRepair.detail}</span>
+                  {/* Shown rather than performed, and that is not a shortcut: the
+                      gateway runs unprivileged inside a read-only mount namespace
+                      with NoNewPrivileges set, so no button here could ever work,
+                      and a button that cannot work is a dead control. */}
+                  <pre
+                    style={{
+                      margin: 0,
+                      padding: 10,
+                      overflowX: "auto",
+                      fontSize: 12,
+                      lineHeight: 1.5,
+                      background: "var(--bg-inset)",
+                      border: "1px solid var(--border)",
+                      borderRadius: 6,
+                      whiteSpace: "pre",
+                    }}
+                  >
+                    {(launchRepair.commands ?? []).join("\n")}
+                  </pre>
+                </>
+              ) : (
+                <span className="fleet-list-row-desc">{launchRepair.detail}</span>
+              )}
             </>
-          ) : (
-            <span className="fleet-list-row-desc">{launchRepair.detail}</span>
           )}
         </div>
       )}

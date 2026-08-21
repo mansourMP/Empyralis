@@ -2487,6 +2487,14 @@ async def handle_gateway_websocket(
                 # has just repaired stops reporting itself stuck as soon as it
                 # reconnects — no second action, no cache to clear.
                 "gateway_launch_updatability": connect_payload.get("gateway_launch_updatability"),
+                # WHICH UPDATE PATH this box is on. A desktop-app box ships
+                # its gateway inside Empyralis.app and gets a new one when the
+                # app updates, so a gateway self-update there would install
+                # correctly and change nothing. Coerced to a real bool rather
+                # than stored as whatever arrived: an absent field and a
+                # literal false both have to mean "not desktop-managed", and
+                # every box that predates this sends nothing at all.
+                "gateway_desktop_managed": connect_payload.get("gateway_desktop_managed") is True,
             },
             # Refresh from what THIS connect declares — a Gateway build that
             # adds a capability (e.g. a new disconnect/reset action) becomes

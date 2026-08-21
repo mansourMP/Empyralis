@@ -188,6 +188,7 @@ def gateway_update_status(registration: Dict[str, Any]) -> Dict[str, Any]:
             and is_newer_gateway_version(current_version, latest_version)
         ),
         launch_updatability=launch["status"],
+        desktop_managed=gateway_build_identity_service.is_desktop_managed(registration),
     )
     update_available = bool(plan["update_available"])
     return {

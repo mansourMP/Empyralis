@@ -87,6 +87,7 @@ REFUSAL_UNCOMPARABLE_PUBLISHED_VERSION = "uncomparable_published_version"
 REFUSAL_UPDATE_WOULD_BE_UNOBSERVABLE = "update_would_be_unobservable"
 REFUSAL_PREVIOUS_UPDATE_CHANGED_NOTHING = "previous_update_changed_nothing"
 REFUSAL_LAUNCH_PATH_NOT_UPDATABLE = "launch_path_not_updatable"
+REFUSAL_DESKTOP_APP_MANAGES_GATEWAY = "desktop_app_manages_gateway"
 
 _REFUSAL_REASONS: Dict[str, str] = {
     REFUSAL_NO_PUBLISHED_BUILD: (
@@ -111,6 +112,10 @@ _REFUSAL_REASONS: Dict[str, str] = {
         "never installed into, so an update would install correctly and then start the old copy "
         "again. Whoever set this computer up has to point it at the update location once; it "
         "cannot change that itself."
+    ),
+    REFUSAL_DESKTOP_APP_MANAGES_GATEWAY: (
+        "This computer runs its gateway from inside the Empyralis app, which keeps it up to "
+        "date on its own. There is nothing to install here separately."
     ),
 }
 
@@ -144,6 +149,25 @@ def build_identity(registration: Dict[str, Any]) -> Dict[str, Optional[str]]:
     return {"gateway_version": version, "gateway_build_fingerprint": fingerprint}
 
 
+def is_desktop_managed(registration: Dict[str, Any]) -> bool:
+    """Does the Empyralis desktop app own this box's gateway?
+
+    Reported by the gateway on every connect (`gateway_desktop_managed`) and
+    persisted on the registration, exactly like the build fingerprint beside
+    it, so it survives a disconnect.
+
+    ABSENT MEANS FALSE, which is the safe direction here: every VPS box
+    predates this field and none of them is desktop-managed, so a missing
+    value must not change what they are offered. The only boxes that ever set
+    it are ones the desktop app started, and it sets it on both of its launch
+    paths (see empyralis-gateway/src/update/gateway-desktop-managed.ts).
+    """
+    metadata = registration.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    return metadata.get("gateway_desktop_managed") is True
+
+
 def plan_gateway_update_advertisement(
     *,
     current_version: Optional[str],
@@ -153,6 +177,7 @@ def plan_gateway_update_advertisement(
     last_update_fingerprint: Optional[str] = None,
     version_is_newer: bool = False,
     launch_updatability: Optional[str] = None,
+    desktop_managed: bool = False,
 ) -> Dict[str, Any]:
     """Decide whether an update may be advertised, and if not, say which fact stopped it.
 
@@ -187,6 +212,21 @@ def plan_gateway_update_advertisement(
     # reports, is the SYMPTOM. Naming the symptom first would send an operator
     # to look at build fingerprints when the fix is one line in a service
     # definition.
+    # AHEAD OF THE LAUNCH-PATH CHECK, and the order is the point. A
+    # desktop-app box's login item deliberately starts the gateway from inside
+    # Empyralis.app, so gateway-launch-updatability.ts correctly reports
+    # "not_updatable" for it — a true answer to the wrong question. Answering
+    # with LAUNCH_PATH_NOT_UPDATABLE would put a block of launchctl commands
+    # in front of someone whose machine is working perfectly and whose gateway
+    # already updates, with the app, on its own.
+    #
+    # This is a REFUSAL rather than a silent "no update", because those are
+    # two different facts: nothing is available here AND nothing ever will be
+    # through this path. Saying only the first would leave the impression that
+    # a gateway update is coming.
+    if desktop_managed:
+        return refuse(REFUSAL_DESKTOP_APP_MANAGES_GATEWAY)
+
     if str(launch_updatability or "").strip() == LAUNCH_STATUS_NOT_UPDATABLE:
         return refuse(REFUSAL_LAUNCH_PATH_NOT_UPDATABLE)
 

@@ -34,6 +34,10 @@ import { GatewayCliSetupRuntime } from "./llm/cli-setup-runtime";
 import { GatewaySelfUpdateRuntime } from "./update/gateway-self-update-runtime";
 import { GatewayRestartRuntime } from "./update/gateway-restart-runtime";
 import { readAndClearPendingGatewayRestartMarker } from "./update/gateway-restart-pending";
+import {
+  desktopManagedSupervisorEnvironment,
+  isDesktopManagedGateway,
+} from "./update/gateway-desktop-managed";
 import { resolveGatewayLaunchEntrypoint } from "./update/gateway-launch-path";
 import {
   auditAndRepairGatewaySupervisorInstall,
@@ -427,6 +431,14 @@ async function runInstallSupervisorAndExit(config: GatewayConfig): Promise<never
     env,
   });
   const logDir = path.join(config.stateDir, "logs");
+  // Only the desktop app supplies this; on every other box it is undefined
+  // and the unit renders byte-identically to before. See
+  // update/gateway-desktop-managed.ts for the live bug this closes.
+  const environment = desktopManagedSupervisorEnvironment({
+    stateDir: config.stateDir,
+    apiBaseUrl: config.apiBaseUrl,
+    env,
+  });
   const registerJob =
     platform === "darwin"
       ? createLaunchdJobRegistrar(typeof process.getuid === "function" ? process.getuid() : 0)
@@ -436,7 +448,7 @@ async function runInstallSupervisorAndExit(config: GatewayConfig): Promise<never
 
   try {
     const outcome = await auditAndRepairGatewaySupervisorInstall(
-      { env, platform, entryPath, logDir, registerJob },
+      { env, platform, entryPath, logDir, registerJob, environment },
       true,
     );
     console.log(JSON.stringify({ ok: true, outcome }));
@@ -715,8 +727,15 @@ async function main(): Promise<void> {
   // forbidden from writing, and proves the launcher runs before anything
   // recommends pointing a unit at it — an unproven launcher in an ExecStart=
   // is how a stale box becomes a dead one.
+  //
+  // A DESKTOP BOX IS EXEMPT, and not because it is a special case: its login
+  // item points into Empyralis.app on purpose, so `not_updatable` here is a
+  // true statement about the wrong question. Writing it a launcher script and
+  // handing its owner `launchctl` commands would send them to repair a
+  // machine that is working and whose real update path is the app itself.
+  const desktopManaged = isDesktopManagedGateway();
   let launchRepair = null;
-  if (launchUpdatability.status === "not_updatable") {
+  if (launchUpdatability.status === "not_updatable" && !desktopManaged) {
     launchRepair = await ensureGatewayLaunchRepair({
       stateDir: config.stateDir,
       runningEntryPath,
@@ -735,6 +754,7 @@ async function main(): Promise<void> {
     capabilityRouter.supportedCapabilities(),
     buildFingerprint,
     { ...launchUpdatability, repair: launchRepair },
+    desktopManaged,
   );
   const client = new GatewayWsClient(
     config,
