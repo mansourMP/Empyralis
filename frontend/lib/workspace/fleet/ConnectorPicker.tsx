@@ -23,13 +23,17 @@
  *                                                 Connect
  * ```
  *
- * THE ACCENT ARITHMETIC IS WHY THIS COMPOSES, and it is the point rather than
- * a side effect. "Full purple, just like the Next button" (his words — the
- * hairline `fleet-btn--accent` was named as the wrong one) is only safe
- * BECAUSE Connect moved off the faces: a grid of 69 faces now carries ZERO
- * accent-filled controls, and an open panel carries exactly one. Putting a
- * filled Connect back on a card face would put 69 of them in one view, which
- * is the thing being fixed.
+ * THE CARD ACTION IS FULL `fleet-btn--accent-fill`, BY THE FOUNDER'S OWN
+ * INSTRUCTION, GIVEN TWICE. His words: "it's going to be FULL purple just
+ * like this next button, not like only around it and slightly purple" — the
+ * hairline `fleet-btn--accent` was named, explicitly, as the wrong one.
+ *
+ * An earlier pass shipped the hairline anyway, reasoning that a filled
+ * button on every one of ~69 faces is a wall of purple. That reasoning is
+ * not wrong on its own terms, but it was not the call to make: he had
+ * already been told the trade and had already chosen. Do not "fix" this
+ * back to the hairline variant without him saying so — the visual argument
+ * has been made and rejected.
  *
  * THE FACE IS THE CHANNELS SHAPE, NOT A COPY OF IT. `.fleet-connector-grid` /
  * `.fleet-connector-card` / `-icon` / `-label` / `-pill` are declared in
@@ -411,7 +415,7 @@ export function ConnectorPicker({
           // single primary action inside the OPEN panel.
           <button
             type="button"
-            className="fleet-btn fleet-btn--accent fleet-connector-card-action"
+            className="fleet-btn fleet-btn--accent-fill fleet-connector-card-action"
             onClick={(e) => {
               e.stopPropagation();
               // Opens the panel FIRST, then starts the connection. An OAuth
