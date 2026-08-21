@@ -102,11 +102,21 @@ declare global {
 
 type PairingIntentResponse = { pairing_token?: string | null };
 
-/** Bounded on purpose — see the doc comment. Roughly the same order as
- *  gateway_pairing_proof.rs's own 30s poll window, which is the only
- *  measurement anyone has of how long a real machine takes to come online. */
+/**
+ * Bounded on purpose — see the doc comment. Sized from a MEASURED first
+ * pairing rather than a guess: on a real machine against a real backend the
+ * gateway took roughly 18s from spawn to writing its identity and appearing
+ * in the workspace. 60s is ~3x that headroom while still being a window a
+ * person will sit through, which is the trade the founder's "never a spinner
+ * that lasts forever" actually asks for — the point is that it ENDS, in a
+ * phase that says something, not that it ends quickly.
+ *
+ * examples/gateway_pairing_proof.rs uses 30s for the same wait. That is fine
+ * for a proof run by someone watching a terminal and too tight here, where
+ * expiry shows a customer a caveat about a machine that was merely slow.
+ */
 const CONFIRM_POLL_INTERVAL_MS = 1_500;
-const CONFIRM_POLL_TIMEOUT_MS = 45_000;
+const CONFIRM_POLL_TIMEOUT_MS = 60_000;
 /** How long a clean success stays on screen before fading. Long enough to
  *  read, short enough that the app does not carry a permanent banner about
  *  something that is simply working. */
@@ -162,12 +172,27 @@ async function mintPairingToken(
  */
 async function pollForThisMachine(
   workspaceId: string,
-  gatewayId: string | null,
+  resolveGatewayId: () => Promise<string | null>,
   signal: { cancelled: boolean },
 ): Promise<ThisMachineState> {
   let best: ThisMachineState = 'absent';
+  let gatewayId: string | null = null;
   const deadline = Date.now() + CONFIRM_POLL_TIMEOUT_MS;
   while (Date.now() < deadline && !signal.cancelled) {
+    // Re-resolved every tick until found, never once up front. MEASURED on a
+    // real first pairing: the child process starts, the native shell returns
+    // after its 1.5s boot grace, and identity.json does not appear for
+    // another ~16s -- the gateway writes it partway through registering. A
+    // single read before the loop therefore finds nothing on exactly the run
+    // that matters (a brand-new machine), leaves gatewayId null forever, and
+    // reports "couldn't confirm" on a pairing that in fact succeeded.
+    if (!gatewayId) {
+      try {
+        gatewayId = await resolveGatewayId();
+      } catch {
+        // Keep waiting; an unreadable identity this tick is not an answer.
+      }
+    }
     try {
       const response = await fleetAuthorizedFetch(
         `/api/gateway/registrations?workspace_id=${encodeURIComponent(workspaceId)}`,
@@ -227,7 +252,11 @@ export function DesktopGatewayPairing({ workspaceId }: { workspaceId: string }) 
     // proof the control plane can see it — confirm before saying connected.
     if (status?.running) {
       setState(describePairing('starting'));
-      const machine = await pollForThisMachine(workspaceId, status.gatewayId ?? null, signal);
+      const machine = await pollForThisMachine(
+        workspaceId,
+        async () => status?.gatewayId ?? (await bridge.getGatewayStatus!())?.gatewayId ?? null,
+        signal,
+      );
       if (signal.cancelled) return;
       setState(resolveStartOutcome({ machine, supervisorOk: true }));
       return;
@@ -269,19 +298,11 @@ export function DesktopGatewayPairing({ workspaceId }: { workspaceId: string }) 
     }
     if (signal.cancelled) return;
 
-    // Re-read the identity from the shell rather than trusting the id the
-    // start call returned: on a FIRST pair the gateway writes identity.json
-    // during registration, i.e. after that call already returned, so the id
-    // is usually absent there and present a moment later.
-    let gatewayId = result.gatewayId ?? status?.gatewayId ?? null;
-    if (!gatewayId) {
-      try {
-        gatewayId = (await bridge.getGatewayStatus())?.gatewayId ?? null;
-      } catch {
-        // Keep the null and let the poll report couldNotConfirm honestly.
-      }
-    }
-    const machine = await pollForThisMachine(workspaceId, gatewayId, signal);
+    const machine = await pollForThisMachine(
+      workspaceId,
+      async () => result.gatewayId ?? (await bridge.getGatewayStatus!())?.gatewayId ?? null,
+      signal,
+    );
     if (signal.cancelled) return;
     setState(
       resolveStartOutcome({
