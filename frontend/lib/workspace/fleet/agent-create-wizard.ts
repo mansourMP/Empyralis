@@ -3,111 +3,90 @@
  * `tsx` test drives the real rule (same discipline as agent-count-shape.ts /
  * channel-doors.ts / agent-create-model.ts).
  *
- * ── Why there is a sequence again ────────────────────────────────────────
- * Agent creation was cut to one card with two fields, and everything the old
- * FleetCreateAgentWizard used to ask became a ROW OF OPTIONAL BUTTONS on the
- * agent's page afterwards ("Connect a channel" · "Give it a computer" ·
- * "Connect your tools"). The founder rejected that shape, twice:
- *
- *   *"it acts like a button, not step-by-step... if you want press this
- *    button and set up your hardware, if you want this if you want that —
- *    I don't want to have that."*
- *
- * A menu of optional links is not setup. So the sequence comes back — "as
- * before", his words — with ONE deletion he had already made separately:
- * there is no project/placement step, because an agent belongs to the
- * WORKSPACE now (CLAUDE.md, 2026-08-20). Four steps, not the old four:
+ * ── THREE STEPS, and each boundary is a dependency rather than a chapter ─
  *
  * ```
- *  1 Identity   name + optional instructions      nothing committed yet
- *  2 Model      the live catalog                  nothing committed yet
- *      └── "Create agent" ──▶ ONE atomic POST carrying all three
- *  3 Channel    the real Channels grid            the agent is real from here
- *  4 Apps       the real Connectors picker
- *      └── "Finish" ──▶ into the agent
+ *  1 Identity & placement   name · what it does · WHERE IT RUNS
+ *        │                  nothing committed
+ *        ▼  placement decides what step 2 may honestly offer
+ *  2 Brain                  who pays ▸ provider ▸ model
+ *        └── "Create agent" ──▶ the agent becomes real here
+ *  3 Reach                  channels AND apps, one screen, both optional
+ *        └── "Finish" / "Skip for now" ──▶ into the agent
  * ```
  *
- * ── The commit boundary is the load-bearing part ─────────────────────────
- * The OLD wizard created the agent at the end of step 1 and PATCHed
- * everything after. That is the create-then-separate-step shape CLAUDE.md's
- * outcome-honesty law names directly, and it made the model a thing that
- * could half-apply. Here identity AND model go in one request, so no agent
- * can exist wearing a model nobody picked.
+ * **Placement is first because step 2 cannot be honest without it.** "Your
+ * subscription" and "Run locally" both route the brain through a Gateway on
+ * a real machine; on a cloud-only agent they are controls that cannot be
+ * completed. Asking where first means the second question only ever offers
+ * real answers. See agent-create-placement.ts / agent-create-brain.ts.
  *
- * Steps 3 and 4 genuinely cannot precede the commit — a channel binds to an
- * agent id and a connector authorizes against one — so they sit AFTER it, on
- * purpose, and the surface stops pretending otherwise the moment it happens:
- * there is no way back into Identity/Model once committed (they are saved,
- * and a Back button that silently did nothing would be a lie), and closing
- * from step 3 or 4 goes INTO the agent rather than discarding, because the
- * agent exists.
+ * **Reach is last and is ONE screen because both halves are the same
+ * question** — "what does this connect to" — and both are optional and both
+ * stay permanently reachable from the agent's own tabs afterwards. They used
+ * to be two separate steps, which is two screens that can each ask for
+ * nothing: the ceremony that made the sequence feel long.
  *
- * ── THE CHANNEL STEP IS REQUIRED. It is DEFERRABLE, which is not the same
- *    thing — corrected 2026-08-21 after the founder reviewed the first
- *    version live. ─────────────────────────────────────────────────────────
+ * ── The commit boundary ──────────────────────────────────────────────────
+ * Identity and the brain go in ONE request wherever the create path can
+ * carry them, so no agent exists wearing a model nobody picked. The two
+ * machine-bound brain modes cannot ride it (the create path accepts three
+ * keys; those need gateway_binding + runtime + a real-box check that lives
+ * in fleet_configure_agent) — so they patch immediately after, and
+ * agent-create-brain.ts's header states the obligation that carries: the two
+ * outcomes may never share one message.
  *
- * It used to say "Skip for now" and walk straight on to Finish. That was
- * wrong on the product's own terms: chat left the platform (founder,
- * 2026-08-19/20 — *"messaging would never be done inside this platform...
- * go to Telegram and speak with the agent inside that channel"*), so an
- * agent with no channel is unreachable by anybody. His words here:
- * *"channels cannot be skipped, because it's something agents are going to
- * speak."* A "Finish" that hands back an agent nobody can talk to is the
- * outcome-honesty law broken at the last screen of setup.
+ * Step 3 genuinely cannot precede the commit — a channel binds to an agent
+ * id, a connector authorizes against one — so it sits after it, and the
+ * surface stops pretending otherwise the moment it happens: no way back into
+ * Identity/Brain (they are saved, and a Back that silently did nothing would
+ * be a lie), and closing goes INTO the agent rather than discarding.
+ *
+ * ── "SKIP" AND "FINISH" ARE DIFFERENT WORDS FOR A REASON ─────────────────
+ *
+ * An earlier pass BLOCKED the forward button until a channel connected, on
+ * the founder's own words that day (*"channels cannot be skipped, because
+ * it's something agents are going to speak"*). The three-step brief
+ * supersedes that with an equally explicit instruction — Reach is
+ * *"(skippable) … Both optional. Skipping is one action."*
+ *
+ * Both are honoured, because they were never about the same thing. What he
+ * rejected was a sequence that TRAPS you; what he never asked for is a
+ * product that calls an unreachable agent finished. So the button MOVES
+ * either way, in one press, and it is NAMED for what it actually does:
  *
  * ```
- *   channels not yet known  ─▶ forward BLOCKED, and SAYS NOTHING.
- *                              "no channel connected" and "I have not asked
- *                              yet" are different facts (CLAUDE.md) and a
- *                              reason line claiming the first while the
- *                              second is true is the lie, not the block.
- *   known, 0 connected      ─▶ forward BLOCKED, with the one fact that
- *                              explains it. The way out is DEFER, in the
- *                              head — never a forward button that calls
- *                              leaving "Skip" and then says "Finish".
- *   known, 1+ connected     ─▶ forward moves. The step is done.
+ *   nothing connected yet   ─▶ "Skip for now"   one press, no block
+ *   at least one connected  ─▶ "Finish"
+ *   not known yet           ─▶ "Skip for now", and NO reason line —
+ *                              "nothing is connected" and "I have not
+ *                              asked yet" are different facts (CLAUDE.md)
  * ```
  *
- * Deferring is a real, first-class exit and always available: the agent is
- * already saved, closing takes you into it, and the setup band on its page
- * (agent-setup-steps.ts) carries the same unfinished channel step forward.
- * What is NOT available is calling that state finished.
+ * The unfinished channel step is not lost by skipping: the agent's own setup
+ * band (agent-setup-steps.ts) carries it forward on the page you land on.
  *
  * ── NOTHING SAYS "CANCEL" ONCE THE AGENT EXISTS ──────────────────────────
- *
- * The founder pressed the head's X on step 3 and found an agent named
- * Zephyr in his workspace afterwards. He was right to expect otherwise —
- * an X is a cancel gesture, and the commit had already happened two screens
- * earlier. Rather than make X delete a real agent (a destructive act behind
- * a dismiss gesture, which is worse), the CONTROL changes when the fact
- * changes: `dismiss` is "Cancel" while nothing exists and "Finish later"
- * from the commit onward. Same rule as `agentCreateCloseIntent` below, one
- * level up — the label and the behaviour move together, so neither can
- * claim something the other does not do.
+ * The founder pressed the head's X on a post-commit step and found an agent
+ * in his workspace afterwards. Rather than make X delete a real agent (a
+ * destructive act behind a dismiss gesture, which is worse), the CONTROL
+ * changes when the fact changes: `dismiss` is "Cancel" while nothing exists
+ * and "Finish later" from the commit onward.
  *
  * ── THE FILL FOLLOWS THE MOVE THAT IS ACTUALLY AVAILABLE ─────────────────
- *
  * `forward.accent` is the view's single accent fill (CLAUDE.md: "One accent
- * colour, spent on the single primary action in a view"), and it is spent
- * only on a forward button that can actually be pressed. A blocked step's
- * button is still rendered and still named — a disabled control that says
- * what it would do is not a dead control — it just stops being the loud
- * purple invitation to press it, which is exactly the thing it cannot
- * accept. Everything else in the surface (the step numbers, the identity
- * glyph) is neutral, so at most ONE accent-filled element is ever on
- * screen.
+ * colour, spent on the single primary action in a view"), spent only on a
+ * forward button that can actually be pressed.
  */
 
 /**
- * "apps", never "tools". Step 4 embeds ConnectorsTab — the apps/MCP
- * connector picker — while Configure carries a SEPARATE, genuinely
- * different "Tools" section (the built-in capability toggles). Two
- * different things were called Tools; the founder named the right word for
- * this one: *"it's clearly applications, MCP applications... name is
- * clearly not tools."* The id moves with the label so the collision cannot
- * survive in the code either.
+ * "apps", never "tools" — Configure carries a SEPARATE, genuinely different
+ * "Tools" section (the built-in capability toggles), and the founder named
+ * the right word for the connector picker: *"it's clearly applications, MCP
+ * applications... name is clearly not tools."* Both now live inside one
+ * step, so the word survives as a heading rather than a step id.
  */
-export type AgentCreateStepId = "identity" | "model" | "channel" | "apps";
+export type AgentCreateStepId = "identity" | "brain" | "reach";
 
 export type AgentCreateStep = {
   id: AgentCreateStepId;
@@ -117,14 +96,13 @@ export type AgentCreateStep = {
 
 export const AGENT_CREATE_STEPS: readonly AgentCreateStep[] = [
   { id: "identity", label: "Identity" },
-  { id: "model", label: "Model" },
-  { id: "channel", label: "Channel" },
-  { id: "apps", label: "Apps" },
+  { id: "brain", label: "Brain" },
+  { id: "reach", label: "Reach" },
 ];
 
 /** The step whose forward button performs the one create call. Everything
  *  before it is uncommitted; everything after it operates on a real agent. */
-export const AGENT_CREATE_COMMIT_STEP: AgentCreateStepId = "model";
+export const AGENT_CREATE_COMMIT_STEP: AgentCreateStepId = "brain";
 
 export function agentCreateStepIndex(id: AgentCreateStepId): number {
   return AGENT_CREATE_STEPS.findIndex((s) => s.id === id);
@@ -155,6 +133,12 @@ export type AgentCreateWizardState = {
   busy: boolean;
   /** A name is resolved (typed, or the server's own suggestion). */
   hasName: boolean;
+  /** agent-create-placement.ts's own verdict for step 1. */
+  placementReady: boolean;
+  placementBlockedReason: string;
+  /** agent-create-brain.ts's own verdict for step 2. */
+  brainReady: boolean;
+  brainBlockedReason: string;
   /** False while the channels fetch is in flight — see this file's header
    *  for why that is not the same as zero. */
   channelsKnown: boolean;
@@ -168,8 +152,7 @@ export type AgentCreateFooterButton = {
 
 /**
  * The head's dismiss control. Its KIND is the whole point: before the commit
- * there is something to cancel, and after it there is not. See this file's
- * header for the founder's own instance of the bug this closes.
+ * there is something to cancel, and after it there is not.
  */
 export type AgentCreateDismissPlan = {
   kind: "cancel" | "defer";
@@ -207,51 +190,54 @@ function dismissPlan(created: boolean): AgentCreateDismissPlan {
 }
 
 export function planAgentCreateFooter(state: AgentCreateWizardState): AgentCreateFooterPlan {
-  const { step, created, busy, hasName, channelsKnown, connectedChannelCount } = state;
+  const {
+    step,
+    created,
+    busy,
+    hasName,
+    placementReady,
+    placementBlockedReason,
+    brainReady,
+    brainBlockedReason,
+    channelsKnown,
+    connectedChannelCount,
+  } = state;
   const dismiss = dismissPlan(created);
 
   if (step === "identity") {
+    const ok = hasName && placementReady;
     return {
       back: { label: "Cancel", action: "cancel", disabled: busy },
-      forward: forwardButton("Next", "next", busy || !hasName),
+      forward: forwardButton("Next", "next", busy || !ok),
       dismiss,
-      blockedReason: "",
+      blockedReason: !hasName ? "Give this agent a name." : placementBlockedReason,
     };
   }
 
-  if (step === "model") {
+  if (step === "brain") {
+    const ok = hasName && brainReady;
     return {
       back: { label: "Back", action: "back", disabled: busy },
-      forward: forwardButton(busy ? "Creating…" : "Create agent", "create", busy || !hasName),
+      forward: forwardButton(busy ? "Creating…" : "Create agent", "create", busy || !ok),
       dismiss,
-      blockedReason: "",
+      blockedReason: !hasName ? "Give this agent a name." : brainBlockedReason,
     };
   }
 
-  if (step === "channel") {
-    // No way back: Identity and Model are committed by now, so a Back button
-    // here could only ever return to a screen whose edits no longer go
-    // anywhere. Better no control than one that lies.
-    const reachable = connectedChannelCount > 0;
-    return {
-      back: null,
-      forward: forwardButton("Next", "next", busy || !reachable),
-      dismiss,
-      // Stated ONLY once we actually know. While the fetch is in flight the
-      // block is real and the explanation is not available yet, and naming
-      // the wrong one of two facts is worse than naming neither.
-      blockedReason:
-        channelsKnown && !reachable
-          ? "Nobody can reach this agent until a channel is connected."
-          : "",
-    };
-  }
-
+  // Reach. Always movable in one press — see this file's header on why the
+  // block was removed and the LABEL carries the honesty instead.
+  const reachable = connectedChannelCount > 0;
   return {
-    back: { label: "Back", action: "back", disabled: busy },
-    forward: forwardButton("Finish", "finish", busy),
+    back: null,
+    forward: forwardButton(reachable ? "Finish" : "Skip for now", "finish", busy),
     dismiss,
-    blockedReason: "",
+    // Stated ONLY once we actually know, and never as a block — it is not
+    // one. A person skipping a step deserves to know what stays undone;
+    // a person who has not been told anything yet deserves silence.
+    blockedReason:
+      channelsKnown && !reachable
+        ? "Nobody can reach this agent until a channel is connected. You can do it later."
+        : "",
   };
 }
 
@@ -272,7 +258,7 @@ export function agentCreatePreviousStep(step: AgentCreateStepId): AgentCreateSte
  *
  * Before the commit there is nothing to keep, so closing discards. After it,
  * the agent is real and already saved — closing must take the person to it,
- * never quietly drop them back on a list as if the last two screens had been
+ * never quietly drop them back on a list as if the last screens had been
  * cancelled. That is the outcome-honesty law applied to a dismiss gesture:
  * "I stopped early" and "nothing happened" are different facts.
  */
@@ -281,8 +267,8 @@ export function agentCreateCloseIntent(created: boolean): "discard" | "open_agen
 }
 
 /** The surface's own title. It names the thing once the thing exists —
- *  a person on step 3 must be able to see, without pressing anything, that
- *  their agent is already real. */
+ *  a person on the last step must be able to see, without pressing anything,
+ *  that their agent is already real. */
 export function agentCreateSurfaceTitle(created: boolean, agentName: string): string {
   const name = agentName.trim();
   return created && name ? name : "New agent";

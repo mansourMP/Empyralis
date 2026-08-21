@@ -7284,6 +7284,118 @@ the box, in a mark the same size as every logo beside it — which is MAN-145's
 own requirement that a fallback not read as broken. Restored immediately
 after; `git checkout --`, never `git stash`.
 
+## Agent creation is THREE steps, and placement is first (2026-08-21)
+
+**The founder compared the shipped one-card creation surface against the
+wizard deleted on 2026-08-20 and found two whole questions missing.**
+Measured, not recalled: grepping `AgentCreateCard.tsx` for
+`platform_credits|byok|cli_subscription` returned ZERO — the entire "who
+pays for this model" question was gone, and so were placement and hardware.
+
+```
+1 IDENTITY & PLACEMENT   name · what it does · WHERE IT RUNS
+       │                 nothing committed
+       ▼  placement decides what step 2 may honestly offer
+2 BRAIN                  who pays ▸ provider ▸ model
+       └── "Create agent" ──▶ the agent becomes real here
+3 REACH                  channels AND apps, one screen, both optional
+       └── "Finish" / "Skip for now" ──▶ into the agent
+```
+
+**PLACEMENT IS FIRST BECAUSE STEP 2 CANNOT BE HONEST WITHOUT IT.** "Your
+subscription" and "Run locally" both route the BRAIN through a Gateway on a
+real machine, so on a cloud-only agent they are controls that cannot be
+completed. They are not rendered disabled and not rendered with an excuse —
+they are not rendered, and step 2 says once where to go to unlock them.
+The gate is DERIVED from each option's own `needsMachine` flag
+(`agent-create-brain.ts`), never a hand-listed pair of mode names.
+
+**NO PROJECT FIELD. That half of the old wizard does not come back** — an
+agent belongs to the WORKSPACE. `currentProjectId` is still resolved
+silently for a required backend field and is never rendered.
+
+**REACH IS ONE SCREEN because Channels and Apps are the same question** —
+what does this connect to — both optional, both permanently reachable from
+the agent's own tabs afterwards. Two separate steps that can each ask for
+nothing was the ceremony that made the four-step flow feel long.
+
+**"SKIP" AND "FINISH" ARE DIFFERENT WORDS, and that is how two founder
+instructions are both honoured.** 2026-08-21 morning: *"channels cannot be
+skipped, because it's something agents are going to speak"* → the forward
+button was BLOCKED. The three-step brief supersedes it: Reach is
+*"(skippable) … Both optional. Skipping is one action."* What he rejected
+was a sequence that traps you; what he never asked for is a product that
+calls an unreachable agent finished. So the button always moves in one
+press and is NAMED for what it does — "Skip for now" with nothing
+connected, "Finish" with something. Unknown-yet says nothing at all.
+
+**WHERE EACH BRAIN MODE'S CONFIG IS WRITTEN, and why they differ.**
+
+```
+platform_credits ─┐ POST /fleet/agents  model_choice{mode,provider,model}
+byok_api         ─┘ ATOMIC with the create. Nothing to patch.
+cli_subscription ─┐ POST (server seed) ─▶ PATCH model_config
+local            ─┘ the create path accepts exactly three keys
+                    (_CREATE_TIME_MODEL_CHOICE_KEYS) and neither fits: both
+                    need gateway_binding + runtime + a real-box check that
+                    lives in fleet_configure_agent and is REUSED here rather
+                    than copied into a thinner second validator
+placement        ── same PATCH. cloud writes NOTHING (the standard preset
+                    already resolves hardware_access to "none").
+```
+
+A pasted API key is a PREREQUISITE, not a follow-up: the vault credential +
+provider profile are saved BEFORE the agent exists, so a failure there has
+nothing to explain away.
+
+**The PATCH is a step that can independently fail after a commit, so its
+failure is reported as its OWN fact and the sequence continues.** Proven
+live, not reasoned about — a Codex binding to a box without Codex installed
+produced exactly: *"Wizard Three was created, but where it runs and what
+runs it couldn't be saved — set it in Configure. (Codex isn't installed on
+Studio Mac yet…)"*, and the database showed the agent real with
+`hardware_access=none` and the seeded model, i.e. the message was true.
+`fleet_configure_agent` rejects a patch WHOLE, so when the model_config half
+is invalid the placement half is lost with it — which is why the sentence
+names both halves rather than one.
+
+**THE FRAME: min-height 560, max-height min(88vh, 640).** Founder: *"it
+stays the same size almost — it has a smallest size which you cannot make it
+smaller, and a biggest size you cannot make it bigger, even though it's a
+longer page."* A ceiling alone was already there and is not enough; without
+a floor the dialog collapses on a short step (the old Model step measured
+249px against Channel's 520px, moving the footer 271px on one Next press).
+
+```
+                                  natural   framed     measured, 1680x1050
+Brain, cloud placement              480       560      ← grows to the floor
+Identity, cloud                     586       586
+Identity, a machine                ~680       640      ← body scrolls
+Brain, byok / subscription      573-640    573-640
+Reach, two whole tabs             1000+      640       ← body scrolls
+phone, every step (375x812)          —        796      ← floor pinned to
+                                                        ceiling: identical
+```
+
+Head, stepper and footer are `flex-shrink: 0`; the body is the only
+scroller on every step. THE COST IS VOID and it is paid deliberately — the
+emptiest step holds 333px of content in the 560px floor, and lowering the
+floor to fit it hands back the jump the frame exists to remove.
+
+**Two defects only the browser showed.** An empty machine list stated "No
+computers paired yet." TWICE on one screen, once in the body and once as the
+footer's blocked reason — the body's copy is gone and the "Pair this
+computer" button is the empty state, per the standing rule that a setup
+control does the work rather than explaining it. And with an error present
+on Reach the footer's border sat BELOW it, so the body's cut-off content ran
+into red text with nothing between; the scroll edge is now drawn on
+whichever pinned row comes first.
+
+**The Reach step carries ~67 accent-filled "Connect" buttons and that is NOT
+a regression to fix here.** It is ConnectorsTab's own face, which the
+founder overruled to full `--accent-fill` twice. The create surface's
+one-accent rule still governs everything the surface itself draws.
+
 ## The two-tier channel split is DERIVED from the doors (2026-08-21, MAN-359)
 
 **The Channels grid now leads with what a person can connect today, and the
