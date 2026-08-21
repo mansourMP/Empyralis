@@ -2662,17 +2662,80 @@ fn ensure_main_window<R: Runtime, M: Manager<R>>(app: &M) -> Result<(), String> 
         .parse()
         .map_err(|error| format!("Invalid app URL: {error}"))?;
 
+    // THIRD-PARTY SIGN-IN NEVER HAPPENS INSIDE THIS WINDOW.
+    //
+    // Without this guard, clicking "Continue with Google" on our own login
+    // page navigated the app's own webview to accounts.google.com — i.e. the
+    // product asked someone to type their Google password into a window this
+    // process owns and can read keystrokes from. That is the shape of a
+    // phishing page, and it is not made safe by our intentions. Google's own
+    // policy blocks OAuth in embedded webviews (`disallowed_useragent`) for
+    // exactly this reason, so it is also a flow that stops working.
+    //
+    // Anything that is not our own origin is handed to the real browser,
+    // where the customer has an address bar to check, their password manager,
+    // and their existing sessions. Same-origin navigation is untouched.
+    let allowed_origin = app_base_url();
     let window_builder = WebviewWindowBuilder::new(app, WINDOW_LABEL, WebviewUrl::External(url))
+        .on_navigation(move |target| {
+            let same_origin = Url::parse(&allowed_origin)
+                .ok()
+                .and_then(|base| base.host_str().map(str::to_owned))
+                .zip(target.host_str().map(str::to_owned))
+                .map(|(base_host, target_host)| base_host == target_host)
+                .unwrap_or(false);
+            if same_origin {
+                return true;
+            }
+            // Non-http(s) schemes are refused rather than handed to `open`,
+            // which would let a page hand the OS an arbitrary scheme.
+            if matches!(target.scheme(), "http" | "https") {
+                let _ = open_external(target.to_string());
+            }
+            false
+        })
         .initialization_script(&desktop_bridge_script())
         .title(WINDOW_TITLE)
         .inner_size(WINDOW_WIDTH, WINDOW_HEIGHT)
         .visible(false)
-        .decorations(false)
+        // NATIVE DECORATIONS, and this is a safety rule rather than a style
+        // choice. decorations(false) hands the only way out of this window to
+        // the hosted page, and the hosted page does not take it: the injected
+        // bridge exposes closeWindow/minimizeWindow/startWindowDrag, and
+        // frontend/lib/desktop/desktop-gateway-pairing.tsx declares only
+        // `getGatewayStatus` and `pairAndStartGateway`. Nothing in the web app
+        // calls a single window control, so there was no close button on any
+        // page — and LSUIElement means no Dock icon to quit from either.
+        //
+        // A borderless window is only honest when the app itself guarantees
+        // the chrome. Ours cannot, because the content is a REMOTE site: an
+        // older deploy, a 404, or no network at all each produce a page that
+        // draws no titlebar, and the customer is then holding a rectangle with
+        // no way out. macOS's own titlebar works offline, works on an error
+        // page, and cannot regress with a frontend deploy.
+        .decorations(true)
         .focused(true);
 
     let window = window_builder
         .build()
         .map_err(|error| format!("Failed to build main window: {error}"))?;
+
+    // The close button HIDES; it does not quit. This is what makes the native
+    // titlebar safe to add to a menu bar app: Tauri exits the process when its
+    // last window closes, and on an app whose whole point is to outlive its
+    // windows that would take the tray icon down with it — the customer would
+    // click the red X on a sign-in window and silently lose their Agent
+    // Computer's only status surface. Quit stays exactly where the founder put
+    // it, in the menu, next to the sentence about what quitting costs.
+    {
+        let hide_target = window.clone();
+        window.on_window_event(move |event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = hide_target.hide();
+            }
+        });
+    }
 
     let _ = mark_window_non_restorable(&window);
 
@@ -2698,6 +2761,7 @@ fn overlay_monitor_bounds<R: Runtime, M: Manager<R>>(app: &M) -> Result<(f64, f6
     Ok((0.0, 0.0, WINDOW_WIDTH, WINDOW_HEIGHT))
 }
 
+#[allow(dead_code)] // Deliberately uncalled — see RunEvent::Ready.
 fn create_overlay_window<R: Runtime, M: Manager<R>>(app: &M) -> Result<(), String> {
     if app.get_webview_window(OVERLAY_WINDOW_LABEL).is_some() {
         return Ok(());
@@ -2818,6 +2882,7 @@ fn emit_overlay_event<R: Runtime, M: Manager<R>>(manager: &M, event: &OverlayAct
         .map_err(|error| format!("Failed to deliver overlay event: {error}"))
 }
 
+#[allow(dead_code)] // Only meaningful alongside the overlay window.
 fn start_overlay_bridge<R: Runtime + 'static>(app_handle: tauri::AppHandle<R>) {
     thread::spawn(move || {
         let listener = match TcpListener::bind(format!("{OVERLAY_BRIDGE_HOST}:{OVERLAY_BRIDGE_PORT}")) {
@@ -3045,18 +3110,27 @@ pub fn run() {
 
                     run_launch_plan(app_handle);
 
-                    // Downgraded from fatal ON PURPOSE. The overlay is an
-                    // optional surface for a separate feature; before this,
-                    // failing to build it exited the whole process — which on
-                    // a menu bar app means the customer's Agent Computer loses
-                    // its only status surface because an unrelated window
-                    // could not be created. The app must survive everything
-                    // that is not its own reason for existing.
-                    if let Err(error) = create_overlay_window(app_handle) {
-                        eprintln!("Empyralis desktop failed to create the overlay window: {error}");
-                    } else {
-                        start_overlay_bridge(app_handle.clone());
-                    }
+                    // NOT CREATED AT LAUNCH, and this is a safety rule
+                    // rather than a preference. `overlay_url()` resolves to
+                    // `<hosted app>/overlay.html`, a document that has never
+                    // existed — not in frontend/public, not in dist-stub, not
+                    // anywhere in this repo's history. So the window did not
+                    // render an overlay; it rendered whatever the server
+                    // returned for a missing path, which is the app's own
+                    // opaque 404 page.
+                    //
+                    // The result was the worst window this product can put on
+                    // a customer's screen: full monitor bounds, always_on_top,
+                    // decorations(false) so no close button, on an app with
+                    // LSUIElement so there is no Dock icon to quit from, and
+                    // ignore_cursor_events so clicks fall through it. An
+                    // opaque error page with no way out, on every launch.
+                    //
+                    // Re-enabling this requires the overlay document to be a
+                    // LOCAL BUNDLED ASSET (WebviewUrl::App), never a remote
+                    // URL. Chrome this app draws over someone's whole screen
+                    // must not be able to become a server's error page because
+                    // a route moved, a deploy lagged, or the network dropped.
 
                     start_tray_status_loop(app_handle.clone());
                 }
