@@ -101,7 +101,7 @@
   border-color: var(--border);
 }
 .fleet-doc-body--editable:focus-visible {
-  outline: 2px solid var(--accent-ring);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 1px;
 }
 

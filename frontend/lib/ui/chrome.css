@@ -177,7 +177,8 @@ body[data-theme='dark'] {
 
   --app-shadow-subtle: inset 0 1px 0 rgba(255, 255, 255, 0.03);
   --app-shadow-panel: inset 0 1px 0 rgba(255, 255, 255, 0.04);
-  --app-shadow-focus: 0 0 0 2px var(--accent-ring);
+  /* Neutral, never the accent — see --focus-ring in theme-tokens.css. */
+  --app-shadow-focus: 0 0 0 2px var(--focus-ring);
   --app-shadow-glow: 0 0 16px var(--accent-soft);
 
   --app-motion-fast: 120ms;
@@ -248,7 +249,8 @@ body[data-theme='dark'] .workstation-shell-frame {
   --interactive-accent: var(--accent);
   --interactive-accent-hover: var(--accent);
   --accent-subtle: var(--accent-soft);
-  --app-shadow-focus: 0 0 0 2px var(--accent-ring);
+  /* Neutral, never the accent — see --focus-ring in theme-tokens.css. */
+  --app-shadow-focus: 0 0 0 2px var(--focus-ring);
   --app-shadow-glow: 0 0 16px var(--accent-soft);
 }
 
@@ -397,7 +399,9 @@ body.theme-light {
 
   --app-shadow-subtle: 0 4px 12px -10px rgba(0, 0, 0, 0.06);
   --app-shadow-panel: 0 16px 40px -28px rgba(32, 32, 32, 0.12), 0 0 0 1px rgba(32, 32, 32, 0.03);
-  --app-shadow-focus: 0 0 0 2px rgba(32, 32, 32, 0.14);
+  /* Was a hand-rolled rgba at 0.14 alpha — under 1.2:1 on white, i.e. a
+     focus ring nobody could see. Same neutral token as every other theme. */
+  --app-shadow-focus: 0 0 0 2px var(--focus-ring);
 
   /* Premium UI Direction A Tokens */
   --premium-shell-bg: #F2F2F2;
@@ -1660,8 +1664,9 @@ textarea {
 .app-select:focus,
 .app-textarea:focus {
   outline: 0;
-  border-color: color-mix(in srgb, var(--app-border-accent) 52%, transparent 48%);
-  background: color-mix(in srgb, var(--app-bg-panel) 82%, var(--app-accent-soft) 18%);
+  /* Focus is neutral. The accent border AND the accent-tinted fill both went;
+     the ring above is the whole indicator now. */
+  border-color: var(--app-border-strong);
   box-shadow: var(--app-shadow-focus);
 }
 
@@ -2715,13 +2720,15 @@ body[data-theme='dark'] .app-auth-card--elevated {
 .app-auth-input:focus,
 .app-auth-input:focus-visible,
 .app-auth-input:active {
-  border-color: var(--app-accent);
-  box-shadow: 0 0 0 4px var(--app-accent-soft);
+  /* Login/signup fields. Neutral focus — this is the first screen a customer
+     ever sees, and it used to bloom violet on the email input. */
+  border-color: var(--focus-ring);
+  box-shadow: 0 0 0 2px var(--focus-ring);
   outline: none;
 }
 
 .app-auth-input-shell:focus-within .app-auth-input {
-  border-color: var(--app-accent);
+  border-color: var(--focus-ring);
 }
 
 .app-auth-input::selection {
@@ -2911,10 +2918,10 @@ body[data-theme='dark'] .app-auth-input:-webkit-autofill:focus {
 }
 
 .studio-agent-chat .app-chat-composer:focus-within {
-  border-color: color-mix(in srgb, var(--app-accent) 24%, var(--premium-glass-border));
+  border-color: color-mix(in srgb, var(--focus-ring) 44%, var(--premium-glass-border));
   box-shadow:
     0 20px 60px -28px rgba(30, 32, 36, 0.12),
-    0 0 0 1px color-mix(in srgb, var(--app-accent) 12%, transparent);
+    0 0 0 1px color-mix(in srgb, var(--focus-ring) 24%, transparent);
 }
 
 .deployed-agent-chat__meta-details {
@@ -9106,7 +9113,7 @@ body[data-workstation-app-surface='open'] .app-shell-viewport {
 }
 
 .workstation-titlebar__surface-link:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--app-accent) 55%, transparent);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 
@@ -9421,7 +9428,7 @@ body[data-workstation-app-surface='open'] .app-shell-viewport {
 }
 
 .workstation-hardware-status__trigger:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--app-accent) 56%, transparent);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 
@@ -13365,7 +13372,7 @@ body.theme-light .studio-agents-nav__agent[aria-selected='true'] {
 
 .studio-agent-overview__check-card:focus-visible,
 .studio-agent-overview__setup-card:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--app-accent) 62%, transparent);
+  outline: 2px solid var(--focus-ring);
   outline-offset: -2px;
 }
 
@@ -23163,10 +23170,10 @@ body[data-theme='dark'] .sage-integration-brand__image[src*='notion.svg'] {
 }
 
 .deployed-agent-chat__composer:focus-within {
-  border-color: color-mix(in srgb, var(--app-accent) 24%, var(--premium-glass-border));
+  border-color: color-mix(in srgb, var(--focus-ring) 44%, var(--premium-glass-border));
   box-shadow:
     0 20px 60px -28px rgba(30, 32, 36, 0.12),
-    0 0 0 1px color-mix(in srgb, var(--app-accent) 12%, transparent);
+    0 0 0 1px color-mix(in srgb, var(--focus-ring) 24%, transparent);
 }
 
 .deployed-agent-chat__input,

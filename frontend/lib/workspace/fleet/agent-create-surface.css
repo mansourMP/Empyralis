@@ -411,15 +411,21 @@
   border-radius: var(--radius-control);
 }
 .agent-create-name-field:hover { border-color: var(--border-strong); }
-/* ONE focus treatment, on the whole control. It used to be two at once: the
-   app-wide :focus-visible ring (a 2px neutral halo, globals.css) drawn round
-   the input AND an accent underline inside it — the "two treatments" the
-   founder was looking at. The ring now belongs to the box that IS the field,
-   and the accent lives in it, which is one of the three roles theme-tokens.css
-   reserves the accent for. */
+/* ONE focus treatment, on the whole control, and it is NEUTRAL. It used to be
+   two at once: the app-wide :focus-visible ring drawn round the input AND an
+   accent underline inside it — the "two treatments" the founder was looking
+   at. The ring now belongs to the box that IS the field.
+
+   CORRECTION 2026-08-21: this comment used to describe the app-wide ring as
+   "a 2px neutral halo" and claim focus as one of the accent's three reserved
+   roles. Both were wrong. The app-wide ring was `--accent-ring`, i.e. violet,
+   and focus is no longer an accent role at all — the founder revoked it
+   ("remove that purple ring everywhere"). This card is where it was worst:
+   AgentCreateCard focuses the Name field on open, so the ring appeared before
+   the customer had touched anything. See --focus-ring in theme-tokens.css. */
 .agent-create-name-field:focus-within {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-ring);
+  border-color: var(--focus-ring);
+  box-shadow: 0 0 0 2px var(--focus-ring);
 }
 
 /* Neutral — it was an accent-tinted tile, which is decoration rather than an
@@ -487,8 +493,8 @@
    same way. */
 .agent-create-input:focus,
 .agent-create-select:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-ring);
+  border-color: var(--focus-ring);
+  box-shadow: 0 0 0 2px var(--focus-ring);
 }
 
 /* ── Foot ─────────────────────────────────────────────────────────────────
