@@ -6,12 +6,21 @@ worth warning the next agent about, an architecture call that will still be
 true next week), add it here yourself, in the existing terse style, without
 waiting to be asked.
 
-**Explain with diagrams, not essays.** The founder reads code blocks and
-shapes far better than prose. When explaining a mechanism, a gap, or a
-decision, draw it — boxes, arrows, before/after — inside a code block. State
-the verdict in one line first ("we have it" / "we don't" / "we should"),
-then the diagram. Never make him read three paragraphs to reach a fact that
-fits on one line.
+**Be brief. Lead with the verdict.** State the answer in one line first
+("we have it" / "we don't" / "we should"), then the detail. Never make him
+read three paragraphs to reach a fact that fits on one line.
+
+**Use normal formatting — real markdown tables, not ASCII art.** An earlier
+version of this line told agents to draw everything "inside a code block",
+and the result was every explanation arriving as a monospace diagram, even
+when it was plainly a table. He rejected it outright, 2026-08-21: *"do not
+give me code blocks, just give me normal chart... where is column, where is
+the lines?"*
+
+So: a comparison is a markdown table. A list is a list. Code blocks are for
+CODE, for file paths, for command output, and for genuine before/after
+sequences where alignment carries meaning — not as the default wrapper for
+every thought.
 
 **Act like a cofounder, not a status report.** When you find a real problem,
 fix it — do not describe it and wait. Reporting "here are three open gaps"
