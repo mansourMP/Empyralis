@@ -33,7 +33,7 @@
      one flat sheet                      three groups, separated by SPACE
      drops in from 12vh, 640px wide      centred, 520px — a card, not a page
      a grey breadcrumb                   an identity row: glyph + the name field
-     one sheet, no steps                 a stepper: Identity · Model · Channel · Apps
+     one sheet, no steps                 a stepper: Identity · Brain · Reach
    ```
 
    ── A THIRD CORRECTION, 2026-08-21: THE RULES AND THE BAND ────────────────
@@ -116,36 +116,55 @@
   border-radius: var(--radius-card);
   box-shadow: 0 32px 80px -32px rgba(0, 0, 0, 0.6);
   animation: fleet-modal-in var(--dur-2) var(--ease-out);
-  /* The steps differ a lot in height (two fields vs. the whole Channels
-     grid). Capping the SURFACE and scrolling only its body keeps the
-     stepper and the footer where the eye left them instead of the whole
-     dialog jumping size on every Next. */
-  max-height: min(84vh, 760px);
+  /* ── ONE FRAME, EVERY STEP: A FLOOR AND A CEILING ──────────────────────
+     The founder, on the three-step sequence: *"it stays the same size almost
+     — it has a smallest size which you cannot make it smaller, and a biggest
+     size you cannot make it bigger, even though it's a longer page."*
+
+     A ceiling alone was already here, and it is not enough: without a floor
+     the dialog COLLAPSES on a short step. Measured on the shipped card, same
+     monitor, same session — the Model step held one `<select>` and rendered
+     at 249px while the Channel step rendered at 520px, so a Next press moved
+     the footer 271px down the screen and the eye had to find it again.
+
+     ```
+     floor    min-height  480px   the tallest SHORT step (Brain, in its
+                                  widest branch: 4 payer options + provider
+                                  + model) sits just under it, so no step
+                                  renders as a stub and none of them differ
+     ceiling  max-height  720px   or 88vh, whichever is smaller — a 900px
+                                  laptop keeps its own margin
+     ```
+
+     Between them the BODY scrolls and nothing else does: head and stepper
+     stay put at the top, the footer stays put at the bottom, on every step.
+     That is the whole mechanism — `overflow: hidden` here, `overflow-y:
+     auto` on .agent-create-body, and `flex-shrink: 0` on the two chrome
+     rows so a long body can never squeeze them. */
+  min-height: min(480px, 88vh);
+  max-height: min(88vh, 720px);
   overflow: hidden;
 }
 
-/* THE TWO STEPS THAT HOST A WHOLE REAL TAB GET A FIXED HEIGHT, NOT A CAP.
+/* THE STEP THAT HOSTS TWO WHOLE REAL TABS PINS TO THE CEILING.
 
    Founder, on the channel step: *"if I press 'no computer needed' the card
    becomes small — it's good. And if I press 'needs a computer' it instantly
-   becomes larger."* The two-tier filter swings the grid between 4 cards and
-   21, and under `max-height` the dialog tracked that — so a control whose
-   only job is to FILTER A LIST was resizing the window around it. Fixing
-   the height moves that change into the body's own scroll, where it
-   belongs, and removes the identical jump between step 3 and step 4 for
-   free. Deliberately not a transition: animating a dialog's own height on
-   every filter press is motion on something the person did not ask to
-   move, and the motion rule is "on state change only, never decorative".
+   becomes larger."* The two-tier filter swings that grid between 4 cards and
+   21, and under a bare cap the dialog tracked it — so a control whose only
+   job is to FILTER A LIST was resizing the window around it.
 
-   520px is measured, not picked. The two embedded steps' natural heights
-   run 433px (the DEFAULT channel view — 4 hardware-free cards, the one the
-   founder called good) to 1063px (all 25), and anything above ~760 has to
-   scroll on a laptop whatever we do. Pinning at the top of that range left
-   327px of void under four cards; pinning near the bottom of it gives the
-   default view ~85px of breathing room and lets the long lists scroll,
-   which is what a filterable grid should do inside a fixed frame. */
+   This is NOT a second frame: it raises the FLOOR to the ceiling the frame
+   already has, so the surface stops growing and shrinking under a filter and
+   the change happens in the body's own scroll instead. Reach genuinely has
+   more content than fits at any size (two full tabs), so its floor and its
+   ceiling are the same number and the size is simply stable.
+
+   Deliberately not a transition: animating a dialog's own height on every
+   filter press is motion on something the person did not ask to move, and
+   the motion rule is "on state change only, never decorative". */
 .agent-create-surface--embed {
-  height: min(84vh, 520px);
+  min-height: min(88vh, 720px);
 }
 .agent-create-surface.is-closing {
   animation: fleet-modal-in var(--dur-2) var(--ease-in) reverse forwards;
@@ -158,6 +177,10 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  /* Pinned. A long body may never squeeze the chrome the person navigates
+     by — the frame's whole promise is that the head and the footer are
+     where the eye left them on every step. */
+  flex-shrink: 0;
   /* No bottom rule. The title and the stepper under it are ONE group — the
      card is telling you what this is and where you are in it — so they are
      held together by 12px of space, not divided by a line. */
@@ -200,6 +223,7 @@
   align-items: center;
   gap: var(--space-4);
   margin: 0;
+  flex-shrink: 0;
   /* On the CARD'S OWN surface, not a tinted band, and with no rule under it.
      A band plus a rule made this a toolbar bolted to the top of a dialog
      instead of the dialog's own second line — the founder's "steps ... not
@@ -491,6 +515,84 @@
   box-shadow: 0 0 0 3px var(--accent-ring);
 }
 
+/* ── Choice cards: placement, and who pays ────────────────────────────────
+   These are the two questions that carry a CONSEQUENCE rather than a value,
+   so they are not `<select>`s. The same reasoning channel-doors.ts already
+   records for a channel's doors: *"a door's consequence is stated on its
+   face, before it is chosen, or the picker has not earned its place."*
+   "Cloud only" and "Paired computer" differ in what the agent can DO; a
+   collapsed dropdown showing one of them hides the other's cost until after
+   it has been picked.
+
+   Stacked, never a grid: at 520px two of these side by side gives each ~230px,
+   which wraps the second line of every one of them. Each card is dense inside
+   (2px between its two lines) and the stack is airy between (--space-2) —
+   craft doctrine, at the smallest scale it applies at.
+
+   Selection is a BORDER, not a fill. The surface's one accent fill belongs to
+   the forward button; a filled selected card beside it is the two-accent bug
+   this file has already been corrected for once. */
+.agent-create-options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.agent-create-option {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+  font-family: inherit;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  cursor: pointer;
+}
+.agent-create-option:hover { border-color: var(--border-strong); }
+.agent-create-option.is-selected {
+  border-color: var(--accent);
+  background: var(--bg-card);
+}
+
+.agent-create-option-label {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+  line-height: 1.35;
+}
+.agent-create-option-body {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
+/* ── Machine lists, and the one-line notes beside them ────────────────────
+   A note here is always a FACT ("no computers paired yet", "using the key
+   you already saved"), never an instruction and never more than a line —
+   the founder's standing objection to a setup surface that explains itself
+   instead of doing the work. */
+.agent-create-nodes {
+  margin-top: var(--space-3);
+}
+
+.agent-create-node-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.agent-create-note {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
 /* ── Foot ─────────────────────────────────────────────────────────────────
    THE LAST RULE IN THE CARD, and it is now drawn ONLY where a rule is doing a
    rule's job. The founder's instruction was "remove any horizontal rule that
@@ -517,6 +619,7 @@
   gap: var(--space-2);
   padding: var(--space-3) var(--space-5);
   border-top: 1px solid transparent;
+  flex-shrink: 0;
 }
 .agent-create-surface--embed .agent-create-foot {
   border-top-color: var(--border);
@@ -574,6 +677,7 @@
 
 .agent-create-error {
   margin: 0;
+  flex-shrink: 0;
   padding: 0 var(--space-5) var(--space-3);
   font-size: var(--text-xs);
   color: var(--offline-text);

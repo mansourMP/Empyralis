@@ -1,118 +1,120 @@
 "use client";
 
 /**
- * THE AGENT-CREATION SURFACE — a real, sequential setup flow.
- *
- * ── Two founder corrections landed on this file in one day ───────────────
- *
- * FIRST, the SHELL. He opened the previous version and asked: *"why the
- * fuck does it look like fucking document creation or issue creation?"* The
- * cause was literal rather than aesthetic — this card was built on
- * `.fleet-composer-*`, the SAME shell TaskComposer.tsx and
- * DocumentComposer.tsx render, so filing a ticket, writing a document and
- * making an agent all opened one grey sheet of paper. It now has its own
- * shell (agent-create-surface.css), which documents the inversion of every
- * composer choice.
- *
- * SECOND, and bigger, the SHAPE. Everything the deleted FleetCreateAgentWizard
- * used to ask had become a row of optional buttons on the agent's page
- * afterwards. He rejected that, twice:
- *
- *   *"it acts like a button, not step-by-step... if you want press this
- *    button and set up your hardware, if you want this if you want that —
- *    I don't want to have that."*
- *
- * A menu of optional links is not setup. So the sequence is back — "as
- * before", his words — with the one deletion he had already made separately:
- * NO project or placement step, because an agent belongs to the WORKSPACE
- * now (CLAUDE.md, 2026-08-20). The step rules live in agent-create-wizard.ts,
- * pure and tested; this file renders them.
+ * THE AGENT-CREATION SURFACE — a real, sequential setup flow, in THREE steps.
  *
  * ```
- *  1 Identity   name + optional instructions      nothing committed
- *  2 Model      the live catalog                  nothing committed
- *      └── "Create agent" ──▶ ONE atomic POST carrying all three
- *  3 Channel    the REAL ChannelsTab              the agent is real from here
- *  4 Apps       the REAL ConnectorsTab
- *      └── "Finish" ──▶ into the agent
+ *  1 Identity & placement   name · what it does · where it runs
+ *  2 Brain                  who pays ▸ provider ▸ model
+ *      └── "Create agent" ──▶ the agent becomes real here
+ *  3 Reach                  channels AND apps, one screen, both optional
+ *      └── "Finish" / "Skip for now" ──▶ into the agent
  * ```
  *
- * ── Why the commit sits after step 2 and not step 1 ──────────────────────
- * The OLD wizard created the agent at the end of its first screen and
- * PATCHed everything after, which made the model a thing that could
- * half-apply — the create-then-separate-step shape CLAUDE.md's
- * outcome-honesty law names directly. Identity and model now go in ONE
- * request (`model_choice`, see agent-quick-create.ts), so no agent can exist
- * wearing a model nobody picked. Steps 3 and 4 genuinely cannot precede the
- * commit — a channel binds to an agent id, a connector authorizes against
- * one — so they sit after it and the surface stops pretending otherwise:
- * the title becomes the agent's own name, Back disappears, and closing goes
- * INTO the agent instead of discarding.
+ * The step RULES live in agent-create-wizard.ts / agent-create-placement.ts /
+ * agent-create-brain.ts — pure and tested. This file renders them.
  *
- * ── Steps 3 and 4 are the REAL tabs, not simplified copies ───────────────
+ * ── What the previous version had lost, measured rather than recalled ────
+ * The shipped card asked for a name, an optional prompt and ONE model
+ * `<select>`. Grepping it for `platform_credits|byok|cli_subscription`
+ * returned zero: the entire "who pays for this model" question was gone, and
+ * so were placement and hardware. Those are back, in the order that makes
+ * them honest — placement FIRST, because "Your subscription" and "Run
+ * locally" both route the brain through a Gateway on a real machine, and
+ * offering them to a cloud-only agent is a control that cannot be completed.
+ *
+ * ── AND WHAT IT MUST NOT BRING BACK: the project question ────────────────
+ * The deleted FleetCreateAgentWizard's Placement step carried a "Which
+ * project?" `<select>`. An agent belongs to the WORKSPACE (CLAUDE.md,
+ * 2026-08-20), so that field does not return. `currentProjectId` is still
+ * resolved silently to satisfy a required backend field, and is never
+ * rendered and never a choice.
+ *
+ * ── THE COMMIT, and the one place two facts could collapse into one ──────
+ *
+ * ```
+ * "Create agent"
+ *   1  byok with a pasted key ─▶ POST vault credential + provider profile
+ *                                BEFORE anything exists. A failure here has
+ *                                nothing to explain away: no agent yet.
+ *   2  POST /fleet/agents        name · instructions · project · model_choice
+ *                                ─▶ THE AGENT IS REAL FROM THIS LINE ON
+ *   3  PATCH  (only when needed) placement columns, and/or the machine-bound
+ *                                model_config the 3-key create path cannot
+ *                                carry (gateway_binding + runtime + a
+ *                                real-box check that lives in
+ *                                fleet_configure_agent and is REUSED, never
+ *                                copied into a thinner second validator)
+ * ```
+ *
+ * Step 3 is a step that can independently fail after a commit — the exact
+ * shape CLAUDE.md names as a recurring defect — so the obligation it carries
+ * is exact and is honoured in `create()` below: a failure there is reported
+ * as ITS OWN fact ("<Name> was created, but …"), the sequence CONTINUES into
+ * Reach because the agent genuinely exists, and it is never reported as
+ * "couldn't create the agent". A cloud-placed platform/byok agent — the
+ * overwhelmingly common path — skips step 3 entirely and is one atomic POST,
+ * exactly as before.
+ *
+ * ── Step 3 is the REAL tabs, not simplified copies ───────────────────────
  * ChannelsTab and ConnectorsTab are imported from FleetAgentDetail. A second,
  * creation-only channel picker would be a fifth copy of a channel list in a
  * codebase that has already shipped four and drifted on all four.
  *
- * ── THREE CORRECTIONS FROM THE FOUNDER'S REVIEW OF THE LIVE VERSION ──────
+ * ── Corrections from earlier reviews that still stand ────────────────────
  *
  * ```
- * X CREATED AN AGENT       he pressed the head's X on step 3 and found an
- *                          agent named Zephyr afterwards. The X is gone from
- *                          the moment the commit lands; the control becomes
- *                          "Finish later", which is what it actually does.
- *                          Nothing labelled cancel survives the commit.
- * CHANNEL WAS SKIPPABLE    *"channels cannot be skipped, because it's
- *                          something agents are going to speak."* Forward is
- *                          blocked until one connects; deferring is still a
- *                          real exit, it just is not called finishing.
- * "TOOLS" WAS THE WRONG    step 4 embeds ConnectorsTab while Configure has a
- * WORD, AND IT COLLIDED    separate, different "Tools" section. It is Apps.
+ * X CREATED AN AGENT       the head's X is gone from the moment the commit
+ *                          lands; the control becomes "Finish later", which
+ *                          is what it does. Nothing labelled cancel survives
+ *                          the commit.
+ * "TOOLS" WAS THE WRONG    Configure has a separate, genuinely different
+ * WORD                     "Tools" section. The connector picker is Apps.
+ * A MODAL IS PORTALLED     `position: fixed` does not save an element whose
+ *                          ANCESTOR is `display: none` — the agents page's
+ *                          own responsive split pane hid this surface
+ *                          entirely at 375px. It renders into document.body.
+ * THE PURPLE               at most ONE accent-filled element is on screen:
+ *                          the forward button, and only when it can be
+ *                          pressed (`forward.accent`).
  * ```
- *
- * ── A MODAL IS PORTALLED, OR A LAYOUT PANE CAN SWALLOW IT ────────────────
- * Found at 375px while verifying the above, and it was total: pressing
- * "+ New agent" on a phone appeared to do nothing at all.
- *
- * ```
- * DIV.agent-create-surface        w=0 h=0
- * DIV.agent-create-backdrop       w=0 h=0     position:fixed, and STILL 0
- * MAIN.fleet-content              w=0 h=0
- * DIV.fleet-agents-detail-pane    display:NONE   ← the agents split pane
- * DIV.fleet-content--split        w=375 h=764       hides its detail half
- * ```
- *
- * `position: fixed` does not save an element whose ANCESTOR is
- * `display: none` — the subtree is not laid out at all. This surface was
- * rendered as an ordinary child of whatever page opened it, so the agents
- * page's own responsive split decided whether the product's front door was
- * on screen. It renders into `document.body` now, which is what "modal"
- * has to mean: owned by the page, not by a pane inside it.
- *
- * ── THE PURPLE ───────────────────────────────────────────────────────────
- * One view used to carry three accent-bearing elements at once — the step
- * number, the identity glyph tile, and the filled button — plus whatever the
- * embedded tab drew. The step numbers and the glyph are neutral now
- * (agent-create-surface.css), and the fill is spent only on a forward button
- * that can actually be pressed (`forward.accent`, agent-create-wizard.ts).
- * At most ONE accent-filled element is on screen at a time.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Bot, Check, X } from "lucide-react";
 
+import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
+import { getErrorMessage } from "@/lib/ui/api-error";
 import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
 
 import { composerSubmitButtonClass } from "./create-accent";
 import { resolveAgentCreateName } from "./agent-create-card";
 import {
-  agentCreateModelChoicePayload,
   findAgentCreateModelChoice,
   groupAgentCreateModelChoices,
   resolveAgentCreateModelId,
 } from "./agent-create-model";
 import { useAgentCreateModelCatalog } from "./agent-create-model-catalog";
+import {
+  AGENT_CREATE_BRAIN_OPTIONS,
+  AGENT_CREATE_DEFAULT_BRAIN_MODE,
+  agentCreateBrainOptionsFor,
+  agentCreateBrainPlacementNote,
+  planAgentCreateBrain,
+  type AgentCreateBrainMode,
+} from "./agent-create-brain";
+import {
+  AGENT_CREATE_DEFAULT_PLACEMENT,
+  AGENT_CREATE_PLACEMENTS,
+  hardwareNodeId,
+  hardwareNodeLabel,
+  hardwareNodeOnline,
+  nodesForPlacement,
+  planAgentCreatePlacement,
+  type AgentCreatePlacement,
+  type HardwareNodeLike,
+} from "./agent-create-placement";
 import {
   AGENT_CREATE_STEPS,
   agentCreateCloseIntent,
@@ -125,7 +127,22 @@ import {
 } from "./agent-create-wizard";
 import { createAgentQuickly } from "./agent-quick-create";
 import { ChannelsTab, ConnectorsTab, isChannelConnected } from "./FleetAgentDetail";
+import {
+  BYOK_PROVIDERS,
+  FREEFORM_MODEL_PROVIDERS,
+  LOCAL_PROVIDERS,
+  SUBSCRIPTION_PROVIDERS,
+  defaultModelForProvider,
+  modelsForProvider,
+  normalizeCliRuntime,
+  providerLabel,
+  runtimeForProvider,
+} from "./fleet-provider-constants";
+import { useCodexModelCatalog, visibleCodexModels } from "./fleet-model-config";
 import { useFleetAgentChannels, type FleetAgent, type FleetProject } from "./fleet-data";
+import { CloudVpsSetupPanel } from "@/lib/workspace/cloud-vps-setup-panel";
+import { SshServerConnectPanel } from "@/lib/workspace/ssh-server-connect-panel";
+import { GatewayPairPanel, type GatewayRegistrationRecord } from "@/lib/gateway/GatewayPairPanel";
 
 import "./agent-create-surface.css";
 
@@ -135,6 +152,44 @@ function exitDurationMs(): number {
   const raw = styles.getPropertyValue("--dur-2").trim();
   const ms = raw.endsWith("ms") ? parseFloat(raw) : parseFloat(raw) * 1000;
   return Number.isFinite(ms) && ms > 0 ? ms : 150;
+}
+
+/** The workspace's paired machines, from the SAME
+ *  `/api/gateway/registrations` endpoint the Hardware page reads. Local and
+ *  self-contained rather than gateway-box-picker's own hook because this
+ *  needs `hardware_kind`, which that hook's type does not model — the same
+ *  reason the deleted wizard had its own copy. */
+function useWorkspaceHardwareNodes(workspaceId: string) {
+  const [nodes, setNodes] = useState<HardwareNodeLike[]>([]);
+  // "have we been told yet" — NOT "are there none". The two are different
+  // facts and the placement plan refuses to state the second while the first
+  // is true (agent-create-placement.ts).
+  const [known, setKnown] = useState(false);
+
+  const refresh = useCallback(async (): Promise<HardwareNodeLike[]> => {
+    try {
+      const res = await fleetAuthorizedFetch(
+        `/api/gateway/registrations?workspace_id=${encodeURIComponent(workspaceId)}`,
+        { credentials: "include" },
+      );
+      const data = res.ok ? await res.json().catch(() => ({})) : {};
+      const list = data?.items || data?.registrations || (Array.isArray(data) ? data : []);
+      const arr: HardwareNodeLike[] = Array.isArray(list) ? list : [];
+      setNodes(arr);
+      return arr;
+    } catch {
+      setNodes([]);
+      return [];
+    } finally {
+      setKnown(true);
+    }
+  }, [workspaceId]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  return { nodes, known, refresh };
 }
 
 export function AgentCreateCard({
@@ -160,38 +215,149 @@ export function AgentCreateCard({
   const [typedName, setTypedName] = useState("");
   const [suggestedName, setSuggestedName] = useState("");
   const [instructions, setInstructions] = useState("");
-  const [requestedModelId, setRequestedModelId] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [closing, setClosing] = useState(false);
+
+  // ── Step 1: placement ───────────────────────────────────────────────────
+  const [placement, setPlacement] = useState<AgentCreatePlacement>(AGENT_CREATE_DEFAULT_PLACEMENT);
+  const [nodeId, setNodeId] = useState("");
+  const { nodes, known: nodesKnown, refresh: refreshNodes } = useWorkspaceHardwareNodes(workspaceId);
+  const [vpsPanelOpen, setVpsPanelOpen] = useState(false);
+  const [sshPanelOpen, setSshPanelOpen] = useState(false);
+  const [pairPanelOpen, setPairPanelOpen] = useState(false);
+  const placementNodes = useMemo(() => nodesForPlacement(placement, nodes), [placement, nodes]);
+
+  // ── Step 2: brain ───────────────────────────────────────────────────────
+  const [brainMode, setBrainMode] = useState<AgentCreateBrainMode>(AGENT_CREATE_DEFAULT_BRAIN_MODE);
+  const [platformModelId, setPlatformModelId] = useState("");
+  const [byokProvider, setByokProvider] = useState(BYOK_PROVIDERS[0]?.id || "anthropic");
+  const [byokModel, setByokModel] = useState("");
+  const [byokKey, setByokKey] = useState("");
+  const [subscriptionProvider, setSubscriptionProvider] = useState(
+    SUBSCRIPTION_PROVIDERS[0]?.id || "claude_code_cli",
+  );
+  const [subscriptionModel, setSubscriptionModel] = useState("");
+  const [localProvider, setLocalProvider] = useState(LOCAL_PROVIDERS[0]?.id || "ollama");
+  const [localModel, setLocalModel] = useState("");
 
   const [created, setCreated] = useState<{ agentId: string; projectId: string } | null>(null);
   const [createdAgent, setCreatedAgent] = useState<FleetAgent | null>(null);
 
   const nameRef = useRef<HTMLInputElement | null>(null);
   const closeTimer = useRef<number | null>(null);
+  // A vault credential a PRIOR attempt already created, when a LATER part of
+  // the same commit then failed. Without it, pressing "Create agent" again
+  // mints a SECOND encrypted key for the same value with nothing referencing
+  // the first. Cleared the moment the profile that references it succeeds.
+  const pendingCredentialId = useRef<string | null>(null);
 
   const name = resolveAgentCreateName(typedName, suggestedName);
 
-  // The picker opens fully usable on the first frame (the platform tiers are
-  // synchronous constants) and folds in any credentialed provider's own live
-  // models when they arrive — never a spinner in front of a control that
-  // already works. See agent-create-model-catalog.ts.
+  // The platform/BYOK picker opens fully usable on the first frame (the
+  // platform tiers are synchronous constants) and folds in any credentialed
+  // provider's own live models when they arrive — never a spinner in front
+  // of a control that already works. See agent-create-model-catalog.ts.
   const { choices } = useAgentCreateModelCatalog(workspaceId);
-  const selectedModelId = resolveAgentCreateModelId(choices, requestedModelId);
-  const selectedChoice = findAgentCreateModelChoice(choices, selectedModelId);
-  const modelGroups = useMemo(() => groupAgentCreateModelChoices(choices), [choices]);
+  const platformChoices = useMemo(() => choices.filter((c) => c.mode === "platform_credits"), [choices]);
+  const byokChoices = useMemo(() => choices.filter((c) => c.mode === "byok_api"), [choices]);
+  const selectedPlatformId = resolveAgentCreateModelId(platformChoices, platformModelId);
+  const selectedPlatformChoice = findAgentCreateModelChoice(platformChoices, selectedPlatformId);
+  const platformGroups = useMemo(
+    () => groupAgentCreateModelChoices(platformChoices),
+    [platformChoices],
+  );
 
-  // Only asked for once the Channel step is actually open — a creation
-  // sequence must not poll an agent's channels through two screens that do
-  // not show them.
+  // Which BYOK providers this workspace already holds a usable credential
+  // for — the live sweep's own answer, never a guess. A provider absent from
+  // it needs its key pasted here, and its model list falls back to the
+  // static per-provider catalog, which is EXACTLY what the server validates
+  // the pick against (provider_profiles.model_is_known_for_provider).
+  const credentialedProviders = useMemo(
+    () => new Set(byokChoices.map((c) => c.provider)),
+    [byokChoices],
+  );
+  const byokProviderHasCredential = credentialedProviders.has(byokProvider);
+  const liveByokModels = useMemo(
+    () => byokChoices.filter((c) => c.provider === byokProvider).map((c) => c.model),
+    [byokChoices, byokProvider],
+  );
+  const byokModelOptions = byokProviderHasCredential && liveByokModels.length > 0
+    ? liveByokModels
+    : modelsForProvider(byokProvider);
+
+  // The picked computer's OWN Codex model list — the live catalog, not the
+  // hand-typed mirror (which already carries ids OpenAI has retired).
+  const codexCatalog = useCodexModelCatalog(
+    workspaceId,
+    nodeId,
+    normalizeCliRuntime(runtimeForProvider(subscriptionProvider)),
+  );
+  const liveCodexModels = subscriptionProvider === "openai-codex" ? visibleCodexModels(codexCatalog) : null;
+
+  // Keep each mode's model in step with its own provider, and never across
+  // modes — a BYOK model id is not a subscription model id.
+  useEffect(() => {
+    setByokModel(FREEFORM_MODEL_PROVIDERS.has(byokProvider) ? "" : defaultModelForProvider(byokProvider));
+  }, [byokProvider]);
+  useEffect(() => {
+    setSubscriptionModel(
+      FREEFORM_MODEL_PROVIDERS.has(subscriptionProvider) ? "" : defaultModelForProvider(subscriptionProvider),
+    );
+  }, [subscriptionProvider]);
+  useEffect(() => {
+    setLocalModel(defaultModelForProvider(localProvider || "ollama"));
+  }, [localProvider]);
+  useEffect(() => {
+    if (!liveCodexModels || liveCodexModels.length === 0) return;
+    if (liveCodexModels.some((m) => m.id === subscriptionModel)) return;
+    setSubscriptionModel(liveCodexModels.find((m) => m.isDefault)?.id || liveCodexModels[0].id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveCodexModels]);
+
+  const placementPlan = planAgentCreatePlacement({
+    placement,
+    nodeId,
+    nodesKnown,
+    availableNodeCount: placementNodes.length,
+  });
+
+  const activeProvider =
+    brainMode === "platform"
+      ? selectedPlatformChoice?.provider || ""
+      : brainMode === "byok"
+        ? byokProvider
+        : brainMode === "subscription"
+          ? subscriptionProvider
+          : localProvider;
+  const activeModel =
+    brainMode === "platform"
+      ? selectedPlatformChoice?.model || ""
+      : brainMode === "byok"
+        ? byokModel
+        : brainMode === "subscription"
+          ? subscriptionModel
+          : localModel;
+
+  const brainPlan = planAgentCreateBrain({
+    placement,
+    mode: brainMode,
+    provider: activeProvider,
+    model: activeModel,
+    apiKey: byokKey,
+    providerHasCredential: byokProviderHasCredential,
+    nodeId,
+  });
+
+  // Only asked for once Reach is actually open — a creation sequence must
+  // not poll an agent's channels through two screens that do not show them.
   const {
     channels,
     slackChannelBinding,
     telegramBotConnected,
     loading: channelsLoading,
     refresh: refreshChannels,
-  } = useFleetAgentChannels(workspaceId, step === "channel" && created ? created.agentId : null);
+  } = useFleetAgentChannels(workspaceId, step === "reach" && created ? created.agentId : null);
   const connectedChannelCount = channels.filter((c) =>
     isChannelConnected(c, slackChannelBinding, telegramBotConnected),
   ).length;
@@ -201,9 +367,11 @@ export function AgentCreateCard({
     created: Boolean(created),
     busy,
     hasName: name.trim().length > 0,
-    // `loading` is the honest "we have not been told yet" — see
-    // agent-create-wizard.ts for why that may not read as "nothing
-    // connected".
+    placementReady: placementPlan.ready,
+    placementBlockedReason: placementPlan.blockedReason,
+    brainReady: brainPlan.ready,
+    brainBlockedReason: brainPlan.blockedReason,
+    // `loading` is the honest "we have not been told yet".
     channelsKnown: Boolean(created) && !channelsLoading,
     connectedChannelCount,
   });
@@ -212,7 +380,9 @@ export function AgentCreateCard({
   // the field opens pre-filled rather than blank.
   useEffect(() => {
     let cancelled = false;
-    fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/suggested-name`, { credentials: "include" })
+    fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/suggested-name`, {
+      credentials: "include",
+    })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (cancelled || !d?.name) return;
@@ -222,7 +392,6 @@ export function AgentCreateCard({
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
 
   useEffect(() => {
@@ -276,28 +445,140 @@ export function AgentCreateCard({
     [workspaceId],
   );
 
+  /** Saves the pasted key as a vault credential + an enabled provider
+   *  profile. Runs BEFORE the agent is created, so a failure here leaves
+   *  nothing behind to explain. Idempotent across retries via
+   *  pendingCredentialId. */
+  const saveApiKey = useCallback(async () => {
+    const label = `${providerLabel(byokProvider)} — ${name.trim() || "agent"}`;
+    let credentialId = pendingCredentialId.current;
+    if (!credentialId) {
+      const res = await fleetAuthorizedFetch("/api/credentials/vault", {
+        method: "POST",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          workspace_id: workspaceId,
+          provider: byokProvider,
+          label,
+          mode: "byok",
+          credentials: { api_key: byokKey.trim() },
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(getErrorMessage(data, `Could not save your API key (HTTP ${res.status})`));
+      credentialId = String(data?.id || "");
+      pendingCredentialId.current = credentialId;
+    }
+    const profileRes = await fleetAuthorizedFetch("/api/providers/profiles", {
+      method: "POST",
+      credentials: "include",
+      headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        workspace_id: workspaceId,
+        provider: byokProvider,
+        label,
+        credential_id: credentialId,
+        enabled: true,
+      }),
+    });
+    if (!profileRes.ok) {
+      const data = await profileRes.json().catch(() => ({}));
+      // The key IS saved — say so, rather than a flat failure that implies
+      // nothing happened and invites a retry that mints a second one.
+      throw new Error(
+        `Your API key was saved, but couldn't be assigned yet: ${getErrorMessage(data, `HTTP ${profileRes.status}`)}`,
+      );
+    }
+    pendingCredentialId.current = null;
+  }, [byokKey, byokProvider, name, workspaceId]);
+
   const create = useCallback(async () => {
-    if (busy || created || name.trim().length === 0) return;
+    if (busy || created || !brainPlan.ready) return;
     setBusy(true);
     setError(null);
+
+    // ── Before anything exists ──────────────────────────────────────────
+    if (brainPlan.savesApiKey) {
+      try {
+        await saveApiKey();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Could not save your API key.");
+        setBusy(false);
+        return;
+      }
+    }
+
+    // ── The commit ──────────────────────────────────────────────────────
+    let result: { agentId: string; projectId: string };
     try {
-      const result = await createAgentQuickly(
+      result = await createAgentQuickly(
         workspaceId,
         currentProjectId,
         projects,
         name.trim(),
         instructions.trim(),
-        agentCreateModelChoicePayload(selectedChoice),
+        brainPlan.modelChoice,
       );
-      setCreated(result);
-      void hydrateCreatedAgent(result.agentId);
-      setStep("channel");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not create the agent.");
-    } finally {
       setBusy(false);
+      return;
     }
-  }, [busy, created, currentProjectId, hydrateCreatedAgent, instructions, name, projects, selectedChoice, workspaceId]);
+
+    // ── After it. THE AGENT EXISTS from here on, whatever happens next ──
+    // Any failure below is reported as its own fact and the sequence
+    // continues — never as "couldn't create the agent", which would be the
+    // outcome-honesty law broken on the product's first screen.
+    setCreated(result);
+    const patch: Record<string, unknown> = { ...(placementPlan.patch || {}) };
+    if (brainPlan.modelConfigPatch) patch.model_config = brainPlan.modelConfigPatch;
+    if (Object.keys(patch).length > 0) {
+      try {
+        const res = await fleetAuthorizedFetch(
+          `/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(result.agentId)}`,
+          {
+            method: "PATCH",
+            credentials: "include",
+            headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
+            body: JSON.stringify({ patch }),
+          },
+        );
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
+      } catch (e) {
+        const detail = e instanceof Error ? e.message : "";
+        const what = brainPlan.modelConfigPatch
+          ? placementPlan.patch
+            ? "where it runs and what runs it"
+            : "what runs it"
+          : "where it runs";
+        setError(
+          `${name.trim() || "The agent"} was created, but ${what} couldn't be saved — set it in Configure.` +
+            (detail ? ` (${detail})` : ""),
+        );
+      }
+    }
+
+    void hydrateCreatedAgent(result.agentId);
+    setStep("reach");
+    setBusy(false);
+  }, [
+    brainPlan.modelChoice,
+    brainPlan.modelConfigPatch,
+    brainPlan.ready,
+    brainPlan.savesApiKey,
+    busy,
+    created,
+    currentProjectId,
+    hydrateCreatedAgent,
+    instructions,
+    name,
+    placementPlan.patch,
+    projects,
+    saveApiKey,
+    workspaceId,
+  ]);
 
   const goForward = useCallback(() => {
     if (footer.forward.disabled) return;
@@ -323,12 +604,78 @@ export function AgentCreateCard({
     if (prev) setStep(prev);
   }, [footer.back, requestClose, step]);
 
-  /** Steps 3 and 4 host a full tab whose own height swings widely. */
-  const embedsFullTab = step === "channel" || step === "apps";
+  /** Picking a machine anywhere — the list, a fresh VPS, a just-paired
+   *  computer — goes through here, so no path can select a node without the
+   *  brain step's binding following it. */
+  const selectNode = useCallback((id: string) => {
+    setNodeId(id);
+  }, []);
+
+  const adoptNewestNode = useCallback(
+    async (kind: "cloud_vps" | "gateway") => {
+      const before = new Set(nodes.map(hardwareNodeId));
+      const after = await refreshNodes();
+      const added = after.find(
+        (n) =>
+          !before.has(hardwareNodeId(n)) &&
+          (kind === "cloud_vps"
+            ? String(n.hardware_kind || "") === "cloud_vps"
+            : String(n.hardware_kind || "") !== "cloud_vps"),
+      );
+      if (added) selectNode(hardwareNodeId(added));
+    },
+    [nodes, refreshNodes, selectNode],
+  );
+
+  const handleGatewayPaired = useCallback(
+    (g: GatewayRegistrationRecord) => {
+      setPairPanelOpen(false);
+      selectNode(String(g.gateway_id || ""));
+      void refreshNodes();
+    },
+    [refreshNodes, selectNode],
+  );
+
+  /** Reach hosts two whole real tabs, whose combined height swings widely. */
+  const embedsFullTab = step === "reach";
 
   const agentHref = created
     ? `/w/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(created.projectId)}/agents/${encodeURIComponent(created.agentId)}/hardware`
     : undefined;
+
+  const brainOptions = agentCreateBrainOptionsFor(placement);
+  const placementNote = agentCreateBrainPlacementNote(placement);
+
+  const nodeList = (emptyLabel: string, addControls: React.ReactNode) => (
+    <div className="agent-create-nodes">
+      {!nodesKnown ? (
+        <p className="agent-create-note" aria-busy="true">
+          Looking for your machines…
+        </p>
+      ) : placementNodes.length === 0 ? (
+        <p className="agent-create-note">{emptyLabel}</p>
+      ) : (
+        <div className="agent-create-options">
+          {placementNodes.map((n) => {
+            const id = hardwareNodeId(n);
+            return (
+              <button
+                key={id}
+                type="button"
+                className={`agent-create-option${nodeId === id ? " is-selected" : ""}`}
+                onClick={() => selectNode(id)}
+                aria-pressed={nodeId === id}
+              >
+                <span className="agent-create-option-label">{hardwareNodeLabel(n)}</span>
+                <span className="agent-create-option-body">{hardwareNodeOnline(n) ? "Online" : "Offline"}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+      <div className="agent-create-node-actions">{addControls}</div>
+    </div>
+  );
 
   const surface = (
     <div
@@ -344,15 +691,15 @@ export function AgentCreateCard({
         }
       }}
     >
-      {/* `--embed` pins the height on the two steps that host a whole real
-          tab. Founder, on the channel step: *"if I press 'no computer
-          needed' the card becomes small — it's good. And if I press 'needs
-          a computer' it instantly becomes larger."* The grid goes from 4
-          cards to 21 between filters, and a max-height lets the dialog
-          track that — so the surface jumped size under a control that was
-          only meant to filter a list. A fixed height means the CONTENT
-          scrolls and the dialog does not move at all; it also removes the
-          same jump between step 3 and step 4. */}
+      {/* ONE FRAME, EVERY STEP. The founder: *"it stays the same size almost
+          — it has a smallest size which you cannot make it smaller, and a
+          biggest size you cannot make it bigger, even though it's a longer
+          page."* A floor stops a two-control step collapsing into a stub; a
+          ceiling stops the whole dialog tracking a filter that swings a grid
+          between 4 cards and 25. Head and footer are pinned; the BODY is the
+          only thing that scrolls. `--embed` only raises the floor to the
+          ceiling for the step that hosts two whole tabs — the frame is the
+          same object, never a second layout. */}
       <div
         className={`agent-create-surface${embedsFullTab ? " agent-create-surface--embed" : ""}${closing ? " is-closing" : ""}`}
         role="dialog"
@@ -365,12 +712,10 @@ export function AgentCreateCard({
             {agentCreateSurfaceTitle(Boolean(created), name)}
           </h2>
           {/* An X is a cancel gesture, and there is nothing left to cancel
-              once the commit has landed two screens back — pressing it used
-              to leave a real, silently created agent behind. So the control
-              itself changes with the fact: the icon while nothing exists,
-              a named exit afterwards. The rule is in agent-create-wizard.ts
-              beside `agentCreateCloseIntent`, so the label and the behaviour
-              cannot drift apart. */}
+              once the commit has landed — pressing it used to leave a real,
+              silently created agent behind. So the control itself changes
+              with the fact. The rule is in agent-create-wizard.ts beside
+              `agentCreateCloseIntent`, so label and behaviour cannot drift. */}
           {footer.dismiss.kind === "cancel" ? (
             <button
               type="button"
@@ -413,17 +758,7 @@ export function AgentCreateCard({
               {/* The mark and the name are ONE CONTROL — this is the thing
                   being made, not a title field on a form. Deliberately NOT a
                   preview of the agent's real sigil: AgentSigil hashes the
-                  agent's id, which does not exist yet, so anything drawn
-                  from the typed name would not be the mark this agent ends
-                  up wearing.
-
-                  The glyph used to be a separate 40px bordered tile beside
-                  the field, centred against a two-line [input + caption]
-                  stack — which put it 9px below the name it belonged to
-                  (measured). Inside the control it cannot drift at all, and
-                  the card loses a border it did not need. Same word, same
-                  <label for>, same field: only the geometry moved, and the
-                  label now sits above like Instructions' and Model's do. */}
+                  agent's id, which does not exist yet. */}
               <div className="agent-create-identity">
                 <label className="agent-create-label" htmlFor="agent-create-name">Name</label>
                 <div className="agent-create-name-field">
@@ -451,61 +786,273 @@ export function AgentCreateCard({
 
               <div className="agent-create-group">
                 <label className="agent-create-label" htmlFor="agent-create-instructions">
-                  Instructions (optional)
+                  What this agent does
                 </label>
                 <textarea
                   id="agent-create-instructions"
                   className="agent-create-input"
                   value={instructions}
-                  rows={4}
-                  placeholder="What should this agent do?"
+                  rows={3}
+                  placeholder="Optional. Editable anytime from Configure."
                   onChange={(e) => setInstructions(e.currentTarget.value)}
                 />
+              </div>
+
+              <div className="agent-create-group">
+                <span className="agent-create-label">Where it runs</span>
+                <div className="agent-create-options">
+                  {AGENT_CREATE_PLACEMENTS.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      className={`agent-create-option${placement === p.id ? " is-selected" : ""}`}
+                      aria-pressed={placement === p.id}
+                      onClick={() => {
+                        setPlacement(p.id);
+                        if (p.id === "cloud") setNodeId("");
+                      }}
+                    >
+                      <span className="agent-create-option-label">{p.label}</span>
+                      <span className="agent-create-option-body">{p.body}</span>
+                    </button>
+                  ))}
+                </div>
+
+                {placement === "vps" &&
+                  nodeList(
+                    "No cloud servers connected yet.",
+                    <>
+                      <button type="button" className="fleet-btn" onClick={() => setVpsPanelOpen(true)}>
+                        Start a server
+                      </button>
+                      <button type="button" className="fleet-btn" onClick={() => setSshPanelOpen(true)}>
+                        Connect your own
+                      </button>
+                    </>,
+                  )}
+
+                {placement === "gateway" &&
+                  (pairPanelOpen ? (
+                    <div className="agent-create-nodes">
+                      <GatewayPairPanel workspaceId={workspaceId} compact onPaired={handleGatewayPaired} />
+                    </div>
+                  ) : (
+                    nodeList(
+                      "No computers paired yet.",
+                      <button type="button" className="fleet-btn" onClick={() => setPairPanelOpen(true)}>
+                        Pair this computer
+                      </button>,
+                    )
+                  ))}
               </div>
             </>
           )}
 
-          {step === "model" && (
-            <div className="agent-create-group">
-              <label className="agent-create-label" htmlFor="agent-create-model">Model</label>
-              {/* Options carry what the model actually IS beside what it is
-                  called — a model pick is a spend decision, so the second
-                  half is never hidden behind a tooltip. */}
-              <select
-                id="agent-create-model"
-                className="agent-create-select"
-                value={selectedModelId}
-                onChange={(e) => setRequestedModelId(e.currentTarget.value)}
-              >
-                {modelGroups.map((group) => (
-                  <optgroup key={group.group} label={group.group}>
-                    {group.choices.map((choice) => (
-                      <option key={choice.id} value={choice.id}>
-                        {choice.label === choice.detail ? choice.label : `${choice.label} — ${choice.detail}`}
-                      </option>
+          {step === "brain" && (
+            <>
+              <div className="agent-create-group">
+                <span className="agent-create-label">Who pays for the model</span>
+                <div className="agent-create-options">
+                  {brainOptions.map((o) => (
+                    <button
+                      key={o.id}
+                      type="button"
+                      className={`agent-create-option${brainMode === o.id ? " is-selected" : ""}`}
+                      aria-pressed={brainMode === o.id}
+                      onClick={() => setBrainMode(o.id)}
+                    >
+                      <span className="agent-create-option-label">{o.label}</span>
+                      <span className="agent-create-option-body">{o.body}</span>
+                    </button>
+                  ))}
+                </div>
+                {/* Said ONCE, and only where something is genuinely missing.
+                    agent-create-brain.ts decides; this renders. */}
+                {placementNote ? <p className="agent-create-note">{placementNote}</p> : null}
+              </div>
+
+              {brainMode === "platform" && (
+                <div className="agent-create-group">
+                  <label className="agent-create-label" htmlFor="agent-create-platform-model">Model</label>
+                  {/* Options carry what the model actually IS beside what it
+                      is called — a model pick is a spend decision, so the
+                      second half is never hidden behind a tooltip. */}
+                  <select
+                    id="agent-create-platform-model"
+                    className="agent-create-select"
+                    value={selectedPlatformId}
+                    onChange={(e) => setPlatformModelId(e.currentTarget.value)}
+                  >
+                    {platformGroups.map((group) => (
+                      <optgroup key={group.group} label={group.group}>
+                        {group.choices.map((choice) => (
+                          <option key={choice.id} value={choice.id}>
+                            {choice.label === choice.detail ? choice.label : `${choice.label} — ${choice.detail}`}
+                          </option>
+                        ))}
+                      </optgroup>
                     ))}
-                  </optgroup>
-                ))}
-              </select>
-            </div>
+                  </select>
+                </div>
+              )}
+
+              {brainMode === "byok" && (
+                <>
+                  <div className="agent-create-group">
+                    <label className="agent-create-label" htmlFor="agent-create-byok-provider">Provider</label>
+                    <select
+                      id="agent-create-byok-provider"
+                      className="agent-create-select"
+                      value={byokProvider}
+                      onChange={(e) => setByokProvider(e.currentTarget.value)}
+                    >
+                      {BYOK_PROVIDERS.map((p) => (
+                        <option key={p.id} value={p.id}>{p.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                  {/* No key field once this provider already has one saved —
+                      re-asking for a credential the workspace holds is a
+                      control with nothing to do. */}
+                  {byokProviderHasCredential ? (
+                    <p className="agent-create-note">Using the {providerLabel(byokProvider)} key you already saved.</p>
+                  ) : (
+                    <div className="agent-create-group">
+                      <label className="agent-create-label" htmlFor="agent-create-byok-key">API key</label>
+                      <input
+                        id="agent-create-byok-key"
+                        className="agent-create-select"
+                        type="password"
+                        autoComplete="off"
+                        value={byokKey}
+                        placeholder="Paste your key"
+                        onChange={(e) => setByokKey(e.currentTarget.value)}
+                      />
+                    </div>
+                  )}
+                  <div className="agent-create-group">
+                    <label className="agent-create-label" htmlFor="agent-create-byok-model">Model</label>
+                    {FREEFORM_MODEL_PROVIDERS.has(byokProvider) ? (
+                      <input
+                        id="agent-create-byok-model"
+                        className="agent-create-select"
+                        value={byokModel}
+                        placeholder={byokProvider === "azure_openai" ? "Your deployment name" : "Model id"}
+                        onChange={(e) => setByokModel(e.currentTarget.value)}
+                      />
+                    ) : (
+                      <select
+                        id="agent-create-byok-model"
+                        className="agent-create-select"
+                        value={byokModel}
+                        onChange={(e) => setByokModel(e.currentTarget.value)}
+                      >
+                        {byokModelOptions.map((m) => (
+                          <option key={m} value={m}>{m}</option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                </>
+              )}
+
+              {brainMode === "subscription" && (
+                <>
+                  <div className="agent-create-group">
+                    <label className="agent-create-label" htmlFor="agent-create-sub-provider">Subscription</label>
+                    <select
+                      id="agent-create-sub-provider"
+                      className="agent-create-select"
+                      value={subscriptionProvider}
+                      onChange={(e) => setSubscriptionProvider(e.currentTarget.value)}
+                    >
+                      {SUBSCRIPTION_PROVIDERS.map((p) => (
+                        <option key={p.id} value={p.id}>{p.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="agent-create-group">
+                    <label className="agent-create-label" htmlFor="agent-create-sub-model">Model</label>
+                    {FREEFORM_MODEL_PROVIDERS.has(subscriptionProvider) ? (
+                      <input
+                        id="agent-create-sub-model"
+                        className="agent-create-select"
+                        value={subscriptionModel}
+                        placeholder="Leave blank for the CLI's own default"
+                        onChange={(e) => setSubscriptionModel(e.currentTarget.value)}
+                      />
+                    ) : (
+                      <select
+                        id="agent-create-sub-model"
+                        className="agent-create-select"
+                        value={subscriptionModel}
+                        onChange={(e) => setSubscriptionModel(e.currentTarget.value)}
+                      >
+                        {(liveCodexModels
+                          ? liveCodexModels.map((m) => ({ id: m.id, label: m.displayName }))
+                          : modelsForProvider(subscriptionProvider).map((m) => ({ id: m, label: m }))
+                        ).map((o) => (
+                          <option key={o.id} value={o.id}>{o.label}</option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                </>
+              )}
+
+              {brainMode === "local" && (
+                <>
+                  <div className="agent-create-group">
+                    <label className="agent-create-label" htmlFor="agent-create-local-provider">Runtime</label>
+                    <select
+                      id="agent-create-local-provider"
+                      className="agent-create-select"
+                      value={localProvider}
+                      onChange={(e) => setLocalProvider(e.currentTarget.value)}
+                    >
+                      {LOCAL_PROVIDERS.map((p) => (
+                        <option key={p.id} value={p.id}>{p.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="agent-create-group">
+                    <label className="agent-create-label" htmlFor="agent-create-local-model">Model</label>
+                    <select
+                      id="agent-create-local-model"
+                      className="agent-create-select"
+                      value={localModel}
+                      onChange={(e) => setLocalModel(e.currentTarget.value)}
+                    >
+                      {modelsForProvider(localProvider || "ollama").map((m) => (
+                        <option key={m} value={m}>{m}</option>
+                      ))}
+                    </select>
+                  </div>
+                </>
+              )}
+            </>
           )}
 
-          {step === "channel" && created && (
-            <div className="agent-create-embed">
-              <ChannelsTab
-                workspaceId={workspaceId}
-                agentId={created.agentId}
-                agent={createdAgent}
-                hardwareHref={agentHref}
-                onChannelsChanged={refreshChannels}
-              />
-            </div>
-          )}
-
-          {step === "apps" && created && (
-            <div className="agent-create-embed">
-              <ConnectorsTab workspaceId={workspaceId} agentId={created.agentId} agent={createdAgent} />
-            </div>
+          {/* ONE screen, two sections. Channels and Apps are the same
+              question — what does this connect to — and both are optional
+              and both stay permanently reachable from the agent's own tabs.
+              Two separate steps that can each ask for nothing was the
+              ceremony that made the sequence feel long. */}
+          {step === "reach" && created && (
+            <>
+              <div className="agent-create-embed">
+                <ChannelsTab
+                  workspaceId={workspaceId}
+                  agentId={created.agentId}
+                  agent={createdAgent}
+                  hardwareHref={agentHref}
+                  onChannelsChanged={refreshChannels}
+                />
+              </div>
+              <div className="agent-create-embed">
+                <ConnectorsTab workspaceId={workspaceId} agentId={created.agentId} agent={createdAgent} />
+              </div>
+            </>
           )}
         </div>
 
@@ -516,22 +1063,14 @@ export function AgentCreateCard({
         ) : null}
 
         <div className="agent-create-foot">
-          {/* Why the forward button will not move — one short fact, only
-              once we actually know it, and never on the same line as the
-              button's own label. Empty while the channel list is still in
-              flight: the block is real then, the explanation is not. */}
+          {/* Why the forward button will not move — or, on Reach, what stays
+              undone if it is pressed anyway. One short fact, only once we
+              actually know it, never on the button's own line. */}
           {footer.blockedReason ? (
             <p className="agent-create-blocked">{footer.blockedReason}</p>
           ) : (
             <span className="agent-create-foot-spacer" aria-hidden="true" />
           )}
-          {/* `agent-create-back` is presentation only — it makes the
-              SECONDARY action look secondary (ghost: no border, no fill).
-              The one-accent rule was already satisfied before this, but a
-              bordered slab the same size and weight as the filled primary
-              still read as a matched pair, so the eye had to read the labels
-              to find the way forward. Same control, same size, same
-              behaviour. */}
           {footer.back ? (
             <button
               type="button"
@@ -543,16 +1082,9 @@ export function AgentCreateCard({
             </button>
           ) : null}
           {/* While this surface is open it owns the view's single accent
-              fill — the header "+ New agent" and FirstAgentEmpty's own CTA
-              behind it both drop to the hairline variant. One rule,
-              create-accent.ts, every create control on every surface
-              (agents, tasks and documents alike).
-
-              The fill is spent only on a move that is actually available:
-              a blocked forward keeps its label (a named disabled control is
-              not a dead one) and drops to plain neutral, because a
-              saturated purple button that refuses to be pressed is the
-              loudest possible way to say no. */}
+              fill, and the fill is spent only on a move that is actually
+              available: a blocked forward keeps its label (a named disabled
+              control is not a dead one) and drops to plain neutral. */}
           <button
             type="button"
             className={footer.forward.accent ? composerSubmitButtonClass() : "fleet-btn"}
@@ -562,6 +1094,30 @@ export function AgentCreateCard({
             {footer.forward.label}
           </button>
         </div>
+
+        {/* Nested INSIDE the surface (not as backdrop siblings) so a click
+            anywhere in these — including their own close buttons — stops at
+            the surface's own stopPropagation and never bubbles out to the
+            backdrop's dismiss, which would kill the whole sequence instead
+            of just this sub-panel. */}
+        <CloudVpsSetupPanel
+          open={vpsPanelOpen}
+          workspaceId={workspaceId}
+          onClose={() => setVpsPanelOpen(false)}
+          onConnected={() => {
+            setVpsPanelOpen(false);
+            void adoptNewestNode("cloud_vps");
+          }}
+        />
+        <SshServerConnectPanel
+          open={sshPanelOpen}
+          workspaceId={workspaceId}
+          onClose={() => setSshPanelOpen(false)}
+          onConnected={() => {
+            setSshPanelOpen(false);
+            void adoptNewestNode("cloud_vps");
+          }}
+        />
       </div>
     </div>
   );
