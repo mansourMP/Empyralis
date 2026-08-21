@@ -2,19 +2,39 @@
  * WHAT IS STILL UNFINISHED ABOUT THIS AGENT — the decision behind the band
  * that renders under an agent's name right after it is created.
  *
- * THE PROBLEM IT EXISTS FOR. Agent creation is deliberately two fields — a
- * name and an optional system prompt (AgentCreateCard.tsx's own header
- * carries the founder's words: "probably its name and possibly some system
- * prompt or something like this"). The 4-step wizard that used to ask for
- * placement/brain/channels/connections was deleted on purpose and MUST NOT
- * come back. But the result, reviewed live, was that creating an agent
- * landed the person on an empty observation surface reading "No
- * conversations yet" with no path to anything: everything the wizard used to
- * ask had become invisible rather than deferred.
+ * ── CORRECTED 2026-08-21, and the correction reverses this file's own
+ *    original premise. Read this before trusting anything below. ──────────
  *
- * So this is the deferral made visible. Not a gate, not an approval, not a
- * checklist that blocks anything — the honest state of an agent that is not
- * set up yet, with one click to each place that fixes it.
+ * The paragraph that used to sit here said the 4-step creation wizard "was
+ * deleted on purpose and MUST NOT come back", and that this band was the
+ * deferral made visible: one row per outstanding thing, each a link into
+ * Configure. The founder saw that live and rejected it, twice:
+ *
+ *   *"it acts like a button, not step-by-step... if you want press this
+ *    button and set up your hardware, if you want this if you want that —
+ *    I don't want to have that."*
+ *
+ * So the SEQUENCE is back, inside the creation surface itself
+ * (agent-create-wizard.ts / AgentCreateCard.tsx): Identity → Model →
+ * Channel → Tools, minus the old wizard's project/placement step. Channels
+ * and connectors are now asked for AT CREATION, in order, not offered as a
+ * menu afterwards.
+ *
+ * ── WHAT THIS FILE IS FOR NOW ────────────────────────────────────────────
+ *
+ * The one case the sequence cannot cover: somebody skipped the Channel step
+ * (deliberately allowed — a person with no credential to hand must be able
+ * to move on) and their agent is therefore unreachable. Deleting this band
+ * outright would put that agent straight back in the dead end this file was
+ * originally written to fix.
+ *
+ * But it renders exactly ONE control now, never a row of them — see
+ * agentSetupNextStep. A menu of optional links is the shape he rejected; the
+ * single next thing that unblocks the agent is not a menu, it is the rest of
+ * the sequence. planAgentSetupSteps below still computes the whole ordered
+ * list (it is what decides WHICH one is next, and its reasoning about dead
+ * controls is unchanged and still load-bearing) — the caller renders the
+ * head of it.
  *
  * ── WHEN THE BAND EXISTS AT ALL: while the agent CANNOT BE REACHED ────────
  *
@@ -270,6 +290,23 @@ export function planAgentSetupSteps(input: AgentSetupInput): AgentSetupStep[] {
   }
 
   return steps;
+}
+
+/**
+ * THE ONE control the band renders — the next thing that actually unblocks
+ * this agent, or null when there is nothing worth saying.
+ *
+ * `planAgentSetupSteps` orders the steps by which most unblocks the agent
+ * and marks the first `primary`; this returns that one. Rendering the rest
+ * beside it is what produced *"if you want this if you want that"* — a menu
+ * of optional links, which is not setup. One control is the continuation of
+ * the creation sequence, not an alternative to it.
+ *
+ * Deliberately NOT a fifth judgement of its own: it reads the same ordered
+ * plan, so the band and the plan can never disagree about what comes next.
+ */
+export function agentSetupNextStep(input: AgentSetupInput): AgentSetupStep | null {
+  return planAgentSetupSteps(input).find((step) => step.primary) ?? null;
 }
 
 /** The band's own heading. A name, not a sentence — and never "N of 3

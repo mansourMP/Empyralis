@@ -37,6 +37,19 @@ export type FleetAgent = {
   agent_id: string;
   label: string;
   role: string;
+  /** "master" for the workspace's own operator (Sage), "specialist" for
+   *  everything else — routes_fleet's own `_row_to_install_summary` already
+   *  emitted this; it just had no declaration here. It is the field the
+   *  BACKEND itself guards on (fleet_delete_agent compares against
+   *  get_workspace_master_agent_install), and the one CLAUDE.md's MAN-201
+   *  entry names as the correct key: "keyed on agent_kind == 'master'".
+   *
+   *  Do NOT reach for `role` for that question. Measured live 2026-08-21:
+   *  the workspace operator comes back as `role: "specialist"`,
+   *  `agent_kind: "master"` — so a `role === "operator"` check (which is
+   *  what AgentsList's delete guard used) matches NOTHING and would have
+   *  offered Delete on the one agent the server always refuses. */
+  agent_kind?: string;
   purpose_preset?: "customer_facing" | "internal_assistant" | "operator";
   /** Owner-facing vs external-facing flag (server: fleet_tools.resolve_agent_audience).
    * "owner" = trusted with the owner's connectors/credentials/memory (Personal Assistant).

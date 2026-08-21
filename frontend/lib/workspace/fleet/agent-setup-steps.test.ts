@@ -12,6 +12,7 @@
  */
 
 import {
+  agentSetupNextStep,
   agentSetupChannelPlatformLabel,
   agentSetupChannelTier,
   agentSetupHeading,
@@ -243,7 +244,14 @@ assert(
   detailSource.includes('from "./agent-setup-steps"'),
   "FleetAgentDetail imports the real rule module",
 );
-assert(/planAgentSetupSteps\s*\(/.test(detailSource), "FleetAgentDetail plans the steps from planAgentSetupSteps, not an inline re-check");
+assert(
+  /agentSetupNextStep\s*\(/.test(detailSource),
+  "FleetAgentDetail asks for the ONE next step, not an inline re-check",
+);
+assert(
+  !/planAgentSetupSteps\s*\(/.test(detailSource),
+  "and never renders the whole plan — a row of optional buttons is the shape the founder rejected",
+);
 assert(/agentSetupHeading\s*\(/.test(detailSource), "FleetAgentDetail renders the heading from agentSetupHeading");
 assert(
   /fleet-agent-setup/.test(detailSource),

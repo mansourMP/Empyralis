@@ -1,50 +1,89 @@
 "use client";
 
 /**
- * THE agent-creation card — the founder's correction to zero-field instant
- * create (see agent-quick-create.ts's own "CORRECTION, 2026-08-20" header
- * for the full quote): "New agent" opens ONE card instead of creating on
- * the click itself.
+ * THE AGENT-CREATION SURFACE — a real, sequential setup flow.
  *
- * CORRECTED SAME DAY, before this shipped: the card originally also
- * offered a Model chip, a Hardware chip and a Project chip. The founder
- * settled a bigger question first — *"messaging would never be done
- * inside this platform. I'm strictly going to prohibit that."* The web UI
- * is for creating and configuring agents and observing what they do; real
- * conversation happens on a channel, never here. That reframes what
- * belongs at CREATION time: model, hardware and memory are CONFIGURATION,
- * seen and changed on the agent's own page after it exists — not
- * questions asked up front. And project scoping is no longer a decision
- * either: *"project and agents are completely independent... let's get
- * rid of that entirely."* So this card asks for exactly two things, in
- * the founder's own words: *"probably its name and possibly some system
- * prompt or something like this... Like the name could be 'YouTube
- * content creation agent'."*
+ * ── Two founder corrections landed on this file in one day ───────────────
  *
- * Shape borrowed from TaskComposer.tsx's own "paper, not a form" doctrine
- * (that file's own header, MAN-127): two bare inputs — a title-style Name
- * field and a body-style, optional system-prompt textarea — no labels,
- * no chips, no borders. This is deliberately NOT a scaled-down version of
- * the earlier chip-based draft; there is nothing left to make a chip out
- * of.
+ * FIRST, the SHELL. He opened the previous version and asked: *"why the
+ * fuck does it look like fucking document creation or issue creation?"* The
+ * cause was literal rather than aesthetic — this card was built on
+ * `.fleet-composer-*`, the SAME shell TaskComposer.tsx and
+ * DocumentComposer.tsx render, so filing a ticket, writing a document and
+ * making an agent all opened one grey sheet of paper. It now has its own
+ * shell (agent-create-surface.css), which documents the inversion of every
+ * composer choice.
  *
- * A project id still has to reach POST /fleet/agents (a required backend
- * field today), so it is resolved SILENTLY via createAgentQuickly's own
- * resolveQuickCreateProjectId — never rendered, never a choice the person
- * makes here. An agent may exist with no channel connected at all; this
- * card never asks for one, and the agent's own page is where that gets
- * connected later, if and when it's needed.
+ * SECOND, and bigger, the SHAPE. Everything the deleted FleetCreateAgentWizard
+ * used to ask had become a row of optional buttons on the agent's page
+ * afterwards. He rejected that, twice:
+ *
+ *   *"it acts like a button, not step-by-step... if you want press this
+ *    button and set up your hardware, if you want this if you want that —
+ *    I don't want to have that."*
+ *
+ * A menu of optional links is not setup. So the sequence is back — "as
+ * before", his words — with the one deletion he had already made separately:
+ * NO project or placement step, because an agent belongs to the WORKSPACE
+ * now (CLAUDE.md, 2026-08-20). The step rules live in agent-create-wizard.ts,
+ * pure and tested; this file renders them.
+ *
+ * ```
+ *  1 Identity   name + optional instructions      nothing committed
+ *  2 Model      the live catalog                  nothing committed
+ *      └── "Create agent" ──▶ ONE atomic POST carrying all three
+ *  3 Channel    the REAL ChannelsTab              the agent is real from here
+ *  4 Tools      the REAL ConnectorsTab
+ *      └── "Finish" ──▶ into the agent
+ * ```
+ *
+ * ── Why the commit sits after step 2 and not step 1 ──────────────────────
+ * The OLD wizard created the agent at the end of its first screen and
+ * PATCHed everything after, which made the model a thing that could
+ * half-apply — the create-then-separate-step shape CLAUDE.md's
+ * outcome-honesty law names directly. Identity and model now go in ONE
+ * request (`model_choice`, see agent-quick-create.ts), so no agent can exist
+ * wearing a model nobody picked. Steps 3 and 4 genuinely cannot precede the
+ * commit — a channel binds to an agent id, a connector authorizes against
+ * one — so they sit after it and the surface stops pretending otherwise:
+ * the title becomes the agent's own name, Back disappears, and closing goes
+ * INTO the agent instead of discarding.
+ *
+ * ── Steps 3 and 4 are the REAL tabs, not simplified copies ───────────────
+ * ChannelsTab and ConnectorsTab are imported from FleetAgentDetail. A second,
+ * creation-only channel picker would be a fifth copy of a channel list in a
+ * codebase that has already shipped four and drifted on all four.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Bot, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Bot, Check, X } from "lucide-react";
 
 import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
 
 import { composerSubmitButtonClass } from "./create-accent";
 import { resolveAgentCreateName } from "./agent-create-card";
-import { createAgentQuickly, quickCreateAgentChatPath } from "./agent-quick-create";
-import type { FleetProject } from "./fleet-data";
+import {
+  agentCreateModelChoicePayload,
+  findAgentCreateModelChoice,
+  groupAgentCreateModelChoices,
+  resolveAgentCreateModelId,
+} from "./agent-create-model";
+import { useAgentCreateModelCatalog } from "./agent-create-model-catalog";
+import {
+  AGENT_CREATE_STEPS,
+  agentCreateCloseIntent,
+  agentCreateNextStep,
+  agentCreatePreviousStep,
+  agentCreateStepStatus,
+  agentCreateSurfaceTitle,
+  planAgentCreateFooter,
+  type AgentCreateStepId,
+} from "./agent-create-wizard";
+import { createAgentQuickly } from "./agent-quick-create";
+import { ChannelsTab, ConnectorsTab, isChannelConnected } from "./FleetAgentDetail";
+import { useFleetAgentChannels, type FleetAgent, type FleetProject } from "./fleet-data";
+
+import "./agent-create-surface.css";
 
 function exitDurationMs(): number {
   if (typeof window === "undefined") return 150;
@@ -62,33 +101,71 @@ export function AgentCreateCard({
   onCreated,
 }: {
   workspaceId: string;
-  /** The project this card was opened from, if any — used only to
-   *  silently seed the create request's required project_id field (see
-   *  this file's own header). Never rendered. */
+  /** The project this was opened from, if any — used only to silently seed
+   *  the create request's required project_id field. Never rendered, never
+   *  a choice: agents belong to the workspace. */
   currentProjectId?: string;
   projects: FleetProject[];
   onClose: () => void;
-  /** Fired once the agent is real — the caller navigates from here, same
-   *  as every "New agent" entry point already did before this card
-   *  existed. */
+  /** Fired when the sequence finishes (or is closed after the agent is
+   *  real) — the caller navigates from here, same as every "New agent"
+   *  entry point already did. */
   onCreated: (result: { agentId: string; projectId: string }) => void;
 }) {
+  const [step, setStep] = useState<AgentCreateStepId>("identity");
   const [typedName, setTypedName] = useState("");
   const [suggestedName, setSuggestedName] = useState("");
   const [instructions, setInstructions] = useState("");
+  const [requestedModelId, setRequestedModelId] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [closing, setClosing] = useState(false);
 
-  const nameRef = useRef<HTMLTextAreaElement | null>(null);
+  const [created, setCreated] = useState<{ agentId: string; projectId: string } | null>(null);
+  const [createdAgent, setCreatedAgent] = useState<FleetAgent | null>(null);
+
+  const nameRef = useRef<HTMLInputElement | null>(null);
   const closeTimer = useRef<number | null>(null);
 
   const name = resolveAgentCreateName(typedName, suggestedName);
 
-  // Suggested name — fleet_create_agent's own fallback pool, fetched once
-  // so the field opens pre-filled rather than blank (this endpoint had
-  // zero frontend callers before this card; the wizard it was built for
-  // was deleted before ever reaching it).
+  // The picker opens fully usable on the first frame (the platform tiers are
+  // synchronous constants) and folds in any credentialed provider's own live
+  // models when they arrive — never a spinner in front of a control that
+  // already works. See agent-create-model-catalog.ts.
+  const { choices } = useAgentCreateModelCatalog(workspaceId);
+  const selectedModelId = resolveAgentCreateModelId(choices, requestedModelId);
+  const selectedChoice = findAgentCreateModelChoice(choices, selectedModelId);
+  const modelGroups = useMemo(() => groupAgentCreateModelChoices(choices), [choices]);
+
+  // Only asked for once the Channel step is actually open — a creation
+  // sequence must not poll an agent's channels through two screens that do
+  // not show them.
+  const {
+    channels,
+    slackChannelBinding,
+    telegramBotConnected,
+    loading: channelsLoading,
+    refresh: refreshChannels,
+  } = useFleetAgentChannels(workspaceId, step === "channel" && created ? created.agentId : null);
+  const connectedChannelCount = channels.filter((c) =>
+    isChannelConnected(c, slackChannelBinding, telegramBotConnected),
+  ).length;
+
+  const footer = planAgentCreateFooter({
+    step,
+    created: Boolean(created),
+    busy,
+    hasName: name.trim().length > 0,
+    // `loading` is the honest "we have not been told yet" — see
+    // agent-create-wizard.ts for why that may not read as "nothing
+    // connected".
+    channelsKnown: Boolean(created) && !channelsLoading,
+    connectedChannelCount,
+  });
+
+  // Suggested name — fleet_create_agent's own fallback pool, fetched once so
+  // the field opens pre-filled rather than blank.
   useEffect(() => {
     let cancelled = false;
     fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/suggested-name`, { credentials: "include" })
@@ -105,9 +182,11 @@ export function AgentCreateCard({
   }, [workspaceId]);
 
   useEffect(() => {
-    nameRef.current?.focus();
-    nameRef.current?.select();
-  }, []);
+    if (step === "identity") {
+      nameRef.current?.focus();
+      nameRef.current?.select();
+    }
+  }, [step]);
 
   useEffect(
     () => () => {
@@ -116,42 +195,97 @@ export function AgentCreateCard({
     [],
   );
 
+  const finish = useCallback(() => {
+    if (created) onCreated(created);
+    else onClose();
+  }, [created, onClose, onCreated]);
+
+  /** Dismiss. Before the commit that discards; after it, the agent is real
+   *  and already saved, so it opens the agent instead — "I stopped early" is
+   *  not "nothing happened". */
   const requestClose = useCallback(() => {
     if (closing || busy) return;
     setClosing(true);
-    closeTimer.current = window.setTimeout(onClose, exitDurationMs());
-  }, [busy, closing, onClose]);
+    const intent = agentCreateCloseIntent(Boolean(created));
+    closeTimer.current = window.setTimeout(
+      () => (intent === "open_agent" ? finish() : onClose()),
+      exitDurationMs(),
+    );
+  }, [busy, closing, created, finish, onClose]);
 
-  const canCreate = name.trim().length > 0 && !busy;
+  /** Best-effort — ChannelsTab and ConnectorsTab both tolerate a null agent,
+   *  so a failed hydrate degrades to a slightly emptier panel rather than a
+   *  broken step. */
+  const hydrateCreatedAgent = useCallback(
+    async (agentId: string) => {
+      try {
+        const res = await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents`, {
+          credentials: "include",
+        });
+        const data = res.ok ? await res.json().catch(() => ({})) : {};
+        const found = (data?.agents || []).find((a: FleetAgent) => a.agent_id === agentId) || null;
+        setCreatedAgent(found);
+      } catch {
+        /* keep null */
+      }
+    },
+    [workspaceId],
+  );
 
   const create = useCallback(async () => {
-    if (!canCreate) return;
+    if (busy || created || name.trim().length === 0) return;
     setBusy(true);
     setError(null);
     try {
-      const { agentId, projectId } = await createAgentQuickly(
+      const result = await createAgentQuickly(
         workspaceId,
         currentProjectId,
         projects,
         name.trim(),
         instructions.trim(),
+        agentCreateModelChoicePayload(selectedChoice),
       );
-      onCreated({ agentId, projectId });
+      setCreated(result);
+      void hydrateCreatedAgent(result.agentId);
+      setStep("channel");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not create the agent.");
+    } finally {
       setBusy(false);
     }
-  }, [canCreate, currentProjectId, instructions, name, onCreated, projects, workspaceId]);
+  }, [busy, created, currentProjectId, hydrateCreatedAgent, instructions, name, projects, selectedChoice, workspaceId]);
 
-  const autosize = (el: HTMLTextAreaElement | null) => {
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${el.scrollHeight}px`;
-  };
+  const goForward = useCallback(() => {
+    if (footer.forward.disabled) return;
+    if (footer.forward.action === "create") {
+      void create();
+      return;
+    }
+    if (footer.forward.action === "finish") {
+      finish();
+      return;
+    }
+    const next = agentCreateNextStep(step);
+    if (next) setStep(next);
+  }, [create, finish, footer.forward.action, footer.forward.disabled, step]);
+
+  const goBack = useCallback(() => {
+    if (!footer.back || footer.back.disabled) return;
+    if (footer.back.action === "cancel") {
+      requestClose();
+      return;
+    }
+    const prev = agentCreatePreviousStep(step);
+    if (prev) setStep(prev);
+  }, [footer.back, requestClose, step]);
+
+  const agentHref = created
+    ? `/w/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(created.projectId)}/agents/${encodeURIComponent(created.agentId)}/hardware`
+    : undefined;
 
   return (
     <div
-      className={`fleet-composer-backdrop${closing ? " is-closing" : ""}`}
+      className={`agent-create-backdrop${closing ? " is-closing" : ""}`}
       onMouseDown={requestClose}
       onKeyDown={(e) => {
         if (e.key === "Escape") {
@@ -159,97 +293,166 @@ export function AgentCreateCard({
           requestClose();
         } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
           e.preventDefault();
-          void create();
+          goForward();
         }
       }}
     >
       <div
-        className={`fleet-composer fleet-agent-composer${closing ? " is-closing" : ""}`}
+        className={`agent-create-surface${closing ? " is-closing" : ""}`}
         role="dialog"
         aria-modal="true"
-        aria-label="New agent"
+        aria-labelledby="agent-create-title"
         onMouseDown={(e) => e.stopPropagation()}
       >
-        {/* IT HAS TO READ AS AN AGENT, not as "some dialog" (founder,
-            2026-08-21, on the version before this: it "opens a fucking
-            sheet, as if it's asking for issue or document or something").
-            He was right and the cause is literal — this card was built on
-            TaskComposer's own .fleet-composer shell, so a task, a document
-            and an agent all opened the identical grey crumb.
-
-            The fix adds NO FIELDS. It is the same two-field paper; what
-            changed is that the head names the thing being made with the
-            product's own agent glyph, in the agent's own accent, instead of
-            a muted breadcrumb word. Deliberately NOT a preview of the
-            agent's generated sigil: AgentSigil is a deterministic hash of
-            the agent's ID, which does not exist yet, so anything drawn here
-            from the typed name would not be the mark the agent ends up
-            with — a small lie on the first screen a new customer sees. */}
-        <div className="fleet-composer-head fleet-agent-composer-head">
-          <span className="fleet-agent-composer-mark" aria-hidden="true">
-            <Bot size={15} strokeWidth={1.75} />
-          </span>
-          <span className="fleet-agent-composer-crumb">New agent</span>
-          <button type="button" className="fleet-composer-close" onClick={requestClose} aria-label="Close">
-            <X size={14} strokeWidth={2} />
+        <div className="agent-create-head">
+          <h2 id="agent-create-title" className="agent-create-title">
+            {agentCreateSurfaceTitle(Boolean(created), name)}
+          </h2>
+          <button type="button" className="agent-create-close" onClick={requestClose} aria-label="Close">
+            <X size={15} strokeWidth={2} />
           </button>
         </div>
 
-        {/* The paper. Two bare fields, nothing around them — same shape as
-            TaskComposer's own title+description, never a labelled form. */}
-        <div className="fleet-composer-paper">
-          <h2 className="fleet-sr-only">New agent</h2>
-          <textarea
-            ref={(el) => {
-              nameRef.current = el;
-              autosize(el);
-            }}
-            className="fleet-composer-title"
-            value={name}
-            rows={1}
-            placeholder="Agent name"
-            onChange={(e) => {
-              setTypedName(e.currentTarget.value);
-              autosize(e.currentTarget);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
-                e.preventDefault();
-                void create();
-              }
-            }}
-          />
-          <textarea
-            className="fleet-composer-desc"
-            value={instructions}
-            rows={3}
-            placeholder="What should this agent do? (optional)"
-            onChange={(e) => setInstructions(e.currentTarget.value)}
-          />
+        {/* The sequence, always visible. Not a progress score — it is where
+            you are, and where you are going. */}
+        <ol className="agent-create-steps" aria-label="Setup steps">
+          {AGENT_CREATE_STEPS.map((s, i) => {
+            const status = agentCreateStepStatus(s.id, step);
+            return (
+              <li
+                key={s.id}
+                className={`agent-create-step is-${status}`}
+                aria-current={status === "current" ? "step" : undefined}
+              >
+                <span className="agent-create-step-index" aria-hidden="true">
+                  {status === "done" ? <Check size={11} strokeWidth={2.75} /> : i + 1}
+                </span>
+                <span className="agent-create-step-label">{s.label}</span>
+              </li>
+            );
+          })}
+        </ol>
+
+        <div className="agent-create-body">
+          {step === "identity" && (
+            <>
+              {/* The mark and the name are one row — this is the thing being
+                  made, not a title field on a form. Deliberately NOT a
+                  preview of the agent's real sigil: AgentSigil hashes the
+                  agent's id, which does not exist yet, so anything drawn
+                  from the typed name would not be the mark this agent ends
+                  up wearing. */}
+              <div className="agent-create-identity">
+                <span className="agent-create-mark" aria-hidden="true">
+                  <Bot size={20} strokeWidth={1.75} />
+                </span>
+                <div className="agent-create-name-field">
+                  <input
+                    ref={nameRef}
+                    id="agent-create-name"
+                    className="agent-create-name"
+                    value={name}
+                    placeholder="Agent name"
+                    autoComplete="off"
+                    spellCheck={false}
+                    onChange={(e) => setTypedName(e.currentTarget.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        goForward();
+                      }
+                    }}
+                  />
+                  <label className="agent-create-name-caption" htmlFor="agent-create-name">Name</label>
+                </div>
+              </div>
+
+              <div className="agent-create-group">
+                <label className="agent-create-label" htmlFor="agent-create-instructions">
+                  Instructions (optional)
+                </label>
+                <textarea
+                  id="agent-create-instructions"
+                  className="agent-create-input"
+                  value={instructions}
+                  rows={4}
+                  placeholder="What should this agent do?"
+                  onChange={(e) => setInstructions(e.currentTarget.value)}
+                />
+              </div>
+            </>
+          )}
+
+          {step === "model" && (
+            <div className="agent-create-group">
+              <label className="agent-create-label" htmlFor="agent-create-model">Model</label>
+              {/* Options carry what the model actually IS beside what it is
+                  called — a model pick is a spend decision, so the second
+                  half is never hidden behind a tooltip. */}
+              <select
+                id="agent-create-model"
+                className="agent-create-select"
+                value={selectedModelId}
+                onChange={(e) => setRequestedModelId(e.currentTarget.value)}
+              >
+                {modelGroups.map((group) => (
+                  <optgroup key={group.group} label={group.group}>
+                    {group.choices.map((choice) => (
+                      <option key={choice.id} value={choice.id}>
+                        {choice.label === choice.detail ? choice.label : `${choice.label} — ${choice.detail}`}
+                      </option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {step === "channel" && created && (
+            <div className="agent-create-embed">
+              <ChannelsTab
+                workspaceId={workspaceId}
+                agentId={created.agentId}
+                agent={createdAgent}
+                hardwareHref={agentHref}
+                onChannelsChanged={refreshChannels}
+              />
+            </div>
+          )}
+
+          {step === "tools" && created && (
+            <div className="agent-create-embed">
+              <ConnectorsTab workspaceId={workspaceId} agentId={created.agentId} agent={createdAgent} />
+            </div>
+          )}
         </div>
 
         {error ? (
-          <p className="fleet-composer-error" role="alert">
+          <p className="agent-create-error" role="alert">
             {error}
           </p>
         ) : null}
 
-        <div className="fleet-composer-foot">
-          <button type="button" className="fleet-btn" onClick={requestClose} disabled={busy}>
-            Cancel
-          </button>
-          {/* The card is the modal, so while it is open it owns the view's
-              single accent fill — the header "+ New agent" and
-              FirstAgentEmpty's own CTA behind it both drop to the hairline
-              variant. One rule, create-accent.ts, every create control
-              on every surface. */}
+        <div className="agent-create-foot">
+          {footer.back ? (
+            <button type="button" className="fleet-btn" onClick={goBack} disabled={footer.back.disabled}>
+              {footer.back.label}
+            </button>
+          ) : (
+            <span className="agent-create-foot-spacer" aria-hidden="true" />
+          )}
+          {/* While this surface is open it owns the view's single accent
+              fill — the header "+ New agent" and FirstAgentEmpty's own CTA
+              behind it both drop to the hairline variant. One rule,
+              create-accent.ts, every create control on every surface
+              (agents, tasks and documents alike). */}
           <button
             type="button"
             className={composerSubmitButtonClass()}
-            onClick={() => void create()}
-            disabled={!canCreate}
+            onClick={goForward}
+            disabled={footer.forward.disabled}
           >
-            {busy ? "Creating…" : "Create agent"}
+            {footer.forward.label}
           </button>
         </div>
       </div>

@@ -1,0 +1,360 @@
+/* ============================================================================
+   THE AGENT-CREATION SURFACE — its own shell, deliberately not the composer's.
+
+   The founder, 2026-08-21, opening the previous version: *"why the fuck does
+   it look like fucking document creation or issue creation?"* He was exactly
+   right, and the cause was literal rather than a matter of taste: the card
+   was built on `.fleet-composer-*` — TaskComposer's and DocumentComposer's
+   own shell — so filing a ticket, writing a document and MAKING AN AGENT all
+   opened the identical grey paper. An earlier same-day attempt swapped the
+   breadcrumb for an agent glyph and changed nothing structural; it was still
+   the composer.
+
+   A SECOND correction landed the same day and is the bigger one: everything
+   the deleted FleetCreateAgentWizard used to ask had become a row of optional
+   buttons on the agent's page afterwards, and he rejected that too — *"it
+   acts like a button, not step-by-step... if you want press this button and
+   set up your hardware, if you want this if you want that — I don't want to
+   have that."* So this shell carries a real SEQUENCE (see
+   agent-create-wizard.ts), which is the other half of why it cannot be the
+   composer's: a composer is one sheet with no steps by design.
+
+   The composer's shape is correct FOR THE COMPOSER: "paper, not a form" —
+   bare, unlabelled, borderless fields you type prose into, because a task
+   and a document ARE prose. An agent is not prose. It is a thing with an
+   identity and a brain that the person is specifying. So this surface
+   inverts every one of those choices, and that inversion is the whole
+   design:
+
+   ```
+   COMPOSER (task / document)          THIS (agent)
+     no labels — bare paper              real labels. you are specifying a thing
+     invisible, borderless fields        fields with visible chrome, on --bg-inset
+     one flat sheet                      three groups, hairline-separated
+     drops in from 12vh, 640px wide      centred, 460px — a card, not a page
+     a grey breadcrumb                   an identity row: glyph + the name field
+     one sheet, no steps                 a stepper: Identity · Model · Channel · Tools
+   ```
+
+   No new colour, no new motion, no new radius: every value below is a shared
+   token, the entrance reuses fleet-theme.css's own `fleet-fade` /
+   `fleet-modal-in` keyframes (one entrance curve in the app, per that file's
+   own rule), and the one accent in view belongs to whichever control
+   agent-create-accent.ts says owns it.
+
+   Own file, never fleet-theme.css: that file is a shared surface several
+   agents work in at once, and a shell replacement has no business landing in
+   the middle of it. Imported directly by AgentCreateCard.tsx, exactly as
+   task-detail.css / document-detail.css / agent-configure-sheet.css already
+   are by their own components.
+   ========================================================================== */
+
+.agent-create-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+  overflow-y: auto;
+  background: rgba(0, 0, 0, 0.45);
+  animation: fleet-fade var(--dur-2) var(--ease-out);
+}
+.agent-create-backdrop.is-closing {
+  animation: fleet-fade var(--dur-2) var(--ease-in) reverse forwards;
+}
+
+.agent-create-surface {
+  width: 520px;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: 0 32px 80px -32px rgba(0, 0, 0, 0.6);
+  animation: fleet-modal-in var(--dur-2) var(--ease-out);
+  /* The steps differ a lot in height (two fields vs. the whole Channels
+     grid). Capping the SURFACE and scrolling only its body keeps the
+     stepper and the footer where the eye left them instead of the whole
+     dialog jumping size on every Next. */
+  max-height: min(84vh, 760px);
+  overflow: hidden;
+}
+.agent-create-surface.is-closing {
+  animation: fleet-modal-in var(--dur-2) var(--ease-in) reverse forwards;
+}
+
+/* ── Head ─────────────────────────────────────────────────────────────────
+   Names the thing being made, at title weight. Not a breadcrumb: there is
+   no trail here, this is the top of a one-screen action. */
+.agent-create-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-3) var(--space-3) var(--space-5);
+  border-bottom: 1px solid var(--border);
+}
+
+.agent-create-title {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-base);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+
+.agent-create-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.agent-create-close:hover { background: var(--rail-active); color: var(--text-primary); }
+
+/* ── The stepper ──────────────────────────────────────────────────────────
+   Where you are in the sequence, and where it goes. Never "2 of 4 complete"
+   — a score turns setup into a grade. Neutral throughout except the current
+   step, which is the only one that needs finding at a glance; a done step
+   gets a check and steps back down to muted, because it is no longer
+   something to look at. */
+.agent-create-steps {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin: 0;
+  padding: var(--space-3) var(--space-5);
+  list-style: none;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-inset);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.agent-create-steps::-webkit-scrollbar { display: none; }
+
+.agent-create-step {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+.agent-create-step.is-current { color: var(--text-primary); }
+
+.agent-create-step-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-strong);
+  font-size: var(--text-2xs);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.agent-create-step.is-current .agent-create-step-index {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.agent-create-step.is-done .agent-create-step-index {
+  border-color: transparent;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.agent-create-step-label { white-space: nowrap; }
+.agent-create-step.is-current .agent-create-step-label { font-weight: var(--weight-medium); }
+
+/* ── Body ─────────────────────────────────────────────────────────────────
+   The only scrolling region. Steps 3 and 4 embed the REAL Channels and
+   Connectors tabs, which are full-page surfaces — they are given the room
+   they need here and their own scroll, rather than a shrunken copy. */
+.agent-create-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.agent-create-embed {
+  padding: var(--space-4) var(--space-5);
+}
+/* Those tabs draw their own section headings; inside a dialog that already
+   has a title and a stepper, their top margin reads as a gap rather than as
+   separation. */
+.agent-create-embed > *:first-child { margin-top: 0; }
+
+/* ── Groups ───────────────────────────────────────────────────────────────
+   Dense inside a group, airy between groups (craft doctrine). The hairline
+   is what makes three questions read as three, instead of as one long form. */
+.agent-create-group {
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border);
+}
+.agent-create-group:last-of-type { border-bottom: none; }
+
+.agent-create-label {
+  display: block;
+  margin-bottom: var(--space-2);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-medium);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+/* ── Identity: the glyph and the name are ONE row ──────────────────────────
+   This is the row that stops the surface reading as a ticket. The mark is
+   deliberately NOT a preview of the agent's real sigil: AgentSigil hashes
+   the agent's id, which does not exist yet, so anything drawn from the typed
+   name would not be the mark this agent ends up wearing — a small lie on the
+   first screen a new customer ever sees. */
+.agent-create-identity {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-5);
+  border-bottom: 1px solid var(--border);
+}
+
+.agent-create-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-card);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.agent-create-name-field {
+  flex: 1;
+  min-width: 0;
+}
+
+.agent-create-name {
+  width: 100%;
+  display: block;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  outline: none;
+  padding: 0 0 var(--space-1);
+  font-family: inherit;
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
+  line-height: 1.35;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+.agent-create-name::placeholder { color: var(--text-muted); }
+.agent-create-name:focus { border-bottom-color: var(--accent); }
+
+/* The one place a caption is worth its ink: the name field carries no
+   uppercase label above it (that would fight the 16px input beside a 40px
+   mark), so it names itself underneath, quietly. */
+.agent-create-name-caption {
+  display: block;
+  margin-top: var(--space-1);
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+}
+
+/* ── Controls ─────────────────────────────────────────────────────────────
+   Visible chrome, on the inset surface — the opposite of the composer's
+   invisible fields, and the reason this reads as specifying rather than
+   drafting. */
+.agent-create-input,
+.agent-create-select {
+  width: 100%;
+  display: block;
+  box-sizing: border-box;
+  font-family: inherit;
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--text-primary);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  outline: none;
+  padding: var(--space-2) var(--space-3);
+}
+.agent-create-select { height: 32px; padding-block: 0; cursor: pointer; }
+.agent-create-input {
+  min-height: 68px;
+  resize: vertical;
+}
+.agent-create-input::placeholder { color: var(--text-muted); }
+.agent-create-input:hover,
+.agent-create-select:hover { border-color: var(--border-strong); }
+
+/* ── Foot ─────────────────────────────────────────────────────────────── */
+.agent-create-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-5);
+  border-top: 1px solid var(--border);
+}
+
+/* A step with no backward move renders NO Back button (a disabled one is a
+   dead control) — this keeps the forward button on the right where it has
+   been on every other step, instead of sliding across the footer. */
+.agent-create-foot-spacer { flex: 1; }
+
+.agent-create-error {
+  margin: 0;
+  padding: 0 var(--space-5) var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--offline-text);
+  line-height: 1.45;
+}
+
+/* ── Phone ────────────────────────────────────────────────────────────────
+   375x812 is a first-class width, not a graceful-degradation afterthought.
+   The surface becomes the sheet: full width, top-anchored so the keyboard
+   never pushes the name field off-screen, and the two footer buttons split
+   the row so neither is a thumb-sized target next to a full-width one. */
+@media (max-width: 560px) {
+  .agent-create-backdrop {
+    align-items: flex-start;
+    padding: var(--space-2);
+  }
+  .agent-create-surface { width: 100%; }
+  .agent-create-identity,
+  .agent-create-group,
+  .agent-create-embed { padding-inline: var(--space-4); }
+  .agent-create-steps { padding-inline: var(--space-4); gap: var(--space-3); }
+  .agent-create-surface { max-height: calc(100vh - var(--space-4)); }
+  .agent-create-head { padding-inline: var(--space-4) var(--space-2); }
+  .agent-create-foot { padding-inline: var(--space-4); }
+  .agent-create-error { padding-inline: var(--space-4); }
+  .agent-create-foot .fleet-btn {
+    flex: 1;
+    height: 34px;
+    justify-content: center;
+  }
+}
+
+/* Reduced motion: the surface still appears, it just does not scale in. */
+@media (prefers-reduced-motion: reduce) {
+  .agent-create-backdrop,
+  .agent-create-backdrop.is-closing,
+  .agent-create-surface,
+  .agent-create-surface.is-closing { animation: none; }
+}

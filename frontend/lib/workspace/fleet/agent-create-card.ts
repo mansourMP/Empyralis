@@ -28,6 +28,20 @@
  * exactly the way agent-quick-create.ts's createAgentQuickly already
  * resolves it via resolveQuickCreateProjectId.
  *
+ * THIRD PASS, 2026-08-21 — the founder kept the one-screen shape and asked
+ * for the model back by name (*"I should be able to pick what model I am
+ * going to use"*). That lives in agent-create-model.ts, not here.
+ *
+ * This module also SHRANK in that pass: it used to export a second payload
+ * builder, buildAgentCreatePayload, alongside agent-quick-create.ts's
+ * buildQuickCreateAgentPayload. It had ZERO production callers — its only
+ * caller was its own test — i.e. CLAUDE.md's single most-documented defect
+ * shape ("built, tested, and never wired") sitting in the create path, where
+ * the next author would reasonably have reached for it and quietly diverged
+ * from what the live request actually sends. Deleted rather than taught
+ * about the model pick: there is ONE payload builder for agent creation, and
+ * it is the one the network call uses.
+ *
  * Kept in its own module, framework-free, so a plain node/tsx test can
  * assert the rules without mounting React — same discipline as
  * agent-count-shape.ts / channel-doors.ts (CLAUDE.md: "a check that
@@ -42,38 +56,4 @@
 export function resolveAgentCreateName(typed: string, suggested: string): string {
   const clean = typed.trim();
   return clean || suggested.trim();
-}
-
-export type AgentCreatePayload = {
-  name: string;
-  instructions: string;
-  capability_preset: string;
-  project_id: string;
-  purpose_preset: string;
-  audience: string;
-};
-
-/** The POST /fleet/agents body. `instructions` is the card's own optional
- *  system-prompt field, passed through verbatim (untrimmed content is
- *  preserved; only leading/trailing whitespace is trimmed) — an empty
- *  string is a legitimate, common choice and the server already treats it
- *  as "no instructions given" (fleet_create_agent falls back to a
- *  purpose-preset default in that case). Reuses the exact fixed defaults
- *  agent-quick-create.ts's buildQuickCreateAgentPayload already
- *  established for capability_preset/purpose_preset/audience — this
- *  function exists so callers building the request from this card's own
- *  resolved name/prompt/project don't have to hand-assemble the rest. */
-export function buildAgentCreatePayload(opts: {
-  name: string;
-  instructions: string;
-  projectId: string;
-}): AgentCreatePayload {
-  return {
-    name: opts.name.trim(),
-    instructions: opts.instructions.trim(),
-    capability_preset: "standard",
-    project_id: opts.projectId,
-    purpose_preset: "internal_assistant",
-    audience: "owner",
-  };
 }
