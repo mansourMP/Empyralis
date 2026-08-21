@@ -234,6 +234,29 @@ pub enum BrowserPairPhase {
 }
 
 impl BrowserPairPhase {
+    /// Why an update must wait, or `None` when nothing is in flight.
+    ///
+    /// Only the two phases that hold something a restart would DESTROY count.
+    /// `Paired` deliberately does not: a connected Agent Computer is the
+    /// steady state of this product, so treating it as busy would mean the
+    /// app never updates on exactly the machines that are working.
+    ///
+    /// The words are the customer's own view of what is happening, because
+    /// this string is shown, not logged.
+    pub fn busy_reason(self) -> Option<&'static str> {
+        match self {
+            BrowserPairPhase::Waiting => Some("connecting this computer"),
+            BrowserPairPhase::Starting => Some("starting this computer"),
+            BrowserPairPhase::Idle
+            | BrowserPairPhase::Cancelled
+            | BrowserPairPhase::TimedOut
+            | BrowserPairPhase::Declined
+            | BrowserPairPhase::Failed
+            | BrowserPairPhase::Paired
+            | BrowserPairPhase::CouldNotStart => None,
+        }
+    }
+
     /// The stable key the local page switches on. Never the prose — a page
     /// keying off displayed text is a page that breaks when copy is edited.
     pub fn key(self) -> &'static str {
@@ -612,6 +635,56 @@ mod tests {
                 !(view.can_start && view.can_cancel),
                 "{phase:?} rendered two mutually exclusive controls"
             );
+        }
+    }
+
+    #[test]
+    fn the_updater_is_never_more_permissive_than_the_window_about_a_busy_moment() {
+        // TWO NOTIONS OF "BUSY", AND THEY ARE NOT THE SAME FACT. This test
+        // was first written asserting they were equal, and it failed on
+        // `Paired` — which is the finding, not a bug:
+        //
+        //   view.busy      "do not offer a Connect button" — true for Paired,
+        //                  because there is nothing left to start.
+        //   busy_reason()  "a restart right now would destroy something in
+        //                  flight" — FALSE for Paired, because a connected
+        //                  Agent Computer is the steady state of this
+        //                  product. An updater that treated it as busy would
+        //                  never update the machines that are working, which
+        //                  is every machine that matters.
+        //
+        // So the invariant is one-directional: the updater may never call a
+        // moment safe that the window itself considers in flight. The
+        // reverse is allowed and `Paired` is the whole reason.
+        for phase in ALL_PHASES {
+            let view = resolve_pair_view(phase, "", None);
+            if phase.busy_reason().is_some() {
+                assert!(
+                    view.busy,
+                    "{phase:?}: the updater will wait for it, but the window does not think anything is in flight"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_connected_computer_is_not_a_reason_to_stop_updating_forever() {
+        // Pinned on its own so that flipping it is a deliberate act with an
+        // argument, not a side effect of tidying the match above.
+        assert_eq!(BrowserPairPhase::Paired.busy_reason(), None);
+        assert!(BrowserPairPhase::Waiting.busy_reason().is_some());
+        assert!(BrowserPairPhase::Starting.busy_reason().is_some());
+    }
+
+    #[test]
+    fn a_busy_reason_reads_as_something_a_person_is_doing() {
+        // It is interpolated into a sentence shown on screen, so it has to be
+        // a phrase, not a state name.
+        for phase in ALL_PHASES {
+            if let Some(reason) = phase.busy_reason() {
+                assert!(!reason.trim().is_empty());
+                assert_eq!(reason, reason.to_lowercase(), "{phase:?} is not sentence-safe");
+            }
         }
     }
 

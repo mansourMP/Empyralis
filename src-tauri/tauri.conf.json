@@ -34,12 +34,15 @@
       "../empyralis-gateway/dist": "gateway/dist",
       "resources/node-runtime": "node-runtime",
       "resources/gateway-node-modules": "gateway/node_modules"
-    }
+    },
+    "createUpdaterArtifacts": true
   },
   "plugins": {
     "updater": {
-      "pubkey": "",
-      "endpoints": []
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IENBRTYwNTY5ODI3MTU4MDgKUldRSVdIR0NhUVhteXZNcjNKdTdKaFYzUnN6VU55SlRhdDdiVnNaR0ptYUc1ZXBtOWpYVGFhZTQK",
+      "endpoints": [
+        "https://empyralis.ai/releases/desktop/latest/latest.json"
+      ]
     }
   }
 }

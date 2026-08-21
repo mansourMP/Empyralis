@@ -127,3 +127,9 @@ empyralis-gateway/dist
 
 # Staged desktop bundle inputs (built, never committed)
 src-tauri/resources/gateway-node-modules/
+
+# Generated per build by scripts/write_tauri_release_config.py. Never
+# committed: it carries the stamped version (which would then be frozen in
+# the repo, reintroducing the exact defect that script exists to fix) and it
+# can carry a throwaway localhost updater endpoint from a verification run.
+src-tauri/tauri.release.conf.json

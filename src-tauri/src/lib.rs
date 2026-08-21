@@ -48,6 +48,7 @@
 
 mod agent_computer_status;
 mod browser_pairing;
+mod desktop_update;
 
 use std::fs;
 use std::io::{Read, Write};
@@ -83,6 +84,8 @@ use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri::{LogicalSize, Manager, RunEvent, Runtime, Size, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_updater::UpdaterExt;
+
+use desktop_update::UpdateSite;
 use url::Url;
 
 const OVERLAY_BRIDGE_HOST: &str = "127.0.0.1";
@@ -101,6 +104,7 @@ const TRAY_MENU_STATUS_ID: &str = "empyralis_status";
 const TRAY_MENU_WORKSPACE_ID: &str = "empyralis_workspace";
 const TRAY_MENU_POWER_ID: &str = "empyralis_power";
 const TRAY_MENU_QUIT_ID: &str = "empyralis_quit";
+const TRAY_MENU_UPDATE_ID: &str = "empyralis_update";
 
 /// How often the menu bar re-reads this machine's own state.
 ///
@@ -162,6 +166,17 @@ const GATEWAY_DISPLAY_NAME_ENV: &str = "EMPYRALIS_GATEWAY_DISPLAY_NAME";
 /// existing box's supervision.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const GATEWAY_SUPERVISOR_SCOPE_ENV: &str = "EMPYRALIS_GATEWAY_SUPERVISOR_SCOPE";
+/// Tells the gateway that THIS APP owns it.
+///
+/// Two consequences, both of which only make sense when the app is the one
+/// shipping the gateway: the login item it installs carries this app's own
+/// state dir and control-plane URL (without which the gateway that starts at
+/// login looks for pairing credentials in a directory that does not have
+/// them), and the backend refuses to advertise a gateway self-update to this
+/// box, because the gateway lives inside the .app bundle and only an app
+/// update can replace it. See
+/// empyralis-gateway/src/update/gateway-desktop-managed.ts.
+const GATEWAY_DESKTOP_MANAGED_ENV: &str = "EMPYRALIS_GATEWAY_DESKTOP_MANAGED";
 /// Tells the gateway process to audit/repair its OS supervisor unit and
 /// exit — never boot the rest of the gateway. See index.ts's
 /// `runInstallSupervisorAndExit`.
@@ -221,8 +236,19 @@ struct DesktopAppUpdateState {
     current_version: String,
     version: Option<String>,
     body: Option<String>,
+    /// One of: `up_to_date` | `available` | `updating` | `failed` |
+    /// `cannot_update` | `unconfigured`. FOUR DIFFERENT FACTS, and they may
+    /// never share one value — CLAUDE.md's outcome-honesty law. In
+    /// particular `cannot_update` is not `failed`: nothing was attempted and
+    /// retrying changes nothing, so telling someone to try again would be
+    /// the lie.
     state: String,
     detail: Option<String>,
+    /// Why this copy cannot replace itself, as a STABLE CODE rather than
+    /// prose — `installable` when it can. See desktop_update::UpdateSite.
+    site_code: String,
+    /// The ONE thing the person does about it, when there is one.
+    action: Option<String>,
 }
 
 fn desktop_update_current_version(app: &tauri::AppHandle) -> String {
@@ -285,6 +311,7 @@ fn desktop_update_is_unconfigured_error(message: &str) -> bool {
 
 fn desktop_update_status(
     app: &tauri::AppHandle,
+    site: &UpdateSite,
     configured: bool,
     available: bool,
     state: &str,
@@ -300,12 +327,35 @@ fn desktop_update_status(
         body,
         state: state.to_string(),
         detail,
+        site_code: site.code().to_string(),
+        action: site.action(),
     }
 }
 
-fn desktop_update_unconfigured(app: &tauri::AppHandle, detail: Option<String>) -> DesktopAppUpdateState {
+/// "This copy cannot replace itself, and here is the one thing to do about
+/// it." Deliberately its own state rather than an error: nothing failed, and
+/// nothing the customer retries will change the answer.
+fn desktop_update_cannot_update(app: &tauri::AppHandle, site: &UpdateSite) -> DesktopAppUpdateState {
     desktop_update_status(
         app,
+        site,
+        true,
+        false,
+        "cannot_update",
+        None,
+        None,
+        Some(site.detail()),
+    )
+}
+
+fn desktop_update_unconfigured(
+    app: &tauri::AppHandle,
+    site: &UpdateSite,
+    detail: Option<String>,
+) -> DesktopAppUpdateState {
+    desktop_update_status(
+        app,
+        site,
         false,
         false,
         "unconfigured",
@@ -313,7 +363,7 @@ fn desktop_update_unconfigured(app: &tauri::AppHandle, detail: Option<String>) -
         None,
         Some(
             detail.unwrap_or_else(|| {
-                "Configure TAURI_UPDATER_PUBLIC_KEY and TAURI_UPDATER_ENDPOINTS, or build with tauri.release.conf.json."
+                "This build has no update endpoint or signing key, so it cannot be updated."
                     .to_string()
             }),
         ),
@@ -1138,12 +1188,79 @@ fn set_turned_off_by_owner(app: &tauri::AppHandle, turned_off: bool) -> Result<(
 struct TrayState {
     rendered: Mutex<Option<TrayRender>>,
     docker: Mutex<Option<(DockerProbe, Instant)>>,
+    /// Last thing the update loop had to say. `None` until its first check,
+    /// which is why the menu shows no update line at all for the first
+    /// minute and a half of a launch — there is genuinely nothing known yet,
+    /// and "Up to date" would be a claim we have not earned.
+    update: Mutex<Option<TrayUpdateLine>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TrayRender {
     status: AgentComputerStatus,
     workspace_line: String,
+    /// Part of the render (rather than something painted on afterwards) so
+    /// that the equality check above it decides when the menu is rebuilt.
+    /// A change here has to redraw the menu exactly like a status change.
+    update: Option<TrayUpdateLine>,
+}
+
+/// What the menu bar says about updates, and whether pressing it does
+/// anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrayUpdateLine {
+    label: String,
+    /// True only when there is a real update sitting there ready to install.
+    /// An `Update now` item that is not backed by a downloaded-and-verified
+    /// update is a dead control, so this is what decides whether the row is
+    /// a control at all or just a line of text.
+    actionable: bool,
+}
+
+/// The menu-bar line for an update state, or `None` when there is nothing
+/// worth a row.
+///
+/// PURE, and separated from the tray for that reason: this is the whole
+/// decision about which of the four update facts is worth interrupting a
+/// nine-word menu for, and it is the part worth testing.
+fn tray_update_line(state: &DesktopAppUpdateState) -> Option<TrayUpdateLine> {
+    match state.state.as_str() {
+        // "Up to date" is the resting state of every healthy machine on every
+        // day nothing shipped. Saying so in the menu is noise, and the menu
+        // is nine words long on purpose.
+        "up_to_date" => None,
+        "available" => Some(TrayUpdateLine {
+            label: match state.version.as_deref() {
+                Some(version) => format!("Update to {version} now"),
+                None => "Update now".to_string(),
+            },
+            actionable: true,
+        }),
+        "updating" => Some(TrayUpdateLine {
+            label: "Updating…".to_string(),
+            actionable: false,
+        }),
+        // The three facts that are NOT "fine" each get a row, because each
+        // one means this machine stops receiving fixes and nothing else in
+        // this product would ever say so. The founder's own Mac sits in
+        // `cannot_update` today and nothing told him.
+        "cannot_update" => Some(TrayUpdateLine {
+            label: "Can't update itself here".to_string(),
+            actionable: false,
+        }),
+        "failed" => Some(TrayUpdateLine {
+            label: "Update didn't finish".to_string(),
+            actionable: false,
+        }),
+        "unconfigured" => Some(TrayUpdateLine {
+            label: "Updates aren't set up in this build".to_string(),
+            actionable: false,
+        }),
+        // `deferred` deliberately shows nothing: the customer is mid-pairing,
+        // the window in front of them already says so, and a second line
+        // about a postponed update is noise at the one moment they are busy.
+        _ => None,
+    }
 }
 
 impl TrayState {
@@ -1151,6 +1268,7 @@ impl TrayState {
         Self {
             rendered: Mutex::new(None),
             docker: Mutex::new(None),
+            update: Mutex::new(None),
         }
     }
 
@@ -1198,6 +1316,11 @@ fn resolve_tray_render(app: &tauri::AppHandle, tray_state: &TrayState) -> TrayRe
     TrayRender {
         status,
         workspace_line: workspace_menu_line(app, status),
+        update: tray_state
+            .update
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone()),
     }
 }
 
@@ -1299,6 +1422,17 @@ fn build_tray_menu(
         builder = builder.separator().item(&power_item);
     } else {
         builder = builder.separator();
+    }
+
+    // Absent unless there is something true to say. Rendered as a CONTROL
+    // only when pressing it would actually do something — the same
+    // rendered-or-absent rule the power item above follows.
+    if let Some(update) = &render.update {
+        let update_item = MenuItemBuilder::with_id(TRAY_MENU_UPDATE_ID, &update.label)
+            .enabled(update.actionable)
+            .build(app)
+            .map_err(|error| format!("Failed to build the update control: {error}"))?;
+        builder = builder.item(&update_item);
     }
 
     let quit_item = MenuItemBuilder::with_id(TRAY_MENU_QUIT_ID, quit_menu_label(render.status))
@@ -1436,6 +1570,30 @@ fn tray_icon(glyph: TrayGlyph) -> tauri::image::Image<'static> {
 
 /// Pushes a freshly resolved state into the menu bar, skipping the work when
 /// nothing changed.
+/// Makes the automatic update happen NOW instead of at the next interval.
+///
+/// This is the only thing the menu item does. It is not a second update
+/// mechanism and it must never become one — the loop is the mechanism, and
+/// this exists because someone who has just read a release note should not
+/// have to wait up to six hours for it.
+fn handle_update_menu_click(app: &tauri::AppHandle) {
+    let handle = app.clone();
+    // Off the menu-event thread: this downloads, installs and restarts.
+    thread::spawn(move || {
+        let state = tauri::async_runtime::block_on(desktop_update_apply(&handle));
+        refresh_tray_update_state(&handle, &state);
+    });
+}
+
+/// Publishes what the update loop just learned to the menu bar.
+fn refresh_tray_update_state(app: &tauri::AppHandle, state: &DesktopAppUpdateState) {
+    let line = tray_update_line(state);
+    if let Ok(mut guard) = app.state::<TrayState>().update.lock() {
+        *guard = line;
+    }
+    refresh_tray(app);
+}
+
 fn refresh_tray(app: &tauri::AppHandle) {
     let tray_state = app.state::<TrayState>();
     let render = resolve_tray_render(app, &tray_state);
@@ -1496,6 +1654,7 @@ fn install_tray(app: &tauri::AppHandle) -> Result<(), String> {
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| match event.id().as_ref() {
             TRAY_MENU_POWER_ID => handle_power_menu_click(app),
+            TRAY_MENU_UPDATE_ID => handle_update_menu_click(app),
             TRAY_MENU_QUIT_ID => app.exit(0),
             _ => {}
         })
@@ -2271,12 +2430,26 @@ struct GatewayStatus {
 /// supervision is still a running, paired Agent Computer for this session;
 /// it just will not come back on its own after a reboot until this is
 /// retried successfully. The caller is told which case it got.
-fn install_gateway_supervisor(node_bin: &Path, entry: &Path, state_dir: &Path) -> GatewaySupervisorOutcome {
+fn install_gateway_supervisor(
+    node_bin: &Path,
+    entry: &Path,
+    state_dir: &Path,
+    api_base_url: &str,
+) -> GatewaySupervisorOutcome {
     let mut command = Command::new(node_bin);
     command
         .arg(entry)
         .env(GATEWAY_INSTALL_SUPERVISOR_ENV, "1")
         .env(GATEWAY_STATE_DIR_ENV, state_dir)
+        // The login item this child writes has to carry BOTH of these, or the
+        // gateway that starts at login resolves its own defaults —
+        // ~/.empyralis/gateway and http://127.0.0.1:8001/api — which is a
+        // directory holding none of this machine's pairing credentials and a
+        // control plane that does not exist on a customer's Mac. Until this
+        // was passed, the Agent Computer only ever came back while the app
+        // itself was open.
+        .env(GATEWAY_API_URL_ENV, api_base_url)
+        .env(GATEWAY_DESKTOP_MANAGED_ENV, "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(target_os = "linux")]
@@ -2475,6 +2648,7 @@ fn pair_and_start_gateway(
         .arg(&entry)
         .env(GATEWAY_API_URL_ENV, &api_base_url)
         .env(GATEWAY_STATE_DIR_ENV, &state_dir)
+        .env(GATEWAY_DESKTOP_MANAGED_ENV, "1")
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
@@ -2525,7 +2699,7 @@ fn pair_and_start_gateway(
         guard.gateway = Some(child);
     }
 
-    let supervisor = install_gateway_supervisor(&node_bin, &entry, &state_dir);
+    let supervisor = install_gateway_supervisor(&node_bin, &entry, &state_dir, &api_base_url);
 
     Ok(GatewayStartResult {
         started: true,
@@ -2574,6 +2748,18 @@ impl BrowserPairState {
             detail: String::new(),
             cancel: Arc::new(AtomicBool::new(false)),
         }))
+    }
+
+    /// Why an update must wait, or `None` when nothing is in flight.
+    ///
+    /// A POISONED LOCK COUNTS AS BUSY. It means a thread panicked while
+    /// holding the pairing state, and the one thing not to do in that
+    /// situation is restart the app out from under whatever it was doing.
+    fn busy_reason(&self) -> Option<String> {
+        match self.0.lock() {
+            Ok(guard) => guard.phase.busy_reason().map(str::to_string),
+            Err(_) => Some("a connection attempt this app lost track of".to_string()),
+        }
     }
 }
 
@@ -3476,87 +3662,285 @@ fn start_overlay_bridge<R: Runtime + 'static>(app_handle: tauri::AppHandle<R>) {
     });
 }
 
-#[tauri::command]
-async fn desktop_app_update_check(app: tauri::AppHandle) -> Result<DesktopAppUpdateState, String> {
-    let updater = match desktop_update_builder(&app) {
+/// Reads what is published. Never installs, never restarts.
+async fn desktop_update_look(app: &tauri::AppHandle) -> DesktopAppUpdateState {
+    let site = desktop_update::resolve_site();
+
+    // The site verdict is checked FIRST, before any network call. A copy that
+    // cannot replace itself has no business asking what is available: the
+    // honest answer to "is there an update for me" is "this copy cannot take
+    // one", and finding an update it can never install would produce the
+    // classic dead control — a button offering a version it cannot reach.
+    if !site.can_install() {
+        return desktop_update_cannot_update(app, &site);
+    }
+
+    let updater = match desktop_update_builder(app) {
         Ok(updater) => updater,
-        Err(error) => return Ok(desktop_update_unconfigured(&app, Some(error))),
+        Err(error) => return desktop_update_unconfigured(app, &site, Some(error)),
     };
 
     match updater.check().await {
-        Ok(Some(update)) => Ok(desktop_update_status(
-            &app,
+        Ok(Some(update)) => desktop_update_status(
+            app,
+            &site,
             true,
             true,
             "available",
             Some(update.version),
             update.body,
-            Some("Update ready to install.".to_string()),
-        )),
-        Ok(None) => Ok(desktop_update_status(
-            &app,
+            Some("A newer Empyralis is ready.".to_string()),
+        ),
+        Ok(None) => desktop_update_status(
+            app,
+            &site,
             true,
             false,
             "up_to_date",
             None,
             None,
             Some("Empyralis is up to date.".to_string()),
-        )),
+        ),
         Err(error) => {
             let message = error.to_string();
             if desktop_update_is_unconfigured_error(&message) {
-                Ok(desktop_update_unconfigured(&app, Some(message)))
+                desktop_update_unconfigured(app, &site, Some(message))
             } else {
-                Ok(desktop_update_status(
-                    &app,
+                desktop_update_status(
+                    app,
+                    &site,
                     true,
                     false,
-                    "error",
+                    "failed",
                     None,
                     None,
                     Some(message),
-                ))
+                )
             }
         }
     }
 }
 
-#[tauri::command]
-async fn desktop_app_update_install(app: tauri::AppHandle) -> Result<DesktopAppUpdateState, String> {
-    let updater = desktop_update_builder(&app)?;
-    let update = updater
-        .check()
-        .await
-        .map_err(|error| format!("Failed to check for updates: {error}"))?;
-    let Some(update) = update else {
-        return Ok(desktop_update_status(
-            &app,
+/// Is this a safe instant to restart the app underneath the customer?
+///
+/// ONE question, asked in ONE place, because the alternative is every future
+/// caller remembering to ask it. Pairing is the only thing this app does that
+/// a restart would actually destroy: `Waiting` means a loopback listener is
+/// up and a browser tab is going to POST to it, and `Starting` means the
+/// gateway is mid-spawn. Both are minutes long at most, so a deferred update
+/// costs one interval; an update that lands in the middle of either costs the
+/// customer their setup and leaves an orphaned gateway behind.
+fn desktop_update_busy_reason(app: &tauri::AppHandle) -> Option<String> {
+    let state = app.state::<BrowserPairState>();
+    state
+        .busy_reason()
+        .map(|reason| format!("Waiting until {reason} finishes."))
+}
+
+/// Downloads, installs, and restarts into the new build.
+///
+/// SEQUENCING IS THE SAFETY PROPERTY HERE, so it is worth stating plainly:
+///
+/// ```text
+/// 1. download        network, slow, fallible. NOTHING on this machine has
+///                    been touched yet, so a failure here is a no-op.
+/// 2. bootout + stop  only now. launchd's KeepAlive would otherwise fight
+///                    the bundle swap and respawn the gateway from a path
+///                    that is being replaced underneath it.
+/// 3. install         local, fast: two renames of the .app.
+/// 4. restart         the new build comes up, re-writes the login item at
+///                    its own path and re-spawns the gateway (the ordinary
+///                    resume path — nothing update-specific).
+/// ```
+///
+/// The gateway is stopped rather than left running because it lives INSIDE
+/// the bundle being replaced (`Contents/Resources/gateway/dist`). Leaving it
+/// up would keep a deleted directory's file handles open and, worse, leave
+/// the OLD build serving the customer's agents while the app reports the new
+/// version — the two halves disagreeing about which build is running is
+/// exactly the state MAN-331 exists to prevent.
+async fn desktop_update_apply(app: &tauri::AppHandle) -> DesktopAppUpdateState {
+    let site = desktop_update::resolve_site();
+    if !site.can_install() {
+        return desktop_update_cannot_update(app, &site);
+    }
+
+    if let Some(reason) = desktop_update_busy_reason(app) {
+        return desktop_update_status(
+            app,
+            &site,
             true,
-            false,
-            "up_to_date",
+            true,
+            "deferred",
             None,
             None,
-            Some("Empyralis is already up to date.".to_string()),
-        ));
+            Some(reason),
+        );
+    }
+
+    let updater = match desktop_update_builder(app) {
+        Ok(updater) => updater,
+        Err(error) => return desktop_update_unconfigured(app, &site, Some(error)),
+    };
+
+    let update = match updater.check().await {
+        Ok(Some(update)) => update,
+        Ok(None) => {
+            return desktop_update_status(
+                app,
+                &site,
+                true,
+                false,
+                "up_to_date",
+                None,
+                None,
+                Some("Empyralis is already up to date.".to_string()),
+            )
+        }
+        Err(error) => {
+            return desktop_update_status(
+                app,
+                &site,
+                true,
+                false,
+                "failed",
+                None,
+                None,
+                Some(error.to_string()),
+            )
+        }
     };
 
     let version = Some(update.version.clone());
     let body = update.body.clone();
-    update
-        .download_and_install(|_, _| {}, || {})
-        .await
-        .map_err(|error| format!("Failed to install the update: {error}"))?;
+
+    let bytes = match update.download(|_, _| {}, || {}).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            // Nothing was replaced and nothing was stopped. Say that, so the
+            // next check is understood as a real retry rather than a repeat
+            // of something already half-done.
+            return desktop_update_status(
+                app,
+                &site,
+                true,
+                true,
+                "failed",
+                version,
+                body,
+                Some(format!("Could not download the update: {error}")),
+            );
+        }
+    };
+
+    // Re-ask right before the irreversible half: the download took real time
+    // and a pairing may have started during it.
+    if let Some(reason) = desktop_update_busy_reason(app) {
+        return desktop_update_status(app, &site, true, true, "deferred", version, body, Some(reason));
+    }
+
+    quiesce_gateway_for_update(app);
+
+    if let Err(error) = update.install(bytes) {
+        // The gateway was stopped for an install that did not happen. Bring
+        // it back rather than leaving the customer's agents without their
+        // computer because an update failed.
+        resume_gateway_after_failed_update(app);
+        return desktop_update_status(
+            app,
+            &site,
+            true,
+            true,
+            "failed",
+            version,
+            body,
+            Some(format!("Could not install the update: {error}")),
+        );
+    }
+
     app.request_restart();
 
-    Ok(desktop_update_status(
-        &app,
+    desktop_update_status(
+        app,
+        &site,
         true,
         true,
-        "installing",
+        "updating",
         version,
         body,
         Some("Restarting Empyralis to finish the update.".to_string()),
-    ))
+    )
+}
+
+/// Stops the gateway and unloads its login item so launchd does not respawn
+/// it into a bundle that is being replaced.
+fn quiesce_gateway_for_update(app: &tauri::AppHandle) {
+    if let Err(error) = remove_gateway_supervision() {
+        eprintln!("Could not unload the Agent Computer login item before updating: {error}");
+    }
+    if let Err(error) = stop_gateway_process(app) {
+        // Best effort by design: a gateway we could not stop is a reason to
+        // log, never a reason to abandon an update that is already
+        // downloaded and verified.
+        eprintln!("Could not stop the Agent Computer before updating: {error}");
+    }
+}
+
+/// Puts the Agent Computer back after an install that did not happen.
+fn resume_gateway_after_failed_update(app: &tauri::AppHandle) {
+    let handle = app.clone();
+    thread::spawn(move || {
+        if let Err(error) = reconnect_agent_computer(&handle) {
+            eprintln!("Could not restart the Agent Computer after a failed update: {error}");
+        }
+    });
+}
+
+/// The mechanism. Runs for the life of the process and asks nobody.
+///
+/// The founder's requirement is that no one ever presses a button to get a
+/// fix. So this loop is the update path, and the tray item added alongside it
+/// only ever makes the same thing happen sooner.
+fn start_desktop_update_loop(app: tauri::AppHandle) {
+    thread::spawn(move || {
+        sleep(desktop_update::FIRST_CHECK_DELAY);
+        loop {
+            let state = tauri::async_runtime::block_on(desktop_update_apply(&app));
+            match state.state.as_str() {
+                // Restarting; this thread dies with the process.
+                "updating" => return,
+                "cannot_update" => {
+                    // Logged ONCE per interval rather than silently swallowed:
+                    // the founder's own Mac is in this state today, and a
+                    // refusal nobody can see is how it stayed that way.
+                    eprintln!(
+                        "Empyralis cannot update itself ({}): {}",
+                        state.site_code,
+                        state.detail.clone().unwrap_or_default()
+                    );
+                }
+                "failed" => {
+                    eprintln!(
+                        "Empyralis update did not complete: {}",
+                        state.detail.clone().unwrap_or_default()
+                    );
+                }
+                _ => {}
+            }
+            refresh_tray_update_state(&app, &state);
+            sleep(desktop_update::CHECK_INTERVAL);
+        }
+    });
+}
+
+#[tauri::command]
+async fn desktop_app_update_check(app: tauri::AppHandle) -> Result<DesktopAppUpdateState, String> {
+    Ok(desktop_update_look(&app).await)
+}
+
+#[tauri::command]
+async fn desktop_app_update_install(app: tauri::AppHandle) -> Result<DesktopAppUpdateState, String> {
+    Ok(desktop_update_apply(&app).await)
 }
 
 pub fn run() {
@@ -3680,6 +4064,12 @@ pub fn run() {
                     // a route moved, a deploy lagged, or the network dropped.
 
                     start_tray_status_loop(app_handle.clone());
+
+                    // THE MECHANISM. The founder's requirement is that a
+                    // customer never presses anything to get a fix, so the
+                    // update path is this loop and the tray item is only a
+                    // way to make it happen sooner.
+                    start_desktop_update_loop(app_handle.clone());
                 }
                 RunEvent::Exit | RunEvent::ExitRequested { .. } => {
                     // Deliberately does NOT touch the gateway child — see this
@@ -3993,6 +4383,73 @@ mod pair_listener_tests {
         assert_eq!(query.get("state").map(String::as_str), Some(STATE));
         assert_eq!(query.get("name").map(String::as_str), Some("Studio Mac"));
         std::env::remove_var(APP_URL_ENV);
+    }
+}
+
+#[cfg(test)]
+mod tray_update_line_tests {
+    use super::*;
+
+    fn state(name: &str, version: Option<&str>) -> DesktopAppUpdateState {
+        DesktopAppUpdateState {
+            configured: true,
+            available: name == "available",
+            current_version: "0.1.9001".to_string(),
+            version: version.map(str::to_string),
+            body: None,
+            state: name.to_string(),
+            detail: Some("detail".to_string()),
+            site_code: "installable".to_string(),
+            action: None,
+        }
+    }
+
+    #[test]
+    fn a_healthy_machine_on_a_quiet_day_adds_nothing_to_the_menu() {
+        // The menu is four lines. "Up to date" is true on almost every day
+        // for almost every machine, so a row saying it is pure noise.
+        assert_eq!(tray_update_line(&state("up_to_date", None)), None);
+    }
+
+    #[test]
+    fn an_available_update_is_the_only_pressable_row() {
+        let line = tray_update_line(&state("available", Some("0.1.9002"))).expect("a row");
+        assert!(line.actionable, "the one row worth pressing is not pressable");
+        assert!(line.label.contains("0.1.9002"), "{}", line.label);
+
+        // Everything else states a fact. A row that cannot act on itself must
+        // never render as a control — CLAUDE.md, "no dead controls".
+        for name in ["updating", "cannot_update", "failed", "unconfigured"] {
+            let line = tray_update_line(&state(name, None))
+                .unwrap_or_else(|| panic!("{name} said nothing at all"));
+            assert!(!line.actionable, "{name} rendered as a pressable control");
+            assert!(!line.label.trim().is_empty());
+        }
+    }
+
+    #[test]
+    fn every_state_that_means_updates_have_stopped_says_so_somewhere() {
+        // The whole reason the founder's Mac stayed stuck is that nothing on
+        // screen ever mentioned it. These three each mean "this machine stops
+        // receiving fixes", and each must reach the one surface this app has.
+        for name in ["cannot_update", "failed", "unconfigured"] {
+            assert!(
+                tray_update_line(&state(name, None)).is_some(),
+                "{name} would be invisible to the customer"
+            );
+        }
+    }
+
+    #[test]
+    fn a_deferred_update_stays_quiet_because_the_customer_is_mid_pairing() {
+        assert_eq!(tray_update_line(&state("deferred", None)), None);
+    }
+
+    #[test]
+    fn an_available_update_with_no_version_still_offers_the_action() {
+        let line = tray_update_line(&state("available", None)).expect("a row");
+        assert!(line.actionable);
+        assert_eq!(line.label, "Update now");
     }
 }
 

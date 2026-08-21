@@ -1,118 +1,188 @@
 name: Release Desktop
 
-# macOS and Linux only — Windows is explicitly out of scope for this app
-# (CLAUDE.md's "Windows is out" entry: "VPS is Linux, fuck Windows we are
-# not going toward that"). Do not add a windows job back.
+# Publishes the macOS Empyralis app AND the update feed every desktop build
+# reads. macOS and Linux only -- Windows is explicitly out of scope for this
+# app (CLAUDE.md's "Windows is out" entry).
 #
-# This app is a native host for the real, hosted Empyralis webview plus the
-# `empyralis-gateway` child process it spawns and supervises — it no longer
-# bundles a Python backend or a locally-built Next.js frontend (see
-# src-tauri/src/lib.rs's own top-of-file doc comment for the full shape).
-# So this workflow's job is: build the gateway, fetch the exact pinned
-# portable Node runtime it will run under (built native addons included),
-# bundle both as Tauri RESOURCES (never a Tauri "sidecar" — the gateway is
-# `node dist/index.js`, not a single self-contained executable), then sign
-# and publish the desktop shell around them.
+# ─────────────────────────────────────────────────────────────────────────────
+# WHY THIS WORKFLOW WAS REWRITTEN, and each of these was fatal on its own:
+#
+# 1. IT ONLY RAN WHEN A HUMAN REMEMBERED. `on: workflow_dispatch` and nothing
+#    else -- the identical defect release-gateway-linux.yml carried until
+#    2026-08-13, when it was found to have published a 15-day-stale artifact
+#    that shipped to every droplet. A merge now publishes itself.
+#
+# 2. IT PUBLISHED WHERE NO APP COULD READ. It uploaded to GitHub Releases and
+#    the endpoint derived to
+#    https://github.com/<owner>/<repo>/releases/latest/download/latest.json.
+#    THIS REPOSITORY IS PRIVATE (`gh api repos/... --jq .visibility` ->
+#    "private"), so that URL is a 404 to any unauthenticated client, which is
+#    every copy of the app. Structurally dead, exactly like the
+#    raw.githubusercontent.com fallback CLAUDE.md already documents. The feed
+#    now goes to the same Cloudflare R2 bucket + empyralis.ai/releases/* route
+#    the gateway artifacts have used successfully since MAN-122.
+#
+# 3. IT COULD NOT RUN AT ALL. "Import Apple signing certificate" was
+#    unconditional and hard-failed without APPLE_CERTIFICATE, which this
+#    company does not have -- the founder's decision is to ship unsigned now
+#    and buy a certificate when there is revenue. Signing is now conditional:
+#    absent secrets produce an ad-hoc-signed build, present ones upgrade it to
+#    a signed and notarized one with no edit here.
+#
+# 4. IT REGRESSED THE BUNDLED NODE'S SIGNATURE. It fetched Node with its own
+#    inline curl and never re-signed it, so a CI build undid 58f8b2fc -- the
+#    customer's Mac said "Software from 'Node.js Foundation' can run in the
+#    background" about a product they installed from us. It now re-signs
+#    ad-hoc under ai.empyralis.agent-computer, and ASSERTS the result.
+#
+# 5. NOTHING COULD OBSERVE AN UPDATE. `version` was the literal 0.1.0 in
+#    tauri.conf.json and had never been bumped. See
+#    scripts/write_tauri_release_config.py's header, and CLAUDE.md's MAN-331
+#    rule: never advertise an update whose success could not be observed.
+# ─────────────────────────────────────────────────────────────────────────────
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          Explicit version to publish. Leave blank to derive 0.1.<commit count>,
+          which is what a push does.
+        required: false
+        default: ""
+  # A MERGE PUBLISHES ITSELF. Same reasoning, verbatim, as the gateway
+  # workflow's own push trigger: "a human must remember to run this" is the
+  # defect, not the schedule.
+  push:
+    branches: [main]
+    paths:
+      - "src-tauri/**"
+      - "empyralis-gateway/**"
+      - "scripts/write_tauri_release_config.py"
+      - "scripts/fetch-desktop-node-runtime.sh"
+      - "scripts/stage-desktop-gateway-deps.sh"
+      - ".github/workflows/build.yml"
 
 permissions:
-  contents: write
-  attestations: write
-  id-token: write
+  contents: read
 
 concurrency:
   group: desktop-release-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  # Same bucket and account the gateway artifacts already publish to, so the
+  # empyralis.ai/releases/* Worker route serves this with no new plumbing.
+  R2_ENDPOINT: https://76e485cbfb611ff8caa5c1d2afa71890.r2.cloudflarestorage.com
+  R2_BUCKET: empyralis-agent-computer-releases
+  # What the app's own tauri.conf.json points at. Kept here so the publish
+  # step and the reachability check below read one value.
+  PUBLIC_FEED_URL: https://empyralis.ai/releases/desktop/latest/latest.json
+
 jobs:
   macos:
-    name: macOS signed release
-    runs-on: macos-latest
+    name: macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Apple silicon. Every Mac the founder or a customer is realistically
+          # running today.
+          - arch: aarch64
+            runner: macos-14
+          # Intel. Cheap to keep and impossible to add back retroactively for
+          # someone already on an old machine.
+          - arch: x86_64
+            runner: macos-13
     steps:
       - name: Checkout
+        with:
+          # write_tauri_release_config.py derives the version from
+          # `git rev-list --count HEAD`. A shallow clone counts 1 and every
+          # build would publish 0.1.1 forever -- a frozen version is the exact
+          # defect this workflow exists to fix, so it must not be reintroduced
+          # by a checkout option.
+          fetch-depth: 0
         uses: actions/checkout@v4
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Setup Node.js (toolchain — compiles the gateway; not what ships)
+      - name: Setup Node.js (toolchain -- compiles the gateway; not what ships)
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install gateway dependencies and build
+      - name: Build the gateway
         working-directory: empyralis-gateway
         run: |
           npm ci
           npm run build
 
-      - name: Resolve pinned portable Node version
-        id: node_pin
-        run: |
-          VERSION="$(node -e "process.stdout.write(require('./empyralis-gateway/dist/update/desktop-node-version.js').DESKTOP_GATEWAY_NODE_VERSION)")"
-          if [ -z "$VERSION" ]; then
-            echo "Could not resolve DESKTOP_GATEWAY_NODE_VERSION from the built gateway artifact." >&2
-            exit 1
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      # Uses the repo's own script rather than an inline curl. That script is
+      # what pins the Node version (read FROM the built gateway, never typed)
+      # and what ad-hoc re-signs the binary under our identifier. The previous
+      # inline copy did neither, which is how defect 4 above shipped.
+      - name: Fetch and re-sign the bundled Node runtime
+        run: bash scripts/fetch-desktop-node-runtime.sh
 
-      - name: Fetch portable Node runtime (arm64 + x64, both ship — universal-capable bundle)
-        env:
-          NODE_PIN: ${{ steps.node_pin.outputs.version }}
-        run: |
-          set -euo pipefail
-          for ARCH in arm64 x64; do
-            DEST="src-tauri/resources/node-runtime-$ARCH"
-            TARBALL="node-v${NODE_PIN}-darwin-${ARCH}.tar.gz"
-            URL="https://nodejs.org/dist/v${NODE_PIN}/${TARBALL}"
-            echo "Fetching $URL"
-            curl -fsSL -o "/tmp/$TARBALL" "$URL"
-            rm -rf "$DEST"
-            mkdir -p "$DEST"
-            tar -xzf "/tmp/$TARBALL" -C "$DEST" --strip-components=1
-            test -x "$DEST/bin/node"
-          done
-          # This runner is one arch; use its own match to compile the
-          # gateway's native addons (bufferutil, utf-8-validate, sharp)
-          # against the EXACT bundled Node, then bundle the matching arch's
-          # runtime as the one Tauri packages for this build. A universal
-          # (arm64+x64) single bundle is future work — today's macOS
-          # release job runs once per architecture via the matrix below if
-          # ever split; for now this targets the runner's native arch.
-          HOST_ARCH="$(uname -m)"
-          case "$HOST_ARCH" in
-            arm64) echo "resolved_arch=arm64" >> "$GITHUB_ENV" ;;
-            x86_64) echo "resolved_arch=x64" >> "$GITHUB_ENV" ;;
-            *) echo "Unsupported host arch: $HOST_ARCH" >&2; exit 1 ;;
-          esac
-
-      - name: Rebuild gateway native addons under the pinned portable Node
+      - name: Rebuild gateway native addons under the bundled Node
         working-directory: empyralis-gateway
         run: |
           set -euo pipefail
-          export PATH="$GITHUB_WORKSPACE/src-tauri/resources/node-runtime-$resolved_arch/bin:$PATH"
+          export PATH="$GITHUB_WORKSPACE/src-tauri/resources/node-runtime/bin:$PATH"
           node --version
           rm -rf node_modules
           npm ci
           npm run build
 
-      - name: Place bundled resources
+      - name: Stage the gateway's production dependencies
+        run: bash scripts/stage-desktop-gateway-deps.sh
+
+      # The bundled Node must carry OUR identifier, not Node.js Foundation's --
+      # macOS attributes background activity by the signature of the binary the
+      # login item launched, and the customer reads that name. Asserted rather
+      # than assumed: the fetch script skips signing when codesign is absent,
+      # and a silent skip here is how the customer's Mac ends up naming
+      # somebody else again.
+      - name: Assert the bundled Node is signed as Empyralis
         run: |
           set -euo pipefail
-          rm -rf src-tauri/resources/node-runtime
-          mv "src-tauri/resources/node-runtime-$resolved_arch" src-tauri/resources/node-runtime
-          rm -rf src-tauri/resources/node-runtime-arm64 src-tauri/resources/node-runtime-x64
           test -x src-tauri/resources/node-runtime/bin/node
+          IDENT="$(codesign -dv src-tauri/resources/node-runtime/bin/node 2>&1 | sed -n 's/^Identifier=//p')"
+          echo "bundled node identifier: ${IDENT:-<none>}"
+          if [ "$IDENT" != "ai.empyralis.agent-computer" ]; then
+            echo "The bundled Node is signed as '${IDENT:-<none>}', not ai.empyralis.agent-computer. macOS would tell the customer that software from someone else runs in the background on their Mac (fixed in 58f8b2fc; see scripts/fetch-desktop-node-runtime.sh)." >&2
+            exit 1
+          fi
           test -f empyralis-gateway/dist/index.js
 
-      - name: Import Apple signing certificate
+      # OPTIONAL BY DESIGN. The app ships unsigned today (founder's decision:
+      # ship now, buy a certificate when there is revenue) and this workflow
+      # must work in that state. When APPLE_CERTIFICATE appears in secrets the
+      # same job produces a signed, notarized build with no edit here.
+      - name: Import Apple signing certificate (only if one is configured)
+        id: apple
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
         run: |
+          set -euo pipefail
+          if [ -z "${APPLE_CERTIFICATE:-}" ]; then
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "No Apple certificate configured; this build ships ad-hoc signed."
+            echo "NOTE: an unsigned app is quarantined on download, and macOS App"
+            echo "Translocation then runs it read-only from a temporary path where"
+            echo "it cannot replace itself. The app detects that and says so"
+            echo "(desktop_update::UpdateSite::Translocated); the customer's one"
+            echo "action is to move it into /Applications."
+            exit 0
+          fi
           CERT_PATH="$RUNNER_TEMP/empyralis-signing.p12"
           KEYCHAIN_PATH="$RUNNER_TEMP/empyralis-signing.keychain-db"
           echo -n "$APPLE_CERTIFICATE" | base64 --decode > "$CERT_PATH"
@@ -124,156 +194,225 @@ jobs:
           security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
           security default-keychain -s "$KEYCHAIN_PATH"
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+          if [ -n "${APPLE_API_KEY_P8:-}" ]; then
+            APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+            echo -n "$APPLE_API_KEY_P8" | base64 --decode > "$APPLE_API_KEY_PATH"
+            {
+              echo "APPLE_API_KEY=$APPLE_API_KEY_ID"
+              echo "APPLE_API_KEY_PATH=$APPLE_API_KEY_PATH"
+              echo "APPLE_API_ISSUER=$APPLE_API_ISSUER"
+            } >> "$GITHUB_ENV"
+          fi
+          echo "signed=true" >> "$GITHUB_OUTPUT"
 
-      - name: Prepare notarization API key
+      - name: Stamp this build's version
+        id: stamp
         env:
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
-        run: |
-          APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
-          echo -n "$APPLE_API_KEY_P8" | base64 --decode > "$APPLE_API_KEY_PATH"
-          {
-            echo "APPLE_API_KEY=$APPLE_API_KEY_ID"
-            echo "APPLE_API_KEY_PATH=$APPLE_API_KEY_PATH"
-            echo "APPLE_API_ISSUER=$APPLE_API_ISSUER"
-          } >> "$GITHUB_ENV"
-
-      - name: Generate release-only Tauri config
-        env:
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          TAURI_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBLIC_KEY }}
+          EMPYRALIS_DESKTOP_VERSION: ${{ inputs.version }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        run: python3 scripts/write_tauri_release_config.py --output src-tauri/tauri.release.conf.json
+        run: |
+          set -euo pipefail
+          VERSION="$(python3 scripts/write_tauri_release_config.py --print-version)"
+          python3 scripts/write_tauri_release_config.py > /dev/null
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing Empyralis $VERSION"
 
-      - name: Build, sign, notarize, and publish macOS release
-        uses: tauri-apps/tauri-action@v1
+      - name: Build and sign the update artifact
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The minisign key that signs the .app.tar.gz. Unrelated to Apple
+          # codesigning: it is what proves to an already-installed app that an
+          # update came from us. Generated with `cargo tauri signer generate`;
+          # the PUBLIC half is in src-tauri/tauri.conf.json.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_API_KEY: ${{ env.APPLE_API_KEY }}
           APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
           APPLE_API_ISSUER: ${{ env.APPLE_API_ISSUER }}
-        with:
-          projectPath: src-tauri
-          tagName: ${{ github.ref_name }}
-          releaseName: Empyralis ${{ github.ref_name }}
-          releaseBody: Automated signed desktop release for ${{ github.ref_name }}.
-          releaseDraft: false
-          prerelease: false
-          uploadUpdaterJson: true
-          updaterJsonPreferNsis: false
-          args: --config tauri.release.conf.json
+        working-directory: src-tauri
+        run: |
+          set -euo pipefail
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY is not set. Without it the build emits an unsigned update artifact that every installed app will reject, which looks exactly like 'no update available' and reports nothing. Refusing to publish." >&2
+            exit 1
+          fi
+          cargo install tauri-cli --version '^2' --locked
+          cargo tauri build --config tauri.release.conf.json --bundles app,dmg
 
-      - name: Attest macOS release provenance
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-path: |
-            src-tauri/target/release/bundle/**/*
+      # The three files an installed app needs, collected by SHAPE rather than
+      # by a hardcoded filename: Tauri names the archive after productName and
+      # target, and a literal here would drift the day either changes.
+      - name: Collect the update artifact
+        id: collect
+        env:
+          VERSION: ${{ steps.stamp.outputs.version }}
+        run: |
+          set -euo pipefail
+          BUNDLE_DIR="src-tauri/target/release/bundle/macos"
+          ARCHIVE="$(find "$BUNDLE_DIR" -maxdepth 1 -name '*.app.tar.gz' -print -quit)"
+          if [ -z "$ARCHIVE" ]; then
+            echo "No .app.tar.gz was produced. bundle.createUpdaterArtifacts must be true in tauri.conf.json -- without it this workflow publishes a feed pointing at nothing." >&2
+            ls -la "$BUNDLE_DIR" >&2 || true
+            exit 1
+          fi
+          test -f "$ARCHIVE.sig" || { echo "The update archive has no .sig beside it, so every installed app would reject it." >&2; exit 1; }
+          OUT="$RUNNER_TEMP/out"
+          mkdir -p "$OUT"
+          NAME="Empyralis_${VERSION}_darwin-${{ matrix.arch }}.app.tar.gz"
+          cp "$ARCHIVE" "$OUT/$NAME"
+          cp "$ARCHIVE.sig" "$OUT/$NAME.sig"
+          DMG="$(find src-tauri/target/release/bundle/dmg -maxdepth 1 -name '*.dmg' -print -quit || true)"
+          if [ -n "$DMG" ]; then cp "$DMG" "$OUT/Empyralis_${VERSION}_${{ matrix.arch }}.dmg"; fi
+          ls -l "$OUT"
+          echo "archive_name=$NAME" >> "$GITHUB_OUTPUT"
 
-  linux:
-    name: Linux signed release
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.arch }}-${{ steps.stamp.outputs.version }}
+          path: ${{ runner.temp }}/out/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish binaries to Cloudflare R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          VERSION: ${{ steps.stamp.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Published under BOTH the version and `latest`. The versioned copy
+          # is what a feed entry points at forever; `latest` is only a
+          # convenience for a human fetching the current build by hand. An
+          # app already installed always follows the URL the feed gave it, so
+          # a later publish can never move the bytes out from under a
+          # download in flight.
+          for DEST in "s3://$R2_BUCKET/desktop/$VERSION/" "s3://$R2_BUCKET/desktop/latest/"; do
+            aws s3 cp "$RUNNER_TEMP/out/" "$DEST" --recursive --endpoint-url "$R2_ENDPOINT"
+          done
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # THE FEED IS WRITTEN ONCE, AFTER BOTH ARCHITECTURES ARE PUBLISHED.
+  #
+  # Deliberately not inside the matrix: latest.json names every platform in one
+  # document, so two jobs writing it race and the loser's architecture
+  # disappears from the feed. The app on that architecture would then get a
+  # clean "up to date" forever -- a silent, permanent loss of updates that
+  # nothing anywhere would report.
+  # ───────────────────────────────────────────────────────────────────────────
+  feed:
+    name: Publish the update feed
+    needs: macos
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Tauri Linux build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            librsvg2-dev \
-            patchelf \
-            file
-
-      - name: Setup Node.js (toolchain — compiles the gateway; not what ships)
-        uses: actions/setup-node@v4
         with:
-          node-version: 20
+          fetch-depth: 0
 
-      - name: Install gateway dependencies and build
-        working-directory: empyralis-gateway
-        run: |
-          npm ci
-          npm run build
-
-      - name: Resolve pinned portable Node version
-        id: node_pin
-        run: |
-          VERSION="$(node -e "process.stdout.write(require('./empyralis-gateway/dist/update/desktop-node-version.js').DESKTOP_GATEWAY_NODE_VERSION)")"
-          if [ -z "$VERSION" ]; then
-            echo "Could not resolve DESKTOP_GATEWAY_NODE_VERSION from the built gateway artifact." >&2
-            exit 1
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Fetch portable Node runtime for this runner's architecture
+      - name: Stamp this build's version
+        id: stamp
         env:
-          NODE_PIN: ${{ steps.node_pin.outputs.version }}
+          EMPYRALIS_DESKTOP_VERSION: ${{ inputs.version }}
+        run: echo "version=$(python3 scripts/write_tauri_release_config.py --print-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Download both architectures
+        uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-*-${{ steps.stamp.outputs.version }}
+          merge-multiple: true
+          path: artifacts
+
+      - name: Write latest.json
+        id: feed
+        env:
+          VERSION: ${{ steps.stamp.outputs.version }}
+          NOTES: ${{ github.event.head_commit.message }}
+          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          case "$(uname -m)" in
-            x86_64) ARCH=x64 ;;
-            aarch64) ARCH=arm64 ;;
-            *) echo "Unsupported host arch: $(uname -m)" >&2; exit 1 ;;
-          esac
-          echo "resolved_arch=$ARCH" >> "$GITHUB_ENV"
-          TARBALL="node-v${NODE_PIN}-linux-${ARCH}.tar.xz"
-          URL="https://nodejs.org/dist/v${NODE_PIN}/${TARBALL}"
-          echo "Fetching $URL"
-          curl -fsSL -o "/tmp/$TARBALL" "$URL"
-          rm -rf src-tauri/resources/node-runtime
-          mkdir -p src-tauri/resources/node-runtime
-          tar -xJf "/tmp/$TARBALL" -C src-tauri/resources/node-runtime --strip-components=1
-          test -x src-tauri/resources/node-runtime/bin/node
+          python3 - <<'PY'
+          import json, os, pathlib, datetime
+          version = os.environ["VERSION"]
+          base = f"https://empyralis.ai/releases/desktop/{version}"
+          # Tauri's own platform keys. darwin-universal is deliberately absent:
+          # this workflow builds two separate slices, and claiming a universal
+          # build it did not produce would hand half the fleet a binary that
+          # cannot run.
+          arches = {"aarch64": "darwin-aarch64", "x86_64": "darwin-x86_64"}
+          platforms = {}
+          for arch, key in arches.items():
+              name = f"Empyralis_{version}_darwin-{arch}.app.tar.gz"
+              sig = pathlib.Path("artifacts") / f"{name}.sig"
+              if not sig.is_file():
+                  raise SystemExit(
+                      f"{name}.sig is missing, so {key} cannot be published. "
+                      "Writing a feed without it would silently stop updates for every Mac on that architecture."
+                  )
+              platforms[key] = {
+                  "signature": sig.read_text().strip(),
+                  "url": f"{base}/{name}",
+              }
+          notes = (os.environ.get("NOTES") or "").strip().splitlines()
+          feed = {
+              "version": version,
+              "notes": (notes[0] if notes else f"Empyralis {version}")[:200],
+              "pub_date": datetime.datetime.now(datetime.timezone.utc)
+                  .replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+              "platforms": platforms,
+          }
+          pathlib.Path("latest.json").write_text(json.dumps(feed, indent=2) + "\n")
+          print(json.dumps(feed, indent=2))
+          PY
 
-      - name: Rebuild gateway native addons under the pinned portable Node
-        working-directory: empyralis-gateway
+      - name: Publish the feed to Cloudflare R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          VERSION: ${{ steps.stamp.outputs.version }}
         run: |
           set -euo pipefail
-          export PATH="$GITHUB_WORKSPACE/src-tauri/resources/node-runtime/bin:$PATH"
-          node --version
-          rm -rf node_modules
-          npm ci
-          npm run build
+          # The BINARIES go up before the FEED, always. A feed published first
+          # points every running app at a URL that does not exist yet, and
+          # each of them reports a failed update for as long as the gap lasts.
+          # `needs: macos` is what guarantees the order.
+          aws s3 cp latest.json "s3://$R2_BUCKET/desktop/$VERSION/latest.json" \
+            --endpoint-url "$R2_ENDPOINT" --content-type application/json
+          aws s3 cp latest.json "s3://$R2_BUCKET/desktop/latest/latest.json" \
+            --endpoint-url "$R2_ENDPOINT" --content-type application/json --cache-control "max-age=60"
 
-      - name: Confirm bundled resources are in place
+      # PUBLISHED IS NOT THE SAME FACT AS REACHABLE, and this product has been
+      # bitten by the difference twice: a Cloudflare "Cache Everything" rule
+      # served a 50-day-stale installer that the origin was returning
+      # correctly, and the gateway tarball was published to a path nothing
+      # ever fetched back. An upload's exit code says only that R2 accepted
+      # bytes. This step asks the internet the same question a customer's app
+      # asks, and fails the job when the answer is wrong.
+      - name: Verify the published feed is reachable and is this build
+        env:
+          VERSION: ${{ steps.stamp.outputs.version }}
         run: |
-          test -x src-tauri/resources/node-runtime/bin/node
-          test -f empyralis-gateway/dist/index.js
-
-      - name: Generate release-only Tauri config
-        env:
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          TAURI_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBLIC_KEY }}
-        run: python3 scripts/write_tauri_release_config.py --output src-tauri/tauri.release.conf.json
-
-      - name: Build, sign, and publish Linux release
-        uses: tauri-apps/tauri-action@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          projectPath: src-tauri
-          tagName: ${{ github.ref_name }}
-          releaseName: Empyralis ${{ github.ref_name }}
-          releaseBody: Automated signed desktop release for ${{ github.ref_name }}.
-          releaseDraft: false
-          prerelease: false
-          uploadUpdaterJson: true
-          updaterJsonPreferNsis: false
-          args: --config tauri.release.conf.json
-
-      - name: Attest Linux release provenance
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-path: |
-            src-tauri/target/release/bundle/**/*
+          set -euo pipefail
+          for attempt in 1 2 3 4 5; do
+            CODE="$(curl -sS -o /tmp/feed.json -w '%{http_code}' "$PUBLIC_FEED_URL" || echo 000)"
+            SERVED="$(python3 -c "import json;print(json.load(open('/tmp/feed.json')).get('version',''))" 2>/dev/null || echo "")"
+            echo "attempt $attempt: HTTP $CODE, version '${SERVED}'"
+            if [ "$CODE" = "200" ] && [ "$SERVED" = "$VERSION" ]; then
+              # Every URL the feed hands out must resolve too. A feed that
+              # parses but points at a 404 is the same silent failure one
+              # level down.
+              python3 -c "import json;[print(p['url']) for p in json.load(open('/tmp/feed.json'))['platforms'].values()]" \
+                | while read -r URL; do
+                    ASSET="$(curl -sS -o /dev/null -w '%{http_code}' -r 0-0 "$URL" || echo 000)"
+                    echo "  asset $ASSET $URL"
+                    [ "$ASSET" = "200" ] || [ "$ASSET" = "206" ] || { echo "  ^ unreachable" >&2; exit 1; }
+                  done
+              echo "The feed at $PUBLIC_FEED_URL serves $VERSION and every artifact it names is reachable."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "The feed was uploaded but $PUBLIC_FEED_URL does not serve $VERSION. Every installed app is still being told about the previous build, or nothing at all -- and nothing else in this system would have said so. Check the empyralis.ai/releases/* Cloudflare Worker route and any cache rule on that path." >&2
+          exit 1
