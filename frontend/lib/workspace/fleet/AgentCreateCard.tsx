@@ -1,15 +1,24 @@
 "use client";
 
 /**
- * THE AGENT-CREATION SURFACE — a real, sequential setup flow, in THREE steps.
+ * THE AGENT-CREATION SURFACE — a real, sequential setup flow, in FOUR steps.
  *
  * ```
  *  1 Identity & placement   name · what it does · where it runs
  *  2 Brain                  who pays ▸ provider ▸ model
  *      └── "Create agent" ──▶ the agent becomes real here
- *  3 Reach                  channels AND apps, one screen, both optional
+ *  3 Channels               how people reach it, optional
+ *      └── "Next" / "Skip for now"
+ *  4 Apps                   what it can reach, optional
  *      └── "Finish" / "Skip for now" ──▶ into the agent
  * ```
+ *
+ * Channels and Apps were merged into one "Reach" screen for exactly one day
+ * and the founder reversed it: *"channels and application must be
+ * separated, do you understand?"* The merge's own argument — two optional
+ * screens read as ceremony — is answered by the one-press skip on each,
+ * never by fusing two different questions. agent-create-wizard.ts's header
+ * carries the full reasoning.
  *
  * The step RULES live in agent-create-wizard.ts / agent-create-placement.ts /
  * agent-create-brain.ts — pure and tested. This file renders them.
@@ -47,16 +56,16 @@
  *                                copied into a thinner second validator)
  * ```
  *
- * Step 3 is a step that can independently fail after a commit — the exact
+ * The PATCH is a step that can independently fail after a commit — the exact
  * shape CLAUDE.md names as a recurring defect — so the obligation it carries
  * is exact and is honoured in `create()` below: a failure there is reported
  * as ITS OWN fact ("<Name> was created, but …"), the sequence CONTINUES into
- * Reach because the agent genuinely exists, and it is never reported as
+ * Channels because the agent genuinely exists, and it is never reported as
  * "couldn't create the agent". A cloud-placed platform/byok agent — the
- * overwhelmingly common path — skips step 3 entirely and is one atomic POST,
- * exactly as before.
+ * overwhelmingly common path — skips the PATCH entirely and is one atomic
+ * POST, exactly as before.
  *
- * ── Step 3 is the REAL tabs, not simplified copies ───────────────────────
+ * ── Steps 3 and 4 are the REAL tabs, not simplified copies ───────────────
  * ChannelsTab and ConnectorsTab are imported from FleetAgentDetail. A second,
  * creation-only channel picker would be a fifth copy of a channel list in a
  * codebase that has already shipped four and drifted on all four.
@@ -139,7 +148,12 @@ import {
   runtimeForProvider,
 } from "./fleet-provider-constants";
 import { useCodexModelCatalog, visibleCodexModels } from "./fleet-model-config";
-import { useFleetAgentChannels, type FleetAgent, type FleetProject } from "./fleet-data";
+import {
+  useFleetAgentChannels,
+  useFleetAgentConnectors,
+  type FleetAgent,
+  type FleetProject,
+} from "./fleet-data";
 import { CloudVpsSetupPanel } from "@/lib/workspace/cloud-vps-setup-panel";
 import { SshServerConnectPanel } from "@/lib/workspace/ssh-server-connect-panel";
 import { GatewayPairPanel, type GatewayRegistrationRecord } from "@/lib/gateway/GatewayPairPanel";
@@ -349,18 +363,34 @@ export function AgentCreateCard({
     nodeId,
   });
 
-  // Only asked for once Reach is actually open — a creation sequence must
-  // not poll an agent's channels through two screens that do not show them.
+  // Only asked for once the Channels step is actually open — a creation
+  // sequence must not poll an agent's channels through screens that do not
+  // show them.
   const {
     channels,
     slackChannelBinding,
     telegramBotConnected,
     loading: channelsLoading,
     refresh: refreshChannels,
-  } = useFleetAgentChannels(workspaceId, step === "reach" && created ? created.agentId : null);
+  } = useFleetAgentChannels(workspaceId, step === "channels" && created ? created.agentId : null);
   const connectedChannelCount = channels.filter((c) =>
     isChannelConnected(c, slackChannelBinding, telegramBotConnected),
   ).length;
+
+  // …and the same for apps, so the last button can say "Finish" rather than
+  // "Skip for now" when something actually got connected. This is a SECOND
+  // read of the list ConnectorPicker fetches for itself one component down —
+  // `useFleetAgentConnectors` holds no shared cache — and it is accepted
+  // rather than plumbed through a callback: one small GET, on one step, buys
+  // the footer a fact it otherwise has to guess at, and a `onConnected` prop
+  // threaded up from the picker would have to fire on four different success
+  // paths inside it (OAuth return, pasted fields, reuse, disconnect) — four
+  // places to forget, for the same answer the list already carries.
+  const { connectors: agentConnectors } = useFleetAgentConnectors(
+    workspaceId,
+    step === "apps" && created ? created.agentId : null,
+  );
+  const connectedAppCount = agentConnectors.filter((c) => c.connected).length;
 
   const footer = planAgentCreateFooter({
     step,
@@ -374,6 +404,7 @@ export function AgentCreateCard({
     // `loading` is the honest "we have not been told yet".
     channelsKnown: Boolean(created) && !channelsLoading,
     connectedChannelCount,
+    connectedAppCount,
   });
 
   // Suggested name — fleet_create_agent's own fallback pool, fetched once so
@@ -561,7 +592,7 @@ export function AgentCreateCard({
     }
 
     void hydrateCreatedAgent(result.agentId);
-    setStep("reach");
+    setStep("channels");
     setBusy(false);
   }, [
     brainPlan.modelChoice,
@@ -636,8 +667,9 @@ export function AgentCreateCard({
     [refreshNodes, selectNode],
   );
 
-  /** Reach hosts two whole real tabs, whose combined height swings widely. */
-  const embedsFullTab = step === "reach";
+  /** The last two steps each host a whole real tab, whose height swings
+   *  widely — a filter press on Channels moves it between 4 cards and 21. */
+  const embedsFullTab = step === "channels" || step === "apps";
 
   const agentHref = created
     ? `/w/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(created.projectId)}/agents/${encodeURIComponent(created.agentId)}/hardware`
@@ -1037,26 +1069,25 @@ export function AgentCreateCard({
             </>
           )}
 
-          {/* ONE screen, two sections. Channels and Apps are the same
-              question — what does this connect to — and both are optional
-              and both stay permanently reachable from the agent's own tabs.
-              Two separate steps that can each ask for nothing was the
-              ceremony that made the sequence feel long. */}
-          {step === "reach" && created && (
-            <>
-              <div className="agent-create-embed">
-                <ChannelsTab
-                  workspaceId={workspaceId}
-                  agentId={created.agentId}
-                  agent={createdAgent}
-                  hardwareHref={agentHref}
-                  onChannelsChanged={refreshChannels}
-                />
-              </div>
-              <div className="agent-create-embed">
-                <ConnectorsTab workspaceId={workspaceId} agentId={created.agentId} agent={createdAgent} />
-              </div>
-            </>
+          {/* TWO STEPS, one tab each — the founder's own instruction, and
+              the reasoning is in agent-create-wizard.ts's header. Each is
+              the REAL tab, never a creation-only copy of it. */}
+          {step === "channels" && created && (
+            <div className="agent-create-embed">
+              <ChannelsTab
+                workspaceId={workspaceId}
+                agentId={created.agentId}
+                agent={createdAgent}
+                hardwareHref={agentHref}
+                onChannelsChanged={refreshChannels}
+              />
+            </div>
+          )}
+
+          {step === "apps" && created && (
+            <div className="agent-create-embed">
+              <ConnectorsTab workspaceId={workspaceId} agentId={created.agentId} agent={createdAgent} />
+            </div>
           )}
         </div>
 

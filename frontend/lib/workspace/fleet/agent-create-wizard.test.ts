@@ -2,11 +2,10 @@
  * Drives the REAL step rules from agent-create-wizard.ts.
  * Run: npx tsx lib/workspace/fleet/agent-create-wizard.test.ts
  *
- * ── TWO ASSERTIONS IN HERE WERE INVERTED, NOT DELETED ────────────────────
- * Both were correct for the shape they were written against and are wrong
- * against the founder's three-step brief. They are kept, pointed the other
- * way, with the reason in the label — so nobody reads the new shape as
- * something that merely slipped past a weaker test.
+ * ── ASSERTIONS IN HERE ARE INVERTED, NEVER DELETED ───────────────────────
+ * Each was correct for the shape it was written against. They are kept,
+ * pointed the other way, with the reason in the label — so nobody reads the
+ * current shape as something that merely slipped past a weaker test.
  *
  * 1. "NO project or placement step". The PROJECT half still holds and is
  *    still asserted (an agent belongs to the workspace, CLAUDE.md
@@ -15,10 +14,25 @@
  *    subscription" / "Run locally" without knowing whether a machine
  *    exists.
  * 2. "the channel step is REQUIRED — an unreachable agent may not walk on
- *    to Finish". Reach is now skippable in one press, per the brief. The
- *    honesty moved from a BLOCK to the LABEL: it reads "Skip for now"
- *    rather than "Finish" whenever nothing is connected. Asserted below in
- *    that form, so the guarantee is not lost — only relocated.
+ *    to Finish". Both post-commit steps are skippable in one press, per the
+ *    brief. The honesty moved from a BLOCK to the LABEL: the button reads
+ *    "Skip for now" rather than "Next"/"Finish" whenever nothing is
+ *    connected. Asserted below in that form, so the guarantee is not lost —
+ *    only relocated.
+ * 3. "THREE steps — Channel and Apps were two screens asking the same
+ *    question", and its sibling "the order is identity > brain > reach".
+ *    REVERSED, 2026-08-21, on the founder's explicit instruction:
+ *    *"channels and application must be separated, do you understand?"*
+ *    The merge's own argument (two optional screens read as ceremony) is
+ *    answered by the one-press skip rather than by fusing them, and both
+ *    halves of that are asserted below: FOUR steps, and each of the two
+ *    post-commit ones movable in a single press.
+ * 4. "no Back once the agent is committed". Narrowed rather than dropped:
+ *    it still holds for Channels, whose only predecessor (Brain) is
+ *    committed and saved. Apps DOES offer a Back, because Channels is a
+ *    live, still-editable screen one press away — the rule is "no Back to a
+ *    screen that can no longer change anything", not "no Back after the
+ *    commit". Both halves asserted separately.
  */
 
 import { readFileSync } from "node:fs";
@@ -62,6 +76,7 @@ function state(patch: Partial<AgentCreateWizardState> = {}): AgentCreateWizardSt
     brainBlockedReason: "",
     channelsKnown: false,
     connectedChannelCount: 0,
+    connectedAppCount: 0,
     ...patch,
   };
 }
@@ -70,10 +85,18 @@ const ALL_STEPS = AGENT_CREATE_STEPS.map((s) => s.id);
 
 // ── The sequence itself ───────────────────────────────────────────────────
 
-assert(AGENT_CREATE_STEPS.length === 3, "THREE steps — Channel and Apps were two screens asking the same question");
+// INVERTED, see this file's header (3). Was: THREE steps, identity>brain>reach.
 assert(
-  ALL_STEPS.join(">") === "identity>brain>reach",
-  "the order is identity > brain > reach",
+  AGENT_CREATE_STEPS.length === 4,
+  'FOUR steps — the founder: "channels and application must be separated"',
+);
+assert(
+  ALL_STEPS.join(">") === "identity>brain>channels>apps",
+  "the order is identity > brain > channels > apps",
+);
+assert(
+  AGENT_CREATE_STEPS.every((s) => s.label.trim().split(/\s+/).length === 1),
+  "every step label is ONE noun — the strip is where you are, not a sentence",
 );
 assert(
   !AGENT_CREATE_STEPS.some((s) => /^tools$/i.test(s.label.trim())),
@@ -90,7 +113,8 @@ assert(
 assert(AGENT_CREATE_COMMIT_STEP === "brain", "the create happens when Brain is committed, carrying identity with it");
 assert(!agentCreateStepIsPostCommit("identity"), "identity precedes the commit");
 assert(!agentCreateStepIsPostCommit("brain"), "brain IS the commit, not after it");
-assert(agentCreateStepIsPostCommit("reach"), "reach operates on a real agent");
+assert(agentCreateStepIsPostCommit("channels"), "channels operates on a real agent");
+assert(agentCreateStepIsPostCommit("apps"), "apps operates on a real agent");
 
 {
   // Exactly ONE step's forward button may perform a create — a second one
@@ -100,6 +124,15 @@ assert(agentCreateStepIsPostCommit("reach"), "reach operates on a real agent");
       planAgentCreateFooter(state({ step, created: agentCreateStepIsPostCommit(step) })).forward.action === "create",
   );
   assert(creators.length === 1 && creators[0] === "brain", "exactly one step creates, and it is Brain");
+
+  // …and exactly ONE step ends the sequence. Splitting Reach into two is
+  // where a second "finish" would slip in unnoticed: both new steps are
+  // optional and post-commit, and only the last of them may leave.
+  const finishers = ALL_STEPS.filter(
+    (step) =>
+      planAgentCreateFooter(state({ step, created: agentCreateStepIsPostCommit(step) })).forward.action === "finish",
+  );
+  assert(finishers.length === 1 && finishers[0] === "apps", "exactly one step finishes, and it is the last one");
 }
 
 // ── Footer: identity, which now also carries placement ────────────────────
@@ -148,28 +181,31 @@ assert(agentCreateStepIsPostCommit("reach"), "reach operates on a real agent");
   assert(noKey.blockedReason === "Paste your API key.", "and the brain module's own sentence is what is shown");
 }
 
-// ── Footer: reach — skippable in ONE press, honest in the LABEL ───────────
+// ── Footer: channels — skippable in ONE press, honest in the LABEL ────────
 //
-// INVERTED from "the channel step is REQUIRED". See this file's header: the
-// founder's three-step brief makes Reach skippable, so the guarantee that an
-// unreachable agent is never called finished moved into the button's word.
+// INVERTED from "the channel step is REQUIRED". See this file's header (2):
+// the brief makes this step skippable, so the guarantee that an unreachable
+// agent is never called finished moved into the button's word.
 
 {
-  const unknown = planAgentCreateFooter(state({ step: "reach", created: true, channelsKnown: false }));
-  assert(unknown.back === null, "no Back once the agent is committed — it would return to saved screens");
-  assert(!unknown.forward.disabled, "reach always moves in one press — skipping is one action, not a fight");
+  const unknown = planAgentCreateFooter(state({ step: "channels", created: true, channelsKnown: false }));
+  assert(
+    unknown.back === null,
+    "no Back from Channels — the step behind it is the committed, saved Brain",
+  );
+  assert(!unknown.forward.disabled, "channels always moves in one press — skipping is one action, not a fight");
   assert(
     unknown.blockedReason === "",
     "and it SAYS NOTHING while unknown — 'not asked yet' may never be reported as 'nothing connected'",
   );
 
   const none = planAgentCreateFooter(
-    state({ step: "reach", created: true, channelsKnown: true, connectedChannelCount: 0 }),
+    state({ step: "channels", created: true, channelsKnown: true, connectedChannelCount: 0 }),
   );
-  assert(!none.forward.disabled, "nothing is connected, and the way out is still one press");
+  assert(!none.forward.disabled, "nothing is connected, and the way on is still one press");
   assert(
-    /skip/i.test(none.forward.label) && !/finish/i.test(none.forward.label),
-    'an agent nobody can reach is never "Finish"ed — the button says Skip, which is what it does',
+    /skip/i.test(none.forward.label) && !/next|finish/i.test(none.forward.label),
+    'a step that connected nothing is never "Next"ed past — the button says Skip, which is what it does',
   );
   assert(none.blockedReason.trim().length > 0, "and the one fact about what stays undone is stated");
   assert(
@@ -182,11 +218,47 @@ assert(agentCreateStepIsPostCommit("reach"), "reach operates on a real agent");
   );
 
   const some = planAgentCreateFooter(
-    state({ step: "reach", created: true, channelsKnown: true, connectedChannelCount: 1 }),
+    state({ step: "channels", created: true, channelsKnown: true, connectedChannelCount: 1 }),
   );
-  assert(some.forward.label === "Finish", "one real connected channel earns the word Finish");
+  assert(some.forward.label === "Next", "one real connected channel earns the ordinary forward word");
   assert(some.blockedReason === "", "and nothing is left to explain");
-  assert(some.forward.action === "finish", "either way the last step finishes");
+  assert(some.forward.action === "next", "channels is not the last step — it advances, it does not finish");
+}
+
+// ── Footer: apps — the same one-press rule, and NOTHING to explain ────────
+//
+// ADDED with the split. The asymmetry with Channels above is the point: an
+// agent with no channel is unreachable, which is a fact worth a sentence; an
+// agent with no apps just cannot open Notion yet, which is not.
+
+{
+  const none = planAgentCreateFooter(state({ step: "apps", created: true, connectedAppCount: 0 }));
+  assert(!none.forward.disabled, "apps moves in one press too");
+  assert(
+    /skip/i.test(none.forward.label) && !/finish/i.test(none.forward.label),
+    "nothing connected on this step, so the last button says Skip rather than claiming completion",
+  );
+  assert(
+    none.blockedReason === "",
+    "and it states NO reason — an agent with no apps is not a broken agent",
+  );
+  assert(none.forward.action === "finish", "either way the last step finishes");
+
+  // INVERTED half of "no Back once committed" — see this file's header (4).
+  assert(
+    none.back?.action === "back",
+    "apps CAN go back to channels — that screen is live and still editable, so the control is not a lie",
+  );
+  assert(
+    none.back?.label === "Back" && !/cancel/i.test(none.back?.label ?? ""),
+    "and it is a Back, never a Cancel — there is nothing left to cancel",
+  );
+
+  const some = planAgentCreateFooter(state({ step: "apps", created: true, connectedAppCount: 1 }));
+  assert(some.forward.label === "Finish", "one real connected app earns the word Finish");
+
+  const busy = planAgentCreateFooter(state({ step: "apps", created: true, busy: true }));
+  assert(busy.back?.disabled === true, "and the Back is not walkable mid-flight");
 }
 
 // ── Nothing claims to cancel something that already happened ──────────────
@@ -240,15 +312,19 @@ assert(agentCreateStepIsPostCommit("reach"), "reach operates on a real agent");
 // ── Navigation ────────────────────────────────────────────────────────────
 
 assert(agentCreateNextStep("identity") === "brain", "identity advances to brain");
-assert(agentCreateNextStep("reach") === null, "the last step has nowhere further to go");
+assert(agentCreateNextStep("brain") === "channels", "the commit lands on channels");
+assert(agentCreateNextStep("channels") === "apps", "channels advances to apps");
+assert(agentCreateNextStep("apps") === null, "the last step has nowhere further to go");
 assert(agentCreatePreviousStep("identity") === null, "the first step has nowhere back to go");
 assert(agentCreatePreviousStep("brain") === "identity", "brain goes back to identity");
+assert(agentCreatePreviousStep("apps") === "channels", "apps goes back to channels");
 
 // ── Step status ───────────────────────────────────────────────────────────
 
-assert(agentCreateStepStatus("identity", "reach") === "done", "passed steps read as done");
-assert(agentCreateStepStatus("reach", "reach") === "current", "the current step reads as current");
-assert(agentCreateStepStatus("reach", "brain") === "todo", "steps ahead read as todo");
+assert(agentCreateStepStatus("identity", "apps") === "done", "passed steps read as done");
+assert(agentCreateStepStatus("apps", "apps") === "current", "the current step reads as current");
+assert(agentCreateStepStatus("apps", "brain") === "todo", "steps ahead read as todo");
+assert(agentCreateStepStatus("channels", "apps") === "done", "and the newly split step reads as done once passed");
 
 // ── Closing is honest about what already happened ─────────────────────────
 
@@ -267,10 +343,10 @@ assert(agentCreateSurfaceTitle(true, "   ") === "New agent", "a blank name never
 
 // ── "Tools" meant two different things, and only a SOURCE scan can see it ─
 //
-// The Reach step embeds ConnectorsTab under an "Apps" heading; Configure
-// carries a separate, genuinely different "Tools" section (the built-in
-// capability toggles). Both were once labelled Tools. The step id no longer
-// carries the word at all, so what is guarded here is the OTHER half: that
+// The Apps step embeds ConnectorsTab; Configure carries a separate,
+// genuinely different "Tools" section (the built-in capability toggles).
+// Both were once labelled Tools. The step id carries "apps" and never
+// "tools" (asserted above), so what is guarded here is the OTHER half: that
 // the three places naming the connector section still agree with each other,
 // and that none of them calls it Tools. Canaries below, because a scan that
 // silently stops matching reports green forever.
