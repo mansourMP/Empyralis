@@ -12220,42 +12220,51 @@ h2.fleet-sage-console-title {
    TINT plus a ring — never a filled button, because the header's own "⋯"
    and any future page action must still be able to own the fill.
    Everything else is neutral. */
+/* ONE ROW, NOT A BAND — corrected 2026-08-21, the same day it shipped.
+
+   `planAgentSetupSteps` reduced this to a single control, but the CSS was
+   still the multi-row layout it had before: `flex: 1 1 220px` on the row and
+   an `--accent-soft` fill on the primary one, so with exactly one row left
+   it grew to the full width of the page as a saturated purple slab under the
+   agent's name. The founder's biggest visual complaint, and he is right —
+   it dominated a page whose actual subject is the agent.
+
+   So it is now literally one line: the fact on the left, the one thing that
+   fixes it on the right, hugging its own content. NO accent anywhere — the
+   accent belongs to the single primary action in a view, and this is a
+   quiet, deferrable piece of unfinished business, not the thing the page is
+   for. The hairline under it is all the separation it needs. */
 .fleet-agent-setup {
   flex-shrink: 0;
   display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-3) 28px var(--space-4);
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-2) 28px;
   border-bottom: 1px solid var(--border);
-  background: var(--bg-surface-2);
+  background: transparent;
   animation: fleet-fade var(--dur-2) var(--ease-out);
 }
 
 .fleet-agent-setup-title {
   margin: 0;
   font-size: var(--text-xs);
-  font-weight: var(--weight-medium);
+  font-weight: var(--weight-regular);
   color: var(--text-muted);
 }
 
-/* Dense inside the group, airy around it. Wraps rather than scrolls: three
-   rows at ~240px each fit a laptop, and a narrow window stacks them instead
-   of hiding one behind an edge. */
-.fleet-agent-setup-steps {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-}
-
+/* Sized to its own content. `flex: 1 1 220px` is what turned the last
+   remaining row into a full-width block — with one child there is nothing
+   for the grow to share the row with. */
 .fleet-agent-setup-step {
-  flex: 1 1 220px;
+  flex: 0 0 auto;
   min-width: 0;
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px var(--space-3);
+  gap: var(--space-2);
+  padding: 3px var(--space-2) 3px var(--space-2);
   border: 1px solid var(--border);
-  border-radius: var(--radius-card);
+  border-radius: var(--radius-control);
   background: var(--bg-card);
   color: var(--text-primary);
   text-decoration: none;
@@ -12267,48 +12276,29 @@ h2.fleet-sage-console-title {
   border-color: var(--border-strong);
 }
 
-.fleet-agent-setup-step--primary {
-  border-color: var(--accent-ring);
-  background: var(--accent-soft);
-}
-
-.fleet-agent-setup-step--primary:hover {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-}
-
+/* The icon is inline at text size now — a 28px tinted tile beside a 13px
+   label was a second decorative surface on a row that is one line tall. */
 .fleet-agent-setup-step-icon {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
   flex-shrink: 0;
-  width: 28px;
-  height: 28px;
-  border-radius: 6px;
-  background: var(--bg-surface-2);
-  color: var(--text-secondary);
+  color: var(--text-muted);
 }
 
-.fleet-agent-setup-step--primary .fleet-agent-setup-step-icon {
-  background: transparent;
-  color: var(--accent);
-}
-
+/* Label and hint sit side by side on the single line, not stacked — a
+   two-line stack is what made this a card rather than a row. */
 .fleet-agent-setup-step-text {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
   min-width: 0;
-  flex: 1;
 }
 
 .fleet-agent-setup-step-label {
-  font-size: var(--text-sm);
+  font-size: var(--text-xs);
   font-weight: var(--weight-medium);
   color: var(--text-primary);
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .fleet-agent-setup-step-hint {
@@ -12324,14 +12314,15 @@ h2.fleet-sage-console-title {
   color: var(--text-muted);
 }
 
-/* At phone width the band is the same rows, stacked, with the page's own
-   narrower gutter — never a horizontal scroller. */
+/* At phone width the row keeps the page's own narrower gutter and the hint
+   is what gives way — the label and the chevron are the parts that have to
+   survive. Never a horizontal scroller. */
 @media (max-width: 720px) {
   .fleet-agent-setup {
-    padding: var(--space-3) var(--space-4) var(--space-4);
+    padding: var(--space-2) var(--space-4);
   }
-  .fleet-agent-setup-step {
-    flex: 1 1 100%;
+  .fleet-agent-setup-step-hint {
+    display: none;
   }
 }
 

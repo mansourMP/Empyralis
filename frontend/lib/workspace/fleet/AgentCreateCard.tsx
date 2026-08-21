@@ -33,7 +33,7 @@
  *  2 Model      the live catalog                  nothing committed
  *      └── "Create agent" ──▶ ONE atomic POST carrying all three
  *  3 Channel    the REAL ChannelsTab              the agent is real from here
- *  4 Tools      the REAL ConnectorsTab
+ *  4 Apps       the REAL ConnectorsTab
  *      └── "Finish" ──▶ into the agent
  * ```
  *
@@ -53,9 +53,53 @@
  * ChannelsTab and ConnectorsTab are imported from FleetAgentDetail. A second,
  * creation-only channel picker would be a fifth copy of a channel list in a
  * codebase that has already shipped four and drifted on all four.
+ *
+ * ── THREE CORRECTIONS FROM THE FOUNDER'S REVIEW OF THE LIVE VERSION ──────
+ *
+ * ```
+ * X CREATED AN AGENT       he pressed the head's X on step 3 and found an
+ *                          agent named Zephyr afterwards. The X is gone from
+ *                          the moment the commit lands; the control becomes
+ *                          "Finish later", which is what it actually does.
+ *                          Nothing labelled cancel survives the commit.
+ * CHANNEL WAS SKIPPABLE    *"channels cannot be skipped, because it's
+ *                          something agents are going to speak."* Forward is
+ *                          blocked until one connects; deferring is still a
+ *                          real exit, it just is not called finishing.
+ * "TOOLS" WAS THE WRONG    step 4 embeds ConnectorsTab while Configure has a
+ * WORD, AND IT COLLIDED    separate, different "Tools" section. It is Apps.
+ * ```
+ *
+ * ── A MODAL IS PORTALLED, OR A LAYOUT PANE CAN SWALLOW IT ────────────────
+ * Found at 375px while verifying the above, and it was total: pressing
+ * "+ New agent" on a phone appeared to do nothing at all.
+ *
+ * ```
+ * DIV.agent-create-surface        w=0 h=0
+ * DIV.agent-create-backdrop       w=0 h=0     position:fixed, and STILL 0
+ * MAIN.fleet-content              w=0 h=0
+ * DIV.fleet-agents-detail-pane    display:NONE   ← the agents split pane
+ * DIV.fleet-content--split        w=375 h=764       hides its detail half
+ * ```
+ *
+ * `position: fixed` does not save an element whose ANCESTOR is
+ * `display: none` — the subtree is not laid out at all. This surface was
+ * rendered as an ordinary child of whatever page opened it, so the agents
+ * page's own responsive split decided whether the product's front door was
+ * on screen. It renders into `document.body` now, which is what "modal"
+ * has to mean: owned by the page, not by a pane inside it.
+ *
+ * ── THE PURPLE ───────────────────────────────────────────────────────────
+ * One view used to carry three accent-bearing elements at once — the step
+ * number, the identity glyph tile, and the filled button — plus whatever the
+ * embedded tab drew. The step numbers and the glyph are neutral now
+ * (agent-create-surface.css), and the fill is spent only on a forward button
+ * that can actually be pressed (`forward.accent`, agent-create-wizard.ts).
+ * At most ONE accent-filled element is on screen at a time.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Bot, Check, X } from "lucide-react";
 
 import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
@@ -279,11 +323,14 @@ export function AgentCreateCard({
     if (prev) setStep(prev);
   }, [footer.back, requestClose, step]);
 
+  /** Steps 3 and 4 host a full tab whose own height swings widely. */
+  const embedsFullTab = step === "channel" || step === "apps";
+
   const agentHref = created
     ? `/w/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(created.projectId)}/agents/${encodeURIComponent(created.agentId)}/hardware`
     : undefined;
 
-  return (
+  const surface = (
     <div
       className={`agent-create-backdrop${closing ? " is-closing" : ""}`}
       onMouseDown={requestClose}
@@ -297,8 +344,17 @@ export function AgentCreateCard({
         }
       }}
     >
+      {/* `--embed` pins the height on the two steps that host a whole real
+          tab. Founder, on the channel step: *"if I press 'no computer
+          needed' the card becomes small — it's good. And if I press 'needs
+          a computer' it instantly becomes larger."* The grid goes from 4
+          cards to 21 between filters, and a max-height lets the dialog
+          track that — so the surface jumped size under a control that was
+          only meant to filter a list. A fixed height means the CONTENT
+          scrolls and the dialog does not move at all; it also removes the
+          same jump between step 3 and step 4. */}
       <div
-        className={`agent-create-surface${closing ? " is-closing" : ""}`}
+        className={`agent-create-surface${embedsFullTab ? " agent-create-surface--embed" : ""}${closing ? " is-closing" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="agent-create-title"
@@ -308,9 +364,27 @@ export function AgentCreateCard({
           <h2 id="agent-create-title" className="agent-create-title">
             {agentCreateSurfaceTitle(Boolean(created), name)}
           </h2>
-          <button type="button" className="agent-create-close" onClick={requestClose} aria-label="Close">
-            <X size={15} strokeWidth={2} />
-          </button>
+          {/* An X is a cancel gesture, and there is nothing left to cancel
+              once the commit has landed two screens back — pressing it used
+              to leave a real, silently created agent behind. So the control
+              itself changes with the fact: the icon while nothing exists,
+              a named exit afterwards. The rule is in agent-create-wizard.ts
+              beside `agentCreateCloseIntent`, so the label and the behaviour
+              cannot drift apart. */}
+          {footer.dismiss.kind === "cancel" ? (
+            <button
+              type="button"
+              className="agent-create-close"
+              onClick={requestClose}
+              aria-label={footer.dismiss.label}
+            >
+              <X size={15} strokeWidth={2} />
+            </button>
+          ) : (
+            <button type="button" className="fleet-btn agent-create-defer" onClick={requestClose}>
+              {footer.dismiss.label}
+            </button>
+          )}
         </div>
 
         {/* The sequence, always visible. Not a progress score — it is where
@@ -420,7 +494,7 @@ export function AgentCreateCard({
             </div>
           )}
 
-          {step === "tools" && created && (
+          {step === "apps" && created && (
             <div className="agent-create-embed">
               <ConnectorsTab workspaceId={workspaceId} agentId={created.agentId} agent={createdAgent} />
             </div>
@@ -434,21 +508,34 @@ export function AgentCreateCard({
         ) : null}
 
         <div className="agent-create-foot">
+          {/* Why the forward button will not move — one short fact, only
+              once we actually know it, and never on the same line as the
+              button's own label. Empty while the channel list is still in
+              flight: the block is real then, the explanation is not. */}
+          {footer.blockedReason ? (
+            <p className="agent-create-blocked">{footer.blockedReason}</p>
+          ) : (
+            <span className="agent-create-foot-spacer" aria-hidden="true" />
+          )}
           {footer.back ? (
             <button type="button" className="fleet-btn" onClick={goBack} disabled={footer.back.disabled}>
               {footer.back.label}
             </button>
-          ) : (
-            <span className="agent-create-foot-spacer" aria-hidden="true" />
-          )}
+          ) : null}
           {/* While this surface is open it owns the view's single accent
               fill — the header "+ New agent" and FirstAgentEmpty's own CTA
               behind it both drop to the hairline variant. One rule,
               create-accent.ts, every create control on every surface
-              (agents, tasks and documents alike). */}
+              (agents, tasks and documents alike).
+
+              The fill is spent only on a move that is actually available:
+              a blocked forward keeps its label (a named disabled control is
+              not a dead one) and drops to plain neutral, because a
+              saturated purple button that refuses to be pressed is the
+              loudest possible way to say no. */}
           <button
             type="button"
-            className={composerSubmitButtonClass()}
+            className={footer.forward.accent ? composerSubmitButtonClass() : "fleet-btn"}
             onClick={goForward}
             disabled={footer.forward.disabled}
           >
@@ -458,4 +545,10 @@ export function AgentCreateCard({
       </div>
     </div>
   );
+
+  // Rendered into the body, never in place — see the block comment above.
+  // `typeof document` guards the server render: this is a "use client"
+  // component, but Next still renders it on the server for the first paint,
+  // and `document` does not exist there.
+  return typeof document === "undefined" ? surface : createPortal(surface, document.body);
 }

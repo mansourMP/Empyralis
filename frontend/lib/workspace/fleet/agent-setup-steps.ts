@@ -16,8 +16,8 @@
  *
  * So the SEQUENCE is back, inside the creation surface itself
  * (agent-create-wizard.ts / AgentCreateCard.tsx): Identity → Model →
- * Channel → Tools, minus the old wizard's project/placement step. Channels
- * and connectors are now asked for AT CREATION, in order, not offered as a
+ * Channel → Apps, minus the old wizard's project/placement step. Channels
+ * and apps are now asked for AT CREATION, in order, not offered as a
  * menu afterwards.
  *
  * ── WHAT THIS FILE IS FOR NOW ────────────────────────────────────────────
@@ -283,7 +283,7 @@ export function planAgentSetupSteps(input: AgentSetupInput): AgentSetupStep[] {
     steps.push({
       id: "connectors",
       tab: "connectors",
-      label: "Connect your tools",
+      label: "Connect your apps",
       hint: "",
       primary: steps.length === 0,
     });

@@ -180,7 +180,15 @@ const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
   { id: "model", label: "Model", icon: Sparkles },
   { id: "skills", label: "Skills", icon: BookOpen },
   { id: "channels", label: "Channels", icon: Radio },
-  { id: "connectors", label: "Connectors", icon: Plug },
+  // "Apps", not "Connectors" — and definitely not "Tools", which is the
+  // genuinely different section two rows down (the built-in capability
+  // toggles). Two different things were called Tools once the creation
+  // sequence labelled its ConnectorsTab step that way; the founder named
+  // the right word: *"it's clearly applications, MCP applications... name
+  // is clearly not tools."* The ID is untouched on purpose — it is a route
+  // segment, in both [tab]/page.tsx VALID_TABS whitelists and in live deep
+  // links; only what a person reads changes.
+  { id: "connectors", label: "Apps", icon: Plug },
   { id: "tools", label: "Tools", icon: Users },
   // feat/agent-context-grant: which PROJECTS this agent may reach. Named
   // "Context" and not "Projects" because the thing being granted is the
@@ -1060,7 +1068,7 @@ export function FleetAgentDetail({
   // ── "This agent isn't set up yet" (2026-08-21, corrected same day) ───────
   // Setup is a SEQUENCE now, and it lives inside the creation surface
   // (AgentCreateCard/agent-create-wizard.ts): Identity → Model → Channel →
-  // Tools. The founder rejected the row of optional buttons that used to sit
+  // Apps. The founder rejected the row of optional buttons that used to sit
   // here — *"it acts like a button, not step-by-step... if you want this if
   // you want that — I don't want to have that."*
   //
@@ -1243,7 +1251,7 @@ export function FleetAgentDetail({
       {connectedChannels > 0 && (
         <PanelRow label="Channels" value={connectedChannelRows.map((c) => c.label).join(", ")} />
       )}
-      {connectedConnectors > 0 && <PanelRow label="Connectors" value={connectedConnectors} />}
+      {connectedConnectors > 0 && <PanelRow label="Apps" value={connectedConnectors} />}
       {/* Cost lives at the bottom, and stays off the panel entirely for an
           agent that hasn't spent anything this period — a freshly created
           agent's Properties shouldn't open on a $0.0000 line before anything
@@ -1321,7 +1329,7 @@ export function FleetAgentDetail({
       />
 
       {/* ONE control, never a row of them. The creation sequence already
-          walked through Channel and Tools in order; this is what is left
+          walked through Channel and Apps in order; this is what is left
           when the Channel step was skipped, which is the only state that
           leaves an agent nobody can reach. A real <Link> straight into the
           Configure section that fixes it (the sheet is derived from the URL
@@ -1333,27 +1341,21 @@ export function FleetAgentDetail({
       {setupStep && (
         <section className="fleet-agent-setup" aria-label="Setup">
           <h2 className="fleet-agent-setup-title">{agentSetupHeading(agent?.label || "")}</h2>
-          <div className="fleet-agent-setup-steps">
-            {(() => {
-              const StepIcon = setupStep.id === "channel" ? Radio : setupStep.id === "hardware" ? Cpu : Plug;
-              return (
-                <Link
-                  href={tabHref(setupStep.tab)}
-                  replace
-                  className="fleet-agent-setup-step fleet-agent-setup-step--primary"
-                >
-                  <span className="fleet-agent-setup-step-icon">
-                    <StepIcon size={15} strokeWidth={1.75} aria-hidden="true" />
-                  </span>
-                  <span className="fleet-agent-setup-step-text">
-                    <span className="fleet-agent-setup-step-label">{setupStep.label}</span>
-                    {setupStep.hint ? <span className="fleet-agent-setup-step-hint">{setupStep.hint}</span> : null}
-                  </span>
-                  <ChevronRight size={14} strokeWidth={1.75} aria-hidden="true" className="fleet-agent-setup-step-chevron" />
-                </Link>
-              );
-            })()}
-          </div>
+          {(() => {
+            const StepIcon = setupStep.id === "channel" ? Radio : setupStep.id === "hardware" ? Cpu : Plug;
+            return (
+              <Link href={tabHref(setupStep.tab)} replace className="fleet-agent-setup-step">
+                <span className="fleet-agent-setup-step-icon">
+                  <StepIcon size={13} strokeWidth={1.75} aria-hidden="true" />
+                </span>
+                <span className="fleet-agent-setup-step-text">
+                  <span className="fleet-agent-setup-step-label">{setupStep.label}</span>
+                  {setupStep.hint ? <span className="fleet-agent-setup-step-hint">{setupStep.hint}</span> : null}
+                </span>
+                <ChevronRight size={13} strokeWidth={1.75} aria-hidden="true" className="fleet-agent-setup-step-chevron" />
+              </Link>
+            );
+          })()}
         </section>
       )}
 
@@ -1395,7 +1397,7 @@ export function FleetAgentDetail({
   );
 
   // Configure sheet — the other six sections (Model, Capabilities,
-  // Channels, Connectors, Tools, Hardware). Same tab components as the
+  // Channels, Apps, Tools, Hardware). Same tab components as the
   // switch above used to render directly, completely unchanged (same
   // props, same markup) — just called from here instead, since activeTab
   // being one of these six is exactly what CONFIGURE_TAB_IDS/sheetOpen
@@ -2870,7 +2872,7 @@ export function ChannelsTab({
 
   return (
     <div>
-      {/* Channels vs. Connectors reads as one undifferentiated "integrations"
+      {/* Channels vs. Apps reads as one undifferentiated "integrations"
           blob otherwise — this one-liner is the whole fix: it's how people
           reach the agent, not what the agent can use. */}
       <p className="fleet-tab-subtitle">Where people can message this agent</p>
@@ -2898,7 +2900,13 @@ export function ChannelsTab({
           {openclawRetryable ? (
             <button
               type="button"
-              className={`fleet-btn ${openclaw.repairable.length > 0 ? "fleet-btn--accent-fill" : ""}`}
+              // The hairline accent, never the fill. This is a REPAIR action
+              // in a toolbar above a grid — it sits beside "Refresh", and
+              // when the Channels tab is embedded in the creation sequence
+              // the footer's own forward button is already the view's single
+              // filled action. Two accent fills in one view is a bug
+              // (CLAUDE.md, craft doctrine).
+              className={`fleet-btn ${openclaw.repairable.length > 0 ? "fleet-btn--accent" : ""}`}
               onClick={() => void openclaw.provision(openclaw.repairable)}
               disabled={openclaw.busy !== null || openclaw.loading}
             >
@@ -3636,7 +3644,7 @@ export function ChannelsTab({
 
 // ── Connectors ──────────────────────────────────────────────────────────────
 
-// Exported (2026-08-21) for AgentCreateCard's Tools step — the creation
+// Exported (2026-08-21) for AgentCreateCard's Apps step — the creation
 // sequence shows the REAL connector picker, never a second, simplified copy
 // of it that would drift from this one.
 export function ConnectorsTab({
@@ -3681,7 +3689,7 @@ export function ConnectorsTab({
         <EmptyState
           icon={Plug}
           title="No project assigned"
-          body="Connectors are shared per project — assign one before connecting apps."
+          body="Apps are shared per project — assign one before connecting them."
         />
       </div>
     );
