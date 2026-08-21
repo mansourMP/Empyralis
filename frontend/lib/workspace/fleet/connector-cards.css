@@ -37,21 +37,34 @@
  * Every value below is a shared token. No new colour, no new radius, no new
  * duration.
  *
- * THE ACCENT ARITHMETIC, and it is a JUDGEMENT CALL worth overruling out loud
- * rather than one buried in a class name. The founder asked for Connect in
- * FULL accent fill, "just like this Next button". Taken literally on a card
- * face that is ~69 filled purple buttons in one view — which is the thing he
- * has been objecting to all night, and which CLAUDE.md calls a bug outright
- * ("two accent-filled buttons in one view"). So the split is:
+ * THE ACCENT IS FULL FILL ON EVERY FACE, BY THE FOUNDER'S OWN INSTRUCTION,
+ * GIVEN TWICE: *"it's going to be FULL purple just like this next button, not
+ * like only around it and slightly purple."* An earlier pass shipped the
+ * hairline `fleet-btn--accent` here instead, reasoning that ~69 filled buttons
+ * in one view is the wall of purple CLAUDE.md calls a bug. That reasoning is
+ * not wrong on its own terms — it was simply not the call to make, because he
+ * had already been told the trade and had already chosen. Do not "fix" it
+ * back; the visual argument has been made and rejected.
+ *
+ * THE CARD IS SIZED FOR PRESENCE, and the numbers are the founder's own words
+ * rather than taste: *"it must be slightly bigger and mature — right now the
+ * space in between each other is very small and generally it looks cheap. It
+ * must look premium, slightly vertically deeper, slightly vertically
+ * thicker."*
  *
  * ```
- * card face   fleet-btn--accent        hairline. accent-COLOURED, not filled.
- *                                      ~69 of them, zero filled backgrounds.
- * open panel  fleet-btn--accent-fill   the single primary action in the view.
+ *              BEFORE (measured live)   AFTER
+ *  card         362 x 50                 358 x 66
+ *  padding      8px 12px                 --space-3 --space-4   (12 / 16)
+ *  logo box     32px                     40px      scales WITH the card, or a
+ *  grid gap     10px                     --space-4 (16)        taller row
+ *  action btn   28px                     --h-control-sm (32)   strands it
  * ```
  *
- * Connect still reads as the accent action everywhere. If he wants every face
- * filled anyway, it is one token in ConnectorPicker's card action className.
+ * Dense INSIDE the card (icon->label still --space-3), airy BETWEEN cards
+ * (10 -> 16). Both halves of CLAUDE.md's rule, and the second is the one he
+ * was actually pointing at. Every value is a shared token: the card can be
+ * re-proportioned by changing which token, never by typing a pixel.
  */
 
 /* ── TWO per row, and the card is a ROW ────────────────────────────────────
@@ -80,9 +93,15 @@
    only works in one of the two orderings is a rule that will silently stop
    working. Doubling raises specificity to (0,2,0) so ordering cannot decide
    it — and here that matters more than before, because these rules OVERRIDE
-   fleet-theme's own column-flex card rather than adding to it. */
+   fleet-theme's own column-flex card rather than adding to it.
+
+   The GAP is doubled for the same reason it is overridden at all: fleet-theme's
+   10px was measured for a 4-up TILE, and between two wide rows it reads as the
+   cheapness the founder named. --space-4 on both axes, so a wide screen and a
+   phone get the same rhythm rather than one tuned and one inherited. */
 .fleet-connector-grid.fleet-connector-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
 }
 
 @media (max-width: 560px) {
@@ -103,8 +122,37 @@
   flex-direction: row;
   align-items: center;
   gap: var(--space-3);
-  padding: var(--space-2) var(--space-3);
+  padding: var(--space-3) var(--space-4);
   cursor: default;
+}
+
+/* THE LOGO BOX SCALES WITH THE CARD, and that is the whole reason this
+   override exists: fleet-theme's 32px was sized for a 4-up tile where it is
+   the largest thing on the face. Left at 32 inside a 66px row it reads as a
+   favicon adrift in white space — a taller card with an unchanged mark looks
+   emptier, not more premium. 40px against 66px is the same optical weight 32
+   had against 50.
+
+   Scoped to --row so the Channels tiles, which fleet-theme's 32px is still
+   correct for, are untouched — one surface's proportion is not the other's. */
+.fleet-connector-card--row .fleet-connector-card-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-card);
+  /* The monogram letter is drawn by this box's own font-size (it is the only
+     text inside it), so the fallback mark has to grow with the box or a
+     no-logo card reads visibly smaller than a logo card beside it. */
+  font-size: var(--text-base);
+}
+.fleet-connector-card--row .fleet-connector-card-icon img {
+  width: 40px;
+  height: 40px;
+}
+
+/* One step up (13 -> 14px). The name is the only word on the face, so on a
+   deeper card it carries the maturity; at 13px it reads as a caption. */
+.fleet-connector-card--row .fleet-connector-card-label {
+  font-size: var(--text-base);
 }
 
 /* THE CARD BODY'S HIT AREA. The `::after` stretches this button over the
@@ -156,11 +204,14 @@
   box-shadow: none;
 }
 
-/* Above the stretch, so it is its own click target. */
+/* Above the stretch, so it is its own click target. Raised to the shared
+   small-control height because fleet-btn's 28px was proportioned against a
+   50px card; against 66px it sits marooned. */
 .fleet-connector-card-action {
   position: relative;
   z-index: 1;
   flex-shrink: 0;
+  height: var(--h-control-sm);
 }
 
 /* The name may not push the action off the end — an app with a long name
@@ -220,7 +271,7 @@
   height: 100%;
   align-items: center;
   justify-content: center;
-  border-radius: 7px;
+  border-radius: inherit;
   color: #ffffff;
 }
 
@@ -236,8 +287,32 @@
   display: block;
   margin-bottom: var(--space-2);
 }
+/* ── The search field is a UTILITY, never the loudest thing on the screen ───
+   Founder, looking at it live: *"wtf is this piece of shit at the middle of
+   the screen, don't you think it must be fixed?"* He was right, and the cause
+   is measurable rather than a matter of taste:
+
+   ```
+   BEFORE  search   FILLED --bg-inset  #eeeeef   36px   ← the only filled
+           cards    --bg-card          #ffffff   50px     surface in view
+           ─▶ a grey slab sitting mid-list, heavier than the 76 things it
+              filters and heavier than every card it sits between
+
+   AFTER   search   --bg-card + hairline --border      ← the SAME surface the
+           cards    --bg-card + hairline --border        cards are drawn on
+           ─▶ the field recedes into the grid's own rhythm. It is still the
+              full grid width, because a control that filters the whole grid
+              and stops short of its edge is a different kind of wrong.
+   ```
+
+   Scoped to `.fleet-connector-browse`, never to `.fleet-wizard-input` itself:
+   that class is the create sequence's own form field, where a filled inset
+   IS correct — a form wants its inputs to read as the thing you act on, and a
+   filter beside a grid does not. Two jobs, one class; only one of them
+   changes here. */
 .fleet-connector-browse > .fleet-wizard-input {
   margin-bottom: var(--space-3);
+  background: var(--bg-card);
 }
 
 /* ── Inside the panel ──────────────────────────────────────────────────────
