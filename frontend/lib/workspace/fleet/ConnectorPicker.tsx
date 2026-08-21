@@ -3,7 +3,7 @@
 import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
 
 import { useCallback, useMemo, useState } from "react";
-import { AlertTriangle, Loader2 } from "lucide-react";
+import { Loader2, X } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { getErrorMessage } from "@/lib/ui/api-error";
@@ -11,9 +11,11 @@ import { CONNECTOR_ICONS } from "./fleet-icons";
 import {
   useFleetAgentConnectors,
   useFleetAgents,
+  useFleetAgentTools,
   useFleetProjectConnectors,
   type FleetConnector,
 } from "./fleet-data";
+import "./connector-cards.css";
 
 function fieldLabel(field: string): string {
   return field.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");

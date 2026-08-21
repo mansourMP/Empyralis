@@ -207,6 +207,23 @@
      which is the same 20px every other group is held apart by. */
   padding: var(--space-3) var(--space-5) 0;
   list-style: none;
+  /* CENTRED, on every step. The strip is the card's own second line, and the
+     card is dead-centre on both axes — a left-ragged strip under a centred
+     title reads as a toolbar that was never aligned to the thing it belongs
+     to. The row is FIXED CONTENT (four steps, four fixed labels), so it does
+     not reflow between steps: centring it once centres it everywhere.
+
+     `safe center` and not plain `center`, and this is the whole reason the
+     two declarations are stacked: an overflowing flex row centred the normal
+     way overflows in BOTH directions and the first item becomes unreachable
+     — the row can only be scrolled right, so at 375px the word "Identity"
+     would be permanently clipped off the left edge. `safe` falls back to
+     flex-start exactly when the content no longer fits, which is exactly
+     when centring stops being possible. The plain `center` above it is the
+     fallback for anything that does not parse the `safe` keyword; there it
+     degrades to today's overflow behaviour rather than to no centring. */
+  justify-content: center;
+  justify-content: safe center;
   overflow-x: auto;
   scrollbar-width: none;
 }

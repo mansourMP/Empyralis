@@ -1,0 +1,225 @@
+/* ── Apps (connectors): the card grid, and the panel a card opens ──────────
+ *
+ * WHY THIS FILE EXISTS, AND WHY IT IS NOT A SECOND PATTERN.
+ *
+ * The Apps surface used to render `.fleet-connector-picker-item` — a wide
+ * two-up card carrying, ON ITS FACE: a logo, a name, a full sentence of
+ * marketing prose ("Connect Linear for teams, issues, projects, and approved
+ * issue updates."), and a button. Sixty-nine of them. The founder's words,
+ * looking at it: *"why do we have those written text right there?... just
+ * application, just application."*
+ *
+ * So the face is now icon + name + ONE pill, which is the shape CLAUDE.md
+ * already records as settled and twice-corrected for Channels — and it is
+ * literally the same shape, not a copy of it: `.fleet-connector-grid` /
+ * `.fleet-connector-card` / `-icon` / `-label` / `-pill` are declared in
+ * fleet-theme.css in the SAME rule blocks as their `.fleet-channel-*`
+ * siblings, and were sitting there unused by this surface. The panel a card
+ * opens is the shared `.fleet-channel-banner` inside `.fleet-detail-backdrop`,
+ * unchanged, exactly as a channel card's panel is.
+ *
+ * ```
+ * BEFORE (2 up, every card)              AFTER (4 up, one pattern)
+ *  ┌───────────────────────────┐          ┌────────┐ ┌────────┐
+ *  │ [L] Linear                │          │ [L]    │ │ [N]    │   face =
+ *  │     Connect Linear for    │          │ Linear │ │ Notion │   icon
+ *  │     teams, issues, pro…   │          │ Set up │ │ Ready  │   + name
+ *  │     [ Connect ]           │          └────────┘ └────────┘   + 1 pill
+ *  └───────────────────────────┘               │
+ *   prose on the face ×69, and                 └── press ──▶ .fleet-channel-banner
+ *   an accent-ish button ×69                       what it is · what it brings
+ *                                                  · ONE accent-filled action
+ * ```
+ *
+ * WHAT IS ACTUALLY NEW HERE, and it is only three things: a muted (not
+ * disabled) face for an app this deployment cannot connect yet, the panel's
+ * own internal typography, and one grid rule for phones. Everything else is
+ * borrowed.
+ *
+ * Every value below is a shared token. No new colour, no new radius, no new
+ * duration, and no accent anywhere on a card face — the accent fill is spent
+ * on the single primary action inside an OPEN panel, which is why the two can
+ * coexist: a grid of 69 faces carries zero accent fills, and an open panel
+ * carries exactly one.
+ */
+
+/* ── One card per row on a phone ───────────────────────────────────────────
+   fleet-theme.css steps both grids 4 -> 2 at 900px and stops there, so at
+   375px a card is ~166px wide and a two-word app name ("Microsoft 365",
+   "Google Workspace") sits on the edge of wrapping under its own icon. The
+   founder asked for one per row at phone width on BOTH surfaces, so the rule
+   is written once, for both, rather than forked per surface.
+
+   The class is doubled deliberately. This file is imported by ConnectorPicker
+   and fleet-theme.css by the app shell; which of the two lands later in the
+   bundle is a property of the bundler, not of this file, and a rule that only
+   works in one of the two orderings is a rule that will silently stop working.
+   Doubling raises specificity to (0,2,0) so the ordering cannot decide it. */
+@media (max-width: 560px) {
+  .fleet-connector-grid.fleet-connector-grid,
+  .fleet-channel-grid.fleet-channel-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ── The one face state that is genuinely ours ─────────────────────────────
+   An app whose OAuth client this deployment has never been given is a THIRD
+   fact, and it must not wear either of the other two's clothes:
+
+     connected            "● Ready"       --online-text     (fleet-theme)
+     not connected        "Set up"        --text-secondary  (fleet-theme)
+     not connectable yet  "Unavailable"   --text-muted      (below)
+
+   It is NOT `:disabled`. fleet-theme's `.fleet-channel-card:disabled` drops
+   the whole card to 0.55 opacity and refuses the pointer, which is right for
+   a card with nothing behind it — but this card HAS something behind it: the
+   one sentence explaining why it cannot be connected, which the founder wants
+   said ONCE, in the panel, instead of nine times across the grid. A card that
+   must open cannot be a dead control, so the quiet is applied to the icon and
+   the label only, and hover/focus/press all behave exactly like any other
+   card's. */
+.fleet-connector-card--muted .fleet-connector-card-icon {
+  filter: grayscale(1);
+  opacity: 0.55;
+}
+
+.fleet-connector-card--muted .fleet-connector-card-label {
+  color: var(--text-secondary);
+}
+
+.fleet-connector-card-pill--locked {
+  color: var(--text-muted);
+}
+
+/* ── Inside the panel ──────────────────────────────────────────────────────
+   Dense inside a group, airy between groups. One rhythm, three steps, the
+   same one agent-create-surface.css settled on:
+
+     --space-2   8px   label -> the thing it labels, row -> row
+     --space-3  12px   coupled, not merged
+     --space-5  20px   between two groups
+
+   The banner supplies its own 16px body padding (fleet-theme.css), so this
+   block only ever decides the spacing BETWEEN its own children. */
+.fleet-connector-panel > * + * {
+  margin-top: var(--space-5);
+}
+
+/* The state, restated at the top of the panel it opened — the same word the
+   face already said, so pressing a card never changes the answer under you.
+   It is a line of text, not a second pill: the pill is a grid affordance for
+   scanning 69 faces, and inside a panel about ONE app there is nothing left
+   to scan. */
+.fleet-connector-panel-state {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  color: var(--text-secondary);
+}
+.fleet-connector-panel-state--connected { color: var(--online-text); }
+.fleet-connector-panel-state--locked { color: var(--text-muted); }
+.fleet-connector-panel-state--reconnect { color: var(--offline-text); }
+
+/* What it is. This is the catalog's own `summary` — the sentence that used to
+   be printed on all 69 faces at once. It is worth its ink exactly here, where
+   a person has asked about one app. */
+.fleet-connector-panel-summary {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+/* Why it cannot be connected. Customer language, one place, once — never the
+   nine repetitions of "Needs an OAuth client configured on this deployment"
+   the grid used to carry. Amber, because this is a setup step somebody can
+   take, not a failure: it matches `.fleet-channel-card-pill--gateway`'s own
+   reading of the same kind of fact one surface over. */
+.fleet-connector-panel-blocked {
+  margin: 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-control);
+  background: var(--bg-inset);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--warning-text);
+}
+
+/* ── What it brings ───────────────────────────────────────────────────────
+   The founder's own list of what a panel owes a person: *"what kind of tool,
+   what it is, and same connect button."*
+
+   This list is DERIVED, never authored: it is the agent's real tool catalog
+   filtered by `requires_connector` (fleet_tools.py's _CONNECTOR_REQUIRED_TOOLS
+   is the only source of that binding). So it is present exactly where the
+   platform genuinely knows the answer and ABSENT everywhere else — never an
+   empty box, never a plausible-sounding list nobody can vouch for. Today that
+   means Google Workspace names its four tools and the rest of the catalog
+   says nothing, which is the honest state of the data rather than a gap in
+   this panel. */
+.fleet-connector-panel-tools-label {
+  display: block;
+  margin-bottom: var(--space-2);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.fleet-connector-panel-tools {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fleet-connector-panel-tool {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+
+.fleet-connector-panel-tool-dot {
+  width: 4px;
+  height: 4px;
+  flex-shrink: 0;
+  border-radius: var(--radius-pill);
+  background: var(--text-tertiary);
+  transform: translateY(-2px);
+}
+
+/* ── The action ───────────────────────────────────────────────────────────
+   ONE accent-filled control, and it is the same `.fleet-btn--accent-fill` the
+   wizard's own Next button wears — the founder named the hairline variant as
+   the wrong one. It only composes because the grid behind it spends no accent
+   at all, so the view still holds exactly one accent-filled control. */
+.fleet-connector-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* The credential rows (`.fleet-connector-picker-row`, fleet-theme.css) are
+   reused verbatim inside the panel — a radio list of real accounts is already
+   the right control and did not need reinventing. It only needs to stop
+   inheriting the old two-up card's own top margin. */
+.fleet-connector-panel .fleet-connector-picker-rows {
+  margin-top: 0;
+}
+
+/* The manual-credential form is a form BODY inside the panel, never a second
+   dialog stacked on the first — the same call the channel panel's own
+   CredentialForm already makes. */
+.fleet-connector-panel-fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
