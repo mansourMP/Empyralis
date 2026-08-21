@@ -184,6 +184,39 @@ html[data-theme="dark"] {
   --accent-muted: color-mix(in oklch, var(--accent) 24%, transparent);
   --accent-ring: color-mix(in oklch, var(--accent) 55%, transparent);
 
+  /* FOCUS IS NEUTRAL, NEVER THE ACCENT. 2026-08-21, founder's instruction:
+     "you will remove that purple ring everywhere." Focus is not a *state
+     worth celebrating* — it is a cursor. The accent is spent on the single
+     primary action in a view (craft doctrine); a halo that follows the
+     keyboard around was spending it on whatever happened to be focused,
+     which is the opposite of restraint. It was also most visible where
+     nobody asked for it: the agent-creation card focuses its Name field on
+     open, so the ring appeared before the customer touched anything.
+
+     The ring is REMOVED FROM THE ACCENT, NOT REMOVED. CLAUDE.md records the
+     earlier incident verbatim — the ring "is the only signal a keyboard user
+     gets; hiding it to kill an unwanted trigger trades a cosmetic bug for an
+     accessibility one." So every control that had a ring still has one.
+
+     Opaque, not alpha-over-accent, so the rendered colour is knowable rather
+     than a function of whatever surface it lands on. Measured against every
+     surface in this theme's own ramp (WCAG 2.1 SC 1.4.11 wants 3:1 for a
+     non-text indicator):
+
+       #a1a1a1 on --bg-canvas      #171717   6.94:1
+                  --bg-page/content #1a1a1a  6.74:1
+                  --bg-inset        #1d1d1d  6.52:1
+                  --bg-panel        #222222  6.16:1
+                  --bg-rail         #232323  6.08:1
+                  --bg-card         #292929  5.63:1
+                  --bg-card-hover   #2e2e2e  5.26:1   <- worst case
+
+     The accent ring it replaces measured 2.11-2.38:1 across those same
+     surfaces — i.e. the purple ring was BELOW the accessibility bar on every
+     single surface in the product. This is not a trade; it is better on both
+     axes. Never point a :focus rule at --accent-ring again. */
+  --focus-ring: #a1a1a1;
+
   /* Destructive — one clear red, mirrors --accent's derived-step shape.
      Reserved for irreversible/stop-it-now confirmations (Stop agent,
      Delete agent) — a distinct role from --offline-* status color below,
@@ -304,6 +337,19 @@ html[data-theme="light"] {
   --accent-soft: color-mix(in oklch, var(--accent) 10%, transparent);
   --accent-muted: color-mix(in oklch, var(--accent) 18%, transparent);
   --accent-ring: color-mix(in oklch, var(--accent) 42%, transparent);
+
+  /* Neutral focus ring — see the long note on --focus-ring in the dark block
+     above for why focus is never the accent. Light theme measured against
+     this theme's own surface ramp:
+
+       #6f6f6f on --bg-page/card/panel #ffffff  5.02:1   <- worst case
+                  --bg-card-hover      #fafafa  4.81:1
+                  --bg-rail/canvas     #f4f4f5  4.57:1
+                  --bg-inset           #eeeeef  4.33:1
+
+     The accent ring it replaces measured 1.85-1.92:1 here — worse than dark,
+     because a 42%-alpha violet over white composites to a pastel. */
+  --focus-ring: #6f6f6f;
 
   /* Destructive — same clear red, darken-on-hover like the light accent. */
   --destructive: oklch(58% 0.19 25);  /* ≈ #d33a3c */

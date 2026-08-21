@@ -357,7 +357,7 @@
 
 .textArea:focus {
   border-color: var(--app-border-strong);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent-soft) 64%, transparent);
+  box-shadow: 0 0 0 2px var(--focus-ring);
 }
 
 .visibilityField {
@@ -550,7 +550,7 @@
 }
 
 .appLauncher:focus-visible .appIcon {
-  outline: 3px solid color-mix(in srgb, var(--app-accent-soft) 58%, transparent);
+  outline: 3px solid var(--focus-ring);
   outline-offset: 3px;
 }
 
@@ -862,7 +862,7 @@
 
 .textInput:focus {
   border-color: var(--app-border-strong);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent-soft) 64%, transparent);
+  box-shadow: 0 0 0 2px var(--focus-ring);
 }
 
 .formError,
@@ -1268,7 +1268,7 @@
 }
 
 .officialCard:focus-within .officialIcon {
-  outline: 3px solid color-mix(in srgb, var(--app-accent-soft) 58%, transparent);
+  outline: 3px solid var(--focus-ring);
   outline-offset: 3px;
 }
 
