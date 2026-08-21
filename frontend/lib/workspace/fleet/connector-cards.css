@@ -91,6 +91,36 @@
   color: var(--text-muted);
 }
 
+/* The no-logo fallback, moved off an inline style and onto the icon box it
+   already fills. The BACKGROUND is still set per card (a deterministic hash of
+   the connector id — see monogramColor), because that value is data, not
+   design; everything else about it is shared. */
+.fleet-connector-monogram {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  color: #ffffff;
+}
+
+/* ── The browse group ──────────────────────────────────────────────────────
+   Airy between groups, dense inside one: --space-5 clears the priority grid
+   above, --space-2 holds the label to the field it labels, --space-3 holds
+   the field to the grid it filters. Three steps, the same rhythm the panel
+   below uses. */
+.fleet-connector-browse {
+  margin-top: var(--space-5);
+}
+.fleet-connector-browse > .fleet-wizard-label {
+  display: block;
+  margin-bottom: var(--space-2);
+}
+.fleet-connector-browse > .fleet-wizard-input {
+  margin-bottom: var(--space-3);
+}
+
 /* ── Inside the panel ──────────────────────────────────────────────────────
    Dense inside a group, airy between groups. One rhythm, three steps, the
    same one agent-create-surface.css settled on:
