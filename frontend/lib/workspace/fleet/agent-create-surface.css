@@ -145,6 +145,11 @@
      Inside the frame the worst case is 40px per edge, and the common
      Identity -> Brain press is 13.
 
+     THE COST IS VOID, and it is paid deliberately: Brain on a cloud
+     placement holds 333px of content in a 560px frame. Lowering the floor
+     to fit it exactly would hand back the jump the frame exists to remove,
+     which is the thing that was actually complained about.
+
      Between them the BODY scrolls and nothing else does: head and stepper
      stay put at the top, the footer stays put at the bottom, on every step.
      That is the whole mechanism — `overflow: hidden` here, `overflow-y:
@@ -724,7 +729,16 @@
      what makes them read as groups, and it is the last thing to give up. */
   .agent-create-body { padding: var(--space-4); }
   .agent-create-steps { padding-inline: var(--space-4); gap: var(--space-3); }
-  .agent-create-surface { max-height: calc(100vh - var(--space-4)); }
+  /* ON A PHONE THE FRAME IS ONE NUMBER, NOT A RANGE. The sheet already
+     fills the screen and is top-anchored, so pinning the floor to the
+     ceiling makes every step exactly the same height with the action row
+     resting on the bottom edge — the platform convention, and the most
+     stable version of "it stays the same size" this width can have.
+     Measured 796px at 375x812; the body absorbs every difference. */
+  .agent-create-surface {
+    min-height: calc(100vh - var(--space-4));
+    max-height: calc(100vh - var(--space-4));
+  }
   .agent-create-head { padding: var(--space-4) var(--space-2) 0 var(--space-4); }
   .agent-create-foot { padding-inline: var(--space-4); }
   .agent-create-error { padding-inline: var(--space-4); }
