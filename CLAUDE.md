@@ -7002,29 +7002,38 @@ keypress lands on the card body with `:focus-visible` true and the CARD
 drawing the ring. The inner button's own ring is suppressed or a keyboard
 user gets two nested rings (observed at 375px, then fixed).
 
-**THE ACCENT SPLIT IS A JUDGEMENT CALL, MADE AGAINST HIS LITERAL WORDS, AND
-IT IS ONE TOKEN TO OVERRULE.** He asked for Connect in FULL accent fill,
-"just like this Next button". Taken literally on a card face that is ~69
-filled purple buttons in one view — the thing he has objected to all night,
-and what CLAUDE.md calls a bug outright. So:
+~~**THE ACCENT SPLIT IS A JUDGEMENT CALL…**~~ **OVERRULED BY THE FOUNDER,
+SAME DAY. THE FACE CARRIES THE FULL FILL. Do not re-litigate it.** The pass
+above shipped the hairline `fleet-btn--accent` on a card face, reasoning that
+~69 filled purple buttons in one view is the wall of purple this file calls a
+bug outright. He had already been told that trade and had already chosen —
+twice: *"it's going to be FULL purple just like this next button, not like
+only around it and slightly purple."*
 
 ```
-card face   fleet-btn--accent        hairline. accent-COLOURED, not filled.
-                                     measured: 67 outlines, 0 fills
-open panel  fleet-btn--accent-fill   the single primary action in the view.
-                                     measured: exactly 1
+card face   fleet-btn--accent-fill   measured live: 67 fills, 0 outlines
+open panel  fleet-btn--accent-fill   the same fill. Connect simply LOOKS
+                                     like this on this surface now.
 ```
 
-Connect still reads as the accent action everywhere. If he wants the faces
-filled, it is one token in ConnectorPicker's card-action className.
+**The rule this leaves, and it is worth more than the pixel:** an agent may
+argue a visual trade ONCE, out loud, before shipping. Once the founder has
+answered it, "my own arithmetic still says otherwise" is not a reason to ship
+the other thing — it is the same shape as reverting approved work on a guess,
+which this file already records as a mistake made on the navigation surface.
+Bring the argument, then build what he said.
 
-The arithmetic is asserted rather than remembered:
-`connector-card-face.test.ts` scans `renderCard`'s own body and fails if it
-carries `summary` (prose) or `accent-fill`, requires the hairline variant and
-`fleet-connector-card-open`/`stopPropagation`, and reads the CSS for the
-stretched `::after` and the two-column rule — with comment-stripping plus
-canaries. A behavioural test cannot see a face growing prose or a fill back;
-that regression has shipped twice on the sibling Channels surface.
+The arithmetic is still asserted rather than remembered, just pointed the
+other way: `connector-card-face.test.ts` scans `renderCard`'s own body and
+fails if it carries `summary` (prose), REQUIRES `accent-fill`, and BANS the
+hairline variant from coming back — plus `fleet-connector-card-open` /
+`stopPropagation`, and the CSS reads for the stretched `::after`, the
+two-column rule, the card's own padding/gap/icon tokens and the search
+field's surface. Flipped rather than deleted, the same treatment this file
+records for `content-security-policy.test.ts`, so nobody mistakes the
+overruled shape for the intended one. A behavioural test cannot see a face
+growing prose or losing a fill; that regression has shipped twice on the
+sibling Channels surface.
 
 **FOUR facts on the face, and the right-hand slot is an ACTION only where one
 exists.** `connectorCardFace()` (connector-card-face.ts, pure + tested) is
@@ -7117,6 +7126,83 @@ fills and 0 accent borders in the whole view. The purple he saw is
 production's older build, which `c546e618` (accent restraint) had already
 neutralised on main. The 67-buttons-on-faces half of the complaint was real
 and is what got fixed.
+
+### "Cheap" was a MEASUREMENT, and so was "that piece of shit" (2026-08-21)
+
+**Two more founder complaints on the same screen, both fixed by reading the
+computed styles rather than by taste.** His words, in order: *"it must be
+slightly bigger and mature — right now the space in between each other is
+very small and generally it looks cheap. It must look premium, slightly
+vertically deeper, slightly vertically thicker"*, and *"wtf is this piece of
+shit at the middle of the screen, don't you think it must be fixed?"*
+
+```
+                    BEFORE            AFTER      (live, CSS px, same dialog)
+card                362 x 50          359 x 66
+padding             8 / 12            --space-3 / --space-4   (12 / 16)
+grid gap            10                --space-4               (16)
+logo box            32                40
+label               13px              14px  (--text-base)
+action button       28                32    (--h-control-sm)
+search field  734 x 36  FILLED        734 x 36  --bg-card + hairline
+              --bg-inset  #eeeeef     #ffffff — the CARDS' own surface
+              ← the ONLY filled
+                surface in the view
+placeholder   "Search by name or what it does…"   "Search"
+```
+
+**THE LOGO HAD TO GROW WITH THE CARD OR THE FIX MAKES IT WORSE.** A taller
+card with an unchanged 32px mark reads emptier, not more premium — 40:66 is
+the same optical weight 32:50 had. Every override is scoped to
+`.fleet-connector-card--row`, so the Channels TILES, which fleet-theme's 32px
+and 10px gap are still correct for, are untouched. Two surfaces, two
+proportions, one stylesheet.
+
+**The search field kept its WIDTH and lost its FILL.** It already matched the
+grid exactly (734 = two 359 tracks + 16 gap); the complaint was weight, not
+size, and a filter that stops short of the grid's own edge is a different
+kind of wrong. Scoped to `.fleet-connector-browse > .fleet-wizard-input`,
+never to `.fleet-wizard-input` itself — that class is ALSO the create
+sequence's form field, where a filled inset IS correct. One class, two jobs;
+only one changes. On dark both resolve to `rgb(41,41,41)`, verified.
+
+**LOGOS: NOTHING WAS BROKEN, and the brief's own numbers were wrong.**
+Reconciled statically and then live, which is the only reason the answer is
+trustworthy:
+
+```
+RAW_CONNECTOR_ICONS mapped entries        78   (the brief said 91)
+  ...whose file does not exist              0   nothing to fix
+public/brand-assets/apps/ files on disk    83
+  ...referenced by the map                 74
+  ...on disk, never mapped                  9   see below
+
+LIVE, in a real browser, 76 rendered cards:
+  <img> elements            76      monogram fallbacks       0
+  naturalWidth === 0         0      unique srcs HTTP 200   75/75
+```
+
+So "some apps show just a colour with its capital letter" is not our
+fallback: Ahrefs / Amplitude / Apollo.io / Ashby render `ahrefs.svg`,
+`amplitude.svg`, `apollo.svg`, `ashby.svg` — their own real letter-based
+brand marks. **Do not redraw them.**
+
+The 9 unmapped files are dead weight, not defects: `gmail.svg` is genuinely
+used (`lib/marketing/landing-page.tsx`), and `google-calendar.svg`,
+`google-drive.svg`, `bitbucket.ico`, `freshbooks.ico`, `mailchimp.ico`,
+`pipedrive.ico`, `quickbooks.png`, `xero.ico` have ZERO references anywhere.
+The six raster ones are scraped favicons, not house-style SVGs, so they could
+never ship as they are. Left in place and reported rather than deleted — an
+unused asset changes no behaviour, and deleting artwork was not asked for.
+
+**The monogram fallback is PROVEN, not assumed** — the live catalog has zero
+of them, so the only honest verification is to force one. Temporarily
+unmapping `notion` produced a 40x40 magenta "N" with `border-radius: 8px`
+matching its own box exactly (the hand-kept `7px` magic number is gone,
+replaced by `inherit`, so the two can never drift), `font-size` scaled with
+the box, in a mark the same size as every logo beside it — which is MAN-145's
+own requirement that a fallback not read as broken. Restored immediately
+after; `git checkout --`, never `git stash`.
 
 ## The two-tier channel split is DERIVED from the doors (2026-08-21, MAN-359)
 
