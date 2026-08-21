@@ -22,6 +22,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 
+import { composerSubmitButtonClass } from "./create-accent";
 import { createFleetDocument, type FleetDocument } from "./documents-data";
 
 export function DocumentComposer({
@@ -125,9 +126,14 @@ export function DocumentComposer({
 
         <div className="fleet-composer-foot">
           <span />
+          {/* The composer is the modal, so while it is open it owns the
+              view's single accent fill — the header "+ New document" and the
+              empty state's own CTA behind it both drop to the hairline
+              variant. One rule, create-accent.ts, every create control on
+              every surface. */}
           <button
             type="button"
-            className="fleet-btn fleet-btn--accent-fill"
+            className={composerSubmitButtonClass()}
             onClick={() => void create()}
             disabled={!canCreate}
           >

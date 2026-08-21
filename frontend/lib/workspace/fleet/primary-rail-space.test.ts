@@ -293,8 +293,20 @@ assert(
     /<AgentConversationList\b/.test(agentsLayoutSource),
   "agents/layout.tsx actually renders AgentConversationList — built, and wired",
 );
+// The shell class moved OUT of this file into agents-split-pane.ts on
+// 2026-08-21 (it is now conditional — one pane at a time below 768px), so
+// the assertion follows it to its producer rather than being weakened. Both
+// halves are checked: the layout asks that module, and that module still
+// answers with the shared master-detail shell.
 assert(
-  /fleet-content--split/.test(agentsLayoutSource),
+  agentsLayoutSource.includes('from "@/lib/workspace/fleet/agents-split-pane"') &&
+    /agentsSplitClassName\s*\(/.test(agentsLayoutSource),
+  "agents/layout.tsx takes its split-shell class from agents-split-pane.ts",
+);
+const agentsSplitPaneSource = readFileSync(new URL("./agents-split-pane.ts", import.meta.url), "utf8");
+assert(agentsSplitPaneSource.length > 500, "CANARY: agents-split-pane.ts was actually read");
+assert(
+  /fleet-content--split/.test(agentsSplitPaneSource),
   "the list+detail split reuses the same master-detail shell class Inbox/Work/Memory already use",
 );
 
