@@ -679,8 +679,8 @@ a.fleet-breadcrumb:hover {
   height: 22px;
   flex-shrink: 0;
   border-radius: 6px;
-  background: var(--accent);
-  color: var(--accent-contrast);
+  background: var(--bg-inset);
+  color: var(--text-primary);
 }
 .fleet-rail-sage-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -801,7 +801,12 @@ a.fleet-breadcrumb:hover {
   bottom: 8px;
   width: 2px;
   border-radius: 2px;
-  background: var(--accent);
+  /* UI-CONTRACT used to carve the active nav bar out as the accent's second
+     legitimate home. The founder closed that carve-out on 2026-08-21
+     ("purple only on primary buttons"), so the bar is neutral. It was never
+     the active row's only signal — the --rail-active fill and weight 500
+     both remain — only its crispest one. */
+  background: var(--text-primary);
 }
 
 .fleet-rail--collapsed .fleet-rail-item--active::before {
@@ -2013,7 +2018,7 @@ a.fleet-breadcrumb:hover {
   height: 7px;
   border-radius: 999px;
   flex-shrink: 0;
-  background: var(--accent);
+  background: var(--text-primary);
 }
 .fleet-inbox-row-dot.is-read {
   background: transparent;
@@ -2353,7 +2358,7 @@ a.fleet-breadcrumb:hover {
 .fleet-panel-row-value--online { color: var(--online-text); }
 .fleet-panel-row-value--offline { color: var(--offline-text); }
 .fleet-panel-row-value--muted { color: var(--text-muted); font-weight: var(--weight-medium); }
-.fleet-panel-row-value--accent { color: var(--accent); }
+.fleet-panel-row-value--accent { color: var(--text-primary); }
 
 /* The agent detail page's right panel is Properties only now — the
    "Sessions" section that used to sit below it (a second, owner-only
@@ -2677,9 +2682,12 @@ a.fleet-breadcrumb:hover {
   font-size: 12px;
   font-weight: var(--weight-semibold);
 }
+/* Was an accent wash. A tile is an identity mark, not an action, so it now
+   uses the same neutral inset the rest of the tile family does and leans on
+   --text-primary to stay the emphatic one. */
 .fleet-tile--accent {
-  background: var(--accent-soft);
-  color: var(--accent);
+  background: var(--bg-inset);
+  color: var(--text-primary);
 }
 /* Genuine error/failed state (e.g. a VPS provision that failed) — the
    destructive token, not one of the arbitrary identity TINTS. A failure is
@@ -3033,21 +3041,23 @@ a.fleet-breadcrumb:hover {
   cursor: default;
 }
 
-/* Primary — the one button that carries the accent, and it does so
-   quietly: a neutral card surface with an accent hairline + accent label,
-   never a saturated fill. "New agent" and every other app-wide primary
-   action (Save, Create key, …) read this way — restrained, not a loud
-   color block. */
+/* The EMPHATIC-BUT-NOT-PRIMARY button. It used to carry an accent hairline
+   and an accent label; it carries no hue at all now, because it is by
+   definition the control that does NOT own the view's primary action —
+   create-accent.ts hands this class out precisely when something else does.
+   What separates it from a plain .fleet-btn is weight, not colour: a
+   full-strength neutral edge and a full-strength label, against
+   .fleet-btn's --border / --text-secondary. */
 .fleet-btn--accent {
-  border-color: var(--accent);
-  color: var(--accent);
+  border-color: var(--text-primary);
+  color: var(--text-primary);
   background: var(--bg-card);
 }
 
 .fleet-btn--accent:hover:not(:disabled) {
-  background: var(--accent-soft);
-  border-color: var(--accent);
-  color: var(--accent);
+  background: var(--bg-card-hover);
+  border-color: var(--text-primary);
+  color: var(--text-primary);
 }
 
 /* Solid accent fill — MAN-103's other half. Reserved for a curated set of
@@ -3149,8 +3159,8 @@ a.fleet-breadcrumb:hover {
   height: 32px;
   flex-shrink: 0;
   border-radius: 8px;
-  background: var(--accent-soft);
-  color: var(--accent);
+  background: var(--bg-inset);
+  color: var(--text-primary);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3387,9 +3397,10 @@ a.fleet-breadcrumb:hover {
 /* The founder's one authored "start here". Deliberately NOT a second pill:
    it rides inside the same single secondary line as "3 ways to connect"
    (.fleet-channel-card-ways), so the face still reads as icon + label + one
-   status pill. Accent-tinted text on a faint accent wash rather than a filled
-   chip — the accent FILL is spent on the single primary action in a view, and
-   a badge is not an action. */
+   status pill. NEUTRAL text on a neutral wash: UI-CONTRACT already said
+   "badges, chips, and pills are neutral, full stop", and the founder closed
+   the last of the accent's non-button homes on 2026-08-21. The word
+   "Recommended" was always what carried this, never the tint. */
 .fleet-channel-card-recommended {
   display: inline-block;
   margin-right: 6px;
@@ -3398,8 +3409,8 @@ a.fleet-breadcrumb:hover {
   font-size: 10px;
   font-weight: var(--weight-medium);
   letter-spacing: 0.01em;
-  color: var(--accent);
-  background: var(--accent-soft);
+  color: var(--text-primary);
+  background: var(--bg-inset);
 }
 
 /* The two-tier filter sits between the tab's own one-line subtitle and the
@@ -3800,8 +3811,8 @@ a.fleet-breadcrumb:hover {
   height: 40px;
   flex-shrink: 0;
   border-radius: 12px;
-  background: var(--accent);
-  color: var(--accent-contrast);
+  background: var(--bg-inset);
+  color: var(--text-primary);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -6583,9 +6594,13 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 
 /* ── Phase 7B: agent-detail tab content ───────────────────────────────────── */
 .fleet-detail-pad { padding: var(--space-5); overflow-y: auto; height: 100%; }
+/* Was accent-coloured. Underlined neutral instead, for the same reason
+   .fleet-doc-body a is: an underline is a link's colour-independent mark. */
 .fleet-link {
-  color: var(--accent);
-  text-decoration: none;
+  color: var(--text-primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: var(--border-strong);
   /* Reset — also used on <button> (e.g. Persona's Expand toggle), not just
      <a>, so it needs to shed browser button chrome too. */
   background: none;
@@ -6681,7 +6696,7 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
    the operator hasn't opened, and a running count at the top of the list. */
 .fleet-work-conv-dot {
   display: inline-block; width: 6px; height: 6px; border-radius: var(--radius-pill);
-  background: var(--accent); margin-right: 6px; vertical-align: middle; flex-shrink: 0;
+  background: var(--text-primary); margin-right: 6px; vertical-align: middle; flex-shrink: 0;
 }
 .fleet-work-conv--unread .fleet-work-conv-title { color: var(--text-primary); font-weight: 600; }
 .fleet-work-conv--unread .fleet-work-conv-preview { color: var(--text-secondary); }
@@ -6701,7 +6716,7 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 .fleet-work-transcript { flex: 1; min-height: 0; overflow-y: auto; padding: var(--space-5); display: flex; flex-direction: column; gap: var(--space-3); }
 .fleet-work-msg { max-width: 72%; padding: var(--space-3) var(--space-4); border-radius: var(--radius-card); border: 1px solid var(--border); }
 .fleet-work-msg--user { align-self: flex-start; background: var(--bg-card); }
-.fleet-work-msg--agent { align-self: flex-end; background: var(--accent-soft); border-color: var(--accent-ring); }
+.fleet-work-msg--agent { align-self: flex-end; background: var(--bg-inset); border-color: var(--border-strong); }
 .fleet-work-msg-role { font-size: var(--text-2xs); color: var(--text-muted); margin-bottom: 3px; }
 .fleet-work-msg-body { font-size: var(--text-sm); color: var(--text-primary); }
 .fleet-work-msg-time { font-size: var(--text-2xs); color: var(--text-muted); margin-top: 4px; }
@@ -6972,7 +6987,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   flex-shrink: 0; width: 15px; height: 15px;
   display: flex; align-items: center; justify-content: center; color: var(--text-muted);
 }
-.fleet-work-plan-mark--active { color: var(--accent); }
+.fleet-work-plan-mark--active { color: var(--text-primary); }
 .fleet-work-plan-title {
   flex: 1; min-width: 0; font-size: var(--text-sm); color: var(--text-primary); line-height: 1.4;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -7002,7 +7017,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   display: flex; align-items: center; justify-content: center; color: var(--text-muted);
 }
 .fleet-work-activity-icon img { display: block; width: 100%; height: 100%; object-fit: contain; }
-.fleet-work-activity-icon--accent { color: var(--accent); }
+.fleet-work-activity-icon--accent { color: var(--text-primary); }
 .fleet-work-activity-icon--success { color: var(--online-text); }
 .fleet-work-activity-icon--danger { color: var(--offline-text); }
 .fleet-work-activity-icon--warning { color: var(--warning-text); }
@@ -10299,7 +10314,11 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   border-radius: 999px;
   background: var(--border-strong);
 }
-.fleet-composer-switch.is-on .fleet-composer-switch-track { background: var(--accent); }
+/* A toggle is UI-CONTRACT's own named example of what the accent is not for.
+   --text-primary against the off state's --border-strong is a much larger
+   step than accent-vs-border ever was, and the --bg-card knob keeps its
+   contrast against it in both themes. */
+.fleet-composer-switch.is-on .fleet-composer-switch-track { background: var(--text-primary); }
 .fleet-composer-switch-knob {
   position: absolute;
   top: 1.5px;
@@ -12299,8 +12318,8 @@ h2.fleet-sage-console-title {
   width: 26px;
   height: 26px;
   border-radius: 7px;
-  background: var(--accent-soft);
-  color: var(--accent);
+  background: var(--bg-inset);
+  color: var(--text-primary);
 }
 
 .fleet-agent-composer-crumb {
