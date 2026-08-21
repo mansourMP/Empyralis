@@ -302,6 +302,42 @@
    separation. */
 .agent-create-embed > *:first-child { margin-top: 0; }
 
+/* ── The embedded grids are sized by THIS CARD, not by the window ─────────
+   Both card grids are `repeat(4, 1fr)` in fleet-theme.css, stepping to 2 at a
+   900px VIEWPORT. Inside this dialog that measurement is about the wrong box:
+   the card is 520px wide on a 1680px monitor, so the viewport query never
+   fires and four cards divide 478px into 112px each. Measured, on the Channel
+   step: "WeChat / WeCom" broke over two lines and "Not configured here" over
+   two more — the squashed, label-wrapping face the founder objected to,
+   arriving on a desktop rather than on a phone.
+
+   `auto-fill` + a real minimum lets the CONTENT decide instead of a
+   breakpoint: three across here, and it degrades on its own as the card
+   narrows rather than needing a second breakpoint per width this dialog can
+   take. 140px is the width at which a two-word app or channel name sits on
+   one line at --text-sm inside the card's 14px padding.
+
+   Scoped to `.agent-create-embed` on purpose — the full-page Channels and
+   Apps tabs have the whole content column and are correct at four across. */
+.agent-create-embed .fleet-channel-grid,
+.agent-create-embed .fleet-connector-grid {
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+}
+
+/* …except on a phone, where ONE per row is the founder's own instruction and
+   `auto-fill` would still fit two 140px cards into 330px. The same 560px
+   breakpoint connector-cards.css uses for the full-page grids, restated here
+   because this selector is the more specific one and would otherwise win.
+   Written as its own block rather than folded into that file: the reason is
+   about THIS dialog's inner width, and a reader debugging the wizard should
+   find both of its grid rules in one place. */
+@media (max-width: 560px) {
+  .agent-create-embed .fleet-channel-grid,
+  .agent-create-embed .fleet-connector-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 /* ── Groups ───────────────────────────────────────────────────────────────
    Dense inside a group, airy between groups (craft doctrine) — and that is
    the WHOLE separation now. The hairline that used to sit under each group
@@ -450,18 +486,34 @@
 }
 
 /* ── Foot ─────────────────────────────────────────────────────────────────
-   THE ONE RULE LEFT IN THE CARD, and it is the one that earns its place: it
-   divides what you are doing from what you can do about it, and the body
-   above it scrolls, so without it long content runs into the buttons. Every
-   other hairline this surface used to draw was separating things that space
-   separates better. */
+   THE LAST RULE IN THE CARD, and it is now drawn ONLY where a rule is doing a
+   rule's job. The founder's instruction was "remove any horizontal rule that
+   is doing spacing's job" — and on steps 1 and 2 that is exactly what this
+   one was: nothing scrolls there, so it divided two things --space-3 already
+   divides, in a card whose head deliberately draws no line for the same
+   reason.
+
+   On steps 3 and 4 it is a different object. `--embed` pins the height and
+   the body genuinely scrolls, so the footer is the EDGE OF A SCROLL REGION —
+   without it, a channel grid slides under the buttons with nothing saying the
+   content continues. Same element, two jobs; it renders only for the one that
+   is real.
+
+   ```
+   step 1 · 2   body fits          no rule.  --space-3 is the separation
+   step 3 · 4   body scrolls       rule.     it marks where content is cut off
+   ```
+*/
 .agent-create-foot {
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: var(--space-2);
   padding: var(--space-3) var(--space-5);
-  border-top: 1px solid var(--border);
+  border-top: 1px solid transparent;
+}
+.agent-create-surface--embed .agent-create-foot {
+  border-top-color: var(--border);
 }
 
 /* Back / Cancel is the SECONDARY action, and it should look like one. It was
