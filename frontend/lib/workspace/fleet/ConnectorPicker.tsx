@@ -409,10 +409,10 @@ export function ConnectorPicker({
             {face.pill}
           </span>
         ) : (
-          // The HAIRLINE accent, not the fill. See connector-cards.css for the
-          // arithmetic: ~69 faces are on screen at once, so a filled button
-          // here is ~69 filled buttons in one view. The fill is spent on the
-          // single primary action inside the OPEN panel.
+          // FULL accent fill, on every face. The founder's own instruction,
+          // given twice, and the file header above records why it outranks the
+          // "~69 filled buttons in one view" arithmetic an earlier pass used
+          // to ship the hairline variant here instead. Do not change it back.
           <button
             type="button"
             className="fleet-btn fleet-btn--accent-fill fleet-connector-card-action"
@@ -466,12 +466,16 @@ export function ConnectorPicker({
           <label className="fleet-wizard-label" htmlFor="connector-search">
             All apps ({catalogSize})
           </label>
+          {/* Placeholder is one word. It was "Search by name or what it
+              does…" — a field explaining how a search box works, above a grid
+              of logos. A professional tool labels; it does not lecture. The
+              field's own quiet treatment is in connector-cards.css. */}
           <input
             id="connector-search"
             type="search"
             className="fleet-wizard-input"
             value={query}
-            placeholder="Search by name or what it does…"
+            placeholder="Search"
             onChange={(e) => setQuery(e.currentTarget.value)}
           />
 

@@ -120,16 +120,27 @@ assert(cardStart > 0 && cardEnd > cardStart, "found renderCard's body to scan");
 // words: "why do we have those written text right there?"
 assert(!/summary/i.test(cardBlock), "no summary/description prose on a card face");
 
-// THE ACCENT ARITHMETIC, asserted rather than remembered. The face carries an
-// accent-COLOURED button (he asked for Connect in the accent) and must never
-// carry a FILLED one: ~69 faces render at once, so one fill here is ~69 fills
-// in one view — the exact shape CLAUDE.md calls a bug.
-assert(!/accent-fill/.test(cardBlock), "a card FACE never carries the accent FILL — 69 faces would be 69 fills");
-assert(/fleet-btn--accent(?!-fill)/.test(cardBlock), "…it carries the hairline accent, so Connect still reads as the action");
+// THE ACCENT IS THE FILL, ASSERTED RATHER THAN REMEMBERED — and these two
+// assertions are FLIPPED from what they said when this file was written, on
+// the founder's own instruction, given twice: "it's going to be FULL purple
+// just like this next button, not like only around it and slightly purple."
+//
+// They are flipped rather than deleted, deliberately (the same treatment
+// CLAUDE.md records for content-security-policy.test.ts): the guard still has
+// teeth, it now points the other way, and nobody reading it can mistake the
+// overruled hairline shape for the one still intended. The "~69 fills in one
+// view" arithmetic the original version enforced is not wrong on its own
+// terms — it was simply not this file's call to make.
+assert(/fleet-btn--accent-fill/.test(cardBlock), "a card FACE carries the FULL accent fill — the founder's own instruction");
+assert(
+  !/fleet-btn--accent(?!-fill)/.test(cardBlock),
+  "…and never the hairline variant, which he named explicitly as the wrong one",
+);
 
-// …and the panel is where the one fill lives.
+// …and the panel spends it too. Both, now — the fill is simply what Connect
+// looks like on this surface, not a scarce resource one control holds.
 const panelBlock = code.slice(cardEnd);
-assert(/fleet-btn--accent-fill/.test(panelBlock), "the open panel spends the accent fill on its primary action");
+assert(/fleet-btn--accent-fill/.test(panelBlock), "the open panel's primary action carries the same fill");
 
 // TWO REAL BUTTONS, NEVER NESTED. `<button>` inside `<button>` is invalid and
 // browsers un-nest it; a div-with-onClick would be mouse-only. The card body
@@ -149,6 +160,53 @@ assert(
 
 // The operator sentence the grid used to repeat nine times.
 assert(!/OAuth client configured/i.test(code), "the operator-language blocked sentence is gone");
+
+// ── PREMIUM IS A MEASUREMENT, NOT AN ADJECTIVE ────────────────────────────
+// The founder's words were "slightly bigger and mature… slightly vertically
+// deeper, slightly vertically thicker", and every one of those is a value
+// that reverts silently the moment someone tidies this CSS. Asserted as
+// TOKENS rather than pixels: a literal here would freeze the scale, while the
+// real rule is that the card is proportioned from the shared spacing set.
+const rowBlock = css.slice(css.indexOf(".fleet-connector-card.fleet-connector-card--row"));
+assert(
+  /padding:\s*var\(--space-3\)\s+var\(--space-4\)/.test(rowBlock.slice(0, 400)),
+  "the card is padded --space-3/--space-4 — deeper than the --space-2 tile it grew out of",
+);
+assert(
+  /\.fleet-connector-grid\.fleet-connector-grid\s*\{[^}]*gap:\s*var\(--space-4\)/.test(css),
+  "cards are separated by --space-4, not fleet-theme's 4-up-tile 10px",
+);
+assert(
+  /\.fleet-connector-card--row\s+\.fleet-connector-card-icon\s*\{[^}]*width:\s*40px/.test(css),
+  "the logo box scales WITH the card — 32px in a 66px row reads as a favicon adrift",
+);
+assert(
+  !/border-radius:\s*7px/.test(css),
+  "the monogram's radius is derived from its own box, never a hand-kept magic number",
+);
+
+// THE SEARCH FIELD RECEDES. It was the only filled surface in the view and
+// therefore the heaviest object on a screen full of logos — the founder's
+// "wtf is this piece of shit at the middle of the screen".
+assert(
+  /\.fleet-connector-browse\s*>\s*\.fleet-wizard-input\s*\{[^}]*background:\s*var\(--bg-card\)/.test(css),
+  "the search field is drawn on the cards' own surface, not the filled inset",
+);
+assert(
+  !/background:\s*var\(--bg-inset\)/.test(css.slice(css.indexOf(".fleet-connector-browse"), css.indexOf(".fleet-connector-browse") + 900)),
+  "…and the inset fill is not re-added beside it",
+);
+// The override is SCOPED — .fleet-wizard-input is the create sequence's own
+// form field, where a filled inset is correct. Two jobs, one class.
+assert(
+  !/^\.fleet-wizard-input\s*\{/m.test(css),
+  "…and it never restyles the shared .fleet-wizard-input for every form in the product",
+);
+
+// A placeholder LABELS. "Search by name or what it does…" explained how a
+// search box works, above a grid of logos.
+assert(/placeholder="Search"/.test(code), "the search placeholder is one word");
+assert(!/what it does/i.test(code), "…and the sentence that explained searching is gone");
 
 assert(
   /codeOnly/.test("codeOnly") && !/fleet-btn/.test(codeOnly("// className=\"fleet-btn\"\nconst x = 1;")),
