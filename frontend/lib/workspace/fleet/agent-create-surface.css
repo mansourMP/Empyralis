@@ -10,6 +10,15 @@
    breadcrumb for an agent glyph and changed nothing structural; it was still
    the composer.
 
+   A SECOND correction landed the same day and is the bigger one: everything
+   the deleted FleetCreateAgentWizard used to ask had become a row of optional
+   buttons on the agent's page afterwards, and he rejected that too — *"it
+   acts like a button, not step-by-step... if you want press this button and
+   set up your hardware, if you want this if you want that — I don't want to
+   have that."* So this shell carries a real SEQUENCE (see
+   agent-create-wizard.ts), which is the other half of why it cannot be the
+   composer's: a composer is one sheet with no steps by design.
+
    The composer's shape is correct FOR THE COMPOSER: "paper, not a form" —
    bare, unlabelled, borderless fields you type prose into, because a task
    and a document ARE prose. An agent is not prose. It is a thing with an
@@ -24,6 +33,7 @@
      one flat sheet                      three groups, hairline-separated
      drops in from 12vh, 640px wide      centred, 460px — a card, not a page
      a grey breadcrumb                   an identity row: glyph + the name field
+     one sheet, no steps                 a stepper: Identity · Model · Channel · Tools
    ```
 
    No new colour, no new motion, no new radius: every value below is a shared
@@ -56,7 +66,7 @@
 }
 
 .agent-create-surface {
-  width: 460px;
+  width: 520px;
   max-width: 100%;
   display: flex;
   flex-direction: column;
@@ -65,6 +75,12 @@
   border-radius: var(--radius-card);
   box-shadow: 0 32px 80px -32px rgba(0, 0, 0, 0.6);
   animation: fleet-modal-in var(--dur-2) var(--ease-out);
+  /* The steps differ a lot in height (two fields vs. the whole Channels
+     grid). Capping the SURFACE and scrolling only its body keeps the
+     stepper and the footer where the eye left them instead of the whole
+     dialog jumping size on every Next. */
+  max-height: min(84vh, 760px);
+  overflow: hidden;
 }
 .agent-create-surface.is-closing {
   animation: fleet-modal-in var(--dur-2) var(--ease-in) reverse forwards;
@@ -105,6 +121,79 @@
   cursor: pointer;
 }
 .agent-create-close:hover { background: var(--rail-active); color: var(--text-primary); }
+
+/* ── The stepper ──────────────────────────────────────────────────────────
+   Where you are in the sequence, and where it goes. Never "2 of 4 complete"
+   — a score turns setup into a grade. Neutral throughout except the current
+   step, which is the only one that needs finding at a glance; a done step
+   gets a check and steps back down to muted, because it is no longer
+   something to look at. */
+.agent-create-steps {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin: 0;
+  padding: var(--space-3) var(--space-5);
+  list-style: none;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-inset);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.agent-create-steps::-webkit-scrollbar { display: none; }
+
+.agent-create-step {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+.agent-create-step.is-current { color: var(--text-primary); }
+
+.agent-create-step-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-strong);
+  font-size: var(--text-2xs);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.agent-create-step.is-current .agent-create-step-index {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.agent-create-step.is-done .agent-create-step-index {
+  border-color: transparent;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.agent-create-step-label { white-space: nowrap; }
+.agent-create-step.is-current .agent-create-step-label { font-weight: var(--weight-medium); }
+
+/* ── Body ─────────────────────────────────────────────────────────────────
+   The only scrolling region. Steps 3 and 4 embed the REAL Channels and
+   Connectors tabs, which are full-page surfaces — they are given the room
+   they need here and their own scroll, rather than a shrunken copy. */
+.agent-create-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.agent-create-embed {
+  padding: var(--space-4) var(--space-5);
+}
+/* Those tabs draw their own section headings; inside a dialog that already
+   has a title and a stepper, their top margin reads as a gap rather than as
+   separation. */
+.agent-create-embed > *:first-child { margin-top: 0; }
 
 /* ── Groups ───────────────────────────────────────────────────────────────
    Dense inside a group, airy between groups (craft doctrine). The hairline
@@ -223,6 +312,11 @@
   border-top: 1px solid var(--border);
 }
 
+/* A step with no backward move renders NO Back button (a disabled one is a
+   dead control) — this keeps the forward button on the right where it has
+   been on every other step, instead of sliding across the footer. */
+.agent-create-foot-spacer { flex: 1; }
+
 .agent-create-error {
   margin: 0;
   padding: 0 var(--space-5) var(--space-3);
@@ -243,7 +337,10 @@
   }
   .agent-create-surface { width: 100%; }
   .agent-create-identity,
-  .agent-create-group { padding-inline: var(--space-4); }
+  .agent-create-group,
+  .agent-create-embed { padding-inline: var(--space-4); }
+  .agent-create-steps { padding-inline: var(--space-4); gap: var(--space-3); }
+  .agent-create-surface { max-height: calc(100vh - var(--space-4)); }
   .agent-create-head { padding-inline: var(--space-4) var(--space-2); }
   .agent-create-foot { padding-inline: var(--space-4); }
   .agent-create-error { padding-inline: var(--space-4); }

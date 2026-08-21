@@ -42,7 +42,9 @@ import { MemoryTab } from "./tabs/MemoryTab";
 import { ProfileFilesSection } from "./tabs/ProfileFilesSection";
 import { GroupedRail, type GroupedRailGroup } from "./GroupedRail";
 import { defaultAgentProfileSegment, isProfileTab, planAgentProfileSegments, type AgentProfileSegmentId } from "./agent-profile-shape";
-import { agentSetupHeading, planAgentSetupSteps } from "./agent-setup-steps";
+import { agentSetupHeading, agentSetupNextStep } from "./agent-setup-steps";
+import { AgentDeleteDialog } from "./AgentDeleteDialog";
+import { canDeleteAgent, deleteFleetAgent } from "./agent-delete";
 
 import {
   resumeFleetAgent,
@@ -113,7 +115,13 @@ const HARDWARE_PLACEMENT_PANEL_TONE: Record<HardwarePlacementTone, PanelValueTon
 // as slackChannelBinding — so a live BYO-bot agent read as connected: false
 // everywhere here: undercounted in the Properties "Channels" total, and the
 // grid pill showed "Set up" instead of "Connected".
-function isChannelConnected(
+// Exported (2026-08-21) for AgentCreateCard's Channel step, which needs the
+// SAME "is this really connected" answer this file already computes — Slack
+// and hosted Telegram each answer it from a second field, so a caller that
+// read `channel.connected` alone would quietly undercount and tell someone
+// their channel step was still empty. One rule, two call sites, never two
+// rules.
+export function isChannelConnected(
   channel: Pick<FleetChannel, "id" | "connected">,
   slackChannelBinding: string | null,
   telegramBotConnected: boolean,
@@ -472,6 +480,7 @@ function AgentDetailHeader({
   configureHref,
   onOpenProperties,
   onAgentChanged,
+  onDeleted,
 }: {
   workspaceId: string;
   agentId: string;
@@ -486,10 +495,48 @@ function AgentDetailHeader({
   configureHref: string;
   onOpenProperties: () => void;
   onAgentChanged?: () => void;
+  /** Where to go once this agent no longer exists. Called only after the
+   *  server has CONFIRMED the delete — never optimistically. */
+  onDeleted: () => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const stopControl = useAgentStopControl(workspaceId, agentId, agent, onAgentChanged);
+
+  // ── Delete (restored 2026-08-21) ────────────────────────────────────────
+  // The route and fleet_tools.fleet_delete_agent never moved; the 2026-08-20
+  // agents-page redesign stopped importing AgentsList.tsx, which held the
+  // only caller, so agents could be created and never removed. The rule and
+  // the request live in agent-delete.ts, the dialog in AgentDeleteDialog.tsx
+  // — shared, so reviving this did not make a second delete path.
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const deletable = canDeleteAgent(agent);
+
+  const closeDelete = useCallback(() => {
+    if (deleteBusy) return;
+    setDeleteOpen(false);
+    setDeleteError(null);
+  }, [deleteBusy]);
+
+  const confirmDelete = useCallback(async () => {
+    if (deleteBusy) return;
+    setDeleteBusy(true);
+    setDeleteError(null);
+    const outcome = await deleteFleetAgent(workspaceId, agentId, agentLabel);
+    setDeleteBusy(false);
+    // Nothing moves until the server has confirmed. A `refused` and an
+    // `unconfirmed` both keep the dialog open carrying their own, different
+    // sentence — collapsing them would send someone to retry something
+    // already done, or give up on something that worked.
+    if (outcome.status === "deleted") {
+      setDeleteOpen(false);
+      onDeleted();
+      return;
+    }
+    setDeleteError(outcome.message);
+  }, [agentId, agentLabel, deleteBusy, onDeleted, workspaceId]);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -612,6 +659,23 @@ function AgentDetailHeader({
                 Stop agent
               </button>
             )}
+            {/* Not rendered at all for the workspace operator —
+                fleet_delete_agent refuses it outright, and a menu item whose
+                only possible outcome is an error is a dead control. */}
+            {deletable && (
+              <button
+                type="button"
+                role="menuitem"
+                className="fleet-list-row-menu-item fleet-list-row-menu-item--danger"
+                onClick={() => {
+                  setMenuOpen(false);
+                  setDeleteError(null);
+                  setDeleteOpen(true);
+                }}
+              >
+                Delete agent
+              </button>
+            )}
           </div>
         ) : null}
       </div>
@@ -622,6 +686,15 @@ function AgentDetailHeader({
           error={stopControl.error}
           onCancel={stopControl.closeConfirm}
           onConfirm={stopControl.handleStop}
+        />
+      )}
+      {deleteOpen && (
+        <AgentDeleteDialog
+          agentName={agentLabel}
+          busy={deleteBusy}
+          error={deleteError}
+          onCancel={closeDelete}
+          onConfirm={confirmDelete}
         />
       )}
     </div>
@@ -969,11 +1042,18 @@ export function FleetAgentDetail({
   const pathname = usePathname();
   const tabHref = useCallback((tab: TabId) => pathname.replace(/\/[^/]+$/, `/${tab}`), [pathname]);
 
-  // ── "This agent isn't set up yet" (2026-08-21) ───────────────────────────
-  // Creation is two fields on purpose and the deleted 4-step wizard is not
-  // coming back — so the things it used to ask are DEFERRED, and this is
-  // where they become visible again. The rule lives in agent-setup-steps.ts
-  // (pure + tested); everything here is the rendering of its answer.
+  // ── "This agent isn't set up yet" (2026-08-21, corrected same day) ───────
+  // Setup is a SEQUENCE now, and it lives inside the creation surface
+  // (AgentCreateCard/agent-create-wizard.ts): Identity → Model → Channel →
+  // Tools. The founder rejected the row of optional buttons that used to sit
+  // here — *"it acts like a button, not step-by-step... if you want this if
+  // you want that — I don't want to have that."*
+  //
+  // What survives is the ONE case the sequence can't cover: the Channel step
+  // is skippable on purpose, and a skipped one leaves an agent nobody can
+  // reach. So this renders a SINGLE control — the next thing that unblocks
+  // it — never a menu. The rule lives in agent-setup-steps.ts (pure +
+  // tested); everything here is the rendering of its answer.
   //
   // The band is gated on the agent being UNREACHABLE (zero channels), not on
   // "something is outstanding": with chat gone from the platform, a channel
@@ -982,9 +1062,9 @@ export function FleetAgentDetail({
   // `connectorsLoading` are passed through so "nothing is connected" and "I
   // have not asked yet" never share a screen — both fetches return [] in
   // either state.
-  const setupSteps = useMemo(
+  const setupStep = useMemo(
     () =>
-      planAgentSetupSteps({
+      agentSetupNextStep({
         channelsKnown: !channelsLoading,
         channels,
         connectedChannelCount: connectedChannels,
@@ -1219,41 +1299,45 @@ export function FleetAgentDetail({
         profileHref={tabHref(profileOpen ? activeTab : defaultAgentProfileSegment(isMaster))}
         onOpenProperties={() => setPropertiesOpen(true)}
         onAgentChanged={onRenamed}
+        // Go somewhere that still exists. Staying on this route after a
+        // confirmed delete renders a detail page for an agent the backend no
+        // longer has — a 404 the person caused by succeeding.
+        onDeleted={() => router.replace(`/w/${encodeURIComponent(workspaceId)}/agents`)}
       />
 
-      {/* Everything the two-field create card deferred, made visible — a
-          band under the agent's own name, above the observation surface,
-          never a gate in front of it. Each row is a real <Link> straight
-          into the Configure section that fixes it (the sheet is derived
-          from the URL segment, so a deep link opens on the right section on
-          first paint). It disappears row by row as each thing is done and
-          vanishes entirely the moment a channel connects. See
-          agent-setup-steps.ts for which steps exist, which two deliberately
-          do not, and why nothing here routes to `context`. */}
-      {setupSteps.length > 0 && (
+      {/* ONE control, never a row of them. The creation sequence already
+          walked through Channel and Tools in order; this is what is left
+          when the Channel step was skipped, which is the only state that
+          leaves an agent nobody can reach. A real <Link> straight into the
+          Configure section that fixes it (the sheet is derived from the URL
+          segment, so a deep link opens on the right section on first
+          paint), and it vanishes the moment a channel connects. See
+          agent-setup-steps.ts for why exactly one row renders, which steps
+          exist, which two deliberately do not, and why nothing here routes
+          to `context`. */}
+      {setupStep && (
         <section className="fleet-agent-setup" aria-label="Setup">
           <h2 className="fleet-agent-setup-title">{agentSetupHeading(agent?.label || "")}</h2>
           <div className="fleet-agent-setup-steps">
-            {setupSteps.map((step) => {
-              const StepIcon = step.id === "channel" ? Radio : step.id === "hardware" ? Cpu : Plug;
+            {(() => {
+              const StepIcon = setupStep.id === "channel" ? Radio : setupStep.id === "hardware" ? Cpu : Plug;
               return (
                 <Link
-                  key={step.id}
-                  href={tabHref(step.tab)}
+                  href={tabHref(setupStep.tab)}
                   replace
-                  className={`fleet-agent-setup-step${step.primary ? " fleet-agent-setup-step--primary" : ""}`}
+                  className="fleet-agent-setup-step fleet-agent-setup-step--primary"
                 >
                   <span className="fleet-agent-setup-step-icon">
                     <StepIcon size={15} strokeWidth={1.75} aria-hidden="true" />
                   </span>
                   <span className="fleet-agent-setup-step-text">
-                    <span className="fleet-agent-setup-step-label">{step.label}</span>
-                    {step.hint ? <span className="fleet-agent-setup-step-hint">{step.hint}</span> : null}
+                    <span className="fleet-agent-setup-step-label">{setupStep.label}</span>
+                    {setupStep.hint ? <span className="fleet-agent-setup-step-hint">{setupStep.hint}</span> : null}
                   </span>
                   <ChevronRight size={14} strokeWidth={1.75} aria-hidden="true" className="fleet-agent-setup-step-chevron" />
                 </Link>
               );
-            })}
+            })()}
           </div>
         </section>
       )}
@@ -3537,7 +3621,10 @@ export function ChannelsTab({
 
 // ── Connectors ──────────────────────────────────────────────────────────────
 
-function ConnectorsTab({
+// Exported (2026-08-21) for AgentCreateCard's Tools step — the creation
+// sequence shows the REAL connector picker, never a second, simplified copy
+// of it that would drift from this one.
+export function ConnectorsTab({
   workspaceId, agentId, agent,
 }: { workspaceId: string; agentId: string; agent: FleetAgent | null }) {
   const projectId = agent?.project_id || "";

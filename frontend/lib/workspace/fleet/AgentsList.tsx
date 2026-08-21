@@ -1,18 +1,17 @@
 "use client";
 
-import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
 
 import type { KeyboardEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Play, Square, Trash2 } from "lucide-react";
 
-import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
-import { getErrorMessage } from "@/lib/ui/api-error";
 
 import { type FleetAgent, type FleetProject, resumeFleetAgent, stopFleetAgent } from "./fleet-data";
 import { timeAgo } from "./fleet-presentation";
 import { StatusChip, StatusDot, AgentSigil } from "./fleet-indicators";
+import { AgentDeleteDialog } from "./AgentDeleteDialog";
+import { canDeleteAgent, deleteFleetAgent } from "./agent-delete";
 import { ProjectIcon } from "./fleet-project-identity";
 import { CHANNEL_LABELS, channelIconSrc } from "./fleet-icons";
 import {
@@ -172,117 +171,6 @@ function resolvePlacementBadge(
 function compactAgo(iso: string | null | undefined): string {
   if (!iso) return "";
   return timeAgo(iso).replace(/\s+ago$/, "");
-}
-
-/** DELETE .../fleet/agents/{agentId} — owner-only, irreversible (see
- *  routes_fleet.py / fleet_tools.fleet_delete_agent). Written inline here
- *  rather than added to fleet-data.ts: this build's scope is deliberately
- *  limited to AgentsList.tsx so it doesn't collide with other in-flight
- *  edits to shared fleet files. Mirrors fleet-data.ts's own
- *  postFleetStopControl in shape (credentials + CSRF header + the same
- *  {ok:false, error} normalization on a non-2xx or {ok:false} body). */
-async function deleteFleetAgentInline(
-  workspaceId: string,
-  agentId: string,
-): Promise<{ ok: boolean; error?: string }> {
-  try {
-    const res = await fleetAuthorizedFetch(
-      `/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`,
-      {
-        method: "DELETE",
-        credentials: "include",
-        headers: buildCookieAuthHeaders("DELETE"),
-      },
-    );
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || data?.ok === false) {
-      return { ok: false, error: getErrorMessage(data, `HTTP ${res.status}`) };
-    }
-    return { ok: true };
-  } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : "Request failed" };
-  }
-}
-
-/** Delete-agent confirmation — rendered via portal so its fixed overlay
- *  always covers the full viewport regardless of where the triggering row
- *  sits in the list. Reuses the existing .fleet-small-dialog/.fleet-btn
- *  design-system classes (fleet-theme.css) rather than introducing new
- *  ones, plus the shared --offline-* red tokens (lib/ui/theme-tokens.css)
- *  for the destructive accent — no stylesheet changes needed. */
-function DeleteAgentDialog({
-  agentName,
-  busy,
-  error,
-  onCancel,
-  onConfirm,
-}: {
-  agentName: string;
-  busy: boolean;
-  error: string | null;
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  useEffect(() => {
-    const onKeyDown = (e: globalThis.KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) onCancel();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [busy, onCancel]);
-
-  if (typeof document === "undefined") return null;
-
-  return createPortal(
-    <div
-      role="presentation"
-      onClick={() => { if (!busy) onCancel(); }}
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0, 0, 0, 0.5)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        zIndex: 1000,
-      }}
-    >
-      <div
-        role="alertdialog"
-        aria-modal="true"
-        aria-labelledby="fleet-delete-agent-title"
-        className="fleet-small-dialog"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="fleet-small-dialog-header">
-          <span id="fleet-delete-agent-title" className="fleet-title">Delete agent</span>
-        </div>
-        <div className="fleet-small-dialog-body">
-          <p style={{ margin: 0, fontSize: 13, color: "var(--text-primary)", lineHeight: 1.5 }}>
-            Delete <strong>{agentName}</strong>? This removes its memory, credentials, and channel
-            connections and can&apos;t be undone.
-          </p>
-          {error && (
-            <p style={{ margin: 0, fontSize: 12, color: "var(--offline-text)" }}>{error}</p>
-          )}
-        </div>
-        <div className="fleet-small-dialog-footer">
-          <button type="button" className="fleet-btn" onClick={onCancel} disabled={busy}>
-            Cancel
-          </button>
-          <button
-            type="button"
-            className="fleet-btn fleet-btn--danger"
-            onClick={onConfirm}
-            disabled={busy}
-          >
-            {busy ? "Deleting…" : "Delete agent"}
-          </button>
-        </div>
-      </div>
-    </div>,
-    document.body,
-  );
 }
 
 /** Stop-agent confirmation — the row-level twin of the Stop-agent confirm
@@ -559,8 +447,10 @@ function AgentRow({
   const relative = compactAgo(agent.last_activity);
   // The workspace operator (Sage) is never deletable (see
   // fleet_tools.fleet_delete_agent's own guard) — don't even offer the
-  // control for that row rather than showing an affordance that always errors.
-  const isOperator = agent.role === "operator";
+  // control for that row rather than showing an affordance that always
+  // errors. The rule itself lives in agent-delete.ts so this row and the
+  // agent detail header's own "⋯" menu can never disagree about it.
+  const isOperator = !canDeleteAgent(agent);
   const agentDisplayName = agent.label || "this agent";
 
   const activate = () => onSelect(agent.agent_id, agent.project_id || "");
@@ -625,15 +515,17 @@ function AgentRow({
   const confirmDelete = useCallback(async () => {
     setDeleting(true);
     setDeleteError(null);
-    const result = await deleteFleetAgentInline(workspaceId, agent.agent_id);
+    const outcome = await deleteFleetAgent(workspaceId, agent.agent_id, agentDisplayName);
     setDeleting(false);
-    if (result.ok) {
+    // Three outcomes, never two — the row stays put unless the server has
+    // actually confirmed. See agent-delete.ts.
+    if (outcome.status === "deleted") {
       setConfirmOpen(false);
       onStoppedChanged?.();
     } else {
-      setDeleteError(result.error || "Failed to delete agent.");
+      setDeleteError(outcome.message);
     }
-  }, [workspaceId, agent.agent_id, onStoppedChanged]);
+  }, [workspaceId, agent.agent_id, agentDisplayName, onStoppedChanged]);
 
   return (
     <>
@@ -733,7 +625,7 @@ function AgentRow({
       />
     )}
     {confirmOpen && (
-      <DeleteAgentDialog
+      <AgentDeleteDialog
         agentName={agentDisplayName}
         busy={deleting}
         error={deleteError}
