@@ -1170,8 +1170,11 @@
   width: 9px;
   height: 9px;
   border-radius: 999px;
-  background: var(--app-accent-solid);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--app-accent-soft) 56%, transparent);
+  /* --app-accent-solid is defined NOWHERE in this codebase (grepped: these
+     were its only two references), so this dot has always rendered with no
+     background at all. Neutral AND actually painted now. */
+  background: var(--app-text-secondary);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--app-text-secondary) 22%, transparent);
 }
 
 .status {
@@ -1223,7 +1226,7 @@
   width: 8px;
   height: 8px;
   border-radius: 999px;
-  background: var(--app-accent-solid);
+  background: var(--app-text-secondary);
 }
 
 .error {
