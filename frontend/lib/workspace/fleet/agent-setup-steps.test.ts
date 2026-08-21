@@ -12,6 +12,7 @@
  */
 
 import {
+  agentSetupChannelPlatformLabel,
   agentSetupChannelTier,
   agentSetupHeading,
   planAgentSetupSteps,
@@ -33,10 +34,21 @@ function assert(condition: boolean, label: string): void {
   }
 }
 
+// FIXTURES BUILT FROM THE REAL PRODUCER, not from what the argument seems to
+// need. These `label` values are the exact strings a live
+// GET /fleet/agent-channels returned on a disposable stack on 2026-08-21 —
+// captured from the running backend, not typed from memory. It matters: the
+// hosted Telegram lane's label is the whole SENTENCE "Talk to your agent on
+// Telegram", and an earlier version of this file used "Telegram" here, which
+// made the recommendation attach in the test and silently never attach in
+// production (channelPopularityKeys normalises the whole label and its
+// LEADING word — "talktoyouragentontelegram" / "talk", neither of which is
+// "telegram"). Caught by driving the real screen; see
+// agentSetupChannelPlatformLabel. Do not "tidy" these labels.
 function channel(over: Partial<AgentSetupChannelRow> = {}): AgentSetupChannelRow {
   return {
     id: "sage_telegram_hosted",
-    label: "Telegram",
+    label: "Talk to your agent on Telegram",
     connected: false,
     requiresGateway: false,
     setupAvailable: true,
@@ -46,6 +58,26 @@ function channel(over: Partial<AgentSetupChannelRow> = {}): AgentSetupChannelRow
 
 const TELEGRAM = channel();
 const WHATSAPP = channel({ id: "openclaw_whatsapp", label: "WhatsApp", requiresGateway: true });
+
+// ── The platform label, which is what the recommendation is keyed on ──────
+assert(
+  agentSetupChannelPlatformLabel(TELEGRAM) === "Telegram",
+  `the hosted Telegram lane resolves to the grid's own platform label — got "${agentSetupChannelPlatformLabel(TELEGRAM)}"`,
+);
+assert(
+  agentSetupChannelPlatformLabel(channel({ id: "slack", label: "Slack" })) === "Slack",
+  "a channel already named after its platform is unchanged",
+);
+assert(
+  agentSetupChannelPlatformLabel(WHATSAPP) === "WhatsApp",
+  "a channel outside the grid's platform list keeps its own label rather than losing one",
+);
+// The regression itself, pinned: reading the RAW label is what silently
+// dropped the recommendation in production.
+assert(
+  agentSetupChannelPlatformLabel(TELEGRAM) !== TELEGRAM.label,
+  "…and the raw backend label is genuinely different, which is why this function exists",
+);
 
 function input(over: Partial<AgentSetupInput> = {}): AgentSetupInput {
   return {
@@ -114,7 +146,7 @@ assert(
 );
 assert(
   fresh[0].hint === "Telegram needs no computer",
-  `the channel hint names the recommended hardware-free channel it found — got "${fresh[0].hint}"`,
+  `the channel hint names the RECOMMENDED hardware-free channel by its platform name — got "${fresh[0].hint}"`,
 );
 
 // ── Steps disappear one at a time as each thing gets done ─────────────────

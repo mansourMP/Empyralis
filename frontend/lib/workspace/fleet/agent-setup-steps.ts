@@ -83,7 +83,7 @@
  * renders against instead of re-typing it.
  */
 
-import { CHANNEL_DOORS } from "./channel-doors";
+import { CHANNEL_DOORS, CHANNEL_GRID_PLATFORMS } from "./channel-doors";
 import { channelHardwareTier, showsRecommendedBadge, type ChannelHardwareTier } from "./channel-hardware-tier";
 import { isChannelRecommended } from "./channel-popularity";
 
@@ -139,6 +139,24 @@ export function agentSetupChannelTier(row: AgentSetupChannelRow): ChannelHardwar
 }
 
 /**
+ * The PLATFORM name for a channel — the label the Channels grid shows, not
+ * the sentence the backend sends.
+ *
+ * FOUND LIVE, and it is the "a fixture that invents its own input" failure
+ * this codebase already documents four times: `FleetChannel.label` for the
+ * hosted Telegram lane is the whole phrase "Talk to your agent on Telegram",
+ * so `isChannelRecommended` — which normalises a label and matches its whole
+ * form or its LEADING word — sees `talktoyouragentontelegram` / `talk` and
+ * matches nothing. The recommendation silently never attached. The grid does
+ * not have this problem because it renders `CHANNEL_GRID_PLATFORMS`' own
+ * platform labels, so that is the map read here too. Falls back to the row's
+ * own label for anything not in the grid's list.
+ */
+export function agentSetupChannelPlatformLabel(row: AgentSetupChannelRow): string {
+  return CHANNEL_GRID_PLATFORMS.find((p) => p.id === row.id)?.label ?? row.label;
+}
+
+/**
  * The channel this agent should be pointed at first, and its tier — used
  * only to write the channel step's hint, never to skip the grid. Null when
  * nothing is connectable, which is what suppresses the step entirely.
@@ -151,14 +169,23 @@ export function agentSetupChannelTier(row: AgentSetupChannelRow): ChannelHardwar
 export function preferredSetupChannel(
   channels: readonly AgentSetupChannelRow[],
   hasHardware: boolean,
-): { row: AgentSetupChannelRow; tier: ChannelHardwareTier; recommended: boolean } | null {
+): {
+  row: AgentSetupChannelRow;
+  tier: ChannelHardwareTier;
+  platformLabel: string;
+  recommended: boolean;
+} | null {
   const connectable = channels
     .filter((row) => !row.connected && row.setupAvailable)
-    .map((row) => ({ row, tier: agentSetupChannelTier(row) }))
+    .map((row) => ({
+      row,
+      tier: agentSetupChannelTier(row),
+      platformLabel: agentSetupChannelPlatformLabel(row),
+    }))
     .filter(({ tier }) => tier === "hardware_free" || hasHardware);
   if (connectable.length === 0) return null;
-  const recommended = connectable.find(
-    ({ row, tier }) => showsRecommendedBadge(isChannelRecommended(row.label), tier),
+  const recommended = connectable.find(({ platformLabel, tier }) =>
+    showsRecommendedBadge(isChannelRecommended(platformLabel), tier),
   );
   const hardwareFree = connectable.find(({ tier }) => tier === "hardware_free");
   const pick = recommended ?? hardwareFree ?? connectable[0];
@@ -206,7 +233,7 @@ export function planAgentSetupSteps(input: AgentSetupInput): AgentSetupStep[] {
       id: "channel",
       tab: "channels",
       label: "Connect a channel",
-      hint: channel.recommended ? `${channel.row.label} needs no computer` : "Nobody can reach it yet",
+      hint: channel.recommended ? `${channel.platformLabel} needs no computer` : "Nobody can reach it yet",
       primary: true,
     });
   }
