@@ -30,10 +30,51 @@
    COMPOSER (task / document)          THIS (agent)
      no labels — bare paper              real labels. you are specifying a thing
      invisible, borderless fields        fields with visible chrome, on --bg-inset
-     one flat sheet                      three groups, hairline-separated
-     drops in from 12vh, 640px wide      centred, 460px — a card, not a page
+     one flat sheet                      three groups, separated by SPACE
+     drops in from 12vh, 640px wide      centred, 520px — a card, not a page
      a grey breadcrumb                   an identity row: glyph + the name field
-     one sheet, no steps                 a stepper: Identity · Model · Channel · Tools
+     one sheet, no steps                 a stepper: Identity · Model · Channel · Apps
+   ```
+
+   ── A THIRD CORRECTION, 2026-08-21: THE RULES AND THE BAND ────────────────
+   He reviewed the built version and rejected how it LOOKED: *"why do I have
+   lines like this? and why isn't it at the middle? and why is it so
+   unbalanced? steps and more things are not beautifully designed."* Three
+   separate faults, each measured in a real browser before it was touched:
+
+   ```
+   LINES        step 1 drew FOUR full-width rules inside the card (head,
+                stepper, identity, footer) on top of the card's own border,
+                so one dialog read as four stacked boxes. Craft doctrine
+                already says how groups separate: "Dense inside a group,
+                airy between groups." SPACE separates; a rule is a last
+                resort. Exactly ONE survives — the footer's, which divides
+                actions from content and is the only boundary a person
+                actually needs to see.
+   THE BAND     the stepper sat on --bg-inset with a rule under it, i.e. a
+                toolbar bolted onto the card rather than part of it. It is
+                on the card's own surface now, held apart by space.
+   NOT MIDDLE   the CARD is dead-centre and always was (measured: 0.0px off
+                on both axes, every step). What was off-centre was the
+                identity row: a 40px glyph tile centred against a two-line
+                [input + caption] stack put the tile's centre 9.0px BELOW
+                the name it sits beside. That 9px is the complaint. The
+                glyph is INSIDE the name control now, so the two cannot
+                drift apart by construction rather than by arithmetic.
+   ```
+
+   THE SPACING SCALE, and it is a rhythm rather than a set of numbers picked
+   per element. Three steps, each with one job:
+
+   ```
+   --space-2   8px   inside a control group   label -> its control,
+                                              button -> button
+   --space-3  12px   coupled, not merged      title -> stepper,
+                                              glyph -> name text
+   --space-5  20px   between groups, and the card's own inner margin —
+                     the SAME value on all four sides and between every
+                     group, so the eye reads one grid instead of 12/16/20
+                     alternating down the card
    ```
 
    No new colour, no new motion, no new radius: every value below is a shared
@@ -117,8 +158,10 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-3) var(--space-3) var(--space-3) var(--space-5);
-  border-bottom: 1px solid var(--border);
+  /* No bottom rule. The title and the stepper under it are ONE group — the
+     card is telling you what this is and where you are in it — so they are
+     held together by 12px of space, not divided by a line. */
+  padding: var(--space-5) var(--space-3) 0 var(--space-5);
 }
 
 .agent-create-title {
@@ -157,10 +200,30 @@
   align-items: center;
   gap: var(--space-4);
   margin: 0;
-  padding: var(--space-3) var(--space-5);
+  /* On the CARD'S OWN surface, not a tinted band, and with no rule under it.
+     A band plus a rule made this a toolbar bolted to the top of a dialog
+     instead of the dialog's own second line — the founder's "steps ... not
+     beautifully designed". Its bottom edge is the body's 20px padding-top,
+     which is the same 20px every other group is held apart by. */
+  padding: var(--space-3) var(--space-5) 0;
   list-style: none;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-inset);
+  /* CENTRED, on every step. The strip is the card's own second line, and the
+     card is dead-centre on both axes — a left-ragged strip under a centred
+     title reads as a toolbar that was never aligned to the thing it belongs
+     to. The row is FIXED CONTENT (four steps, four fixed labels), so it does
+     not reflow between steps: centring it once centres it everywhere.
+
+     `safe center` and not plain `center`, and this is the whole reason the
+     two declarations are stacked: an overflowing flex row centred the normal
+     way overflows in BOTH directions and the first item becomes unreachable
+     — the row can only be scrolled right, so at 375px the word "Identity"
+     would be permanently clipped off the left edge. `safe` falls back to
+     flex-start exactly when the content no longer fits, which is exactly
+     when centring stops being possible. The plain `center` above it is the
+     fallback for anything that does not parse the `safe` keyword; there it
+     degrades to today's overflow behaviour rather than to no centring. */
+  justify-content: center;
+  justify-content: safe center;
   overflow-x: auto;
   scrollbar-width: none;
 }
@@ -213,28 +276,83 @@
    The only scrolling region. Steps 3 and 4 embed the REAL Channels and
    Connectors tabs, which are full-page surfaces — they are given the room
    they need here and their own scroll, rather than a shrunken copy. */
+/* ONE inner margin, --space-5 on all four sides, and the SAME --space-5
+   between any two groups inside it. The padding used to live on each child
+   with a different value per child (20px on the identity row, 16px on a
+   group, 16/20 on an embed) and a hairline between them; moving it here is
+   what lets the rules go away without the card collapsing into one dense
+   block. */
 .agent-create-body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  padding: var(--space-5);
+}
+.agent-create-body > * + * {
+  margin-top: var(--space-5);
 }
 
+/* The two embedded steps are a single child of the padded body, so they take
+   the same margin as everything else rather than declaring their own. */
 .agent-create-embed {
-  padding: var(--space-4) var(--space-5);
+  padding: 0;
 }
 /* Those tabs draw their own section headings; inside a dialog that already
    has a title and a stepper, their top margin reads as a gap rather than as
    separation. */
 .agent-create-embed > *:first-child { margin-top: 0; }
 
-/* ── Groups ───────────────────────────────────────────────────────────────
-   Dense inside a group, airy between groups (craft doctrine). The hairline
-   is what makes three questions read as three, instead of as one long form. */
-.agent-create-group {
-  padding: var(--space-4) var(--space-5);
-  border-bottom: 1px solid var(--border);
+/* ── The embedded grids are sized by THIS CARD, not by the window ─────────
+   Both card grids are `repeat(4, 1fr)` in fleet-theme.css, stepping to 2 at a
+   900px VIEWPORT. Inside this dialog that measurement is about the wrong box:
+   the card is 520px wide on a 1680px monitor, so the viewport query never
+   fires and four cards divide 478px into 112px each. Measured, on the Channel
+   step: "WeChat / WeCom" broke over two lines and "Not configured here" over
+   two more — the squashed, label-wrapping face the founder objected to,
+   arriving on a desktop rather than on a phone.
+
+   `auto-fill` + a real minimum lets the CONTENT decide instead of a
+   breakpoint: three across here, and it degrades on its own as the card
+   narrows rather than needing a second breakpoint per width this dialog can
+   take. 140px is the width at which a two-word app or channel name sits on
+   one line at --text-sm inside the card's 14px padding.
+
+   Scoped to `.agent-create-embed` on purpose — the full-page Channels and
+   Apps tabs have the whole content column and are correct at four across. */
+.agent-create-embed .fleet-channel-grid {
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
 }
-.agent-create-group:last-of-type { border-bottom: none; }
+
+/* Apps are ROW cards (icon + name … Connect) rather than tiles, so the same
+   478px holds exactly ONE of them — two would put a button and an ellipsised
+   name into 234px. Selector tripled on purpose: connector-cards.css's own
+   two-up rule is already doubled to survive bundle ordering, so matching it
+   at (0,2,0) would leave which one wins up to the bundler. */
+.agent-create-embed .fleet-connector-grid.fleet-connector-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* …and on a phone the channel tiles go one-per-row too — the founder's own
+   instruction, restated here because `auto-fill` would still fit two 140px
+   tiles into 330px and this selector outranks connector-cards.css's. Written
+   as its own block rather than folded into that file: the reason is about
+   THIS dialog's inner width, and a reader debugging the wizard should find
+   its grid rules in one place. */
+@media (max-width: 560px) {
+  .agent-create-embed .fleet-channel-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ── Groups ───────────────────────────────────────────────────────────────
+   Dense inside a group, airy between groups (craft doctrine) — and that is
+   the WHOLE separation now. The hairline that used to sit under each group
+   was doing spacing's job: 20px of air between two labelled groups already
+   reads as two groups, and four of those hairlines in one 520px card read
+   as four stacked boxes. Spacing lives on .agent-create-body above. */
+.agent-create-group {
+  padding: 0;
+}
 
 .agent-create-label {
   display: block;
@@ -246,18 +364,62 @@
   color: var(--text-muted);
 }
 
-/* ── Identity: the glyph and the name are ONE row ──────────────────────────
+/* ── Identity: the glyph and the name are ONE CONTROL ──────────────────────
    This is the row that stops the surface reading as a ticket. The mark is
    deliberately NOT a preview of the agent's real sigil: AgentSigil hashes
    the agent's id, which does not exist yet, so anything drawn from the typed
    name would not be the mark this agent ends up wearing — a small lie on the
-   first screen a new customer ever sees. */
+   first screen a new customer ever sees.
+
+   IT USED TO BE TWO OBJECTS PUSHED APART, and that is what "unbalanced" and
+   "why isn't it at the middle" were about. A 40px bordered tile sat beside a
+   413px borderless underline with a caption under it; the tile was centred
+   against the two-line [input + caption] stack, so its centre landed 9.0px
+   BELOW the centre of the name it was supposed to belong to (measured, both
+   themes). Two boxes, two borders, one of them optically wrong.
+
+   ```
+   BEFORE                                AFTER
+    ┌──┐                                  NAME
+    │  │  Garnet ─────────────────        ┌────────────────────────────┐
+    └──┘  Name                            │ ⌂  Garnet                  │
+     ^ centred on input+caption           └────────────────────────────┘
+       => 9px low against the name         one control. the glyph cannot
+       two borders, two radii              drift from the name it names.
+   ```
+
+   The label moves ABOVE, in the same uppercase style Instructions and Model
+   already use, so all three questions on this card are asked the same way.
+   Same word, same <label for>, same field — only the geometry changed. */
 .agent-create-identity {
+  display: block;
+}
+
+/* The control itself: one hairline box on the inset surface, exactly like
+   .agent-create-input / .agent-create-select below, at --space-10 (40px) so
+   the identity of the thing being made still gets more presence than an
+   ordinary field without needing a second border to say so. */
+.agent-create-name-field {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  padding: var(--space-5);
-  border-bottom: 1px solid var(--border);
+  height: var(--space-10);
+  padding-inline: var(--space-3);
+  box-sizing: border-box;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+}
+.agent-create-name-field:hover { border-color: var(--border-strong); }
+/* ONE focus treatment, on the whole control. It used to be two at once: the
+   app-wide :focus-visible ring (a 2px neutral halo, globals.css) drawn round
+   the input AND an accent underline inside it — the "two treatments" the
+   founder was looking at. The ring now belongs to the box that IS the field,
+   and the accent lives in it, which is one of the three roles theme-tokens.css
+   reserves the accent for. */
+.agent-create-name-field:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
 }
 
 /* Neutral — it was an accent-tinted tile, which is decoration rather than an
@@ -269,28 +431,16 @@
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  width: 40px;
-  height: 40px;
-  border-radius: var(--radius-card);
-  border: 1px solid var(--border);
-  background: var(--bg-inset);
-  color: var(--text-secondary);
-}
-
-.agent-create-name-field {
-  flex: 1;
-  min-width: 0;
+  color: var(--text-muted);
 }
 
 .agent-create-name {
-  width: 100%;
-  display: block;
+  flex: 1;
+  min-width: 0;
   border: none;
-  border-bottom: 1px solid var(--border);
-  border-radius: 0;
   background: transparent;
   outline: none;
-  padding: 0 0 var(--space-1);
+  padding: 0;
   font-family: inherit;
   font-size: var(--text-md);
   font-weight: var(--weight-medium);
@@ -299,20 +449,10 @@
   color: var(--text-primary);
 }
 .agent-create-name::placeholder { color: var(--text-muted); }
-/* Focus keeps the accent: it is a transient state, only ever on one element
-   at a time, and it is the affordance a keyboard user navigates by — the
-   same reason globals.css's :focus-visible ring is never traded away. */
-.agent-create-name:focus { border-bottom-color: var(--accent); }
-
-/* The one place a caption is worth its ink: the name field carries no
-   uppercase label above it (that would fight the 16px input beside a 40px
-   mark), so it names itself underneath, quietly. */
-.agent-create-name-caption {
-  display: block;
-  margin-top: var(--space-1);
-  font-size: var(--text-2xs);
-  color: var(--text-muted);
-}
+/* The ring moved OUT to the wrapper (:focus-within above) — it is not
+   removed, and this is the only way to keep it from being drawn twice, once
+   round the input and once round the box holding it. */
+.agent-create-name:focus-visible { box-shadow: none; }
 
 /* ── Controls ─────────────────────────────────────────────────────────────
    Visible chrome, on the inset surface — the opposite of the composer's
@@ -341,15 +481,66 @@
 .agent-create-input::placeholder { color: var(--text-muted); }
 .agent-create-input:hover,
 .agent-create-select:hover { border-color: var(--border-strong); }
+/* Same one treatment as the name control above — and these two had NO focus
+   style of their own at all, only `outline: none` plus whatever the app-wide
+   ring happened to draw. Every field on this card now says "focused" the
+   same way. */
+.agent-create-input:focus,
+.agent-create-select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
 
-/* ── Foot ─────────────────────────────────────────────────────────────── */
+/* ── Foot ─────────────────────────────────────────────────────────────────
+   THE LAST RULE IN THE CARD, and it is now drawn ONLY where a rule is doing a
+   rule's job. The founder's instruction was "remove any horizontal rule that
+   is doing spacing's job" — and on steps 1 and 2 that is exactly what this
+   one was: nothing scrolls there, so it divided two things --space-3 already
+   divides, in a card whose head deliberately draws no line for the same
+   reason.
+
+   On steps 3 and 4 it is a different object. `--embed` pins the height and
+   the body genuinely scrolls, so the footer is the EDGE OF A SCROLL REGION —
+   without it, a channel grid slides under the buttons with nothing saying the
+   content continues. Same element, two jobs; it renders only for the one that
+   is real.
+
+   ```
+   step 1 · 2   body fits          no rule.  --space-3 is the separation
+   step 3 · 4   body scrolls       rule.     it marks where content is cut off
+   ```
+*/
 .agent-create-foot {
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: var(--space-2);
   padding: var(--space-3) var(--space-5);
-  border-top: 1px solid var(--border);
+  border-top: 1px solid transparent;
+}
+.agent-create-surface--embed .agent-create-foot {
+  border-top-color: var(--border);
+}
+
+/* Back / Cancel is the SECONDARY action, and it should look like one. It was
+   a bordered white slab the same height and weight as the filled primary
+   beside it — the one-accent rule was already satisfied (only the forward
+   button is filled) but the two still read as a matched pair, so the eye had
+   to read the labels to find the way forward. Ghost: no border, no fill,
+   secondary text. Still a full-size, fully reachable control — a quiet
+   button is not a dead one — it simply stops competing.
+
+   Sized identically to .fleet-btn on purpose: shrinking it would fork the
+   app's one control height (28px, fleet-theme.css) for a single dialog. */
+.agent-create-foot .agent-create-back {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-secondary);
+}
+.agent-create-foot .agent-create-back:hover:not(:disabled) {
+  background: var(--rail-active);
+  border-color: transparent;
+  color: var(--text-primary);
 }
 
 /* A step with no backward move renders NO Back button (a disabled one is a
@@ -400,12 +591,14 @@
     padding: var(--space-2);
   }
   .agent-create-surface { width: 100%; }
-  .agent-create-identity,
-  .agent-create-group,
-  .agent-create-embed { padding-inline: var(--space-4); }
+  /* The rhythm steps down one notch as a whole — 20px of margin becomes 16px
+     on a 375px screen — rather than each element picking its own phone
+     value. --space-5 between groups is unchanged: the air BETWEEN groups is
+     what makes them read as groups, and it is the last thing to give up. */
+  .agent-create-body { padding: var(--space-4); }
   .agent-create-steps { padding-inline: var(--space-4); gap: var(--space-3); }
   .agent-create-surface { max-height: calc(100vh - var(--space-4)); }
-  .agent-create-head { padding-inline: var(--space-4) var(--space-2); }
+  .agent-create-head { padding: var(--space-4) var(--space-2) 0 var(--space-4); }
   .agent-create-foot { padding-inline: var(--space-4); }
   .agent-create-error { padding-inline: var(--space-4); }
   .agent-create-foot .fleet-btn {

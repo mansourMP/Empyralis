@@ -2008,7 +2008,6 @@ import {
 import {
   channelCardPill,
   connectMethodFor,
-  formatChannelList,
   openclawObservedErrorBanner,
 } from "./openclaw-channel-copy";
 import { planChannelSetupFlow, setupQuestionFor } from "./channel-setup-flow";
@@ -2850,16 +2849,11 @@ export function ChannelsTab({
     editingSettings: openclawEditing,
   });
 
-  // OpenClaw's own catalog carries every channel that overlaps a first-party
-  // platform too (channel_lane_contract_service.OPENCLAW_SUPERSEDED_CHANNELS)
-  // so the owner can be told WHY a channel they've heard of is missing from
-  // the transported cards above. Most of those are already real cards via
-  // legacyCards now (Telegram/WhatsApp/Discord/Signal/iMessage/Slack) — this
-  // is only the leftover that has no first-party card anywhere in this tab
-  // (SMS today: it is a Studio business connector, not a per-agent channel).
-  // Computed, never a second hand-typed list.
-  const legacyLabels = new Set(firstPartyGrid.map((p) => p.label));
-  const unmappedSupersededChannels = openclaw.alreadyAvailable.filter((label) => !legacyLabels.has(label));
+  // DELETED with the note it fed (2026-08-21): the leftover
+  // OPENCLAW_SUPERSEDED_CHANNELS labels with no first-party card in this tab
+  // (SMS today) used to be named in a sentence under the grid. `formatChannelList`
+  // stays in openclaw-channel-copy.ts with its own tests — the copy helper is
+  // fine, the paragraph was not.
 
   // "the box could not be reached" and "the box answered fine but has never
   // had the transport installed" are different facts (2026-08-13 audit,
@@ -2992,13 +2986,13 @@ export function ChannelsTab({
         <p className="fleet-subtitle">Reading this agent&apos;s computer…</p>
       ) : null}
 
-      {unmappedSupersededChannels.length > 0 ? (
-        <p className="fleet-subtitle openclaw-elsewhere-note">
-          {formatChannelList(unmappedSupersededChannels)}{" "}
-          {unmappedSupersededChannels.length === 1 ? "connects" : "connect"} elsewhere in Empyralis and{" "}
-          {unmappedSupersededChannels.length === 1 ? "isn't" : "aren't"} shown here.
-        </p>
-      ) : null}
+      {/* DELETED, 2026-08-21: a standalone paragraph under the grid reading
+          "SMS connects elsewhere in Empyralis and isn't shown here." A
+          professional tool labels; it does not lecture — and this one
+          lectured about the ABSENCE of a card, which is the least
+          actionable thing a sentence can say. The channel it named is
+          reachable from where it actually lives; nothing here can act on
+          it, so nothing here needs to say it. */}
 
       {/* What a transported channel's card opens into: the SAME
           .fleet-channel-banner shell a first-party card opens (header + icon +
@@ -3658,26 +3652,15 @@ export function ConnectorsTab({
   const subtitle = <p className="fleet-tab-subtitle">Apps this agent can use</p>;
 
   if (!agent) {
-    // Matches ConnectorPicker's OWN loading shape below it (`.fleet-
-    // connector-picker`'s real 2-col grid of title/description/button
-    // cards) rather than `FleetCardGridSkeleton`'s 4-col square-icon-card
-    // grid (`.fleet-channel-grid`) — this tab never renders that grid, only
-    // ConnectorPicker's wide picker-item cards, so the two placeholders
-    // shown in sequence (this one, then ConnectorPicker's own once `agent`
-    // resolves) used to visibly change shape mid-load.
+    // Matches ConnectorPicker's OWN loading shape below it. Both are now the
+    // square-card grid, so the two placeholders shown in sequence (this one,
+    // then ConnectorPicker's once `agent` resolves) are the same box — they
+    // used to change shape mid-load, and BOTH used to be the wide
+    // picker-item card the Apps grid no longer renders at all.
     return (
       <div>
         {subtitle}
-        <div className="fleet-connector-picker" aria-busy="true" aria-label="Loading connectors">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="fleet-connector-picker-item">
-              <div className="fleet-skeleton-bar" style={{ width: "40%", height: 13 }} />
-              <div className="fleet-skeleton-bar" style={{ width: "90%", height: 10, opacity: 0.7 }} />
-              <div className="fleet-skeleton-bar" style={{ width: "60%", height: 10, opacity: 0.7 }} />
-              <div className="fleet-skeleton-bar" style={{ width: 76, height: 26, marginTop: 4 }} />
-            </div>
-          ))}
-        </div>
+        <FleetCardGridSkeleton cards={9} label="Loading apps" />
       </div>
     );
   }

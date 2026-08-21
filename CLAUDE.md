@@ -6944,6 +6944,180 @@ Not proven, and do not claim it: no message was sent from a real Telegram
 account, because that needs the founder's own. Everything up to the
 delivery boundary is verified; the reply leg is verified only by code path.
 
+## Apps is a ROW card: name left, action right, whole card opens it (2026-08-21)
+
+**Apps and Channels now DIVERGE on card shape, deliberately, and the reason
+is the content rather than taste.** The founder's first correction was that a
+card face carries the app and nothing else — *"why do we have those written
+text right there?"* His second, from a screenshot of the result, is the
+layout:
+
+```
+NOW (rejected)  four tiny tiles per row, "Set up" as a text label
+WANT            ┌──────────────────────────┐ ┌──────────────────────────┐
+                │ [N] Notion    [Connect]  │ │ [L] Linear    [Connect]  │
+                └──────────────────────────┘ └──────────────────────────┘
+                TWO per row on desktop · ONE on mobile
+                press the CARD  ─▶ its detail: what it is, what tools, settings
+                press the BUTTON ─▶ connects
+```
+
+His words: *"in one line there should be only two horizontally, not four —
+only two. In mobile they're gonna be only one. And at the right side, the
+connect button. And if I press the entire template itself that belongs to
+this specific application, it goes to its settings showing what it is, tools
+and other things — just like as it is inside this Claude application."*
+
+**So a channel face is a TILE and an app face is a ROW, and that is not an
+inconsistency.** A channel face is icon + label + a status word. An app face
+carries an ACTION, and an action belongs at the end of a line, not stacked
+under the thing it acts on — four tiles per row cannot hold a button without
+shrinking it into the label.
+
+```
+BEFORE  (measured live, Configure -> Apps, 1680x1050)   AFTER
+  76 wide cards, each carrying a full sentence            76 row cards, 2 up
+  67 Connect buttons ON CARD FACES                        67, but at the RIGHT
+   9 "Needs an OAuth client configured on this…"           0 of that sentence
+   1 header paragraph saying it a tenth time               0 paragraphs
+   "Set up" text label under every name                    0 — the button is it
+   accent FILLS in view: 0 · accent OUTLINES: 0            0 fills · 67 outlines
+   card size                                              351 x 49
+```
+
+**TWO CLICK TARGETS, TWO REAL BUTTONS, NEITHER NESTED — and the bubbling is
+closed by GEOMETRY, not by remembering `stopPropagation`.** `<button>` inside
+`<button>` is invalid and browsers un-nest it; a `<div onClick>` wrapper works
+with a mouse and is unreachable without one. So the card is a plain container
+holding two siblings: `.fleet-connector-card-open`, whose `::after` stretches
+`inset: 0` over the whole card, and `.fleet-connector-card-action`, painted
+above that stretch. A press on Connect was never inside the card's hit
+rectangle in the first place. Verified with `elementFromPoint`: card centre
+hits the open button, the action's centre hits the action.
+`stopPropagation` is on the handler as a second, cheap belt.
+
+Keyboard is two ordinary buttons in DOM order — measured adjacent in the
+natural tab sequence (43 -> 44), `tabIndex` 0 on both, and a real Tab
+keypress lands on the card body with `:focus-visible` true and the CARD
+drawing the ring. The inner button's own ring is suppressed or a keyboard
+user gets two nested rings (observed at 375px, then fixed).
+
+**THE ACCENT SPLIT IS A JUDGEMENT CALL, MADE AGAINST HIS LITERAL WORDS, AND
+IT IS ONE TOKEN TO OVERRULE.** He asked for Connect in FULL accent fill,
+"just like this Next button". Taken literally on a card face that is ~69
+filled purple buttons in one view — the thing he has objected to all night,
+and what CLAUDE.md calls a bug outright. So:
+
+```
+card face   fleet-btn--accent        hairline. accent-COLOURED, not filled.
+                                     measured: 67 outlines, 0 fills
+open panel  fleet-btn--accent-fill   the single primary action in the view.
+                                     measured: exactly 1
+```
+
+Connect still reads as the accent action everywhere. If he wants the faces
+filled, it is one token in ConnectorPicker's card-action className.
+
+The arithmetic is asserted rather than remembered:
+`connector-card-face.test.ts` scans `renderCard`'s own body and fails if it
+carries `summary` (prose) or `accent-fill`, requires the hairline variant and
+`fleet-connector-card-open`/`stopPropagation`, and reads the CSS for the
+stretched `::after` and the two-column rule — with comment-stripping plus
+canaries. A behavioural test cannot see a face growing prose or a fill back;
+that regression has shipped twice on the sibling Channels surface.
+
+**FOUR facts on the face, and the right-hand slot is an ACTION only where one
+exists.** `connectorCardFace()` (connector-card-face.ts, pure + tested) is
+the single decider for the slot, the pill and the line the panel restates —
+same reason `channelCardPill` derives from `remediationFor`: two things that
+compute state separately drift toward the one nobody re-reads.
+
+```
+connected           pill "Ready"        --online-text    ● dot   no button
+connected, unwell   btn  "Reconnect"    hairline accent
+not connected       btn  "Connect"      hairline accent
+NOT CONNECTABLE     pill "Unavailable"  --text-muted     icon+label quieted
+```
+
+A connected app has nothing left to press and an unconnectable one has
+nothing a customer COULD press, so both keep a pill — "no dead controls"
+decided once in the pure function rather than at the render site, where the
+next state added would forget it.
+
+**The founder explicitly REFUSED to hide the nine unconnectable apps** (Box,
+Docusign, GitHub, Google Workspace, Higgsfield, HubSpot, Microsoft 365,
+Salesforce, Zoom — he is going to configure them, MAN-361). So they are
+ordinary cards sorted last, and the reason is said ONCE, in the panel, in
+customer language. That card is muted but **never `:disabled`** — it has to
+open, because the sentence lives inside it; and it carries NO action at all,
+because a Connect that cannot connect is the dead control the product law
+forbids.
+
+**`healthStatus` is only meaningful once CONNECTED.** The backend's default
+for a never-connected work_app_connector is the literal string
+`"not_configured"` (connection_catalog_service's `status_items()`), so
+reading health before connection paints a warning on every app nobody has
+connected yet — i.e. most of the catalog. Pinned by a test.
+
+**A grid sized by the VIEWPORT is the wrong measurement inside a dialog.**
+Both grids are `repeat(4, 1fr)` in fleet-theme.css stepping down at a 900px
+viewport — but the create sequence's card is 520px wide on a 1680px monitor,
+so four cards divided 478px into **112px each** and "WeChat / WeCom" broke
+over two lines. The squashed, label-wrapping face he objected to, arriving on
+a desktop. Inside `.agent-create-embed` the channel TILES now use `auto-fill`
++ `minmax(140px, 1fr)` (measured 3 x 152px, degrading on its own) and the app
+ROWS go one per row — 478px holds exactly one of them, since two would put a
+button and an ellipsised name into 234px each.
+
+**Specificity is load-bearing across these three files and is not tidiness.**
+connector-cards.css is imported by ConnectorPicker while fleet-theme.css comes
+from the app shell, so which lands later is the BUNDLER's choice — and these
+rules OVERRIDE fleet-theme's card rather than adding to it. Hence
+`.fleet-connector-grid.fleet-connector-grid` (0,2,0) there, and
+`.agent-create-embed .fleet-connector-grid.fleet-connector-grid` (0,3,0) in
+the wizard, which has to outrank it deliberately rather than tie with it.
+
+**A horizontal rule renders only where a rule has a job.** The step strip was
+already centred and band-free (`justify-content: safe center`, measured
+108px/108px either side against 21px/194px before). What was left was the
+footer's `border-top`, drawn on all four steps — and on steps 1-2 nothing
+scrolls, so it divided two things `--space-3` already divides, in a card
+whose head deliberately draws none for exactly that reason. It is transparent
+unless `--embed`, where the body genuinely scrolls and the line marks where
+content is cut off.
+
+**Deleted with the sentence it styled:** `"SMS connects elsewhere in
+Empyralis and isn't shown here."` — a paragraph about the ABSENCE of a card,
+under a grid whose whole job is what you CAN do — plus `legacyLabels` /
+`unmappedSupersededChannels`, the `formatChannelList` import that fed it, and
+`.openclaw-elsewhere-note`. When a shell goes, its CSS goes; a leftover rule
+is how the next author rebuilds the thing that was removed.
+
+**Verified live on a disposable stack**, both themes, 1680x1050 and 375x812,
+zero console errors, with before/after measured from computed styles (accent
+resolved through a 1x1 canvas — `oklch`/`color-mix` do not parse as rgb;
+`--accent` is `141,91,191` light / `165,109,222` dark). Read the PIXEL, not
+the string: `oklch`/`color-mix` never compare equal to an rgb literal, so a
+naive check silently matches nothing and reports a clean grid.
+
+**NOT verified live: the wizard's step-4 Apps panel.** The Channel step
+correctly refuses to advance until a channel connects, which needs a real
+credential. Its grid rule was confirmed by resolving `.fleet-connector-grid`
+inside the live `.agent-create-embed` (one column, 478px), not by rendering
+the step. Also not observed: a real Tab landing on a card's ACTION button —
+the pane's key delivery stalled after the first few presses, so that half is
+proven structurally (the two buttons adjacent in the natural tab sequence,
+`tabIndex` 0, neither disabled) rather than by watching it happen.
+
+**One claim in the brief did NOT reproduce, and should not be repeated:** the
+"outlined, faint purple" Connect buttons. On `main` they are
+`fleet-btn` + `.fleet-connector-picker-connect-btn`, which sets only
+`align-self`/`margin-left` — measured neutral (`rgb(41,41,41)`), 0 accent
+fills and 0 accent borders in the whole view. The purple he saw is
+production's older build, which `c546e618` (accent restraint) had already
+neutralised on main. The 67-buttons-on-faces half of the complaint was real
+and is what got fixed.
+
 ## The two-tier channel split is DERIVED from the doors (2026-08-21, MAN-359)
 
 **The Channels grid now leads with what a person can connect today, and the
