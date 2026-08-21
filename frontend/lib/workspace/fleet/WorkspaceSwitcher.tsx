@@ -3,9 +3,16 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Check, ChevronsUpDown, Plus } from "lucide-react";
+import { Check, ChevronsUpDown, Plus, X } from "lucide-react";
 
 import { useAccountShell } from "@/lib/shell/account-shell-context";
+import {
+  declinePendingWorkspaceInvite,
+  settlePendingInviteJoin,
+  useMyPendingWorkspaceInvites,
+  type MyPendingWorkspaceInvite,
+} from "./members-data";
+import { planPendingInviteIndicator } from "./pending-invite-indicator";
 
 const ROLE_LABEL: Record<string, string> = {
   owner: "Owner",
@@ -26,6 +33,20 @@ const ROLE_LABEL: Record<string, string> = {
  * actual control: the workspace brand mark/name in the rail header, which
  * used to be inert text, is now the switcher's trigger — the natural spot,
  * since it's the one element that already names "where you are."
+ *
+ * PENDING INVITES (2026-08-20). PendingWorkspaceInvitesBanner covers the
+ * person with NO workspace at all — it renders above the shell, which this
+ * switcher never even mounts inside. The person who ALREADY has a workspace
+ * and gets invited to a second one had no in-app signal whatsoever; the
+ * founder hit exactly that ("I didn't even know of it at first"). Linear
+ * puts a count on its own workspace switcher for this; so do we. The
+ * rendering rule lives in pending-invite-indicator.ts (pure + tested) and
+ * the joined/failed/unconfirmed decision lives in members-data.ts's
+ * settlePendingInviteJoin, which the banner calls too — one implementation,
+ * two surfaces, no drift.
+ *
+ * With zero pending invites this component renders byte-identically to what
+ * it rendered before that change: no badge, no group, no divider.
  */
 export function WorkspaceSwitcher({
   workspaceId,
@@ -60,6 +81,60 @@ export function WorkspaceSwitcher({
 
   const memberships = state.workspaceMemberships;
   const hasOtherWorkspaces = memberships.some((membership) => membership.workspace.id !== workspaceId);
+
+  // Its own read of /workspaces/invites/pending rather than a shared store:
+  // the banner above the shell owns the same data, and hoisting it into
+  // account-shell context would be a restructure of the shell for a tiny,
+  // cold GET. Two reads of a small list on shell mount is the cheaper trade.
+  const { invites: pendingInvites, loading: invitesLoading, refresh: refreshInvites } =
+    useMyPendingWorkspaceInvites();
+  const invitePlan = planPendingInviteIndicator({
+    loading: invitesLoading,
+    invites: pendingInvites,
+    memberWorkspaceIds: memberships.map((membership) => membership.workspace.id),
+  });
+  const [inviteBusyId, setInviteBusyId] = useState<string | null>(null);
+  const [inviteErrorById, setInviteErrorById] = useState<Record<string, string>>({});
+
+  function clearInviteError(id: string) {
+    setInviteErrorById((prev) => {
+      if (!(id in prev)) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  }
+
+  async function joinInvite(invite: MyPendingWorkspaceInvite) {
+    setInviteBusyId(invite.id);
+    clearInviteError(invite.id);
+    const settled = await settlePendingInviteJoin(invite.id, invite.workspace_id);
+    if (settled.outcome === "joined") {
+      // A full navigation, not router.push: the membership list this
+      // switcher renders comes from the server-resolved account shell, so a
+      // client-side route change would land inside a workspace the shell
+      // still believes this account does not belong to.
+      window.location.assign(`/w/${encodeURIComponent(settled.workspace_id || invite.workspace_id)}`);
+      return;
+    }
+    // "failed" and "unconfirmed" carry different words from
+    // settlePendingInviteJoin and are shown verbatim — never flattened into
+    // one "couldn't join", which is the outcome-honesty law's whole point.
+    setInviteBusyId(null);
+    setInviteErrorById((prev) => ({ ...prev, [invite.id]: settled.error }));
+  }
+
+  async function declineInvite(invite: MyPendingWorkspaceInvite) {
+    setInviteBusyId(invite.id);
+    clearInviteError(invite.id);
+    const result = await declinePendingWorkspaceInvite(invite.id);
+    setInviteBusyId(null);
+    if (!result.ok) {
+      setInviteErrorById((prev) => ({ ...prev, [invite.id]: result.error }));
+      return;
+    }
+    await refreshInvites();
+  }
 
   function goTo(targetWorkspaceId: string) {
     setOpen(false);
@@ -115,6 +190,48 @@ export function WorkspaceSwitcher({
               </button>
             );
           })}
+          {invitePlan.show && (
+            <div className="fleet-rail-workspace-invites" role="group" aria-label="Pending workspace invitations">
+              <span className="fleet-rail-workspace-invites-label">
+                {invitePlan.count === 1 ? "Invitation" : "Invitations"}
+              </span>
+              {invitePlan.invites.map((invite) => {
+                const name = String(invite.workspace_name || "").trim() || "Untitled workspace";
+                const busy = inviteBusyId === invite.id;
+                const error = inviteErrorById[invite.id];
+                return (
+                  <div key={invite.id} className="fleet-rail-workspace-invite-row">
+                    <span className="fleet-rail-workspace-popover-mark">{name.charAt(0).toUpperCase()}</span>
+                    <span className="fleet-rail-workspace-popover-text">
+                      <span className="fleet-rail-workspace-popover-name">{name}</span>
+                      <span className="fleet-rail-workspace-popover-role">
+                        {error ? error : `Invited as ${ROLE_LABEL[invite.role]?.toLowerCase() ?? invite.role}`}
+                      </span>
+                    </span>
+                    <span className="fleet-rail-workspace-invite-actions">
+                      <button
+                        type="button"
+                        className="fleet-rail-workspace-invite-btn"
+                        disabled={busy}
+                        aria-label={`Decline the invitation to ${name}`}
+                        onClick={() => void declineInvite(invite)}
+                      >
+                        <X size={13} strokeWidth={1.75} aria-hidden="true" />
+                      </button>
+                      <button
+                        type="button"
+                        className="fleet-rail-workspace-invite-btn fleet-rail-workspace-invite-btn--join"
+                        disabled={busy}
+                        onClick={() => void joinInvite(invite)}
+                      >
+                        {busy ? "Joining…" : "Join"}
+                      </button>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
           <Link
             href="/workspaces/new"
             role="menuitem"
@@ -140,7 +257,11 @@ export function WorkspaceSwitcher({
         // "{brandLetter}{workspaceName}" content to name the button, which
         // the live a11y tree (MAN-145 item 5) showed coming through empty.
         // Unconditional aria-label is the unambiguous fix in both states.
-        aria-label={`Switch workspace (current: ${workspaceName})`}
+        aria-label={
+          invitePlan.show
+            ? `Switch workspace (current: ${workspaceName}) — ${invitePlan.count} pending ${invitePlan.count === 1 ? "invitation" : "invitations"}`
+            : `Switch workspace (current: ${workspaceName})`
+        }
         title={collapsed ? workspaceName : undefined}
       >
         <span className="fleet-rail-brand-mark">{brandLetter}</span>
@@ -149,7 +270,17 @@ export function WorkspaceSwitcher({
             {workspaceName}
           </span>
         )}
-        {!collapsed && hasOtherWorkspaces && (
+        {/* Muted + tabular, never a filled badge — the same treatment the
+            Inbox unread count already uses one screen-region away
+            (.fleet-rail-item-count), because two different unread-count
+            vocabularies inside one rail is worse than a quiet one. In the
+            collapsed rail it rides on the brand mark instead (CSS). */}
+        {invitePlan.show && (
+          <span className="fleet-rail-workspace-invite-count" aria-hidden="true">
+            {invitePlan.count}
+          </span>
+        )}
+        {!collapsed && (hasOtherWorkspaces || invitePlan.show) && (
           <ChevronsUpDown size={12} strokeWidth={1.75} className="fleet-rail-workspace-chevron" aria-hidden="true" />
         )}
       </button>

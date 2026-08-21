@@ -482,7 +482,17 @@ a.fleet-breadcrumb:hover {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  z-index: 10;
+  /* Above .fleet-rail-resizer (z-index 40), which is a full-height 8px
+     drag strip sitting at the rail's own right edge — and this popover is
+     260px wide, so it always extends PAST that edge and the strip runs
+     straight down the middle of it. At z-index 10 the strip swallowed
+     every click in that 8px band: measured live 2026-08-20 with the rail
+     at its (persisted) 240px width, where document.elementFromPoint over
+     an in-popover button returned .fleet-rail-resizer, no click event
+     fired, and the only visible effect was the popover closing. Latent
+     since the popover shipped — where the band falls depends on the
+     rail's width, so which row it eats varies per person. */
+  z-index: 41;
   animation: fleet-fade var(--dur-2) var(--ease-out);
 }
 
@@ -565,6 +575,105 @@ a.fleet-breadcrumb:hover {
 .fleet-rail-workspace-popover-role {
   font-size: 11px;
   color: var(--text-muted);
+}
+
+/* Pending workspace invites on the switcher (2026-08-20) — see
+   WorkspaceSwitcher.tsx. Every rule here only ever applies when there is at
+   least one pending invite; with zero, none of these class names exist in
+   the DOM at all, so the switcher is byte-identical to what it was. */
+.fleet-rail-workspace-invite-count {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Collapsed rail: the name is gone, so the count rides the brand mark
+   instead of sitting in a row that no longer exists. */
+.fleet-rail--collapsed .fleet-rail-workspace-invite-count {
+  position: absolute;
+  top: -4px;
+  right: -6px;
+  min-width: 13px;
+  height: 13px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+/* Airy between groups, dense inside one: the invitations sit in their own
+   divided group, same separation the "New workspace" row already gets. */
+.fleet-rail-workspace-invites {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-top: 1px solid var(--border);
+  margin-top: 2px;
+  padding-top: 6px;
+}
+
+.fleet-rail-workspace-invites-label {
+  padding: 0 10px 2px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.fleet-rail-workspace-invite-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+  padding: 4px 10px;
+  border-radius: var(--radius-control);
+}
+
+.fleet-rail-workspace-invite-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+/* Both actions stay neutral rather than making Join the accent button — the
+   rail sits beside content that already spends this view's one accent-filled
+   action (a project's "New task"), and two accent buttons in one view is the
+   craft-doctrine bug. PendingWorkspaceInvitesBanner.tsx makes the same call
+   for the same reason. */
+.fleet-rail-workspace-invite-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 24px;
+  min-width: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.fleet-rail-workspace-invite-btn:hover:not(:disabled) {
+  background: var(--rail-active);
+  color: var(--text-primary);
+}
+
+.fleet-rail-workspace-invite-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.fleet-rail-workspace-invite-btn--join {
+  color: var(--text-primary);
 }
 
 .fleet-rail-brand-mark {
