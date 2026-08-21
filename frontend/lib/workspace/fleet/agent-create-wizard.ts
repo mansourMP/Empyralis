@@ -3,7 +3,7 @@
  * `tsx` test drives the real rule (same discipline as agent-count-shape.ts /
  * channel-doors.ts / agent-create-model.ts).
  *
- * ── THREE STEPS, and each boundary is a dependency rather than a chapter ─
+ * ── FOUR STEPS, and each boundary is a dependency rather than a chapter ──
  *
  * ```
  *  1 Identity & placement   name · what it does · WHERE IT RUNS
@@ -11,7 +11,9 @@
  *        ▼  placement decides what step 2 may honestly offer
  *  2 Brain                  who pays ▸ provider ▸ model
  *        └── "Create agent" ──▶ the agent becomes real here
- *  3 Reach                  channels AND apps, one screen, both optional
+ *  3 Channels               how people reach it        optional
+ *        └── "Next" / "Skip for now"
+ *  4 Apps                   what it can reach          optional
  *        └── "Finish" / "Skip for now" ──▶ into the agent
  * ```
  *
@@ -21,11 +23,26 @@
  * completed. Asking where first means the second question only ever offers
  * real answers. See agent-create-placement.ts / agent-create-brain.ts.
  *
- * **Reach is last and is ONE screen because both halves are the same
- * question** — "what does this connect to" — and both are optional and both
- * stay permanently reachable from the agent's own tabs afterwards. They used
- * to be two separate steps, which is two screens that can each ask for
- * nothing: the ceremony that made the sequence feel long.
+ * ── CHANNELS AND APPS ARE TWO STEPS. THAT IS THE FOUNDER'S CALL ──────────
+ * An earlier pass merged them into one "Reach" screen, on the argument that
+ * both answer "what does this connect to" and neither is required — two
+ * screens that can each ask for nothing read as ceremony. The founder
+ * rejected that directly: *"channels and application must be separated, do
+ * you understand?"* So they are two steps again.
+ *
+ * The merge's argument was not wrong about the COST, and the cost is paid
+ * where it was already being paid — in the button's own word. Each step
+ * moves in ONE press, and says which of the two things it is doing:
+ * "Skip for now" when that step has nothing connected, "Next"/"Finish" when
+ * it does. A second screen you can leave in one keystroke is not ceremony;
+ * a second screen that traps you is.
+ *
+ * They are also genuinely different questions once you look at what they
+ * cost to get wrong. A channel is the ONLY way a person talks to their agent
+ * (chat left the platform), so a skipped Channels step leaves an agent
+ * nobody can reach — a fact worth stating. A skipped Apps step leaves an
+ * agent that simply cannot open Notion yet, which needs no sentence at all.
+ * One screen could only ever state the harsher of the two facts, or neither.
  *
  * ── The commit boundary ──────────────────────────────────────────────────
  * Identity and the brain go in ONE request wherever the create path can
@@ -36,19 +53,24 @@
  * agent-create-brain.ts's header states the obligation that carries: the two
  * outcomes may never share one message.
  *
- * Step 3 genuinely cannot precede the commit — a channel binds to an agent
- * id, a connector authorizes against one — so it sits after it, and the
- * surface stops pretending otherwise the moment it happens: no way back into
- * Identity/Brain (they are saved, and a Back that silently did nothing would
- * be a lie), and closing goes INTO the agent rather than discarding.
+ * Steps 3 and 4 genuinely cannot precede the commit — a channel binds to an
+ * agent id, a connector authorizes against one — so they sit after it, and
+ * the surface stops pretending otherwise the moment it happens: no way back
+ * into Identity/Brain (they are saved, and a Back that silently did nothing
+ * would be a lie), and closing goes INTO the agent rather than discarding.
+ *
+ * Apps DOES offer a Back, and that is not an inconsistency: Channels is a
+ * live, still-editable screen sitting one press away, so a Back there does
+ * exactly what it says. The rule is not "no Back after the commit", it is
+ * "no Back to a screen that can no longer change anything".
  *
  * ── "SKIP" AND "FINISH" ARE DIFFERENT WORDS FOR A REASON ─────────────────
  *
  * An earlier pass BLOCKED the forward button until a channel connected, on
  * the founder's own words that day (*"channels cannot be skipped, because
- * it's something agents are going to speak"*). The three-step brief
- * supersedes that with an equally explicit instruction — Reach is
- * *"(skippable) … Both optional. Skipping is one action."*
+ * it's something agents are going to speak"*). The later brief supersedes
+ * that with an equally explicit instruction — both of these steps are
+ * *"optional … Skipping is one action."*
  *
  * Both are honoured, because they were never about the same thing. What he
  * rejected was a sequence that TRAPS you; what he never asked for is a
@@ -57,7 +79,7 @@
  *
  * ```
  *   nothing connected yet   ─▶ "Skip for now"   one press, no block
- *   at least one connected  ─▶ "Finish"
+ *   at least one connected  ─▶ "Next" (channels) / "Finish" (apps)
  *   not known yet           ─▶ "Skip for now", and NO reason line —
  *                              "nothing is connected" and "I have not
  *                              asked yet" are different facts (CLAUDE.md)
@@ -83,10 +105,11 @@
  * "apps", never "tools" — Configure carries a SEPARATE, genuinely different
  * "Tools" section (the built-in capability toggles), and the founder named
  * the right word for the connector picker: *"it's clearly applications, MCP
- * applications... name is clearly not tools."* Both now live inside one
- * step, so the word survives as a heading rather than a step id.
+ * applications... name is clearly not tools."* It is a step id again now
+ * that Channels and Apps are two steps, and the word it must never be is
+ * still "tools".
  */
-export type AgentCreateStepId = "identity" | "brain" | "reach";
+export type AgentCreateStepId = "identity" | "brain" | "channels" | "apps";
 
 export type AgentCreateStep = {
   id: AgentCreateStepId;
@@ -97,7 +120,8 @@ export type AgentCreateStep = {
 export const AGENT_CREATE_STEPS: readonly AgentCreateStep[] = [
   { id: "identity", label: "Identity" },
   { id: "brain", label: "Brain" },
-  { id: "reach", label: "Reach" },
+  { id: "channels", label: "Channels" },
+  { id: "apps", label: "Apps" },
 ];
 
 /** The step whose forward button performs the one create call. Everything
@@ -143,6 +167,13 @@ export type AgentCreateWizardState = {
    *  for why that is not the same as zero. */
   channelsKnown: boolean;
   connectedChannelCount: number;
+  /** Apps needs no `appsKnown` twin, and its absence is deliberate rather
+   *  than an oversight: `channelsKnown` exists ONLY to keep the reason line
+   *  silent while the answer is unknown, and the Apps step states no reason
+   *  line at all (an agent with no apps is not a broken agent — it just
+   *  cannot open Notion yet, which needs no sentence). Unknown and zero both
+   *  resolve to "Skip for now", which is the honest word in both cases. */
+  connectedAppCount: number;
 };
 
 export type AgentCreateFooterButton = {
@@ -201,6 +232,7 @@ export function planAgentCreateFooter(state: AgentCreateWizardState): AgentCreat
     brainBlockedReason,
     channelsKnown,
     connectedChannelCount,
+    connectedAppCount,
   } = state;
   const dismiss = dismissPlan(created);
 
@@ -224,20 +256,36 @@ export function planAgentCreateFooter(state: AgentCreateWizardState): AgentCreat
     };
   }
 
-  // Reach. Always movable in one press — see this file's header on why the
-  // block was removed and the LABEL carries the honesty instead.
-  const reachable = connectedChannelCount > 0;
+  if (step === "channels") {
+    // Always movable in one press — see this file's header on why the block
+    // was removed and the LABEL carries the honesty instead.
+    const reachable = connectedChannelCount > 0;
+    return {
+      // No Back: the only step behind this one is Brain, which is already
+      // committed and saved. A Back that silently changed nothing is a lie.
+      back: null,
+      forward: forwardButton(reachable ? "Next" : "Skip for now", "next", busy),
+      dismiss,
+      // Stated ONLY once we actually know, and never as a block — it is not
+      // one. A person skipping a step deserves to know what stays undone;
+      // a person who has not been told anything yet deserves silence.
+      blockedReason:
+        channelsKnown && !reachable
+          ? "Nobody can reach this agent until a channel is connected. You can do it later."
+          : "",
+    };
+  }
+
+  // Apps — the last step. Same one-press rule, and NO reason line: an agent
+  // with no apps connected is not a broken agent, so there is no fact here
+  // worth a sentence. A professional tool labels; it does not lecture.
   return {
-    back: null,
-    forward: forwardButton(reachable ? "Finish" : "Skip for now", "finish", busy),
+    // Channels is live and still editable one press back, so this Back does
+    // exactly what it says — see this file's header.
+    back: { label: "Back", action: "back", disabled: busy },
+    forward: forwardButton(connectedAppCount > 0 ? "Finish" : "Skip for now", "finish", busy),
     dismiss,
-    // Stated ONLY once we actually know, and never as a block — it is not
-    // one. A person skipping a step deserves to know what stays undone;
-    // a person who has not been told anything yet deserves silence.
-    blockedReason:
-      channelsKnown && !reachable
-        ? "Nobody can reach this agent until a channel is connected. You can do it later."
-        : "",
+    blockedReason: "",
   };
 }
 
