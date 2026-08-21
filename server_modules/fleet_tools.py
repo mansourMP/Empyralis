@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from server_modules import activity_ledger_service
 
@@ -395,6 +395,167 @@ def seed_operator_metadata() -> Dict[str, Any]:
         "subagents_enabled": True,
         "model_config": {"mode": "platform_credits"},
     }
+
+
+# ── Create-time model pick ───────────────────────────────────────────────────
+#
+# The founder, 2026-08-21, on the agent-creation surface: *"I should be able to
+# pick what model I am going to use."* That pick rides on the CREATE call
+# (frontend: agent-create-model.ts -> agent-quick-create.ts's `model_choice`),
+# never as a follow-up PATCH — a create that commits followed by a model save
+# that can independently fail is exactly the outcome-honesty shape CLAUDE.md
+# bans; its half-failure would leave a real agent quietly running a model the
+# person did not choose, with nothing able to say so.
+#
+# THIS IS A NARROWING OF fleet_configure_agent's model_config validation, NOT A
+# SECOND COPY OF IT. Three keys are accepted and two modes, so everything the
+# big validator exists to check about the rest — gateway_binding resolving to a
+# real paired box, a cli runtime being installed AND signed in, engine/mode
+# compatibility, the two reasoning-effort vocabularies — is not merely skipped
+# here, it is UNREACHABLE: those keys are rejected outright rather than
+# silently dropped, so a caller can never believe a value took effect that
+# never arrived. Anything richer goes through PATCH, which is what the agent's
+# own Model tab already does.
+#
+# The one check that IS shared is shared by CALLING THE SAME FUNCTION
+# (provider_profiles.model_is_known_for_provider) rather than by re-deriving a
+# model list here — CLAUDE.md's "derive, never transcribe", and the reason a
+# retired/mistyped id fails loudly at create time instead of mid-turn.
+_CREATE_TIME_MODEL_CHOICE_KEYS = frozenset({"mode", "provider", "model"})
+
+# cli_subscription and local are absent BY CONSTRUCTION: both require a paired
+# computer, and the creation surface never asks about one. A workspace that
+# wants either sets it on the agent's Model tab, where the box picker and the
+# installed/authenticated checks live.
+_CREATE_TIME_MODEL_MODES = frozenset({"platform_credits", "byok_api"})
+
+
+def validate_create_time_model_choice(
+    raw: Optional[Dict[str, Any]],
+) -> Tuple[Optional[Dict[str, str]], str]:
+    """Validate a create-time model pick.
+
+    Returns ``(cleaned, "")`` on success, ``(None, "")`` when there is no pick
+    at all (the caller keeps seed_specialist_metadata's own default), and
+    ``(None, error)`` when the pick is unusable.
+
+    SHAPE ONLY — which keys, which mode, non-empty provider/model. Whether
+    the model IDENTITY is real for that provider is resolve_create_time_model_
+    choice's job below, because answering it honestly needs a live call.
+
+    An ABSENT pick and an EMPTY one are the same fact here and only here —
+    both mean "nobody chose, use the seed". Everything else is a real answer
+    and is either accepted whole or refused by name.
+    """
+    if raw is None:
+        return None, ""
+    if not isinstance(raw, dict):
+        return None, "model_choice must be an object with mode, provider and model."
+    if not raw:
+        return None, ""
+
+    unknown = sorted(str(k) for k in raw.keys() if str(k) not in _CREATE_TIME_MODEL_CHOICE_KEYS)
+    if unknown:
+        return None, (
+            "model_choice accepts only "
+            + ", ".join(sorted(_CREATE_TIME_MODEL_CHOICE_KEYS))
+            + f" at creation time; got {', '.join(unknown)}. "
+            "Set anything else on the agent afterwards."
+        )
+
+    mode = str(raw.get("mode") or "").strip().lower()
+    provider = str(raw.get("provider") or "").strip().lower()
+    model = str(raw.get("model") or "").strip()
+
+    if mode not in _CREATE_TIME_MODEL_MODES:
+        return None, (
+            f"model_choice mode '{mode or '(none)'}' can't be chosen at creation time. "
+            f"Must be one of: {', '.join(sorted(_CREATE_TIME_MODEL_MODES))}."
+        )
+    if not provider:
+        return None, "model_choice needs a provider."
+    if not model:
+        return None, "model_choice needs a model."
+
+    return {"mode": mode, "provider": provider, "model": model}, ""
+
+
+async def resolve_create_time_model_choice(
+    raw: Optional[Dict[str, Any]],
+    *,
+    workspace_id: str,
+) -> Tuple[Optional[Dict[str, str]], str]:
+    """Shape check (above) plus "is this model real for this provider".
+
+    THE MODEL-IDENTITY HALF IS SPLIT OUT AND ASYNC ON PURPOSE, and the reason
+    is a live gap this repo already has documented. ``model_is_known_for_
+    provider`` answers from the STATIC ``PROVIDER_CATALOG`` — correct and free
+    for the platform tiers, and stale for BYOK the moment a provider ships a
+    model (CLAUDE.md's own standing note: a customer whose live-discovered
+    list shows a real model outside the static catalog "can pick it, see it
+    rendered, and then have the SAVE itself rejected"). The creation picker
+    offers the customer's OWN live model list, so validating it against a
+    hand-maintained mirror would have reproduced exactly that dead control on
+    the first screen of the product.
+
+    So the static catalog is a FAST PATH, never the authority:
+
+    ```
+    in the static catalog        ─▶ accepted. zero network. every platform
+                                    tier lands here, so the common case pays
+                                    nothing.
+    not in it, live says yes     ─▶ accepted. the provider's own API is the
+                                    authority on its own models.
+    not in it, live says no      ─▶ refused, naming what the account can use.
+    not in it, live can't answer ─▶ REFUSED, and this is the deliberate one.
+                                    An id our catalog does not know and the
+                                    provider could not confirm is an id
+                                    nothing has ever vouched for; saving it
+                                    would surface as an opaque provider error
+                                    mid-conversation instead of here.
+    ```
+
+    Fail-closed is safe precisely because it cannot reach the default path:
+    the creation surface only ever offers ids that came out of one of these
+    two sources in the first place, so this branch means something genuinely
+    changed underneath — and creation is the one moment a refusal costs
+    nothing, because no agent exists yet to be broken by it.
+    """
+    cleaned, error = validate_create_time_model_choice(raw)
+    if error or not cleaned:
+        return cleaned, error
+
+    from server_modules import provider_profiles
+
+    provider = cleaned["provider"]
+    model = cleaned["model"]
+    if provider_profiles.model_is_known_for_provider(provider, model):
+        return cleaned, ""
+
+    from server_modules import connectors_core
+
+    try:
+        live = await connectors_core.get_provider_models(provider, workspace_id=workspace_id)
+    except Exception:
+        live = None
+    live_models = [
+        str(m).strip()
+        for m in ((live or {}).get("models") or [])
+        if isinstance(m, str) and str(m).strip()
+    ]
+    if live_models and model in live_models:
+        return cleaned, ""
+    if live_models:
+        return None, (
+            f"'{model}' isn't a model this workspace's {provider} key can use right now."
+            f" Available: {', '.join(live_models[:12])}."
+        )
+
+    known = provider_profiles._provider_model_identifier_list(provider)
+    return None, (
+        f"Couldn't confirm '{model}' is a usable model for provider '{provider}'."
+        + (f" Known models: {', '.join(known)}." if known else "")
+    )
 
 
 def seed_specialist_metadata() -> Dict[str, Any]:
@@ -2484,6 +2645,7 @@ async def fleet_create_agent(
     enabled_tools: Optional[List[str]] = None,
     connectors: Optional[List[str]] = None,
     channel_bindings: Optional[Dict[str, Any]] = None,
+    model_choice: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Create a new specialist agent in the workspace.
 
@@ -2498,6 +2660,12 @@ async def fleet_create_agent(
     reserved (Sage-class) and not creatable via this flow. All fields remain
     overridable afterward except a knowledge agent's policy-locked hardware
     access.
+
+    `model_choice` is the creation surface's own narrow model pick —
+    {mode, provider, model}, nothing else (see
+    validate_create_time_model_choice). Omitted, the agent keeps
+    seed_specialist_metadata's default; given and invalid, the whole create
+    is refused rather than committing an agent on a model nobody picked.
     """
     from server_modules import agent_registry_repository as repo
     from server_modules import capability_presets as _caps
@@ -2511,6 +2679,15 @@ async def fleet_create_agent(
                 "and cannot be created through the normal flow. Use 'knowledge' or 'standard'."
             ),
         }
+    # Refuse BEFORE anything is created. A model pick that cannot be honoured
+    # must never produce an agent — "created, but not the one you asked for"
+    # is the dishonest outcome this ordering exists to make impossible.
+    _model_choice, _model_choice_error = await resolve_create_time_model_choice(
+        model_choice, workspace_id=workspace_id,
+    )
+    if _model_choice_error:
+        return {"ok": False, "error": _model_choice_error}
+
     _preset_defaults = _caps.build_install_defaults(capability_preset)
 
     clean_name = str(name or "").strip()
@@ -2531,6 +2708,12 @@ async def fleet_create_agent(
     # model_tier, context_policy, hardware lock flag, subagents default).
     meta.update(dict(_preset_defaults.get("metadata") or {}))
     meta["subagents_enabled"] = bool(_preset_defaults.get("subagents_enabled"))
+    # The person's own pick replaces the seed WHOLE, never merges into it —
+    # fleet_configure_agent's model_config patch has the same replace-not-merge
+    # semantics, so a create and a later save can't leave different leftovers
+    # behind for the same choice.
+    if _model_choice:
+        meta["model_config"] = dict(_model_choice)
     _preset_hardware_access = str(_preset_defaults.get("hardware_access") or "none")
     meta["hardware_access"] = _preset_hardware_access
     # tool_toggles is the field _resolve_specialist_toolset actually enforces at

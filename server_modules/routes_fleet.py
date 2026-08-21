@@ -2089,6 +2089,16 @@ class FleetCreateAgentRequest(BaseModel):
     audience: str = ""  # "owner" | "external" — facing flag for the create-agent wizard; derived from purpose_preset when omitted (see fleet_tools._AUDIENCE_BY_PURPOSE_PRESET)
     capability_preset: str = "standard"  # Phase 5B: knowledge | standard
     project_id: str = ""  # Phase 7B: assign to a project at creation
+    # The creation surface's own model pick — {mode, provider, model} only,
+    # validated by fleet_tools.validate_create_time_model_choice. Named
+    # `model_choice` and NOT `model_config` because pydantic v2 reserves
+    # `model_config` as BaseModel's own class-config attribute: a field of that
+    # name is a hard error, not a shadowing warning. The narrower name is also
+    # the honest one — this is a pick from a picker, deliberately not the full
+    # model_config PATCH accepts (no gateway binding, no runtime, no engine, no
+    # reasoning effort; all of those need a paired computer or a second screen
+    # that creation never shows).
+    model_choice: Optional[Dict[str, Any]] = None
 
 
 @router.post("/api/w/{workspace_id}/fleet/agents")
@@ -2113,6 +2123,7 @@ async def fleet_create_agent_route(
             audience=body.audience,
             capability_preset=body.capability_preset,
             project_id=body.project_id,
+            model_choice=body.model_choice,
         )
         return result
     except Exception as exc:

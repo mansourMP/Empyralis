@@ -19,6 +19,13 @@
  * content creation agent'"*). See AgentCreateCard.tsx's own header for
  * the full quotes and reasoning.
  *
+ * THIRD PASS, 2026-08-21 — the founder kept the light one-screen shape and
+ * added exactly one thing back: *"I should be able to pick what model I am
+ * going to use."* That pick rides on THIS request as `model_choice` (see
+ * QuickCreateModelChoice below), never as a follow-up PATCH — a create that
+ * commits and a model that separately fails to stick is precisely the
+ * outcome-honesty shape CLAUDE.md bans.
+ *
  * This module's create call is still the shared submit path (see
  * createAgentQuickly's own updated doc comment below) — only the framing
  * above is what got walked back twice. `instructions` (below) is the
@@ -111,6 +118,17 @@ import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fet
 import type { FleetProject } from "./fleet-data";
 import { refreshFleetAgents, resolveAgentProjectId } from "./fleet-data";
 
+/** The narrow, create-time model pick — exactly the three keys
+ *  fleet_tools._CREATE_TIME_MODEL_CHOICE_KEYS accepts. Built by
+ *  agent-create-model.ts's agentCreateModelChoicePayload; null when the
+ *  caller has no pick to make, in which case the server's own
+ *  seed_specialist_metadata default applies untouched. */
+export type QuickCreateModelChoice = {
+  mode: string;
+  provider: string;
+  model: string;
+};
+
 export type QuickCreateAgentPayload = {
   name: string;
   instructions: string;
@@ -118,6 +136,10 @@ export type QuickCreateAgentPayload = {
   project_id: string;
   purpose_preset: string;
   audience: string;
+  /** Omitted entirely when there is no pick — an ABSENT key means "use the
+   *  server's own seed", which is a different fact from an empty object and
+   *  must not be collapsed into one. */
+  model_choice?: QuickCreateModelChoice;
 };
 
 /** The project a zero-decision "New agent" resolves to — current project
@@ -146,8 +168,9 @@ export function buildQuickCreateAgentPayload(
   projectId: string,
   name: string = "",
   instructions: string = "",
+  modelChoice: QuickCreateModelChoice | null = null,
 ): QuickCreateAgentPayload {
-  return {
+  const payload: QuickCreateAgentPayload = {
     name,
     instructions,
     capability_preset: "standard",
@@ -155,6 +178,8 @@ export function buildQuickCreateAgentPayload(
     purpose_preset: "internal_assistant",
     audience: "owner",
   };
+  if (modelChoice) payload.model_choice = modelChoice;
+  return payload;
 }
 
 /** Where to land after creation — straight into the new agent's Chat, the
@@ -213,13 +238,14 @@ export async function createAgentQuickly(
   projects: FleetProject[],
   name: string = "",
   instructions: string = "",
+  modelChoice: QuickCreateModelChoice | null = null,
 ): Promise<{ agentId: string; projectId: string }> {
   const projectId = resolveQuickCreateProjectId(currentProjectId, projects);
   const res = await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents`, {
     method: "POST",
     credentials: "include",
     headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
-    body: JSON.stringify(buildQuickCreateAgentPayload(projectId, name, instructions)),
+    body: JSON.stringify(buildQuickCreateAgentPayload(projectId, name, instructions, modelChoice)),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data?.ok === false) {
