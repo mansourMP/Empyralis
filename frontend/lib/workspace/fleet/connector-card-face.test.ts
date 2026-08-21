@@ -188,13 +188,57 @@ assert(
 // THE SEARCH FIELD RECEDES. It was the only filled surface in the view and
 // therefore the heaviest object on a screen full of logos — the founder's
 // "wtf is this piece of shit at the middle of the screen".
+//
+// RETARGETED, not weakened: the selector moved from `.fleet-connector-browse`
+// (the second card group, which the field used to live inside) to
+// `.fleet-connector-search` (its own wrapper at the top of the surface) when
+// the field moved above everything it filters. The assertion is the same
+// fact about the same control.
 assert(
-  /\.fleet-connector-browse\s*>\s*\.fleet-wizard-input\s*\{[^}]*background:\s*var\(--bg-card\)/.test(css),
+  /\.fleet-connector-search\s*>\s*\.fleet-wizard-input\s*\{[^}]*background:\s*var\(--bg-card\)/.test(css),
   "the search field is drawn on the cards' own surface, not the filled inset",
 );
 assert(
-  !/background:\s*var\(--bg-inset\)/.test(css.slice(css.indexOf(".fleet-connector-browse"), css.indexOf(".fleet-connector-browse") + 900)),
+  !/background:\s*var\(--bg-inset\)/.test(css.slice(css.indexOf(".fleet-connector-search"), css.indexOf(".fleet-connector-search") + 900)),
   "…and the inset fill is not re-added beside it",
+);
+
+// ── AND IT IS AT THE TOP ──────────────────────────────────────────────────
+// The founder, on a pass that fixed the weight above and left the position
+// alone: *"what the fuck, you are putting the search at the middle again —
+// isn't it supposed to be at the top?"* Weight and position are two
+// different faults; fixing one is not fixing the other, which is exactly how
+// this shipped twice. Both are asserted from here on.
+{
+  // The final return's JSX only — `{heading}` also appears in the loading
+  // branch above it, and an indexOf over the whole file would compare the
+  // wrong two positions and pass for the wrong reason.
+  const tailStart = code.indexOf("const manualComplete");
+  assert(tailStart > 0, "CANARY: found the start of ConnectorPicker's main return");
+  const tail = code.slice(tailStart);
+
+  const searchAt = tail.indexOf('id="connector-search"');
+  const headingAt = tail.indexOf("{heading}");
+  const firstGridAt = tail.indexOf('className="fleet-connector-grid"');
+  assert(searchAt > 0, "CANARY: the search field is still findable in the rendered tree");
+  assert(headingAt > 0, "CANARY: the surface's heading is still rendered by the picker");
+  assert(firstGridAt > 0, "CANARY: a card grid is still rendered");
+
+  assert(searchAt < firstGridAt, "the search field is ABOVE every card it filters, not between two groups");
+  assert(searchAt < headingAt, "…and above the surface's own heading, which is the founder's own sketch");
+}
+
+// BOTH GROUPS ARE FILTERED, and this is the behavioural half of the move.
+// The priority row was deliberately exempt while the field sat below it —
+// defensible then, a lie now: a filter above a row it does not touch leaves
+// nine unrelated apps pinned over the results for "notion".
+assert(
+  /shownPriority\s*=\s*useMemo\(\(\)\s*=>\s*priorityConnectors\.filter\(matches\)/.test(code),
+  "the priority row is filtered by the same predicate — the field's reach matches its position",
+);
+assert(
+  /shownBrowsable\s*=\s*useMemo\(\(\)\s*=>\s*browsableConnectors\.filter\(matches\)/.test(code),
+  "…and so is the browsable group, by that same one predicate rather than a second copy of it",
 );
 // The override is SCOPED — .fleet-wizard-input is the create sequence's own
 // form field, where a filled inset is correct. Two jobs, one class.

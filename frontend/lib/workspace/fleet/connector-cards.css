@@ -285,33 +285,41 @@
 }
 .fleet-connector-browse > .fleet-wizard-label {
   display: block;
-  margin-bottom: var(--space-2);
+  margin: 0 0 var(--space-2);
 }
-/* ── The search field is a UTILITY, never the loudest thing on the screen ───
-   Founder, looking at it live: *"wtf is this piece of shit at the middle of
-   the screen, don't you think it must be fixed?"* He was right, and the cause
-   is measurable rather than a matter of taste:
+
+/* ── The search field: AT THE TOP, and quiet ───────────────────────────────
+   Two separate corrections from the founder live in this one block, and both
+   are still in force.
+
+   WEIGHT — *"wtf is this piece of shit at the middle of the screen, don't
+   you think it must be fixed?"*
 
    ```
    BEFORE  search   FILLED --bg-inset  #eeeeef   36px   ← the only filled
            cards    --bg-card          #ffffff   50px     surface in view
-           ─▶ a grey slab sitting mid-list, heavier than the 76 things it
-              filters and heavier than every card it sits between
-
+           ─▶ a grey slab, heavier than the 76 things it filters
    AFTER   search   --bg-card + hairline --border      ← the SAME surface the
            cards    --bg-card + hairline --border        cards are drawn on
-           ─▶ the field recedes into the grid's own rhythm. It is still the
-              full grid width, because a control that filters the whole grid
-              and stops short of its edge is a different kind of wrong.
    ```
 
-   Scoped to `.fleet-connector-browse`, never to `.fleet-wizard-input` itself:
-   that class is the create sequence's own form field, where a filled inset
-   IS correct — a form wants its inputs to read as the thing you act on, and a
-   filter beside a grid does not. Two jobs, one class; only one of them
-   changes here. */
-.fleet-connector-browse > .fleet-wizard-input {
+   POSITION — *"what the fuck, you are putting the search at the middle
+   again — isn't it supposed to be at the top?"* Fixing the weight and
+   leaving the field between the two card groups was only half the fix: a
+   filter that lives inside the second of the things it filters is debris in
+   the middle of a list whatever colour it is. `.fleet-connector-search` is
+   its own wrapper at the top of the surface, above the heading — the
+   spacing below it (--space-3) holds it to the whole grid rather than to
+   either group.
+
+   Scoped to these two wrappers, never to `.fleet-wizard-input` itself: that
+   class is the create sequence's own form field, where a filled inset IS
+   correct — a form wants its inputs to read as the thing you act on, and a
+   filter above a grid does not. Two jobs, one class; only one changes. */
+.fleet-connector-search {
   margin-bottom: var(--space-3);
+}
+.fleet-connector-search > .fleet-wizard-input {
   background: var(--bg-card);
 }
 

@@ -47,11 +47,41 @@
  * not connected / not-connectable-yet are three different facts and each
  * keeps its own word on the face (connector-card-face.ts), which the panel
  * then restates rather than recomputes.
+ *
+ * ── THE SEARCH FIELD IS AT THE TOP, AND THAT DECIDES WHAT IT FILTERS ─────
+ *
+ * The founder, twice, at the live screen: *"wtf is this piece of shit at the
+ * middle of the screen"*, and then — after a pass that fixed the field's
+ * WEIGHT but left it where it was — *"what the fuck, you are putting the
+ * search at the middle again — isn't it supposed to be at the top?"*
+ *
+ * ```
+ * BEFORE                                AFTER
+ *   "Apps this agent can use"             [ Search ]          ← above everything
+ *    [connected / suggested cards]        "Apps this agent can use"
+ *   "All apps (68)"                        [connected / suggested cards]
+ *    [ Search ]   ← debris, mid-list      "All apps (12 of 68)"
+ *    [cards]                               [cards]
+ * ```
+ *
+ * The MOVE FORCED A BEHAVIOUR CHANGE, and it is the whole reason this is not
+ * a two-line diff. The priority row used to be deliberately unfiltered —
+ * defensible while the field sat below it, since a field can only claim the
+ * thing under it. Above everything, an unfiltered row is a field that lies
+ * about its own reach: type "notion" and nine unrelated apps stay pinned at
+ * the top of the results. So BOTH groups filter now, and the "All apps"
+ * count says "12 of 68" while a query is live rather than pretending the
+ * group still holds 68.
+ *
+ * The HEADING travels with it. "Apps this agent can use" belongs to
+ * ConnectorsTab (it is that tab's own one-liner) and is passed in, so there
+ * is still exactly one place that decides those words — this component only
+ * decides where they sit relative to the field.
  */
 
 import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useState, type ReactNode } from "react";
 import { Loader2, X } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
@@ -96,13 +126,15 @@ function monogramColor(id: string): string {
 
 // The owner's own priority stack — Google Workspace (Gmail/Calendar/Drive)
 // plus his 8 (Notion, Linear, Stripe, ClickUp, Airtable, Canva, Asana,
-// Zoom) — always rendered first, unfiltered by search. Everything else in
-// the catalog (the ~70-connector directory: dev tools, finance, sales
-// outreach, etc.) is real and stays reachable below it via a live search —
-// MAN-145 founder feedback killed the old click-to-expand "More connectors
-// (67)" disclosure ("i must not have this more connectors") because it
-// forced scanning 67 cards by eye with no way to jump straight to one.
-// Order here IS display order for the priority row.
+// Zoom) — always rendered FIRST. Not "unfiltered by search" any more: the
+// field moved above this row, and a filter sitting above a group it does not
+// touch is a control lying about its own reach (see the file header).
+// Everything else in the catalog (the ~70-connector directory: dev tools,
+// finance, sales outreach, etc.) is real and stays reachable below it via
+// that live search — MAN-145 founder feedback killed the old click-to-expand
+// "More connectors (67)" disclosure ("i must not have this more connectors")
+// because it forced scanning 67 cards by eye with no way to jump straight to
+// one. Order here IS display order for the priority row.
 const PRIORITY_CONNECTOR_IDS = [
   "google_workspace",
   "notion",
@@ -128,10 +160,15 @@ export function ConnectorPicker({
   workspaceId,
   projectId,
   agentId,
+  heading,
 }: {
   workspaceId: string;
   projectId: string;
   agentId: string;
+  /** The surface's own one-liner, rendered UNDER the search field — see the
+   *  file header. Owned by the caller so the words live in one place; owned
+   *  positionally by this component so the field is always above it. */
+  heading?: ReactNode;
 }) {
   const { connectors, loading: agentLoading, refresh: refreshAgent } = useFleetAgentConnectors(workspaceId, agentId);
   const { projectConnectors, loading: projectLoading, refresh: refreshProject } = useFleetProjectConnectors(workspaceId, projectId);
@@ -206,14 +243,21 @@ export function ConnectorPicker({
   // carry category tags of their own. The summary no longer appears on any
   // face, which makes searching it MORE useful, not less: it is the one way
   // that text still earns its keep.
+  //
+  // ONE predicate, applied to BOTH groups. The field sits above both of them
+  // now (file header), so a second rule — or an exemption for the priority
+  // row — would be the field claiming a reach it does not have.
   const q = query.trim().toLowerCase();
-  const shownBrowsable = useMemo(
-    () =>
-      browsableConnectors.filter(
-        (c) => !q || c.label.toLowerCase().includes(q) || c.id.toLowerCase().includes(q) || c.summary.toLowerCase().includes(q),
-      ),
-    [browsableConnectors, q],
+  const matches = useCallback(
+    (c: FleetConnector) =>
+      !q ||
+      c.label.toLowerCase().includes(q) ||
+      c.id.toLowerCase().includes(q) ||
+      c.summary.toLowerCase().includes(q),
+    [q],
   );
+  const shownPriority = useMemo(() => priorityConnectors.filter(matches), [priorityConnectors, matches]);
+  const shownBrowsable = useMemo(() => browsableConnectors.filter(matches), [browsableConnectors, matches]);
 
   const open = useMemo(() => connectors.find((c) => c.id === openId) || null, [connectors, openId]);
 
@@ -351,7 +395,17 @@ export function ConnectorPicker({
   if (agentLoading || projectLoading) {
     // The same grid, the same card box — a placeholder that reflows into a
     // different shape the instant the fetch lands is its own small lie.
-    return <FleetCardGridSkeleton cards={9} label="Loading apps" />;
+    //
+    // NO SEARCH FIELD HERE, deliberately: there is nothing to filter yet, and
+    // a field that accepts typing and changes nothing is a dead control for
+    // as long as the fetch takes. The heading still renders, so the surface
+    // says what it is from the first frame.
+    return (
+      <div>
+        {heading}
+        <FleetCardGridSkeleton cards={9} label="Loading apps" />
+      </div>
+    );
   }
 
   const connectorIcon = (c: FleetConnector) => {
@@ -459,35 +513,58 @@ export function ConnectorPicker({
           one message, never two copies of it on screen at once. */}
       {error && !open ? <p className="fleet-channel-expand-error">{error}</p> : null}
 
-      <div className="fleet-connector-grid">{priorityConnectors.map(renderCard)}</div>
-
-      {catalogSize > 0 && (
-        <div className="fleet-connector-browse">
-          <label className="fleet-wizard-label" htmlFor="connector-search">
-            All apps ({catalogSize})
-          </label>
-          {/* Placeholder is one word. It was "Search by name or what it
-              does…" — a field explaining how a search box works, above a grid
-              of logos. A professional tool labels; it does not lecture. The
-              field's own quiet treatment is in connector-cards.css. */}
+      {/* THE FIRST THING ON THE SURFACE. It filters everything below it, so
+          it sits above everything — including the heading, which is the
+          founder's own sketch. Placeholder is one word: it was "Search by
+          name or what it does…", a field explaining how a search box works
+          above a grid of logos. A professional tool labels; it does not
+          lecture. The field's own quiet treatment is in connector-cards.css.
+          `aria-label` rather than a visible <label>: the words above it name
+          the SURFACE, not this control, and a second visible label over a
+          search box is the lecture again. */}
+      {connectors.length > 0 ? (
+        <div className="fleet-connector-search">
           <input
             id="connector-search"
             type="search"
             className="fleet-wizard-input"
             value={query}
             placeholder="Search"
+            aria-label="Search apps"
             onChange={(e) => setQuery(e.currentTarget.value)}
           />
+        </div>
+      ) : null}
 
-          {shownBrowsable.length > 0 ? (
-            <div className="fleet-connector-grid">{shownBrowsable.map(renderCard)}</div>
-          ) : (
-            <p className="fleet-composer-pop-empty" style={{ padding: 0 }}>
-              No apps match &ldquo;{query.trim()}&rdquo;.
-            </p>
-          )}
+      {heading}
+
+      {shownPriority.length > 0 ? (
+        <div className="fleet-connector-grid">{shownPriority.map(renderCard)}</div>
+      ) : null}
+
+      {shownBrowsable.length > 0 && (
+        <div className="fleet-connector-browse">
+          {/* A HEADING now, not a <label> — the field it used to label is no
+              longer beneath it. The count says how many of the group are
+              actually on screen while a query is live: "All apps (68)" over
+              twelve cards is a small lie, and it is exactly the kind that
+              makes a person think the filter is broken. */}
+          <p className="fleet-wizard-label">
+            All apps ({q ? `${shownBrowsable.length} of ${catalogSize}` : catalogSize})
+          </p>
+          <div className="fleet-connector-grid">{shownBrowsable.map(renderCard)}</div>
         </div>
       )}
+
+      {/* Said ONCE, for the whole surface, because the field now filters the
+          whole surface. It used to live inside the browsable group, where it
+          could claim "no apps match" while nine priority cards sat visible
+          above it contradicting it. */}
+      {q && shownPriority.length === 0 && shownBrowsable.length === 0 ? (
+        <p className="fleet-composer-pop-empty" style={{ padding: 0 }}>
+          No apps match &ldquo;{query.trim()}&rdquo;.
+        </p>
+      ) : null}
 
       {connectors.length === 0 && <p className="fleet-wizard-hint">No apps are available yet.</p>}
 
