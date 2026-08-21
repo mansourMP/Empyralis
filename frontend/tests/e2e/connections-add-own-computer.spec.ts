@@ -1,9 +1,17 @@
 /**
- * Settings -> Connections -> "Or add your own computer instead" is the entire
- * front door for connecting a machine you already own. It is one `useState`
- * toggle (HardwareSection.tsx) in front of GatewayPairPanel, so it works if and
- * only if React actually attached to that subtree — which means a unit test can
- * never cover it. `planAgentCountShape`-style pure-module tests, `tsc`, and the
+ * Settings -> Connections -> the "This computer" card is the entire front door
+ * for connecting a machine you already own. It is one `useState` toggle
+ * (HardwareSection.tsx) in front of GatewayPairPanel, so it works if and only
+ * if React actually attached to that subtree — which means a unit test can
+ * never cover it.
+ *
+ * RENAMED 2026-08-22: this used to drive a text link reading "Or add your own
+ * computer instead", sitting at the very bottom of the page below the machine
+ * list. That link is gone — connecting your own computer is now one of the
+ * five ways-to-add cards at the TOP of the page, beside the cloud providers
+ * and SSH, because it is not an afterthought. What this test asserts is
+ * unchanged and is the only thing that matters: a real click on the real
+ * control opens the real form and mints a real token. `planAgentCountShape`-style pure-module tests, `tsc`, and the
  * whole `npm run test:unit` suite all stay green on a page whose React never
  * hydrates and whose every button is therefore dead.
  *
@@ -50,13 +58,13 @@ async function loginOwner(page: Page): Promise<void> {
   expect(res.ok()).toBeTruthy();
 }
 
-test("Connections — 'Or add your own computer instead' opens the pairing form on a real click", async ({ page }) => {
+test("Connections — the 'This computer' card opens the pairing form on a real click", async ({ page }) => {
   const hydrationErrors = watchForHydrationErrors(page);
   await loginOwner(page);
 
   await page.goto(`/w/${WORKSPACE_ID}/settings/connections`, { waitUntil: "domcontentloaded" });
 
-  const toggle = page.getByRole("button", { name: /Or add your own computer instead/i });
+  const toggle = page.getByRole("button", { name: /This computer/i });
   await expect(toggle).toBeVisible();
 
   // The form must not already be on screen — otherwise the click below would
@@ -82,7 +90,7 @@ test("Connections — 'Generate pairing command' mints a real token on a real cl
   await loginOwner(page);
 
   await page.goto(`/w/${WORKSPACE_ID}/settings/connections`, { waitUntil: "domcontentloaded" });
-  await page.getByRole("button", { name: /Or add your own computer instead/i }).click();
+  await page.getByRole("button", { name: /This computer/i }).click();
 
   const label = page.locator(".gw-pair-panel-field input[type=text]");
   await label.fill("Playwright device");

@@ -7,19 +7,13 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import {
   ArrowLeft,
-  Brain,
-  Container,
   Cpu,
-  Database,
-  Gpu,
   Loader2,
   LogIn,
   MemoryStick,
-  Radio,
   Server,
   ServerOff,
-  Thermometer,
-  Waypoints,
+  TriangleAlert,
 } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
@@ -29,11 +23,20 @@ import { StatusChip, StatusDot, TintTile } from "@/lib/workspace/fleet/fleet-ind
 import { CHANNEL_LABELS, channelIconSrc } from "@/lib/workspace/fleet/fleet-icons";
 import { deriveStatus, formatDate, timeAgo, type AgentStatusTone } from "@/lib/workspace/fleet/fleet-presentation";
 import {
-  channelTransportPill,
-  channelTransportSummary,
   planChannelTransportState,
   type ProbeStatus,
 } from "@/lib/workspace/fleet/box-capability-state";
+import {
+  boxHasProblem,
+  planBoxHealth,
+  planBoxProblems,
+  planChannelCapabilityRow,
+  planCliCapabilityRow,
+  planLocalModelCapabilityRow,
+  planSandboxCapabilityRow,
+  type CapabilityRow,
+  type CapabilityTone,
+} from "@/lib/workspace/fleet/hardware-detail-shape";
 import { HardwareRenameField } from "@/lib/workspace/fleet/hardware-rename-field";
 import { useBreadcrumbLabel } from "@/lib/workspace/fleet/Breadcrumbs";
 import { useFleetAgents } from "@/lib/workspace/fleet/fleet-data";
@@ -53,48 +56,26 @@ import {
 } from "@/lib/workspace/fleet/gateway-box-picker";
 import { type CliSubscriptionRuntime } from "@/lib/workspace/fleet/fleet-provider-constants";
 
-/** The right-hand panel used to render one flat list mixing two fundamentally
- *  different kinds of thing: actionable installable tools (buttons, per-item
- *  install/sign-in state) and read-only detected services ("Not detected"
- *  sitting right next to those buttons, which reads as a broken control
- *  rather than an observation). Split into two explicit groups so each gets
- *  its own visual treatment below — INSTALLABLE_TOOL_ORDER always renders
- *  through CliSetupControl (real actions), DETECTED_SERVICE_ORDER always
- *  renders as plain status readouts (no button, ever). */
+/** The four coding CLIs, in the order they are offered. Docker, Ollama and
+ *  the channel transport are ALSO capabilities and render in the same list —
+ *  they simply have no install/sign-in action behind them, which
+ *  hardware-detail-shape.ts decides once rather than each row guessing.
+ *
+ *  This used to be two separate lists on this page: "AI coding tools" with
+ *  real buttons, and "Detected on this machine" as a read-only readout. That
+ *  split put "Not detected" next to Install buttons (reading as a broken
+ *  control) and, worse, mixed real signal with noise — the founder's own
+ *  local PostgreSQL showed up as "Not responding" on a page about an Agent
+ *  Computer, where it means nothing at all. PostgreSQL and GPU are gone from
+ *  this page for that reason; they are facts about a machine, not about what
+ *  an agent can do on it. */
 const INSTALLABLE_TOOL_ORDER = ["claude_cli", "codex_cli", "grok_cli", "cursor_cli"] as const;
-// openclaw/openclaw_channel_plugins: the honest box-capability-reporting pass
-// (the empyralis.ai/install/agent-computer.sh incident — a stale, zero-Docker,
-// zero-OpenClaw installer served to every real customer box with nothing in
-// the product noticing). Same passive-probe family as docker/ollama above
-// (empyralis-gateway/src/health/service-inventory.ts's probeOpenClaw /
-// probeOpenClawChannelPlugins), so they slot into this existing read-only
-// list with no new plumbing — serviceItemPresentation()'s generic
-// ready/degraded/offline/missing/unknown handling below already covers them.
-const DETECTED_SERVICE_ORDER = ["docker", "ollama", "postgres", "gpu", "openclaw", "openclaw_channel_plugins"] as const;
+
 const CAPABILITY_LABEL: Record<string, string> = {
   claude_cli: "Claude Code",
   codex_cli: "Codex",
   grok_cli: "Grok Build",
   cursor_cli: "Cursor CLI",
-  docker: "Docker",
-  ollama: "Ollama",
-  postgres: "PostgreSQL",
-  gpu: "GPU",
-  openclaw: "Channel transport",
-  openclaw_channel_plugins: "Channel plugins",
-};
-
-/** Small leading glyph per detected service — the same icon+label pattern
- *  the resource gauges above already use (fleet-hw-dash-gauge-head), reused
- *  here so a read-only row visually reads as "information" rather than
- *  borrowing the installable tools' bare-text row shape. */
-const SERVICE_ICON: Record<string, ReactNode> = {
-  docker: <Container size={13} strokeWidth={1.75} />,
-  ollama: <Brain size={13} strokeWidth={1.75} />,
-  postgres: <Database size={13} strokeWidth={1.75} />,
-  gpu: <Gpu size={13} strokeWidth={1.75} />,
-  openclaw: <Radio size={13} strokeWidth={1.75} />,
-  openclaw_channel_plugins: <Waypoints size={13} strokeWidth={1.75} />,
 };
 
 /** Maps a service_inventory row id to its cli_subscription runtime key —
@@ -107,101 +88,17 @@ const CLI_ROW_RUNTIME: Record<string, CliSubscriptionRuntime> = {
   cursor_cli: "cursor_cli",
 };
 
-/** Ollama's own documented floor is ~8 GB of RAM to run even its smallest
- *  (7B-class) models — below that it cannot serve real inference regardless
- *  of whether the binary happens to be installed. Without this, a 1 GB box
- *  just shows "Not detected" next to Docker/Postgres/GPU's own "Not
- *  detected" — reading as one more thing that failed to install, instead of
- *  the truth: this box physically cannot run it, full stop. Deliberately a
- *  single flat threshold, not a per-model curve — this is a UI hint about
- *  whether pursuing Ollama here is worth the owner's time at all, not a
- *  guarantee about any specific quantized model. */
-const OLLAMA_MIN_MEMORY_GB = 8;
-
-/** Reason string for the memory gate above, or null when this box clears the
- *  bar (or reports no memory total at all, in which case we say nothing
- *  rather than guess). */
-function ollamaMemoryShortfallReason(resources: GatewayResources | null | undefined): string | null {
-  const totalBytes = resources?.memory_total_bytes;
-  if (typeof totalBytes !== "number" || !Number.isFinite(totalBytes) || totalBytes <= 0) return null;
-  const totalGB = totalBytes / 1_000_000_000;
-  if (totalGB >= OLLAMA_MIN_MEMORY_GB) return null;
-  const haveLabel = totalGB < 1 ? `${totalGB.toFixed(1)} GB` : `${Math.round(totalGB)} GB`;
-  return `needs ~${OLLAMA_MIN_MEMORY_GB} GB memory, this machine has ${haveLabel}`;
-}
-
-type ServicePresentation = { tone: AgentStatusTone; label: string; reason: string | null };
-
-/** Detected-service row presentation — tone + label + an optional plain-
- *  language reason. A reason is shown for every non-ready state EXCEPT plain
- *  "missing" (the binary/service simply isn't there — self-explanatory, no
- *  elaboration needed); "degraded"/"offline"/"blocked" get the gateway's own
- *  probe summary inline instead of a generic red line, and Ollama gets the
- *  resource-gate reason above whenever this box can't run it regardless of
- *  what the probe itself reports — a box that's somehow ready anyway is
- *  trusted over this heuristic, never overridden by it. */
-/** Docker's own probe summary is the RAW `docker info` stderr (e.g. "Cannot
- *  connect to the Docker daemon at unix:///var/run/docker.sock. Is the
- *  docker daemon running?") — a diagnostic dump, not something to hand a
- *  customer as their only signal. This is the same "Docker isn't running,
- *  start Docker Desktop" plain-language fact the chat-side
- *  gateway_capability_missing error already gives when a shell call fails
- *  for this exact reason — this Settings surface says the same thing BEFORE
- *  a call ever fails, so "check before you try" and "what just happened"
- *  never disagree. Only overrides "offline"/"degraded" (daemon unreachable
- *  or unhealthy); "missing" (Docker isn't installed at all) keeps the
- *  existing bare "Not detected" — self-explanatory, no daemon to start. */
-function dockerNotReadyReason(status: string): string | null {
-  if (status === "offline" || status === "degraded") {
-    return "Docker isn't running on this machine. Start Docker Desktop, then refresh this page to check again.";
-  }
-  return null;
-}
-
-function serviceItemPresentation(
-  id: string,
-  item: ServiceInventoryItem | undefined,
-  resources: GatewayResources | null | undefined,
-): ServicePresentation {
-  const status = (item?.status || "").toLowerCase();
-  if (status === "ready") return { tone: "ready", label: "Ready", reason: null };
-
-  if (id === "ollama") {
-    const shortfall = ollamaMemoryShortfallReason(resources);
-    if (shortfall) return { tone: "unknown", label: "Unavailable", reason: shortfall };
-  }
-
-  if (id === "docker") {
-    const dockerReason = dockerNotReadyReason(status);
-    if (dockerReason) {
-      return { tone: "degraded", label: status === "degraded" ? "Degraded" : "Not responding", reason: dockerReason };
-    }
-  }
-
-  const reason = status && status !== "missing" ? item?.summary || null : null;
-  if (status === "degraded") return { tone: "degraded", label: "Degraded", reason };
-  if (status === "offline") return { tone: "degraded", label: "Not responding", reason };
-  if (status === "blocked") return { tone: "error", label: "Blocked", reason };
-  if (status === "missing") return { tone: "unknown", label: "Not detected", reason: null };
-  return { tone: "unknown", label: "Unknown", reason };
-}
-
-/** Right-aligned header status pill's honest tail — connPresentation already
- *  gives the raw connection word (Online/Degraded/Offline/…); this adds the
- *  plain-language "what that means" clause the approved design calls for
- *  ("● Online · gateway healthy"). */
-function connectionHealthSuffix(tone: AgentStatusTone): string {
+/** A capability row's tone, mapped onto the shared StatusChip vocabulary. */
+function capabilityChipTone(tone: CapabilityTone): AgentStatusTone {
   switch (tone) {
-    case "online":
-      return "gateway healthy";
+    case "ready":
+      return "ready";
     case "degraded":
-      return "needs attention";
-    case "offline":
-      return "not reachable";
+      return "degraded";
     case "error":
-      return "re-pair required";
+      return "offline";
     default:
-      return "";
+      return "unknown";
   }
 }
 
@@ -257,12 +154,6 @@ function toneForPct(pct: number): GaugeTone {
   return "";
 }
 
-function toneForTempC(c: number): GaugeTone {
-  if (c >= 90) return "danger";
-  if (c >= 75) return "warn";
-  return "";
-}
-
 function clampPct(n: number): number {
   if (!Number.isFinite(n)) return 0;
   return Math.max(0, Math.min(100, n));
@@ -281,12 +172,29 @@ type GaugeCardDef = {
   tone: GaugeTone;
 };
 
-/** Builds only the cards for metrics this box actually reported — a null
- *  field (no GPU, no temp sensor) is hidden, never rendered as a fake/empty
- *  gauge. `resources` itself can be undefined (older gateway build, or one
- *  that hasn't heartbeated with this field yet) — same result, empty list,
- *  which the caller renders as the "live metrics will appear" line instead
- *  of an empty grid. */
+/** CPU and memory ONLY, and that is a measurement result rather than a
+ *  design preference.
+ *
+ *  Both were verified against their real source before being kept:
+ *    · cpu_pct is the idle/total delta of os.cpus() over a 500ms window
+ *      (empyralis-gateway/src/health/resource-metrics.ts). Driven to a
+ *      genuine full-core load it reads 100.0%, and at rest it matches
+ *      `top`'s own busy figure.
+ *    · memory on Linux — which every cloud Agent Computer is — comes out as
+ *      total minus os.freemem(), and on the Node this gateway runs
+ *      os.freemem() IS MemAvailable, so that figure equals the true
+ *      "in use" number exactly (checked inside a real Linux container, not
+ *      inferred from documentation). On macOS it is vm_stat's
+ *      active+wired+compressed, which measured ~3 percentage points below
+ *      Activity Monitor's own formula — a real reading, slightly
+ *      conservative, never fabricated.
+ *
+ *  GPU and temperature were REMOVED. Not because they are wrong — they are
+ *  best-effort by their own contract (nvidia-smi only, thermal zones only,
+ *  both null on macOS) — but because nothing here could prove them against
+ *  a real source, and the standing bar for a number on this page is that it
+ *  is provably accurate. A gauge nobody has checked is worse than a missing
+ *  one. */
 function buildGaugeCards(resources: GatewayResources | null | undefined): GaugeCardDef[] {
   if (!resources) return [];
   const cards: GaugeCardDef[] = [];
@@ -296,17 +204,6 @@ function buildGaugeCards(resources: GatewayResources | null | undefined): GaugeC
       key: "cpu",
       icon: <Cpu size={13} strokeWidth={1.75} />,
       label: "CPU",
-      value: `${Math.round(pct)}%`,
-      pct,
-      tone: toneForPct(pct),
-    });
-  }
-  if (typeof resources.gpu_pct === "number" && Number.isFinite(resources.gpu_pct)) {
-    const pct = clampPct(resources.gpu_pct);
-    cards.push({
-      key: "gpu",
-      icon: <Gpu size={13} strokeWidth={1.75} />,
-      label: "GPU",
       value: `${Math.round(pct)}%`,
       pct,
       tone: toneForPct(pct),
@@ -324,20 +221,6 @@ function buildGaugeCards(resources: GatewayResources | null | undefined): GaugeC
       value: `${formatGB(resources.memory_used_bytes)} / ${formatGB(resources.memory_total_bytes)} GB`,
       pct,
       tone: toneForPct(pct),
-    });
-  }
-  if (typeof resources.temperature_c === "number" && Number.isFinite(resources.temperature_c)) {
-    const c = resources.temperature_c;
-    cards.push({
-      key: "temp",
-      icon: <Thermometer size={13} strokeWidth={1.75} />,
-      label: "Temp",
-      value: `${Math.round(c)}°C`,
-      // No universal "100% = danger" ceiling for temperature the way there
-      // is for a percent-based metric — 100°C is a reasonable upper bound
-      // for a bar visualization only, not a claim about any real limit.
-      pct: clampPct((c / 100) * 100),
-      tone: toneForTempC(c),
     });
   }
   return cards;
@@ -368,22 +251,6 @@ function formatUptime(iso: string | null | undefined): string {
 const VERIFY_POLL_MS = 5_000;
 const VERIFY_TIMEOUT_MS = 90_000;
 const LOGIN_EVENTS_POLL_MS = 2_000;
-
-/** Multi-line copy-paste shell/config snippet inside the claude_code
- *  long-lived-token guide (CliSetupControl) — .fleet-md-code is chip-sized
- *  for inline spans, so a block variant is defined here rather than adding
- *  a new global CSS class for one component's use. */
-const CODE_BLOCK_STYLE: React.CSSProperties = {
-  margin: "6px 0 0",
-  padding: "8px 10px",
-  borderRadius: 6,
-  background: "var(--bg-inset)",
-  fontFamily: "var(--app-font-mono, ui-monospace, monospace)",
-  fontSize: 11,
-  lineHeight: 1.5,
-  whiteSpace: "pre-wrap",
-  wordBreak: "break-all",
-};
 
 function createRunId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
@@ -755,12 +622,29 @@ function CliSetupControl({
    *  why this exists as a separate, non-spawned path rather than a fourth
    *  cli.login.start method. */
   const [tokenGuideOpen, setTokenGuideOpen] = useState(false);
-  /** Which OS's instructions the guide shows — defaults from isCloud (cloud
-   *  VPS boxes are always Ubuntu/systemd per scripts/install-agent-
-   *  computer.sh; a non-cloud box is the owner's own machine, macOS/
-   *  launchd for this product today) but stays a toggle since that
-   *  heuristic isn't a hard guarantee for every box shape. */
-  const [tokenGuideIsCloud, setTokenGuideIsCloud] = useState(isCloud);
+  /** Copy-the-setting-name affordance for the long-lived-token path above.
+   *  A NAME, never a command: what a person has to add is one setting, and
+   *  a shell line telling them how to add it on one particular OS is
+   *  mechanism this page does not owe anybody. */
+  const [settingCopied, setSettingCopied] = useState(false);
+  const settingCopiedRef = useRef<number | null>(null);
+  const copySettingName = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText("CLAUDE_CODE_OAUTH_TOKEN");
+      setSettingCopied(true);
+      if (settingCopiedRef.current) window.clearTimeout(settingCopiedRef.current);
+      settingCopiedRef.current = window.setTimeout(() => setSettingCopied(false), 2_000);
+    } catch {
+      // Clipboard denied (an insecure origin, or a browser prompt refused).
+      // The name is already on screen in full, so nothing is lost — never
+      // report a failure the reader cannot act on and does not need to.
+    }
+  }, []);
+  useEffect(() => {
+    return () => {
+      if (settingCopiedRef.current) window.clearTimeout(settingCopiedRef.current);
+    };
+  }, []);
   const eventsPollRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -935,11 +819,22 @@ function CliSetupControl({
           ? "Checking…"
           : installState === "error"
             ? "Retry"
-            : `Install ${label}`;
+            // "Install", not "Install Codex" — the tool's name is already
+            // the left half of this same row, and repeating it made four
+            // buttons in one list four different widths. The accessible
+            // name below still carries it.
+            : "Install";
     primaryAction = (
       <button
         type="button"
-        className="fleet-btn fleet-btn--accent-fill"
+        // NOT accent-filled. Four coding-CLI rows sit in this list and each
+        // can carry an action, so an accent fill here paints up to four
+        // "the primary action" buttons in one view — the founder called
+        // exactly this out on Cursor CLI's Sign in. fleet-btn--accent is
+        // the neutral-but-emphatic variant for precisely this case: a row
+        // action in a view whose primary action is something else.
+        className="fleet-btn fleet-btn--accent"
+        aria-label={`Install ${label} on this computer`}
         onClick={() => installQueue.requestTurn(runtime)}
         disabled={installBusy || isQueuedForInstall}
       >
@@ -948,15 +843,13 @@ function CliSetupControl({
       </button>
     );
   } else if (state === "unauthenticated" && loginPhase === "idle") {
-    // The single most important action on this page once a tool is
-    // installed — an accent-filled button with a leading icon so it doesn't
-    // read as just another text row, on top of now sitting in a section
-    // that's exclusively actionable tools (no more "Not detected" siblings
-    // to get lost next to).
+    // Emphatic by WEIGHT, never by hue — see the install button above for
+    // why an accent fill cannot live on a row that repeats four times.
     primaryAction = (
       <button
         type="button"
-        className="fleet-btn fleet-btn--accent-fill"
+        className="fleet-btn fleet-btn--accent"
+        aria-label={`Sign in to ${label} on this computer`}
         onClick={openPicker}
         disabled={verifying}
       >
@@ -1103,62 +996,45 @@ function CliSetupControl({
                 textUnderlineOffset: 2,
               }}
             >
-              {tokenGuideOpen ? "Hide manual token setup" : "Sign-in not sticking? Set a long-lived token manually"}
+              {tokenGuideOpen ? "Hide" : "Sign-in not sticking?"}
             </button>
+            {/* This used to be three shell commands, a plist path, an
+                EnvironmentVariables dict and a `launchctl kickstart` line —
+                a wall of mechanism handed to a customer who asked why their
+                sign-in did not stick. What replaces it says the same thing
+                as a fact and an action: the setting to add, one button to
+                copy it, and an honest sentence about who has to apply it.
+                Nobody reads a command off a screen and retypes it; anyone
+                who can act on this can paste it. */}
             {tokenGuideOpen && (
               <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 10, fontSize: 12 }}>
                 <p style={{ margin: 0, color: "var(--text-muted)" }}>
-                  This is the same long-lived-token mechanism Anthropic documents for CI and
-                  background services. You generate it yourself and place it directly into this
-                  Gateway&apos;s own environment — Empyralis never transmits or stores the value.
+                  Claude Code can also hold a long-lived token instead of a sign-in session. You
+                  create it yourself and put it on that computer — Empyralis never sees the value.
                 </p>
-                <div style={{ display: "flex", gap: 6 }}>
-                  <button
-                    type="button"
-                    className={tokenGuideIsCloud ? "fleet-btn fleet-btn--accent" : "fleet-btn"}
-                    style={{ padding: "4px 10px", fontSize: 12 }}
-                    onClick={() => setTokenGuideIsCloud(true)}
-                  >
-                    Cloud server (Linux)
-                  </button>
-                  <button
-                    type="button"
-                    className={!tokenGuideIsCloud ? "fleet-btn fleet-btn--accent" : "fleet-btn"}
-                    style={{ padding: "4px 10px", fontSize: 12 }}
-                    onClick={() => setTokenGuideIsCloud(false)}
-                  >
-                    This Mac
-                  </button>
-                </div>
                 <ol style={{ margin: 0, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 8 }}>
                   <li>
-                    On any computer where you&apos;re signed in to Claude Code, run{" "}
-                    <code className="fleet-md-code">claude setup-token</code>, approve access in the
-                    browser, and copy the token it prints — treat it like a password.
+                    On any computer where you are already signed in to Claude Code, create a
+                    long-lived token and copy it. Treat it like a password.
                   </li>
-                  {tokenGuideIsCloud ? (
-                    <li>
-                      SSH into this box and run:
-                      <pre style={CODE_BLOCK_STYLE}>
-                        {'echo \'CLAUDE_CODE_OAUTH_TOKEN="paste-your-token-here"\' | sudo tee -a /etc/empyralis/agent-computer.env\nsudo systemctl restart empyralis-gateway.service'}
-                      </pre>
-                    </li>
-                  ) : (
-                    <li>
-                      In the Empyralis folder you installed this in, run:
-                      <pre style={CODE_BLOCK_STYLE}>
-                        {'echo \'CLAUDE_CODE_OAUTH_TOKEN=paste-your-token-here\' >> .env.local\nscripts/agent_computer.sh stop && scripts/agent_computer.sh start'}
-                      </pre>
-                      Not sure where that is, or running this as a background service already? Add the
-                      same line to{" "}
-                      <code className="fleet-md-code">~/Library/LaunchAgents/ai.empyralis.agent-computer.plist</code>
-                      {"'"}s <code className="fleet-md-code">EnvironmentVariables</code> dict instead
-                      (<code className="fleet-md-code">{"<key>CLAUDE_CODE_OAUTH_TOKEN</key><string>…</string>"}</code>),
-                      then run{" "}
-                      <code className="fleet-md-code">launchctl kickstart -k gui/$(id -u)/ai.empyralis.agent-computer</code>.
-                    </li>
-                  )}
-                  <li>We&apos;ll pick it up on the next heartbeat, usually within 20 seconds.</li>
+                  <li>
+                    Add it to this computer as the setting{" "}
+                    <code className="fleet-md-code">CLAUDE_CODE_OAUTH_TOKEN</code>, then restart it.
+                    {isCloud
+                      ? " On a cloud server that needs someone with administrator access to it."
+                      : " On your own Mac you can do this yourself."}
+                    <div style={{ marginTop: 6 }}>
+                      <button
+                        type="button"
+                        className="fleet-btn"
+                        style={{ padding: "4px 10px", fontSize: 12 }}
+                        onClick={() => void copySettingName()}
+                      >
+                        {settingCopied ? "Copied" : "Copy setting name"}
+                      </button>
+                    </div>
+                  </li>
+                  <li>We pick it up on the next check-in, usually within 20 seconds.</li>
                 </ol>
                 <div>
                   <button
@@ -1364,10 +1240,7 @@ function GatewaySelfUpdateControl({
   // code since the build fingerprint shipped and nothing on this page ever
   // read it. That is this codebase's own outcome-honesty law broken on the
   // one screen where a stuck box is visible.
-  const launchRepair =
-    gateway.gateway_update_refusal_code === "launch_path_not_updatable"
-      ? gateway.gateway_launch_repair ?? null
-      : null;
+  const cannotReceiveUpdates = gateway.gateway_update_refusal_code === "launch_path_not_updatable";
 
   const [busy, setBusy] = useState(false);
   const [verifying, setVerifying] = useState(false);
@@ -1422,7 +1295,7 @@ function GatewaySelfUpdateControl({
   // reports no version at all) AND has no known newer build to offer either.
   // A box that reports itself un-updatable is the exception: that is the one
   // state a person most needs to see, whatever its version says.
-  if (!currentVersion && !updateAvailable && !launchRepair) {
+  if (!currentVersion && !updateAvailable && !cannotReceiveUpdates) {
     return null;
   }
 
@@ -1440,53 +1313,16 @@ function GatewaySelfUpdateControl({
             {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
             {busy ? "Starting…" : `Update to v${latestVersion}`}
           </button>
-        ) : launchRepair ? (
+        ) : cannotReceiveUpdates ? (
+          // The reason, the blockers and the repair itself all live in
+          // "What's wrong" (GatewayLaunchRepairRow) — this row only has to
+          // stop claiming "Up to date", which is what it used to do for a
+          // box that could not be updated at all.
           <span className="fleet-list-row-desc">Can&apos;t receive updates</span>
         ) : (
           <span className="fleet-list-row-desc">Up to date</span>
         )}
       </span>
-      {launchRepair && (
-        <div
-          className="fleet-hw-note"
-          style={{ paddingTop: 10, width: "100%", display: "flex", flexDirection: "column", gap: 8 }}
-        >
-          <span>{gateway.gateway_update_refusal_reason}</span>
-          {/* Each blocker is its own fact with its own fix. Merging them into
-              one sentence sends someone to correct half of the problem. */}
-          {(launchRepair.blockers ?? []).map((blocker) => (
-            <span key={String(blocker?.code)} className="fleet-list-row-desc">
-              {blocker?.detail}
-            </span>
-          ))}
-          {launchRepair.state === "ready" && (launchRepair.commands ?? []).length > 0 ? (
-            <>
-              <span className="fleet-list-row-desc">{launchRepair.detail}</span>
-              {/* Shown rather than performed, and that is not a shortcut: the
-                  gateway runs unprivileged inside a read-only mount namespace
-                  with NoNewPrivileges set, so no button here could ever work,
-                  and a button that cannot work is a dead control. */}
-              <pre
-                style={{
-                  margin: 0,
-                  padding: 10,
-                  overflowX: "auto",
-                  fontSize: 12,
-                  lineHeight: 1.5,
-                  background: "var(--bg-inset)",
-                  border: "1px solid var(--border)",
-                  borderRadius: 6,
-                  whiteSpace: "pre",
-                }}
-              >
-                {(launchRepair.commands ?? []).join("\n")}
-              </pre>
-            </>
-          ) : (
-            <span className="fleet-list-row-desc">{launchRepair.detail}</span>
-          )}
-        </div>
-      )}
       {error && (
         <span className="fleet-channel-expand-error" style={{ margin: 0, width: "100%" }}>
           {error}
@@ -1501,24 +1337,91 @@ function GatewaySelfUpdateControl({
   );
 }
 
-/** Honest "are channels actually going to work on this box" summary — the
- *  card-face doctrine already established for the channel grid
- *  (openclaw-channel-copy.ts's channelCardPill/remediationFor), applied here
- *  at the BOX level instead of per-channel: icon + one pill + a single
- *  mechanism-free line, everything else omitted. The fact this reports on
- *  (box-capability-state.ts's planChannelTransportState, fed by the
- *  `openclaw`/`openclaw_channel_plugins` rows in the read-only list below)
- *  is exactly the one the empyralis.ai/install/agent-computer.sh incident
- *  proved the product had no way to see: a box can heartbeat healthy —
- *  connected, online, every other capability fine — while its channel
- *  transport was never installed at all, and nothing said so anywhere
- *  short of this reading its own passive probes.
+/** THE REPAIR — a sentence and a button, never a wall of shell.
  *
- *  Deliberately placed ABOVE "Channels through this box": an empty channel
- *  list there is ambiguous on its own (no agent has set one up yet, OR the
- *  transport itself is broken) — this line resolves that ambiguity before
- *  the customer has to guess which one they're looking at. */
-function ChannelTransportBanner({
+ *  This is the one repair on the page Empyralis genuinely cannot perform:
+ *  the gateway runs unprivileged inside a read-only mount namespace with
+ *  NoNewPrivileges set (all three measured on production), so it cannot
+ *  rewrite the supervisor entry that starts it. A button that ran it would
+ *  be a dead control.
+ *
+ *  What it used to do was print four `plutil`/`launchctl` lines at the
+ *  customer. What it does now is state the fact — this needs someone with
+ *  administrator access — and hand that person the exact commands through
+ *  the clipboard. Nobody reads shell off a screen and retypes it; anyone
+ *  who can act on this can paste it. The commands come BACK FROM THE
+ *  BACKEND for this specific box (gateway_launch_repair) and are never
+ *  literals in this file, which is why the surface scan bans the literals
+ *  and permits this.
+ *
+ *  Three states, kept apart because they send a person to three different
+ *  places: `ready` (here is the fix), `unverified` (this computer could not
+ *  prepare its own repair — the reason is named and NO instruction is
+ *  offered, since a wrong ExecStart turns a stale box into a dead one), and
+ *  nothing at all. */
+function GatewayLaunchRepairRow({ gateway }: { gateway: FleetGateway }) {
+  const repair = gateway.gateway_launch_repair ?? null;
+  const commands = repair?.state === "ready" ? (repair.commands ?? []) : [];
+  const [copied, setCopied] = useState(false);
+  const copiedRef = useRef<number | null>(null);
+  useEffect(() => {
+    return () => {
+      if (copiedRef.current) window.clearTimeout(copiedRef.current);
+    };
+  }, []);
+  const copyCommands = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(commands.join("\n"));
+      setCopied(true);
+      if (copiedRef.current) window.clearTimeout(copiedRef.current);
+      copiedRef.current = window.setTimeout(() => setCopied(false), 2_000);
+    } catch {
+      // Clipboard denied. Deliberately silent rather than reporting a
+      // failure whose only fix is a browser permission the reader did not
+      // come here to think about — the sentence above still says who has to
+      // act and what for.
+    }
+  }, [commands]);
+  return (
+    <div className="fleet-hw-row" style={{ flexDirection: "column", alignItems: "stretch", gap: 8 }}>
+      {(repair?.blockers ?? []).map((blocker) => (
+        <span key={String(blocker?.code)} className="fleet-list-row-desc" style={{ whiteSpace: "normal" }}>
+          {blocker?.detail}
+        </span>
+      ))}
+      {/* The backend's own sentence, passed through rather than replaced —
+          it already names who has to act and that it is a one-time change.
+          Writing a second sentence beside it said the same thing twice. */}
+      {repair?.detail ? (
+        <span className="fleet-list-row-desc" style={{ whiteSpace: "normal" }}>{repair.detail}</span>
+      ) : null}
+      {commands.length > 0 ? (
+        <div>
+          <button type="button" className="fleet-btn" onClick={() => void copyCommands()}>
+            {copied ? "Copied" : "Copy the commands"}
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** CHANNELS, as one capability row — the same shape as every other row on
+ *  this page rather than a banner of its own.
+ *
+ *  THE GATEWAY AND THE CHANNEL TRANSPORT ARE TWO DIFFERENT THINGS, and this
+ *  page used to blur them. The gateway is this computer's own connection to
+ *  Empyralis — one process, always required, the thing that makes the box
+ *  reachable at all. The channel transport (OpenClaw) is a SEPARATE program
+ *  running beside it that carries Telegram/WhatsApp/Signal traffic, and a
+ *  computer with a perfectly healthy connection can have no channel
+ *  transport at all. They are named apart everywhere on this page now:
+ *  "Connection to Empyralis" for the first, "Channels" for the second.
+ *
+ *  The state comes from box-capability-state.ts's planChannelTransportState
+ *  composed by hardware-detail-shape.ts's planChannelCapabilityRow — one
+ *  derivation, so this row and the health line can never disagree. */
+function ChannelCapabilityRow({
   openclawStatus,
   pluginsStatus,
   gatewayId,
@@ -1532,16 +1435,13 @@ function ChannelTransportBanner({
   workspaceId: string;
   /** The agent whose channel policy a "Set up" click provisions — the
    *  transport is provisioned FOR an agent's own settings, so there is
-   *  nothing this button can do without one. `null` when this box has no
-   *  agent pinned to it yet, in which case the button is not rendered at
-   *  all (CLAUDE.md: "no dead controls" — a control that cannot act is not
-   *  shown, not shown-and-disabled). */
+   *  nothing this button can do without one. `null` renders no button at
+   *  all and says why instead (CLAUDE.md: "no dead controls"). */
   setupAgentId: string | null;
   refresh: (opts?: { silent?: boolean }) => Promise<FleetGateway[]>;
 }) {
   const state = planChannelTransportState({ transportStatus: openclawStatus, pluginsStatus });
-  const pill = channelTransportPill(state);
-  const summary = channelTransportSummary(state);
+  const row = planChannelCapabilityRow(state, Boolean(setupAgentId));
 
   const [busy, setBusy] = useState(false);
   const [verifying, setVerifying] = useState(false);
@@ -1606,30 +1506,60 @@ function ChannelTransportBanner({
   }, [gatewayId, setupAgentId, state, refresh]);
 
   return (
+    <CapabilityRowView
+      row={row}
+      action={
+        row.action === "set_up" ? (
+          <button type="button" className="fleet-btn" disabled={busy || verifying} onClick={() => void runSetup()}>
+            {(busy || verifying) ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
+            {busy ? "Starting…" : verifying ? "Setting up…" : "Set up"}
+          </button>
+        ) : null
+      }
+      error={error}
+    />
+  );
+}
+
+/** One capability, one line: name, honest state, and at most ONE action.
+ *  Healthy collapses to exactly that line — no note, no expansion — which
+ *  is the whole "healthy collapses, broken expands" rule expressed in one
+ *  place instead of at each call site. */
+function CapabilityRowView({
+  row,
+  action,
+  error,
+}: {
+  row: CapabilityRow;
+  action?: ReactNode;
+  error?: string | null;
+}) {
+  const expanded = Boolean(row.note) || Boolean(error);
+  return (
     <div
-      className="fleet-hw-dash-empty"
-      style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-start", marginBottom: 12 }}
+      className="fleet-hw-row"
+      style={expanded ? { flexDirection: "column", alignItems: "stretch", gap: 6 } : undefined}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <StatusChip
-          tone={pill.tone === "connected" ? "ready" : pill.tone === "setup" ? "degraded" : "unknown"}
-          label={pill.label}
-        />
-        <span className="fleet-hw-dash-empty-desc" style={{ margin: 0 }}>
-          {summary.headline}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, width: "100%" }}>
+        <span className="fleet-hw-label">{row.label}</span>
+        <span className="fleet-hw-value" style={{ gap: 10 }}>
+          <StatusChip tone={capabilityChipTone(row.tone)} label={row.stateLabel} />
+          {action}
         </span>
       </div>
-      {summary.hasSetupAction && setupAgentId && (
-        <button type="button" className="fleet-btn" disabled={busy || verifying} onClick={() => void runSetup()}>
-          {(busy || verifying) ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
-          {busy ? "Starting…" : verifying ? "Setting up…" : "Set up"}
-        </button>
-      )}
-      {error && (
+      {row.note ? (
+        <span
+          className="fleet-list-row-desc"
+          style={{ whiteSpace: "normal", overflow: "visible", textOverflow: "clip" }}
+        >
+          {row.note}
+        </span>
+      ) : null}
+      {error ? (
         <span className="fleet-channel-expand-error" style={{ margin: 0 }}>
           {error}
         </span>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -1678,16 +1608,20 @@ function GatewayRestartControl({ gatewayId, workspaceId }: { gatewayId: string; 
 
   return (
     <div className="fleet-hw-row">
-      <span className="fleet-hw-label">Gateway process</span>
+      {/* Named for the ACTION, not for the process. This section is
+          already titled "Connection to Empyralis"; repeating "Gateway" in
+          the row label was the same mechanism-naming this page has been
+          swept for everywhere else. */}
+      <span className="fleet-hw-label">Restart</span>
       <span className="fleet-hw-value" style={{ display: "flex", alignItems: "center", gap: 10 }}>
         {justRestarted ? (
           <span className="fleet-list-row-desc" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-            <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Restarting — should reconnect within
-            a few seconds.
+            <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Restarting — should reconnect within a few
+            seconds.
           </span>
         ) : (
           <button type="button" className="fleet-btn" onClick={() => setConfirmOpen(true)}>
-            Restart gateway
+            Restart
           </button>
         )}
       </span>
@@ -1698,9 +1632,9 @@ function GatewayRestartControl({ gatewayId, workspaceId }: { gatewayId: string; 
       )}
       <ConfirmDialog
         open={confirmOpen}
-        title="Restart this computer's gateway?"
-        body="This briefly disconnects the gateway process and interrupts anything running on it right now. It should reconnect automatically within a few seconds — no data or pairing is lost."
-        confirmLabel="Restart gateway"
+        title="Restart this computer's connection?"
+        body="This briefly disconnects the computer and interrupts anything running on it right now. It reconnects on its own within a few seconds — nothing is lost and it stays paired."
+        confirmLabel="Restart"
         confirmTone="primary"
         busy={busy}
         onConfirm={() => void runRestart()}
@@ -1900,14 +1834,11 @@ export default function GatewayDetailPage() {
           <div className="fleet-skeleton-bar" style={{ width: 74, height: 20, borderRadius: 999 }} />
         </header>
 
-        <div className="fleet-hw-dash-gauges">
-          {[0, 1, 2].map((i) => (
-            <div className="fleet-hw-dash-gauge" key={i}>
-              <div className="fleet-skeleton-bar" style={{ width: "55%", height: 11 }} />
-              <div className="fleet-skeleton-bar" style={{ width: "35%", height: 18, marginTop: 4 }} />
-              <div className="fleet-skeleton-bar" style={{ width: "100%", height: 6, marginTop: 8 }} />
-            </div>
-          ))}
+        {/* The health line — the real page's first answer, so the skeleton
+            stands in at the same spot rather than at a gauge grid that no
+            longer exists. */}
+        <div className="fleet-hw-dash-health">
+          <div className="fleet-skeleton-bar" style={{ width: 240, height: 12 }} />
         </div>
 
         <div className="fleet-hw-dash-band">
@@ -2003,14 +1934,54 @@ export default function GatewayDetailPage() {
     : null;
   const headerSubline = [platformSegment, locationSegment, pairedSegment].filter(Boolean).join(" · ");
 
-  const statusSuffix = connectionHealthSuffix(connPresentation.tone);
-  const statusPillLabel = statusSuffix ? `${connPresentation.label} · ${statusSuffix}` : connPresentation.label;
-
-  // Real resource snapshot (CPU/GPU/memory/temp) this box last heartbeated —
-  // feeds both the gauge cards above and the Ollama memory gate below, so
-  // the two never quote a different number for the same box.
+  // Real resource snapshot this box last heartbeated — feeds both the gauge
+  // cards and the local-model memory gate below, so the two never quote a
+  // different number for the same box.
   const resources = gateway.metadata?.resources ?? gateway.resources;
   const gaugeCards = buildGaugeCards(resources);
+
+  // ── QUESTION 1: is this computer working? ──────────────────────────────
+  // One line. The state, plus the ONE fact that could break it — chosen by
+  // priority in hardware-detail-shape.ts, never a list glued together.
+  const dockerStatus = byId.get("docker")?.status as ProbeStatus;
+  const launchRepairBlocked = gateway.gateway_update_refusal_code === "launch_path_not_updatable";
+  const fullAccessAuthorizedButOff =
+    gateway.runtime_access_mode === "full_access"
+      ? gateway.shell_full_access_locally_enabled === false
+        ? true
+        : gateway.shell_full_access_locally_enabled === true
+          ? false
+          : null
+      : false;
+  const healthFacts = {
+    connectionTone: connPresentation.tone as Parameters<typeof planBoxHealth>[0]["connectionTone"],
+    connectionLabel: connPresentation.label,
+    dockerStatus,
+    fullAccessAuthorizedButOff,
+    cannotReceiveUpdates: launchRepairBlocked,
+    executionBlocked: String(gateway.connection_status || "").toLowerCase() === "execution_blocked",
+  };
+  const health = planBoxHealth(healthFacts);
+
+  // ── QUESTION 2: what can it do? ────────────────────────────────────────
+  // The four coding CLIs keep their own control (CliSetupControl owns its
+  // row: install/sign-in are real multi-step flows with their own state).
+  // Everything else is a plain CapabilityRowView. Both go through the same
+  // rule module, so "ready" means the same thing in every row.
+  const cliRows = INSTALLABLE_TOOL_ORDER.map((id) => ({
+    id,
+    runtime: CLI_ROW_RUNTIME[id],
+    row: planCliCapabilityRow(id, CAPABILITY_LABEL[id], gatewayRuntimeState(gateway, CLI_ROW_RUNTIME[id])),
+  }));
+  const sandboxRow = planSandboxCapabilityRow(dockerStatus);
+  const localModelRow = planLocalModelCapabilityRow(
+    byId.get("ollama")?.status as ProbeStatus,
+    resources?.memory_total_bytes ?? null,
+  );
+  const channelRowState = planChannelTransportState({
+    transportStatus: byId.get("openclaw")?.status as ProbeStatus,
+    pluginsStatus: byId.get("openclaw_channel_plugins")?.status as ProbeStatus,
+  });
 
   // Channels through this box — derived from the SAME boundAgents this
   // page already resolves for "Agents running on this computer" (see
@@ -2030,6 +2001,23 @@ export default function GatewayDetailPage() {
   // agent pinned to this box is as good a choice as any (provisioning is
   // additive/idempotent, never destructive to another agent's setup).
   const setupAgentId = boundAgents[0]?.agent_id || null;
+  const channelRow = planChannelCapabilityRow(channelRowState, Boolean(setupAgentId));
+
+  // ── QUESTION 3: what's wrong? ──────────────────────────────────────────
+  // Empty on a healthy box, and the whole section is then ABSENT — not
+  // rendered as an "all clear" panel nobody needs. A capability that
+  // already offers its own control is a next step, not a problem, and is
+  // deliberately not repeated here.
+  const problems = planBoxProblems({
+    ...healthFacts,
+    updateRefusalReason: gateway.gateway_update_refusal_reason || null,
+  });
+  const somethingIsWrong = boxHasProblem(problems, [
+    ...cliRows.map((c) => c.row),
+    sandboxRow,
+    localModelRow,
+    channelRow,
+  ]);
 
   return (
     <main className="fleet-hw-dashboard">
@@ -2050,38 +2038,135 @@ export default function GatewayDetailPage() {
           </div>
         </div>
         <span className="fleet-hw-dash-status">
-          <StatusChip tone={connPresentation.tone} label={statusPillLabel} />
+          <StatusChip tone={connPresentation.tone} label={health.headline} />
         </span>
       </header>
 
-      {gaugeCards.length > 0 ? (
-        <div className="fleet-hw-dash-gauges">
-          {gaugeCards.map((g) => (
-            <div className="fleet-hw-dash-gauge" key={g.key}>
-              <span className="fleet-hw-dash-gauge-head">
+      {/* ── 1. IS THIS COMPUTER WORKING? ────────────────────────────────
+          One line. On a healthy box the caveat is null and this is the
+          whole answer — the pill above plus, at most, live usage. The
+          status pill used to carry a glued-on suffix ("Online · gateway
+          healthy") which said the same word twice; the caveat is now the
+          only thing that adds a fact. */}
+      <div className="fleet-hw-dash-health">
+        {health.caveat ? (
+          <span className="fleet-hw-dash-health-caveat">
+            <TriangleAlert size={14} strokeWidth={1.75} aria-hidden="true" />
+            {health.caveat}
+          </span>
+        ) : (
+          <span className="fleet-hw-dash-health-ok">Nothing needs your attention on this computer.</span>
+        )}
+        {gaugeCards.length > 0 ? (
+          <span className="fleet-hw-dash-health-metrics">
+            {gaugeCards.map((g) => (
+              <span className="fleet-hw-list-resource-item" key={g.key} title={`${g.label} — ${g.value}`}>
                 {g.icon}
-                {g.label}
+                {g.key === "memory" ? `${Math.round(g.pct)}%` : g.value}
               </span>
-              <span className="fleet-hw-dash-gauge-value">{g.value}</span>
-              <span className="fleet-hw-dash-gauge-bar">
-                <span
-                  className={`fleet-hw-dash-gauge-bar-fill${g.tone ? ` fleet-hw-dash-gauge-bar-fill--${g.tone}` : ""}`}
-                  style={{ width: `${g.pct}%` }}
-                />
-              </span>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div className="fleet-hw-dash-gauges-empty">
-          Live metrics will appear once this computer&apos;s gateway updates.
-        </div>
-      )}
+            ))}
+          </span>
+        ) : null}
+      </div>
 
+      {/* ── 2. WHAT CAN IT DO? ───────────────────────────────────────────
+          One row per capability: name, honest state, at most ONE action.
+          This replaced two lists that used to sit side by side — "AI
+          coding tools" with buttons and "Detected on this machine" as a
+          read-only readout. That split put "Not detected" next to Install
+          buttons, and the read-only half mixed real signal with noise: the
+          founder's own local PostgreSQL reported "Not responding" on a
+          page about an Agent Computer, where it means nothing. PostgreSQL
+          and GPU are gone; Docker and Ollama are here, named for what they
+          let an agent DO rather than for the software they are. */}
+      <div className="fleet-detail-section-title">What this computer can do</div>
+      <div className="fleet-hw-card">
+        {cliRows.map(({ id, runtime, row }) =>
+          row.healthy ? (
+            <CapabilityRowView key={id} row={row} />
+          ) : (
+            <div
+              className="fleet-hw-row"
+              key={id}
+              style={{ flexDirection: "column", alignItems: "stretch", justifyContent: "flex-start", gap: 4 }}
+            >
+              {/* CliSetupControl owns its own row layout for the states that
+                  have a real multi-step flow behind them (install, then the
+                  method picker, then the device-code exchange). */}
+              <CliSetupControl
+                runtime={runtime}
+                state={gatewayRuntimeState(gateway, runtime)}
+                gatewayId={targetGatewayId}
+                workspaceId={workspaceId}
+                refresh={refresh}
+                isCloud={isCloud}
+                installQueue={installQueue}
+              />
+            </div>
+          ),
+        )}
+        <CapabilityRowView row={sandboxRow} />
+        <CapabilityRowView row={localModelRow} />
+        <ChannelCapabilityRow
+          openclawStatus={byId.get("openclaw")?.status as ProbeStatus}
+          pluginsStatus={byId.get("openclaw_channel_plugins")?.status as ProbeStatus}
+          gatewayId={targetGatewayId}
+          workspaceId={workspaceId}
+          setupAgentId={setupAgentId}
+          refresh={refresh}
+        />
+      </div>
+
+      {/* ── 3. WHAT'S WRONG? ─────────────────────────────────────────────
+          Rendered only when something IS. On a healthy computer this whole
+          section — problems, repair instructions and diagnostics — is
+          absent from the page rather than sitting there empty. */}
+      {somethingIsWrong ? (
+        <>
+          {/* The HEADING renders only when there is something to list under
+              it. A box whose only fault is Docker being down has already
+              said so twice — in the health line at the top and in Docker's
+              own row — so a "What's wrong" heading over nothing but a
+              Diagnostics button would be a third empty restatement. What
+              that box still needs from this section is the diagnostics and
+              repair below, and it gets exactly that. */}
+          {problems.length > 0 || launchRepairBlocked ? (
+          <>
+          <div className="fleet-detail-section-title">What&apos;s wrong</div>
+          <div className="fleet-hw-card">
+            {problems.map((problem) => (
+              <div
+                className="fleet-hw-row"
+                key={problem.key}
+                style={{ flexDirection: "column", alignItems: "stretch", gap: 4 }}
+              >
+                <span className="fleet-hw-label" style={{ color: "var(--text-primary)" }}>{problem.title}</span>
+                {problem.detail ? (
+                  <span
+                    className="fleet-list-row-desc"
+                    style={{ whiteSpace: "normal", overflow: "visible", textOverflow: "clip" }}
+                  >
+                    {problem.detail}
+                  </span>
+                ) : null}
+              </div>
+            ))}
+            {launchRepairBlocked ? (
+              <GatewayLaunchRepairRow gateway={gateway} />
+            ) : null}
+          </div>
+          </>
+          ) : null}
+          <GatewayDoctorControl gatewayId={targetGatewayId} workspaceId={workspaceId} />
+        </>
+      ) : null}
+
+      {/* Reference, below the answers. Everything here is a fact about the
+          box that a person occasionally needs and never scans for. */}
       <div className="fleet-hw-dash-band">
         <div className="fleet-hw-dash-panel">
           <div className="fleet-detail-section-title" style={{ marginTop: 0 }}>
-            Agents running on this computer{boundAgents.length > 0 ? ` · ${boundAgents.length}` : ""}
+            Agents on this computer{boundAgents.length > 0 ? ` · ${boundAgents.length}` : ""}
           </div>
           {agentsLoading ? (
             <div className="fleet-hw-card">
@@ -2093,9 +2178,7 @@ export default function GatewayDetailPage() {
             <div className="fleet-hw-dash-empty">
               <div className="fleet-hw-dash-empty-title">No agents are pinned to this computer</div>
               <div className="fleet-hw-dash-empty-desc">
-                Bind an agent to it from that agent&apos;s Hardware tab — this only lists agents whose
-                &quot;which computer&quot; choice points here specifically, not every agent allowed to use
-                any paired box.
+                Pin one from that agent&apos;s own Hardware tab.
               </div>
             </div>
           ) : (
@@ -2117,73 +2200,7 @@ export default function GatewayDetailPage() {
               })}
             </div>
           )}
-        </div>
-
-        <div className="fleet-hw-dash-panel">
-          <div className="fleet-detail-section-title" style={{ marginTop: 0 }}>Gateway</div>
-          <div className="fleet-hw-card">
-            <GatewaySelfUpdateControl gateway={gateway} gatewayId={targetGatewayId} workspaceId={workspaceId} refresh={refresh} />
-            <GatewayRestartControl gatewayId={targetGatewayId} workspaceId={workspaceId} />
-            <div className="fleet-hw-row">
-              <span className="fleet-hw-label">Heartbeat</span>
-              <span className="fleet-hw-value">
-                {typeof heartbeatAge === "number"
-                  ? heartbeatAge < 60 ? `${heartbeatAge}s ago` : timeAgo(gateway.last_heartbeat_at)
-                  : gateway.last_heartbeat_at ? timeAgo(gateway.last_heartbeat_at) : "—"}
-              </span>
-            </div>
-            <div className="fleet-hw-row">
-              <span className="fleet-hw-label">Uptime</span>
-              <span className="fleet-hw-value">{formatUptime(gateway.latest_connected_at)}</span>
-            </div>
-            {gateway.runtime_access_label && (
-              <div
-                className="fleet-hw-row"
-                style={shellAccess.note ? { flexDirection: "column", alignItems: "stretch", gap: 4 } : undefined}
-              >
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%" }}>
-                  <span className="fleet-hw-label">Shell access</span>
-                  <span className="fleet-hw-value">
-                    {shellAccess.note ? (
-                      <StatusChip tone={shellAccess.tone} label={shellAccess.label} />
-                    ) : (
-                      shellAccess.label
-                    )}
-                  </span>
-                </div>
-                {shellAccess.note && (
-                  <span
-                    className="fleet-list-row-desc"
-                    style={{ whiteSpace: "normal", overflow: "visible", textOverflow: "clip" }}
-                  >
-                    {shellAccess.note}
-                  </span>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-
-      <div className="fleet-hw-dash-band">
-        <div className="fleet-hw-dash-panel">
-          <div className="fleet-detail-section-title" style={{ marginTop: 0 }}>Channels through this box</div>
-          <ChannelTransportBanner
-            openclawStatus={byId.get("openclaw")?.status as ProbeStatus}
-            pluginsStatus={byId.get("openclaw_channel_plugins")?.status as ProbeStatus}
-            gatewayId={targetGatewayId}
-            workspaceId={workspaceId}
-            setupAgentId={setupAgentId}
-            refresh={refresh}
-          />
-          {channelKeys.length === 0 ? (
-            <div className="fleet-hw-dash-empty">
-              <div className="fleet-hw-dash-empty-title">No channels yet</div>
-              <div className="fleet-hw-dash-empty-desc">
-                Agents pinned to this computer aren&apos;t connected to a channel yet.
-              </div>
-            </div>
-          ) : (
+          {channelKeys.length > 0 ? (
             <div className="fleet-hw-dash-channels">
               {channelKeys.map((key) => (
                 <span className="fleet-hw-dash-channel-pill" key={key}>
@@ -2192,119 +2209,40 @@ export default function GatewayDetailPage() {
                 </span>
               ))}
             </div>
-          )}
+          ) : null}
         </div>
 
         <div className="fleet-hw-dash-panel">
-          {/* Split from the old flat "Capabilities" list, which mixed
-              actionable installable tools with read-only detected services
-              in one list — "Not detected" sitting right next to Install
-              buttons read as a broken control, not an observation. These
-              are now two distinct sections with two distinct visual
-              treatments: real actions with real per-item state below, vs.
-              a plain status readout further down. */}
-          <div className="fleet-detail-section-title" style={{ marginTop: 0 }}>AI coding tools</div>
-          <p className="fleet-tab-subtitle" style={{ margin: "0 0 10px" }}>
-            Install a coding CLI on this computer, then sign it in — signing in is what actually lets an
-            agent use it.
-          </p>
+          {/* NAMED APART FROM CHANNELS, DELIBERATELY. This is the one
+              process that makes the computer reachable by Empyralis at all.
+              The channel transport is a different program running beside
+              it, and it lives up in the capability list under "Channels" —
+              the two used to blur into one another here. */}
+          <div className="fleet-detail-section-title" style={{ marginTop: 0 }}>Connection to Empyralis</div>
           <div className="fleet-hw-card">
-            {INSTALLABLE_TOOL_ORDER.map((id) => {
-              const runtime = CLI_ROW_RUNTIME[id];
-              const state = gatewayRuntimeState(gateway, runtime);
-              // A CLI row with state==="ready" collapses to nothing extra —
-              // the CliSetupControl returns null and we render just the
-              // label + status chip like every other row.
-              if (state === "ready") {
-                return (
-                  <div className="fleet-hw-row" key={id}>
-                    <span className="fleet-hw-label">{CAPABILITY_LABEL[id]}</span>
-                    <span className="fleet-hw-value">
-                      <StatusChip tone={runtimeStateTone(state)} label={runtimeStateLabel(state)} />
-                    </span>
-                  </div>
-                );
-              }
-              // CliSetupControl now OWNS the row layout for missing /
-              // unauthenticated states — label, status chip, primary action
-              // button all sit on ONE flex row, with the expansion area
-              // (chooser / URL+code / input / error) rendered below only
-              // when non-empty. See the memo at
-              // https://claude.ai/code/artifact/d3280431-5697-49e7-89bc-cad15f013af2
-              return (
-                <div
-                  className="fleet-hw-row"
-                  key={id}
-                  style={{ flexDirection: "column", alignItems: "stretch", justifyContent: "flex-start", gap: 4 }}
-                >
-                  <CliSetupControl
-                    runtime={runtime}
-                    state={state}
-                    gatewayId={targetGatewayId}
-                    workspaceId={workspaceId}
-                    refresh={refresh}
-                    isCloud={isCloud}
-                    installQueue={installQueue}
-                  />
-                </div>
-              );
-            })}
-          </div>
-
-          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
-            <div className="fleet-detail-section-title">Detected on this machine</div>
-            {/* Nothing on this page polls for Docker/Ollama/etc. changing —
-                the gateway probes them roughly once a minute and reports on
-                its next heartbeat, but this list only reflects that once
-                registrations are re-fetched. A manual check is the honest
-                "is it ready NOW" affordance (the whole point of this
-                section existing in Settings at all) without inventing an
-                auto-poll loop this page doesn't otherwise have. */}
-            <button
-              type="button"
-              className="fleet-btn"
-              style={{ padding: "4px 10px", fontSize: 12, flexShrink: 0 }}
-              onClick={() => void refresh()}
-            >
-              Refresh
-            </button>
-          </div>
-          <p className="fleet-tab-subtitle" style={{ margin: "0 0 10px" }}>
-            Read-only — background services this computer already has. Nothing to install here.
-          </p>
-          <div className="fleet-hw-card">
-            {DETECTED_SERVICE_ORDER.map((id) => {
-              const item = byId.get(id);
-              const presentation = serviceItemPresentation(id, item, resources);
-              return (
-                <div
-                  className="fleet-hw-row"
-                  key={id}
-                  style={presentation.reason ? { flexDirection: "column", alignItems: "stretch", gap: 4 } : undefined}
-                >
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%" }}>
-                    <span className="fleet-hw-label" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                      {SERVICE_ICON[id]}
-                      {CAPABILITY_LABEL[id]}
-                    </span>
-                    <StatusChip tone={presentation.tone} label={presentation.label} />
-                  </div>
-                  {presentation.reason && (
-                    <span
-                      className="fleet-list-row-desc"
-                      style={{ whiteSpace: "normal", overflow: "visible", textOverflow: "clip" }}
-                    >
-                      {presentation.reason}
-                    </span>
-                  )}
-                </div>
-              );
-            })}
+            <GatewaySelfUpdateControl gateway={gateway} gatewayId={targetGatewayId} workspaceId={workspaceId} refresh={refresh} />
+            <GatewayRestartControl gatewayId={targetGatewayId} workspaceId={workspaceId} />
+            <div className="fleet-hw-row">
+              <span className="fleet-hw-label">Last check-in</span>
+              <span className="fleet-hw-value">
+                {typeof heartbeatAge === "number"
+                  ? heartbeatAge < 60 ? `${heartbeatAge}s ago` : timeAgo(gateway.last_heartbeat_at)
+                  : gateway.last_heartbeat_at ? timeAgo(gateway.last_heartbeat_at) : "—"}
+              </span>
+            </div>
+            <div className="fleet-hw-row">
+              <span className="fleet-hw-label">Connected for</span>
+              <span className="fleet-hw-value">{formatUptime(gateway.latest_connected_at)}</span>
+            </div>
+            {gateway.runtime_access_label && (
+              <div className="fleet-hw-row">
+                <span className="fleet-hw-label">What agents may touch</span>
+                <span className="fleet-hw-value">{shellAccess.label}</span>
+              </div>
+            )}
           </div>
         </div>
       </div>
-
-      <GatewayDoctorControl gatewayId={targetGatewayId} workspaceId={workspaceId} />
 
       {canDestroy && (
         <>

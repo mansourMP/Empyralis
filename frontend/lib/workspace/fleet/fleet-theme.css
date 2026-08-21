@@ -7093,70 +7093,47 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
    present metrics reflow instead of stretching into awkward whitespace.
    Only a metric this box actually reported gets a card (see
    buildGaugeCards in page.tsx) — never an empty/fake gauge. */
-.fleet-hw-dash-gauges {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-  gap: var(--space-3);
-  margin-bottom: var(--space-6);
-}
-.fleet-hw-dash-gauge {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-4);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-  background: var(--bg-card);
-  min-width: 0;
-}
-.fleet-hw-dash-gauge-head {
+/* The health line — the detail page's FIRST answer, and on a healthy box
+   its only one. Replaced a four-card gauge grid (CPU/GPU/Memory/Temp) that
+   sat second on the page: GPU and temperature were best-effort readings
+   nobody had verified, and even the two that ARE verified (CPU, memory) are
+   a detail about a working computer rather than the answer to "is it
+   working". Both survive here as two quiet chips on the same line. */
+.fleet-hw-dash-health {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  font-weight: var(--weight-medium);
-
-  color: var(--text-muted);
-}
-.fleet-hw-dash-gauge-head svg { flex-shrink: 0; }
-.fleet-hw-dash-gauge-value {
-  font-size: 20px;
-  font-weight: var(--weight-semibold);
-  color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.fleet-hw-dash-gauge-bar {
-  display: block;
-  height: 4px;
-  border-radius: 999px;
-  background: var(--bg-inset);
-  overflow: hidden;
-}
-.fleet-hw-dash-gauge-bar-fill {
-  display: block;
-  height: 100%;
-  border-radius: 999px;
-  background: var(--online-text);
-  transition: width var(--dur-3) var(--ease-out);
-}
-.fleet-hw-dash-gauge-bar-fill--warn { background: var(--warning-text); }
-.fleet-hw-dash-gauge-bar-fill--danger { background: var(--offline-text); }
-
-/* Honest fallback when the gateway hasn't reported `resources` at all yet
-   (older build, or hasn't heartbeated with the field yet) — one subtle
-   line instead of a grid of empty/fake gauges. */
-.fleet-hw-dash-gauges-empty {
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin: var(--space-4) 0 var(--space-5);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg-card);
   font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+.fleet-hw-dash-health-ok { color: var(--text-secondary); }
+.fleet-hw-dash-health-caveat {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--text-primary);
+  min-width: 0;
+}
+.fleet-hw-dash-health-caveat svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--warning-text);
+}
+.fleet-hw-dash-health-metrics {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-shrink: 0;
   color: var(--text-muted);
-  padding: var(--space-2) 0 var(--space-3);
-  margin-bottom: var(--space-3);
 }
 
-/* Two-column dashboard bands (Agents|Gateway, then Channels|Capabilities).
-   Left column wider — the founder called the Agents panel the crucial one.
-   Collapses to one column under 900px so neither panel gets crushed. */
 .fleet-hw-dash-band {
   display: grid;
   grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
@@ -7464,6 +7441,30 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
 .fleet-provider-card:disabled {
   cursor: default;
   opacity: 0.55;
+}
+/* An option that cannot be completed today — AWS while it is deliberately
+   unwired, or a cloud provider whose own setup is not switched on for this
+   deployment. Rendered as an inert CARD, never a <button disabled>: a
+   disabled control still reads as something that ought to work and doesn't,
+   while a card that simply is not a control reads as what it is. Quieter
+   than a live card, but never faded to the point of looking broken — it
+   carries a real sentence a person is meant to read. */
+.fleet-provider-card--inert {
+  cursor: default;
+  background: var(--bg-inset);
+  border-style: dashed;
+}
+.fleet-provider-card--inert .fleet-provider-card-title,
+.fleet-provider-card--inert .fleet-provider-card-desc {
+  color: var(--text-muted);
+}
+.fleet-provider-card--inert .fleet-provider-card-logo,
+.fleet-provider-card--inert > .fleet-provider-card-top > svg {
+  opacity: 0.5;
+}
+.fleet-provider-card--inert .fleet-provider-card-desc {
+  white-space: normal;
+  line-height: var(--leading-normal);
 }
 .fleet-provider-card-top {
   display: flex;
