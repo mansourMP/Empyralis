@@ -422,6 +422,11 @@ export class GatewayWsClient {
           // that cannot receive one, and puts the one-line operator fix on
           // the Hardware page, which is the only place a human will see it.
           gateway_launch_updatability: runtimeMetadata.launchUpdatability,
+          // Which of the two update paths this box is on. A desktop box's
+          // gateway is replaced by an app update, so the backend must refuse
+          // to advertise a gateway self-update here — it would succeed and
+          // change nothing, which is the exact loop MAN-331 exists to stop.
+          gateway_desktop_managed: runtimeMetadata.desktopManaged,
           device_metadata: runtimeMetadata.deviceMetadata,
           requested_capabilities: runtimeMetadata.requestedCapabilities,
           journal_cursor: await this.journal.lastCursor(),

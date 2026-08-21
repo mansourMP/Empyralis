@@ -3500,6 +3500,91 @@ and the shared pool is still never auto-injected with a per-person block
 (the private note stays pull-based via `memory_get_private`, unchanged from
 2026-08-12's own deliberate scoping).
 
+## The desktop app updates itself, automatically (2026-08-22)
+
+**Founder: *"this icon must have upgraded button once we push something it
+must reload! nobody is going to press this button to reload... It must
+actually work!"* So there is no button. There is a loop.** A tray row appears
+only when there is something true to say and is pressable only when pressing
+it makes the same automatic update happen SOONER.
+
+```
+90s after launch, then every 6h   check -> download -> stop gateway -> install -> relaunch
+6h is a deliberate bound on staleness: this is a menu-bar accessory that is
+never quit, so "on launch" alone leaves a box on a month-old build. 1h is
+24 pointless requests a day; 24h means a morning fix lands tomorrow, which
+is the complaint this answers.
+```
+
+**THE UPDATER SIGNING KEY IS NOT APPLE CODESIGNING and the two are unrelated.**
+It is minisign, free, and it proves to an already-installed app that an update
+came from us.
+
+```
+private   ~/.empyralis-desktop-updater/empyralis-desktop-updater.key   (0600, NEVER committed)
+public    src-tauri/tauri.conf.json plugins.updater.pubkey             (committed, safe)
+CI secret TAURI_SIGNING_PRIVATE_KEY = the private file's contents
+          NO passphrase, deliberately: the passphrase would live in GitHub
+          Secrets beside the key it protects, which is zero added security
+          and one more thing to lose. Losing the private key strands every
+          installed copy — they can no longer verify any update.
+```
+
+**GITHUB RELEASES CANNOT SERVE THIS FEED, and the old workflow pointed at it.**
+The repo is PRIVATE, so `github.com/<owner>/<repo>/releases/latest/download/
+latest.json` is a 404 to every unauthenticated client — which is every copy of
+the app. Same structurally-dead shape as the `raw.githubusercontent.com`
+fallback this file already records. The feed lives on the R2 bucket +
+`empyralis.ai/releases/*` route the gateway artifacts have used since MAN-122:
+`https://empyralis.ai/releases/desktop/latest/latest.json`.
+
+**The version is DERIVED (`0.1.<git rev-list --count HEAD>`), never authored.**
+`tauri.conf.json` shipped the literal `0.1.0` and had never been bumped —
+`GATEWAY_VERSION` all over again, and the same consequence: "it updated" and
+"it did nothing" produce the identical `current_version`. MAN-331's law
+applied to the app. A shallow CI checkout counts 1 and would freeze it again,
+so `fetch-depth: 0` is load-bearing.
+
+**Three things only running it reveals:**
+- **A non-https updater endpoint PANICS the app at startup**, before any
+  window. Not a failed check — a dead app. `dangerousInsecureTransport
+  Protocol` exists for a local proof feed and must never reach `tauri.conf.json`.
+- **UNSIGNED + quarantined = macOS App Translocation**, i.e. the app runs
+  read-only from `/private/var/folders/.../AppTranslocation/` and CANNOT
+  replace itself. This is the DEFAULT state of a freshly downloaded copy while
+  the app ships unsigned, not an edge case. Detected and reported
+  (`desktop_update::UpdateSite::Translocated`); the one action is to move it
+  into /Applications.
+- **Only ONE Empyralis.app can run per Mac, and it is matched by BINARY NAME
+  across every bundle** (`existing_desktop_process`). A second copy focuses the
+  first and exits. So two copies cannot be tested side by side, and a stale
+  build-output copy blocks an installed one.
+
+**THE FOUNDER'S OWN MAC CANNOT UPDATE, and the one action is to move the app.**
+`~/Library/LaunchAgents/ai.empyralis.agent-computer.plist` points at
+`/Users/mansur/empyralis/src-tauri/target/release/bundle/macos/Empyralis.app/
+...` — a build output, so an "update" is overwritten by the next `cargo tauri
+build`. Drag `Empyralis.app` into /Applications and open it from there, once;
+the app rewrites the login item at its own path on launch. Until then it
+reports `cannot_update` rather than pretending.
+
+**A desktop box's GATEWAY is updated BY THE APP, never by gateway self-update.**
+It ships inside `Contents/Resources/gateway/dist`, so a self-update would
+stage into `gateway-releases`, report success, and the next start would run
+the same bundled build — MAN-331 exactly. The gateway reports
+`gateway_desktop_managed` on connect and the backend refuses with
+`desktop_app_manages_gateway`, checked AHEAD of `launch_path_not_updatable`
+(which is true of these boxes but answers the wrong question, and would put
+launchctl commands in front of someone whose machine is fine).
+
+**The macOS login item now carries the app's own state dir and API URL.** It
+carried NEITHER, so the gateway launchd started at login fell back to
+`~/.empyralis/gateway` and `http://127.0.0.1:8001/api` and could never
+register — the Agent Computer only ever worked while the app was open. Supplied
+ONLY on the desktop path: a systemd unit at `/etc/systemd/system` is one the
+service user cannot write, so changing every VPS box's expected unit contents
+would make the fleet report drift it can never repair.
+
 ## Testing the UI
 
 **Seed your own data. Never ask for the founder's account, and never copy secrets.**

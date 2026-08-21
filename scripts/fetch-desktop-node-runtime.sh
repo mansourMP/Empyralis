@@ -67,4 +67,35 @@ tar "$TAR_FLAG" "${TMPDIR:-/tmp}/$TARBALL" -C "$DEST" --strip-components=1
 git checkout -- "$DEST/.gitignore" "$DEST/bin/README.placeholder" 2>/dev/null || true
 
 test -x "$DEST/bin/node"
+
+# Re-sign the bundled Node under OUR identifier on macOS.
+#
+# WHY: the login item runs this binary directly, and macOS attributes
+# background activity by the SIGNATURE of the executable it launched. The
+# runtime ships signed "Developer ID Application: Node.js Foundation", so the
+# customer's own Mac told them:
+#
+#   "Software from 'Node.js Foundation' can run in the background."
+#
+# about a product they installed from us. The founder's reaction was the
+# correct one — nothing on that notice names the thing they actually chose to
+# run, so it reads as something that arrived uninvited.
+#
+# An ad-hoc signature costs nothing and needs no Apple account, which is why
+# this is done now rather than parked behind the paid certificate. It
+# REPLACES a valid Developer ID with an ad-hoc one, which is a real trade:
+# Node's own provenance is no longer verifiable from this copy. That is the
+# right trade for a runtime we fetched at a pinned version, over a checksum,
+# and then bundled inside our own app — the app is what the customer is
+# trusting, and the app should be what the system names.
+#
+# Non-macOS is skipped rather than failed: codesign does not exist there and
+# no other platform attributes background items this way.
+if [ "$PLATFORM" = "darwin" ] && command -v codesign >/dev/null 2>&1; then
+  codesign --force --sign - --identifier ai.empyralis.agent-computer "$DEST/bin/node"
+  # A binary that will not run is worse than a misattributed one, and
+  # re-signing is exactly the step that could produce one.
+  "$DEST/bin/node" --version >/dev/null
+fi
+
 echo "Bundled Node runtime ready: $("$DEST/bin/node" --version) (${PLATFORM}-${ARCH})"
