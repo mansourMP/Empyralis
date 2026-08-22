@@ -23,6 +23,7 @@ import {
 import { logout } from "@/lib/auth/auth-client";
 import { useAccountShell } from "@/lib/shell/account-shell-context";
 import { useRevealedEmail } from "@/lib/shell/use-revealed-email";
+import { groupTasksByAgent, planAgentCardFace } from "./agent-card-face";
 import { getInboxLastSeenAt, useFleetAgents, useFleetNotifications, useFleetProjects, useFleetWorkspace, useFleetWorkspaceTasks, useWorkspaceActivity } from "./fleet-data";
 import { deriveStatus, findSageAgent } from "./fleet-presentation";
 import { ProjectIcon } from "./fleet-project-identity";
@@ -405,16 +406,38 @@ export function PrimaryRail({
   const activeProjectId = useMemo(() => activeProjectIdFromPathname(pathname), [pathname]);
   const segment = useSelectedLayoutSegment();
 
-  // Footer pulse — the exact same status tones the Agents table itself
-  // derives from, and the same workspace-usage fetch every other "spend
-  // today" figure in this UI already reads (see agents/page.tsx) — no new
-  // endpoint, no new meaning for "today".
-  const statusTones = useMemo(
-    () => agents.map((a) => deriveStatus(a.hardware_status || "unknown", Boolean(a.stopped?.active), Boolean(a.current_run_id)).tone),
-    [agents],
-  );
-  const workingCount = statusTones.filter((t) => t === "working").length;
-  const stoppedCount = statusTones.filter((t) => t === "stopped").length;
+  // Footer pulse — the exact same state the Agents surface's own cards derive,
+  // and the same workspace-usage fetch every other "spend today" figure in
+  // this UI already reads (see agents/page.tsx) — no new endpoint, no new
+  // meaning for "today".
+  //
+  // "WORKING" HAS ONE DEFINITION IN THIS PRODUCT, AND IT LIVES IN
+  // agent-card-face.ts. This used to count `current_run_id` alone, which is
+  // truthful but de-facto always null (see that module's header), so the
+  // footer read "0 working" permanently — and once the Agents cards started
+  // counting an assigned task in progress as working too, the two surfaces
+  // said different things about the same fleet ON THE SAME SCREEN. The tasks
+  // are already in hand here (workspaceTasks, one line up, off the same shared
+  // cache the cards read), so this is a reuse rather than a second fetch.
+  //
+  // The status handed in is deriveStatus, not deriveAgentStatus: the rail does
+  // not fetch the paired-box list, so a brain-blocked agent still counts as
+  // ready here while its own card says "Needs sign-in". That gap is narrower
+  // than the one being closed and is left rather than papered over — this
+  // footer is a two-number pulse, not a status table.
+  const cardStatesByAgent = useMemo(() => {
+    const byAgent = groupTasksByAgent(workspaceTasks);
+    return agents.map(
+      (a) =>
+        planAgentCardFace(
+          a,
+          deriveStatus(a.hardware_status || "unknown", Boolean(a.stopped?.active), Boolean(a.current_run_id)),
+          byAgent.get(a.agent_id) || [],
+        ).state,
+    );
+  }, [agents, workspaceTasks]);
+  const workingCount = cardStatesByAgent.filter((s) => s === "working").length;
+  const stoppedCount = cardStatesByAgent.filter((s) => s === "stopped").length;
   const [spendToday, setSpendToday] = useState(0);
   useEffect(() => {
     let cancelled = false;

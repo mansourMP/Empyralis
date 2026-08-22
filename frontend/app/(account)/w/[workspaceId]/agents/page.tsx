@@ -3,38 +3,57 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 
-import { resolveAgentProjectId, useFleetAgents, useFleetProjects } from "@/lib/workspace/fleet/fleet-data";
+import {
+  resolveAgentProjectId,
+  useFleetAgents,
+  useFleetProjects,
+  useFleetWorkspaceTasks,
+} from "@/lib/workspace/fleet/fleet-data";
+import { useWorkspaceGateways } from "@/lib/workspace/fleet/gateway-box-picker";
 import { breadcrumbCount, findSageAgent } from "@/lib/workspace/fleet/fleet-presentation";
 import { quickCreateAgentChatPath } from "@/lib/workspace/fleet/agent-quick-create";
 import { AgentCreateCard } from "@/lib/workspace/fleet/AgentCreateCard";
+import { AgentCards, AgentCardsSkeleton } from "@/lib/workspace/fleet/AgentCards";
 import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
-import { FleetListSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
+import { FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import { HeaderAction, useBreadcrumbBadge } from "@/lib/workspace/fleet/Breadcrumbs";
 import { planAgentCountShape } from "@/lib/workspace/fleet/agent-count-shape";
 import { createButtonClass } from "@/lib/workspace/fleet/create-accent";
 
 /**
- * The bare workspace /agents index. Its own job shrank sharply in the
- * 2026-08-20 redesign (see agents-conversation-list.ts's header): the
- * agent-picking surface for 2+ agents now lives in the persistent list
- * pane agents/layout.tsx renders beside this page, not here — so this
- * component only ever needs to answer three questions: is the workspace
- * still loading, does it have zero real agents (FirstAgentEmpty), or
- * exactly one (redirect straight into it, a list of one is worse than no
- * list). At 2+ agents this renders a quiet "pick a conversation" prompt —
- * the list pane beside it already IS the picker.
+ * The workspace Agents surface.
  *
- * The board/grouped-list/filter/sort/properties-drawer surfaces that used
- * to live here (AgentsBoard, AgentsGroupedList, AgentViewOptions,
- * FleetToolbar's filters, FleetRightPanel) are NOT deleted — they were
- * already unreachable before this change (the prior "workspace-agents
- * rail space" gate hid them at the exact same 2+ threshold this file still
- * uses, so nobody could ever see them with a real fleet) — but they are no
- * longer imported here. See AgentsList.tsx/AgentsBoard.tsx/
- * AgentsGroupedList.tsx/AgentViewOptions.tsx, now orphaned rather than
- * wired to any route; reviving fleet-wide management views (sort by cost,
- * group by project, a board) is a real, separate product decision, not
- * something to half-restore as a side effect of this redesign.
+ * WHAT CHANGED HERE AND WHY. This page used to render one sentence — "Pick an
+ * agent to watch it work." — beside a persistent picker column that
+ * agents/layout.tsx mounted (AgentConversationList). That arrangement is
+ * deleted, layout and column both, for two independent reasons and either
+ * alone would be enough:
+ *
+ *   1. The column existed because you used to CHAT with an agent in the pane
+ *      beside it. Chat left the platform entirely (CLAUDE.md, "THE PLATFORM IS
+ *      NOT A CHAT PRODUCT" — conversation happens in channels). What was left
+ *      was a Telegram-shaped contact list for agents nobody can talk to.
+ *   2. The primary rail already says "Agents". A pick-list in the content area
+ *      beside it is a SECOND picker, which is the one thing "the rail is where
+ *      you pick; the content is what you picked" rules out.
+ *
+ * The content area now shows the agents themselves, the way the workspace's
+ * other first-class things are shown — the founder's own framing: *"maybe just
+ * like as we show this project we would show also the agents as well."* Each
+ * face carries the two facts that separate one agent from another (see
+ * agent-card-face.ts), never the lifecycle verb that was there before —
+ * "Created" is true of all nineteen of them and therefore says nothing.
+ *
+ * The agent's own routed page (agents/[agentId]/[tab]) is UNTOUCHED and still
+ * carries every tab it had. It simply renders full width now, exactly as its
+ * project-scoped twin at .../projects/{pid}/agents/{id}/{tab} already does —
+ * that route has never had a layout of its own, so this is a configuration
+ * already proven in production rather than a new one.
+ *
+ * The count-decided shapes are unchanged and still come from
+ * planAgentCountShape, never a second rule: 0 real agents -> FirstAgentEmpty,
+ * exactly 1 -> straight into that agent (a grid of one is worse than no grid,
+ * the same call this codebase makes for a table of one), 2+ -> the grid.
  */
 export default function AgentsPage() {
   const params = useParams();
@@ -44,10 +63,18 @@ export default function AgentsPage() {
 
   const { agents: allAgents, loading, error, refresh } = useFleetAgents(workspaceId);
   const { projects } = useFleetProjects(workspaceId);
+  // The whole workspace's tasks in ONE call, off the shared polled cache
+  // PrimaryRail/Inbox/My work already subscribe to — so a card can say which
+  // task an agent is on at zero extra network cost. See fleet-data.ts's
+  // sharedResourceCache: same key, one fetch, one interval.
+  const { tasks } = useFleetWorkspaceTasks(workspaceId);
+  // Paired boxes, so deriveAgentStatus can report the HONEST status of a
+  // brain-bound agent ("Needs sign-in", "Computer offline") instead of the
+  // "Ready" a bare heartbeat check would give it.
+  const { gateways } = useWorkspaceGateways(workspaceId);
 
-  // Sage is the Operator, not a listed worker — it never appears as a row
-  // here (contract). Same root cause as its own detail page: Sage isn't a
-  // specialist agent, so it's excluded from every agent-list surface.
+  // Sage is the Operator, not a listed worker — it never appears as a card
+  // here (contract). Same exclusion every other agent-list surface applies.
   const sageAgent = useMemo(() => findSageAgent(allAgents), [allAgents]);
   const agents = useMemo(
     () => (sageAgent ? allAgents.filter((a) => a.agent_id !== sageAgent.agent_id) : allAgents),
@@ -64,14 +91,12 @@ export default function AgentsPage() {
     ),
   );
 
-  // MAN-317 — "the fleet table has one row. Decide what replaces it": with
-  // exactly one real agent, THIS surface redirects straight to that
-  // agent's own chat page — a table of one is worse than no table, whether
-  // a reader lands here via the rail, a bookmark, or a direct URL. The
-  // workspace root does NOT do this (CLAUDE.md's own correction on this
-  // point): it always lands on Projects regardless of agent count.
-  // Reversible for free: recomputed from the live count on every render,
-  // so a second real agent appearing simply stops the redirect. Guarded on
+  // MAN-317 — with exactly one real agent, THIS surface goes straight to that
+  // agent, whether a reader lands here via the rail, a bookmark, or a direct
+  // URL. The workspace root does NOT do this (CLAUDE.md's own correction on
+  // this point): it always lands on Projects regardless of agent count.
+  // Reversible for free: recomputed from the live count on every render, so a
+  // second real agent appearing simply stops the redirect. Guarded on
   // `!loading` so the transient agents.length===0 during the initial fetch
   // never fires a bogus redirect.
   const agentCountMode = useMemo(() => planAgentCountShape(agents.length), [agents.length]);
@@ -81,16 +106,14 @@ export default function AgentsPage() {
     const pid = resolveAgentProjectId(soloAgent.project_id, projects);
     return pid ? `${base}/projects/${encodeURIComponent(pid)}/agents/${encodeURIComponent(soloAgent.agent_id)}/chat` : null;
   }, [soloAgent, projects, base]);
-  // ?new=1 is the command palette's "New agent" target, and the list
-  // pane's own "+" button (AgentConversationList.tsx) — it must still
-  // create a new agent on a workspace that already has exactly one, not
-  // bounce away to that existing one before the create-and-navigate effect
-  // below ever runs. Read once, synchronously, at mount (matching
-  // consumedNew's own one-shot style further down): the query is stripped
-  // from the URL within the same render pass the create kicks off in, so
-  // re-deriving this from the live URL on every render would start
-  // redirecting again the instant the param is gone — before the async
-  // create has finished and pushed its own destination.
+  // ?new=1 is the command palette's "New agent" target — it must still create
+  // a new agent on a workspace that already has exactly one, not bounce away
+  // to that existing one before the create-and-navigate effect below ever
+  // runs. Read once, synchronously, at mount (matching consumedNew's own
+  // one-shot style further down): the query is stripped from the URL within
+  // the same render pass the create kicks off in, so re-deriving this from the
+  // live URL on every render would start redirecting again the instant the
+  // param is gone — before the async create has finished.
   const [suppressSoloRedirect] = useState<boolean>(
     () => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("new") === "1",
   );
@@ -132,8 +155,6 @@ export default function AgentsPage() {
   // commits, so it stays quiet instead of flashing the page chrome first.
   // If the project can't resolve, soloHref stays null and this falls
   // through to the ordinary render below rather than a dead screen.
-  // Suppressed by ?new=1 (see suppressSoloRedirect above) so a fresh
-  // create can still land on a one-agent workspace.
   if (!loading && soloHref && !suppressSoloRedirect) {
     return (
       <main className="fleet-page-state">
@@ -143,20 +164,27 @@ export default function AgentsPage() {
   }
 
   return (
-    <main className="fleet-content">
-      {/* WHO OWNS THE VIEW'S ONE ACCENT FILL is decided by
-          create-accent.ts, not here — three controls can create an
-          agent and up to two are on screen at once. This button used to be
-          unconditionally filled (a brand-new workspace rendered it AND
-          FirstAgentEmpty's own centred CTA filled at the same time), which
-          was fixed 2026-08-13 by a hand-inlined ternary; that ternary was
-          still blind to the THIRD case, so opening AgentCreateCard left this
-          filled behind the card's own filled "Create agent" — the exact
-          violation of "two accent-filled buttons in one view is a bug" that
-          the comment sitting here used to quote. At 2+ agents this still
-          portals into the shell topbar, which stays visible for the bare
-          index (only an agent's own tab pages suppress it — see
-          FleetContentFrame.tsx's WORKSPACE_AGENT_DETAIL_ROUTE). */}
+    // --wide, not the plain reading column, and it is load-bearing rather
+    // than a taste call. fleet-theme.css's own comment on this modifier spells
+    // out the trap: .fleet-content is a flex ITEM of .fleet-shell-scroll, so
+    // its margin-inline:auto is a pair of CROSS-AXIS auto margins, which per
+    // the flexbox spec disable stretch and absorb the leftover space
+    // themselves — the box then sizes to its content's shrink-to-fit width,
+    // and a `repeat(auto-fill, …)` grid inside it cannot compute a real column
+    // count against an indefinite inline size, so it collapses to ONE column
+    // and compounds the narrowing. Measured live before this modifier was
+    // added: 18 cards in a single 310px column, centred, with ~600px of dead
+    // space either side — the exact screen CLAUDE.md records the founder
+    // rejecting outright on the old workspace home. --wide zeroes the inline
+    // margins so the item stretches, and the 1140px cap becomes a real ceiling
+    // rather than a target never reached.
+    <main className="fleet-content fleet-content--wide">
+      {/* WHO OWNS THE VIEW'S ONE ACCENT FILL is decided by create-accent.ts,
+          not here — three controls can create an agent and up to two are on
+          screen at once (this header button, FirstAgentEmpty's own centred
+          CTA, and AgentCreateCard's "Create agent" once the card is open).
+          The grid below spends no accent at all, which is what lets this
+          stay the single filled control in the view. */}
       <HeaderAction>
         <button
           type="button"
@@ -170,7 +198,10 @@ export default function AgentsPage() {
 
       <div className="fleet-content-main">
         {loading && agents.length === 0 ? (
-          <FleetListSkeleton rows={6} rowHeight={52} />
+          // A card-grid skeleton, not the old row skeleton: a loading state
+          // whose shape is not the shape that arrives is its own small lie,
+          // and it reflows the whole pane the moment real data lands.
+          <AgentCardsSkeleton cards={6} />
         ) : error && agents.length === 0 ? (
           <FleetSurfaceError title="Couldn’t load agents" message={error} onRetry={refresh} />
         ) : agents.length === 0 ? (
@@ -181,13 +212,7 @@ export default function AgentsPage() {
             createCardOpen={cardOpen}
           />
         ) : (
-          // 2+ agents: agents/layout.tsx's own list pane (beside this pane,
-          // not stacked above or inside it) is the browse surface now —
-          // this pane just prompts a pick, same shell and same class as
-          // the project-agents space's own placeholder
-          // (fleet-theme.css's .fleet-project-agents-placeholder — an
-          // identical shape, reused rather than a second rule).
-          <div className="fleet-project-agents-placeholder">Pick an agent to watch it work.</div>
+          <AgentCards workspaceId={workspaceId} agents={agents} tasks={tasks} gateways={gateways} />
         )}
       </div>
 
