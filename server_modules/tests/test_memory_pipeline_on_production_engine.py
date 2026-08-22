@@ -4,7 +4,7 @@ CLAUDE.md carried a note saying `persist_direct_chat_memory_best_effort` had
 "zero callers outside its own module", and concluded the memory pipeline
 never ran on the SDK/action-loop engine (the production default). Half of
 that was stale by 2026-08-20: a real chain exists
-(sage_agent_runtime_service -> conversation_memory_facade_service.
+(agent_turn_runtime_service -> conversation_memory_facade_service.
 persist_interaction -> memory_service). The CONCLUSION was still right, for
 a different and worse reason -- every branch behind that chain was gated on
 metadata flags (`persist_memory` / `persist_transcript`) that only the
@@ -16,7 +16,7 @@ These tests pin the corrected behaviour, and are written so that the
 STALENESS itself cannot come back silently:
 
   * The production call site's metadata is not hand-written here. It is read
-    out of sage_agent_runtime_service.py's own source with AST, so the day
+    out of agent_turn_runtime_service.py's own source with AST, so the day
     somebody changes what that call site passes, these tests are exercising
     the new shape rather than a fixture's memory of the old one. (CLAUDE.md:
     "a fixture that invents its own input cannot notice the real input is
@@ -38,11 +38,11 @@ from server_modules import conversation_memory_facade_service as facade
 from server_modules import memory_service
 
 
-_SAGE_RUNTIME_PATH = pathlib.Path(__file__).resolve().parents[1] / "sage_agent_runtime_service.py"
+_SAGE_RUNTIME_PATH = pathlib.Path(__file__).resolve().parents[1] / "agent_turn_runtime_service.py"
 
 
 def _production_persist_metadata_keys() -> List[frozenset]:
-    """Every `persist_interaction(...)` call in sage_agent_runtime_service.py,
+    """Every `persist_interaction(...)` call in agent_turn_runtime_service.py,
     reduced to the literal key set of its `metadata=` argument.
 
     Read from the real module source rather than transcribed, so this test
@@ -71,7 +71,7 @@ class ProductionCallSiteShapeTests(unittest.TestCase):
         self.assertGreater(
             len(_production_persist_metadata_keys()),
             0,
-            "sage_agent_runtime_service no longer calls persist_interaction — "
+            "agent_turn_runtime_service no longer calls persist_interaction — "
             "the memory chain this file pins has moved or been deleted.",
         )
 

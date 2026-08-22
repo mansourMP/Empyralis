@@ -29,16 +29,16 @@ from server_modules import (
     response_leak_guard_service,
     sage_daily_operator_service,
     sage_instruction_compiler_service,
-    sage_heartbeat_service,
-    sage_memory_service,
-    sage_proof_log_service,
-    sage_profile_service,
+    assistant_health_service,
+    assistant_memory_service,
+    assistant_audit_log_service,
+    assistant_profile_service,
     secret_redaction_service,
     security_audit_service,
     # No longer called directly here (the old keyword-matched MCP bridge that
     # called skill_registry.execute_skill was removed — see the note above
     # _run_sage_action_loop_v3's route_decision block). Kept imported: some
-    # tests reach it via sage_agent_runtime_service.skill_registry (module
+    # tests reach it via agent_turn_runtime_service.skill_registry (module
     # attribute access), and skill_registry.execute_skill remains the real,
     # live executor for the goal-based /skills mcp:server:tool slash command.
     skill_registry,
@@ -82,14 +82,14 @@ from server_modules.agent_policy_context import (
     AgentTier,
     resolve_agent_tier,
 )
-from server_modules.sage_agent_runtime_contract import (
+from server_modules.agent_turn_runtime_contract import (
     SAGE_MODE,
     normalize_sage_mode,
     normalize_sage_surface,
     SageTurnResult,
 )
 from server_modules.skill_registry import list_skill_definitions
-from server_modules.sage_transparency_service import emit_sage_turn_transparency_events
+from server_modules.assistant_transparency_service import emit_sage_turn_transparency_events
 from server_modules.transparency_event_store_service import persist_transparency_events
 from server_modules.provider_profiles import PROVIDER_MODEL_CATALOG, _build_provider_credential_candidates
 from scripts.orion_local_worker_llm import resolve_requested_model
@@ -724,7 +724,7 @@ def resolve_model_for_capability(
 _SAGE_AI_SETUP_PATH = "/integrations?section=ai-runtime"
 
 # ── User-facing AI-stop messages (imported from the single source of truth) ──
-from server_modules.sage_command_dispatcher import (
+from server_modules.agent_command_dispatcher import (
     SAGE_AI_LIMIT_MESSAGE,
     SAGE_AI_NEEDS_ATTENTION_MESSAGE,
 )
@@ -850,7 +850,7 @@ async def _resolve_cloud_provider(
             )
         # Platform is configured but blocked (credits exhausted, policy, etc.)
         # Always lead with the stable `reason` code (e.g. "cap_reached"), not
-        # just the free-text `message` — sage_command_dispatcher.classify_error
+        # just the free-text `message` — agent_command_dispatcher.classify_error
         # keyword-matches on the raw error string, and message wording is
         # free to change (it already has once, see MAN entitlements copy
         # pass) without classify_error's bucket keywords being updated to
@@ -1061,7 +1061,7 @@ async def _resolve_agent_cloud_provider(
                 reason=f"platform_credits provider '{provider}' is unavailable or missing credentials.",
             )
             # "Heads up: " prefix (this file's established convention — see
-            # _friendly_cli_subscription_error's docstring and sage_command_
+            # _friendly_cli_subscription_error's docstring and agent_command_
             # dispatcher.classify_error's bucket-0 check) marks this as an
             # already-final, specific, platform-voice message so the
             # classifier passes it through untouched instead of keyword-
@@ -1114,7 +1114,7 @@ async def _resolve_agent_cloud_provider(
         # function, so that import silently shadowed the module-level names
         # for this entire function — including the platform_credits branch
         # above, which references them too (§29) — and defeated
-        # `patch("server_modules.sage_agent_runtime_service.
+        # `patch("server_modules.agent_turn_runtime_service.
         # direct_chat_credentials", ...)` in tests, which patches the
         # module-level binding this file's OTHER call sites (e.g.
         # _resolve_cloud_provider) already rely on being patchable that way.
@@ -2044,7 +2044,7 @@ async def set_persisted_model_preference(workspace_id: str, model: str, provider
 
 
 def _load_profile_context(*, workspace_id: str) -> str:
-    profile = sage_profile_service.list_sage_profile(workspace_id=workspace_id)
+    profile = assistant_profile_service.list_sage_profile(workspace_id=workspace_id)
     profile_data = profile.get("profile") if isinstance(profile.get("profile"), dict) else {}
 
     user_name = _coerce_text(profile_data.get("user_name"))
@@ -2123,7 +2123,7 @@ async def _load_context_layer_index(
 
 
 def _load_memory_context(*, workspace_id: str) -> str:
-    return sage_memory_service.build_sage_memory_context_block(
+    return assistant_memory_service.build_sage_memory_context_block(
         workspace_id=workspace_id,
         include_restricted=False,
     )
@@ -3683,9 +3683,9 @@ def _normalize_direct_action_approvals(final_payload: dict[str, Any]) -> list[di
 #
 # A same-day sibling fix (0cac7f2a7, merged as b54fe79b7) had moved this
 # classifier to a new leaf module, server_modules/sage_blocked_tools_
-# outcome.py, so sage_transparency_service.py's Work-tab/Inbox event
+# outcome.py, so assistant_transparency_service.py's Work-tab/Inbox event
 # emission could reuse it instead of growing its own copy of the
-# allowlist. That module is GONE too now (see sage_transparency_service.py
+# allowlist. That module is GONE too now (see assistant_transparency_service.py
 # — its blocked_tools handling collapsed to always emit "turn_failed",
 # the same reasoning as this file: the one condition the classifier
 # existed to detect, a real per-agent tool-policy code, can no longer
@@ -5454,7 +5454,7 @@ async def handle_sage_chat(**kwargs: Any) -> dict:
     adding a new branch. It was, twice: the BYO-brain ``local`` and
     ``cli_subscription`` branches each returned their gateway reply directly,
     hundreds of lines above the guard the cloud path runs, and
-    ``sage_turn_adapter.execute_sage_turn`` relays ``result["message"]``
+    ``agent_turn_adapter.execute_sage_turn`` relays ``result["message"]``
     verbatim to WhatsApp/Telegram/Signal/iMessage and the OpenClaw channels.
     Those are the worst two to miss: they are the turns that run on the
     owner's own machine, against their own local model or CLI subscription,
@@ -5552,7 +5552,7 @@ async def _resolve_channel_sender_class(
         #
         # Canonicalizing here rather than changing what the bridge passes:
         # `remote_jid` is also the personal-channel thread key
-        # (sage_turn_adapter's thread resolution, and the per-thread turn
+        # (agent_turn_adapter's thread resolution, and the per-thread turn
         # lock), so repointing it is a separate change with its own blast
         # radius. Fixing the COMPARISON is what this bug is.
         linked_by_channel = list_owner_linked_channel_identities_for_workspace(workspace_id)
@@ -5802,7 +5802,7 @@ async def _handle_sage_chat_unguarded(
     # resolution just above when no header is present (console/unwired
     # channels). See inbound_attribution_recovery.py's module docstring for
     # why this is recovered from text rather than threaded as the live
-    # InboundEnvelope object (sage_turn_adapter.py's handle_sage_chat call
+    # InboundEnvelope object (agent_turn_adapter.py's handle_sage_chat call
     # doesn't forward one, and that file is out of scope for this change).
     # Threaded into _run_sage_action_loop_v3's session_ctx below so
     # memory_write can stamp it on any fact this turn saves.
@@ -5884,7 +5884,7 @@ async def _handle_sage_chat_unguarded(
         used_context.append("attachments")
 
     try:
-        heartbeat_snapshot = await sage_heartbeat_service.build_sage_heartbeat_snapshot(
+        heartbeat_snapshot = await assistant_health_service.build_sage_heartbeat_snapshot(
             tenant_id=normalized_tenant_id,
             workspace_id=normalized_workspace_id,
         )
@@ -7083,7 +7083,7 @@ async def _handle_sage_chat_unguarded(
         proof_log_id = ""
         if proof_log_payload:
             try:
-                proof_record = sage_proof_log_service.append_proof_log(
+                proof_record = assistant_audit_log_service.append_proof_log(
                     tenant_id=normalized_tenant_id,
                     workspace_id=normalized_workspace_id,
                     actor_user_id=actor_user_id,
@@ -7454,7 +7454,7 @@ async def _handle_sage_chat_unguarded(
                         # SQLite-fallback prod for these turns (they never write
                         # there in the first place), and for a master/Sage
                         # channel turn thread_id is frequently a shared, UNSCOPED
-                        # value (e.g. "sage-main" — see sage_turn_adapter's
+                        # value (e.g. "sage-main" — see agent_turn_adapter's
                         # thread resolution) rather than one keyed to this
                         # specific remote_jid/conversation. Falling through to
                         # thread_service.get_thread(thread_id, ...) here would

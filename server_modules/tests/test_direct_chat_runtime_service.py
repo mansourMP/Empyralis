@@ -493,7 +493,7 @@ class DirectChatRuntimeServiceTests(unittest.TestCase):
         refusal, and the real generation path is reached.
 
         Proven by mocking the entitlement-gated provider resolver
-        (sage_agent_runtime_service._resolve_cloud_provider) — the first
+        (agent_turn_runtime_service._resolve_cloud_provider) — the first
         thing ANY real turn touches once past the slash-command block — to
         raise a distinctive error and asserting that error's payload comes
         back, rather than the registry's "isn't available" refusal. Only
@@ -506,7 +506,7 @@ class DirectChatRuntimeServiceTests(unittest.TestCase):
         services.prepare_direct_chat_request = lambda **kwargs: prepared
 
         with mock.patch(
-            "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+            "server_modules.agent_turn_runtime_service._resolve_cloud_provider",
             side_effect=RuntimeError("generation path reached"),
         ):
             events = list(

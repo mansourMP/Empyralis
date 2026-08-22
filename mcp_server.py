@@ -29,7 +29,7 @@ Read + chat (always live):
   - ``empyralis_list_agents`` → fleet_list_agents (+ project, channel, connector status)
   - ``empyralis_get_agent_activity`` → fleet_get_agent_activity
   - ``empyralis_get_agent_conversations`` → deployed_agent_service.list_deployed_agent_conversations
-  - ``empyralis_chat`` → sage_turn_adapter.execute_sage_turn, the same
+  - ``empyralis_chat`` → agent_turn_adapter.execute_sage_turn, the same
     chokepoint every real channel (web, Telegram, Discord, WhatsApp...)
     routes a turn through -- full turn, named agent, real reply or a real
     error (MAN-205)
@@ -705,7 +705,7 @@ if empyralist_mcp is not None:
     async def empyralis_chat(message: str, agent_id: str = "", ctx: Context = None) -> Dict[str, Any]:
         """Send a message to a platform agent and get its real reply.
 
-        Routes through ``sage_turn_adapter.execute_sage_turn`` -- the same
+        Routes through ``agent_turn_adapter.execute_sage_turn`` -- the same
         chokepoint every real channel (web console, Telegram, Discord,
         WhatsApp...) runs a turn through -- so this exercises the full turn:
         tools, hardware dispatch, memory, and the activity ledger. Never a
@@ -770,7 +770,7 @@ if empyralist_mcp is not None:
 
         import asyncio
 
-        from server_modules.sage_turn_adapter import execute_sage_turn
+        from server_modules.agent_turn_adapter import execute_sage_turn
         from server_modules.specialist_runtime_context import resolve_specialist_runtime_context
 
         try:
@@ -801,7 +801,7 @@ if empyralist_mcp is not None:
                     surface="chat",
                     # channel_origin is routing/audit metadata only (never
                     # reaches the prompt). channel_sender_id is deliberately
-                    # left unset: sage_agent_runtime_service.py defaults
+                    # left unset: agent_turn_runtime_service.py defaults
                     # sender_class to "owner" for web/API sessions exactly
                     # when no per-message sender id is given -- setting one
                     # here would downgrade this call to "audience" tool

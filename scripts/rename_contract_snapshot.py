@@ -24,6 +24,7 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 import tempfile
 from typing import Any, Iterable
@@ -64,13 +65,50 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+def _tracked_files(root: Path = ROOT) -> frozenset[Path]:
+    """Every git-TRACKED path under ``root``, resolved absolute.
+
+    The contract is a property of the REPOSITORY, not of one machine.  Before
+    this filter the walk below picked up anything on disk that merely had a
+    source suffix -- including git-ignored local build junk.  A real instance:
+    the primary checkout carries ``empyralis-gateway/dist.bak`` (ignored by
+    ``*.bak``), 167 stale compiled files, and the committed baseline was
+    captured with them in scope.  So the baseline pinned contract items that
+    exist in NO tracked file -- ``PHONE_CODE_EXPIRED``, ``AUTH_KEY_UNREGISTERED``
+    and the rest of the gramjs Telegram vocabulary this repo deleted -- and any
+    clean checkout reported a "changed" contract before a single line was
+    renamed.  One agent = one worktree here, so that is every agent doing this
+    work: the verifier failed on the exact tree the rename happens in.
+
+    A verifier that cries wolf is one people stop reading, so this refuses to
+    guess: if git cannot answer, it raises rather than silently falling back to
+    the disk walk that produced the bad baseline.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "-z"],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "contract snapshot cannot list git-tracked files under "
+            f"{root}: {result.stderr.decode('utf-8', 'replace').strip()}"
+        )
+    entries = result.stdout.decode("utf-8", "replace").split("\0")
+    tracked = frozenset((root / entry).resolve() for entry in entries if entry)
+    if not tracked:
+        raise RuntimeError(f"contract snapshot found no git-tracked files under {root}")
+    return tracked
+
+
 def _source_files(root: Path = ROOT) -> Iterable[Path]:
     # Prune excluded trees while walking.  ``Path.rglob`` still descends into
     # .claude/worktrees before the later filter can discard their files.
+    tracked = _tracked_files(ROOT)
     roots = SOURCE_SCAN_ROOTS if root == ROOT else (root,)
     for scan_root in roots:
         if scan_root.is_file():
-            if scan_root.suffix in SOURCE_SUFFIXES:
+            if scan_root.suffix in SOURCE_SUFFIXES and scan_root.resolve() in tracked:
                 yield scan_root
             continue
         if not scan_root.exists():
@@ -84,7 +122,7 @@ def _source_files(root: Path = ROOT) -> Iterable[Path]:
                 if filename == SELF_PATH_PART:
                     continue
                 path = Path(directory) / filename
-                if path.suffix in SOURCE_SUFFIXES:
+                if path.suffix in SOURCE_SUFFIXES and path.resolve() in tracked:
                     yield path
 
 
@@ -274,7 +312,27 @@ def collect_contract_literals() -> list[str]:
             for value in re.findall(r"['\"]([A-Z][A-Z0-9 _-]{5,})['\"]", text):
                 if confirmation.fullmatch(value):
                     values.add(value)
-    return sorted(value for value in values if value)
+    # A string that is exactly the basename of a git-tracked source file is a
+    # REFERENCE TO A MODULE, not a persisted value, a wire field, or a phrase
+    # anyone types.  It reached this set only because the constant holding it
+    # happens to be uppercase (``_SAGE_RUNTIME_PATH``, ``LIVE_HANDLER``), and
+    # keeping it would make the guard fire on the one thing an internal rename
+    # is *supposed* to change while proving nothing about the contract: what a
+    # renamed route module actually exposes is measured directly, and far more
+    # honestly, by ``http_routes`` off the live ``server.app``.
+    #
+    # Deliberately exact-match on the basename of a TRACKED file, never a
+    # suffix test: dropping anything merely ending in ``.py`` would let a real
+    # persisted value that happens to look like a filename slip out of the
+    # guard unnoticed.
+    source_basenames = {
+        path.name
+        for path in _tracked_files(ROOT)
+        if path.suffix in SOURCE_SUFFIXES
+    }
+    return sorted(
+        value for value in values if value and value not in source_basenames
+    )
 
 
 def _class_tokens(value: str) -> set[str]:
@@ -286,6 +344,12 @@ def _class_tokens(value: str) -> set[str]:
 
 
 def collect_css_references(root: Path = FRONTEND_ROOT) -> list[str]:
+    # Same tracked-only rule as ``_source_files``: an ignored local build copy
+    # under ``frontend/`` would otherwise contribute class names that exist in
+    # no committed file.  An explicitly supplied root outside the repository
+    # (the ``--demo`` fixture) is a deliberate caller decision and is scanned
+    # as given.
+    tracked = _tracked_files(ROOT) if root == FRONTEND_ROOT else None
     classes: set[str] = set()
     patterns = (
         re.compile(r"\bclassName\s*=\s*[\"'`]([^\"'`{}]+)[\"'`]"),
@@ -301,6 +365,8 @@ def collect_css_references(root: Path = FRONTEND_ROOT) -> list[str]:
         for filename in sorted(filenames):
             path = Path(directory) / filename
             if path.suffix not in {".ts", ".tsx", ".js", ".jsx", ".mjs"}:
+                continue
+            if tracked is not None and path.resolve() not in tracked:
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")
             for pattern in patterns:

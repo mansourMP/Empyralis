@@ -49,7 +49,7 @@ class SpecialistRuntimeContext:
     runtime: str = ""
     # Reasoning-effort override from the Fleet Model tab (model_config.
     # reasoning_effort) — one of _VALID_REASONING_EFFORTS in
-    # sage_agent_runtime_service.py ("low"/"medium"/"high"/"xhigh"), or empty
+    # agent_turn_runtime_service.py ("low"/"medium"/"high"/"xhigh"), or empty
     # for "no override" (provider/model default). Only meaningful for
     # mode in (platform_credits, byok_api) — those are the two lanes that
     # reach stream_provider_backed_direct_chat, the one call site that
@@ -65,7 +65,7 @@ class SpecialistRuntimeContext:
     # MAN-310 Phase 1: which turn engine drives this specialist's turn —
     # model_config.engine ("legacy" | "claude_agent_sdk", fleet_tools.py's
     # _VALID_ENGINES). "" (unset) means the existing engine, same as
-    # "legacy" — see sage_agent_runtime_service.py's handle_sage_chat, the
+    # "legacy" — see agent_turn_runtime_service.py's handle_sage_chat, the
     # one consumer. Only meaningful for mode in (platform_credits, byok_api)
     # — same _ENGINE_SUPPORTED_MODES boundary as reasoning_effort just
     # above: cli_subscription/local dispatch to the Gateway "brain" branches
@@ -295,7 +295,7 @@ async def resolve_specialist_runtime_context(
             # to their own existing "no gateway bound" handling (same as if
             # no default existed at all — an unrelated, pre-existing
             # billing-lane rule this change deliberately leaves alone, see
-            # sage_agent_runtime_service.py's _dispatch_*_gateway_brain
+            # agent_turn_runtime_service.py's _dispatch_*_gateway_brain
             # "HARD RULE — no fallback" doctrine); platform_credits/byok_api
             # turns (the common case) simply run with no preferred_gateway_
             # id, i.e. cloud-side, which is precisely the "runs cloud-side

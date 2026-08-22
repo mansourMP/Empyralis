@@ -35,7 +35,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from server_modules import connection_oauth_service, mcp_registry_service
-from server_modules import sage_agent_runtime_service as sage
+from server_modules import agent_turn_runtime_service as sage
 
 
 def _run(coro):
@@ -220,7 +220,7 @@ class _RegistryEntry:
 
 
 class SpecialistMcpRegistryOwnershipFilterTests(unittest.TestCase):
-    """Read side of §1.3: sage_agent_runtime_service._filter_registry_for_
+    """Read side of §1.3: agent_turn_runtime_service._filter_registry_for_
     specialist previously gated MCP tools purely on connector-id/tool-name
     membership, never on WHICH credential the workspace's MCP registry row
     currently resolves to. A specialist explicitly toggled onto (or bound to

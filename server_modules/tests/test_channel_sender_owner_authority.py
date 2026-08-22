@@ -1,4 +1,4 @@
-"""The second half of the identity_links fix: sage_agent_runtime_service's
+"""The second half of the identity_links fix: agent_turn_runtime_service's
 owner/audience tool-authority classification for a channel turn.
 
 THE PROBLEM THIS CLOSES
@@ -14,7 +14,7 @@ linked_identity columns, populated by the real pairing/login path and
 already trusted by personal_channels_service._is_owner_message for the
 DM-policy gate that runs before a reply is even generated.
 
-_resolve_channel_sender_class (sage_agent_runtime_service.py) now
+_resolve_channel_sender_class (agent_turn_runtime_service.py) now
 consults personal_channels_repository — and ONLY personal_channels_
 repository — as the sole authoritative source for this classification.
 workspace.identity_links is never read here again.
@@ -48,7 +48,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from server_modules import personal_channels_repository
-from server_modules import sage_agent_runtime_service
+from server_modules import agent_turn_runtime_service
 
 
 def _run(coro):
@@ -171,21 +171,21 @@ class ResolveChannelSenderClassTests(unittest.TestCase):
 
     def test_no_channel_context_is_owner_by_default(self) -> None:
         """Web/API sessions: no sender identity to doubt."""
-        result = _run(sage_agent_runtime_service._resolve_channel_sender_class(
+        result = _run(agent_turn_runtime_service._resolve_channel_sender_class(
             channel_origin="", sender_id=None, workspace_id="ws-real-owner",
         ))
         self.assertEqual(result, "owner")
 
     def test_the_real_linked_owner_resolves_to_owner(self) -> None:
         with self._patched_db_path():
-            result = _run(sage_agent_runtime_service._resolve_channel_sender_class(
+            result = _run(agent_turn_runtime_service._resolve_channel_sender_class(
                 channel_origin="telegram_personal", sender_id="tg-owner-123", workspace_id="ws-real-owner",
             ))
         self.assertEqual(result, "owner")
 
     def test_an_unlinked_sender_on_the_same_channel_is_audience(self) -> None:
         with self._patched_db_path():
-            result = _run(sage_agent_runtime_service._resolve_channel_sender_class(
+            result = _run(agent_turn_runtime_service._resolve_channel_sender_class(
                 channel_origin="telegram_personal", sender_id="some-stranger-999", workspace_id="ws-real-owner",
             ))
         self.assertEqual(result, "audience")
@@ -196,7 +196,7 @@ class ResolveChannelSenderClassTests(unittest.TestCase):
         silently grant owner authority just because there is no data to
         check against."""
         with self._patched_db_path():
-            result = _run(sage_agent_runtime_service._resolve_channel_sender_class(
+            result = _run(agent_turn_runtime_service._resolve_channel_sender_class(
                 channel_origin="telegram_personal", sender_id="tg-owner-123", workspace_id="ws-nothing-linked-here",
             ))
         self.assertEqual(result, "audience")
@@ -210,7 +210,7 @@ class ResolveChannelSenderClassTests(unittest.TestCase):
             personal_channels_repository, "list_owner_linked_channel_identities_for_workspace",
             side_effect=RuntimeError("db unavailable"),
         ):
-            result = _run(sage_agent_runtime_service._resolve_channel_sender_class(
+            result = _run(agent_turn_runtime_service._resolve_channel_sender_class(
                 channel_origin="telegram_personal", sender_id="tg-owner-123", workspace_id="ws-real-owner",
             ))
         self.assertEqual(result, "audience")
@@ -232,7 +232,7 @@ class ResolveChannelSenderClassTests(unittest.TestCase):
                 },
             ),
         ):
-            result = _run(sage_agent_runtime_service._resolve_channel_sender_class(
+            result = _run(agent_turn_runtime_service._resolve_channel_sender_class(
                 channel_origin="telegram_personal", sender_id="tg-owner-123", workspace_id="ws-nothing-linked-here",
             ))
         # tg-owner-123 IS the linked owner per workspace.identity_links

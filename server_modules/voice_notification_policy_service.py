@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 from server_modules import activity_ledger_service, secret_redaction_service, security_audit_service
-from server_modules.sage_agent_runtime_contract import SAGE_MODE, SageTurnResult
+from server_modules.agent_turn_runtime_contract import SAGE_MODE, SageTurnResult
 
 
 VOICE_SURFACE = "voice"
@@ -223,7 +223,7 @@ async def execute_voice_sage_task(
             trace_id=envelope.trace_id,
         ).as_dict() | {"voice_policy": envelope.as_policy_dict()}
 
-    from server_modules.sage_turn_adapter import execute_sage_turn
+    from server_modules.agent_turn_adapter import execute_sage_turn
 
     await _emit_voice_policy_event(
         envelope=envelope,

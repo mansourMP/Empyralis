@@ -5,7 +5,7 @@ TWO different functions that mutate a workspace's real spendable balance
 (workspace metadata's admin_defaults.credit_balance_usd):
 
   1. control_plane_repository.debit_workspace_credits_for_turn_atomic —
-     called from sage_agent_runtime_service.handle_sage_chat's "cloud
+     called from agent_turn_runtime_service.handle_sage_chat's "cloud
      fallthrough" (text-only) completion path.
   2. control_plane_repository.debit_workspace_credit_balance_for_hosted_usage_atomic —
      called (via billing_service.debit_workspace_credit_balance_for_hosted_usage)
@@ -24,7 +24,7 @@ twice:
       when Postgres isn't configured). Given the SAME request_id, whichever
       of the two fires SECOND is a no-op, regardless of call order.
 
-  (B) KEY-COMPUTATION LEVEL — sage_agent_runtime_service._turn_credit_
+  (B) KEY-COMPUTATION LEVEL — agent_turn_runtime_service._turn_credit_
       idempotency_key is the single, deterministic, never-empty source of
       that shared request_id: it prefers the caller's stable request_id
       (survives a channel/webhook retry) and falls back to trace_id, but
@@ -56,7 +56,7 @@ from unittest.mock import AsyncMock, patch
 from server_modules import control_plane_repository
 from server_modules import deployed_agent_virtual_runtime_service
 from server_modules import direct_chat_hosted_usage_service
-from server_modules import sage_agent_runtime_service
+from server_modules import agent_turn_runtime_service
 
 
 def _run(coro):
@@ -225,12 +225,12 @@ class LedgerLevelSharedDedupTests(unittest.TestCase):
         caller_request_id = "webhook-delivery-id-abc"
 
         # First attempt: some trace_id.
-        key_attempt_1 = sage_agent_runtime_service._turn_credit_idempotency_key(
+        key_attempt_1 = agent_turn_runtime_service._turn_credit_idempotency_key(
             caller_request_id, "trace-attempt-1",
         )
         # Retry (e.g. webhook redelivery): a DIFFERENT fresh trace_id, same
         # caller request_id.
-        key_attempt_2 = sage_agent_runtime_service._turn_credit_idempotency_key(
+        key_attempt_2 = agent_turn_runtime_service._turn_credit_idempotency_key(
             caller_request_id, "trace-attempt-2",
         )
         self.assertEqual(key_attempt_1, key_attempt_2)
@@ -290,13 +290,13 @@ class TurnCreditIdempotencyKeyTests(unittest.TestCase):
     non-deterministic key, and prefers the stable caller id."""
 
     def test_prefers_caller_supplied_request_id_over_trace_id(self):
-        key = sage_agent_runtime_service._turn_credit_idempotency_key(
+        key = agent_turn_runtime_service._turn_credit_idempotency_key(
             "caller-stable-id", "trace-xyz",
         )
         self.assertEqual(key, "caller-stable-id")
 
     def test_falls_back_to_trace_id_when_no_caller_request_id(self):
-        key = sage_agent_runtime_service._turn_credit_idempotency_key("", "trace-xyz")
+        key = agent_turn_runtime_service._turn_credit_idempotency_key("", "trace-xyz")
         self.assertEqual(key, "trace-xyz")
 
     def test_never_mints_a_random_fallback(self):
@@ -305,13 +305,13 @@ class TurnCreditIdempotencyKeyTests(unittest.TestCase):
         inputs were falsy. The fix must be pure/deterministic instead --
         same (falsy) inputs always produce the same (empty) output, never
         two different random ids that would defeat retry dedup."""
-        key_1 = sage_agent_runtime_service._turn_credit_idempotency_key("", "")
-        key_2 = sage_agent_runtime_service._turn_credit_idempotency_key("", "")
+        key_1 = agent_turn_runtime_service._turn_credit_idempotency_key("", "")
+        key_2 = agent_turn_runtime_service._turn_credit_idempotency_key("", "")
         self.assertEqual(key_1, key_2)
         self.assertEqual(key_1, "")
 
     def test_whitespace_only_request_id_is_treated_as_absent(self):
-        key = sage_agent_runtime_service._turn_credit_idempotency_key("   ", "trace-xyz")
+        key = agent_turn_runtime_service._turn_credit_idempotency_key("   ", "trace-xyz")
         self.assertEqual(key, "trace-xyz")
 
 
@@ -338,14 +338,14 @@ class HandleSageChatWiringTests(unittest.TestCase):
     def _base_patches(usage: dict):
         return [
             patch(
-                "server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile",
+                "server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile",
                 return_value={"profile": {"user_name": "", "identity_summary": "", "communication_style": "", "recurring_responsibility": "", "standing_rules": []}},
             ),
-            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
-            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
-            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
-            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
-            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider", return_value=("deepseek", {"api_key": "test-key"})),
+            patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
+            patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.agent_turn_runtime_service.assistant_health_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider", return_value=("deepseek", {"api_key": "test-key"})),
             # Force the "cloud fallthrough" (text-only) branch deterministically
             # -- an unmocked _run_sage_action_loop_v3 would attempt a REAL
             # network call to the provider (flaky, slow, and it can itself
@@ -354,11 +354,11 @@ class HandleSageChatWiringTests(unittest.TestCase):
             # "action loop produced nothing usable" case handle_sage_chat's
             # cloud-fallthrough path exists to handle.
             patch(
-                "server_modules.sage_agent_runtime_service._run_sage_action_loop_v3",
+                "server_modules.agent_turn_runtime_service._run_sage_action_loop_v3",
                 new=AsyncMock(return_value=None),
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback",
+                "server_modules.agent_turn_runtime_service.generate_chat_reply_with_provider_fallback",
                 return_value=("Reply", usage, "deepseek", ""),
             ),
             # The Phase 5A metering call sits in the SAME try/except as the
@@ -371,9 +371,9 @@ class HandleSageChatWiringTests(unittest.TestCase):
                 "server_modules.usage_events_repository.record_usage_from_context",
                 new=AsyncMock(return_value=None),
             ),
-            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
-            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
-            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+            patch("server_modules.agent_turn_runtime_service.persist_interaction"),
+            patch("server_modules.agent_turn_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.agent_turn_runtime_service.security_audit_service.emit_security_audit_event"),
         ]
 
     def _run_chat_with_mocks(self, usage: dict, extra_patches=None, **chat_kwargs):
@@ -388,7 +388,7 @@ class HandleSageChatWiringTests(unittest.TestCase):
             extra_mocks = [stack.enter_context(p) for p in extra_patches]
             for p in self._base_patches(usage):
                 stack.enter_context(p)
-            result = _run(sage_agent_runtime_service.handle_sage_chat(**chat_kwargs))
+            result = _run(agent_turn_runtime_service.handle_sage_chat(**chat_kwargs))
         return result, extra_mocks
 
     def test_fallback_debit_uses_the_callers_stable_request_id_not_trace_id(self):
@@ -504,37 +504,37 @@ class HandleSageChatWiringTests(unittest.TestCase):
         }]
         with (
             patch(
-                "server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile",
+                "server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile",
                 return_value={"profile": {"user_name": "", "identity_summary": "", "communication_style": "", "recurring_responsibility": "", "standing_rules": []}},
             ),
-            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
-            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
+            patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block", return_value=""),
             patch("server_modules.memory_service.get_memory", return_value=""),
-            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
-            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
-            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider", return_value=("deepseek", {"api_key": "test-key"})),
-            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
+            patch("server_modules.agent_turn_runtime_service.assistant_health_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider", return_value=("deepseek", {"api_key": "test-key"})),
+            patch("server_modules.agent_turn_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
             patch(
-                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
+                "server_modules.agent_turn_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
                 return_value={"runtime_ok": True, "local_gateway_online": True},
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
+                "server_modules.agent_turn_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
             ) as mock_stream,
-            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
-            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
-            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+            patch("server_modules.agent_turn_runtime_service.persist_interaction"),
+            patch("server_modules.agent_turn_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.agent_turn_runtime_service.security_audit_service.emit_security_audit_event"),
             # Irrelevant to what this test verifies (session_ctx contents) --
             # mocked out so it can't leave any process-global state (e.g. a
             # cached "control plane unavailable" decision) that could make a
             # LATER, unrelated test's debit-mock assertion order-dependent.
             patch(
-                "server_modules.sage_agent_runtime_service.agent_trace_service.start_trace",
+                "server_modules.agent_turn_runtime_service.agent_trace_service.start_trace",
                 new=AsyncMock(return_value={}),
             ),
         ):
             mock_stream.return_value = iter(stream_events)
-            _run(sage_agent_runtime_service.handle_sage_chat(
+            _run(agent_turn_runtime_service.handle_sage_chat(
                 workspace_id="ws-1", message="hello", request_id="stable-caller-id-2",
             ))
 
@@ -627,7 +627,7 @@ class RuntimeUsageCreditDebitPlanTests(unittest.TestCase):
         plan = deployed_agent_virtual_runtime_service.runtime_usage_credit_debit_plan(
             payer="platform_credits", estimated_cost_usd=0.5, runtime_session_id="collide-id",
         )
-        turn_key = sage_agent_runtime_service._turn_credit_idempotency_key("collide-id", "trace-x")
+        turn_key = agent_turn_runtime_service._turn_credit_idempotency_key("collide-id", "trace-x")
         self.assertNotEqual(plan["request_id"], turn_key)
 
 

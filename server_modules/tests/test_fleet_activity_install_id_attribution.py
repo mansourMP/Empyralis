@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from server_modules import fleet_tools
-from server_modules import sage_agent_runtime_service
+from server_modules import agent_turn_runtime_service
 
 
 def _run(coro):
@@ -67,7 +67,7 @@ class SageChatLedgerFieldsTests(unittest.TestCase):
     status=error on failure regardless of which."""
 
     def test_sage_turn_success(self):
-        event_class, action, title, status = sage_agent_runtime_service._sage_chat_ledger_fields(
+        event_class, action, title, status = agent_turn_runtime_service._sage_chat_ledger_fields(
             spec_install_id="", agent_label="", failed=False,
         )
         self.assertEqual(event_class, "sage_activity")
@@ -76,7 +76,7 @@ class SageChatLedgerFieldsTests(unittest.TestCase):
         self.assertEqual(status, "logged")
 
     def test_sage_turn_failure(self):
-        event_class, action, title, status = sage_agent_runtime_service._sage_chat_ledger_fields(
+        event_class, action, title, status = agent_turn_runtime_service._sage_chat_ledger_fields(
             spec_install_id="", agent_label="", failed=True,
         )
         self.assertEqual(event_class, "sage_activity")
@@ -85,7 +85,7 @@ class SageChatLedgerFieldsTests(unittest.TestCase):
         self.assertEqual(status, "error")
 
     def test_specialist_turn_success_carries_its_own_label(self):
-        event_class, action, title, status = sage_agent_runtime_service._sage_chat_ledger_fields(
+        event_class, action, title, status = agent_turn_runtime_service._sage_chat_ledger_fields(
             spec_install_id="ainstall_xyz", agent_label="Repo Watch", failed=False,
         )
         self.assertEqual(event_class, "specialist_activity")
@@ -95,7 +95,7 @@ class SageChatLedgerFieldsTests(unittest.TestCase):
         self.assertNotIn("Sage", title)
 
     def test_specialist_turn_failure_carries_its_own_label(self):
-        event_class, action, title, status = sage_agent_runtime_service._sage_chat_ledger_fields(
+        event_class, action, title, status = agent_turn_runtime_service._sage_chat_ledger_fields(
             spec_install_id="ainstall_xyz", agent_label="Repo Watch", failed=True,
         )
         self.assertEqual(event_class, "specialist_activity")
@@ -104,7 +104,7 @@ class SageChatLedgerFieldsTests(unittest.TestCase):
         self.assertEqual(status, "error")
 
     def test_specialist_turn_missing_label_falls_back_honestly(self):
-        _, _, title, _ = sage_agent_runtime_service._sage_chat_ledger_fields(
+        _, _, title, _ = agent_turn_runtime_service._sage_chat_ledger_fields(
             spec_install_id="ainstall_xyz", agent_label="", failed=False,
         )
         self.assertEqual(title, "Agent chat completed")

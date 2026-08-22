@@ -554,7 +554,7 @@ def _block_live_provider_calls(request: pytest.FixtureRequest):
 # fixed sentinels handled separately below). Most operations are identity,
 # but several are not (e.g. "upsert_workspace_memory" -> "write_workspace_memory",
 # "upsert_sage_memory_entry" -> "write_sage_memory_entry") — that mismatch was
-# the root cause of the memory_service.py / sage_memory_service.py failures.
+# the root cause of the memory_service.py / assistant_memory_service.py failures.
 _RUNTIME_STATE_STORE_NEXT_ACTIONS: dict[str, str] = {
     "init_schema": "initialize_state_schema",
     "upsert_live_run": "write_live_run_state",
@@ -1621,7 +1621,7 @@ def _skip_kernel_tests_when_binary_missing(request: pytest.FixtureRequest, monke
         # Several Rust kernel commands derive `next_action` from the
         # requested `operation` on an "allow" decision, but the mapping is
         # NOT always the identity function — callers (memory_service.py,
-        # sage_memory_service.py, control_plane_repository.py,
+        # assistant_memory_service.py, control_plane_repository.py,
         # gateway_pairing_service.py, gateway_state_repository.py,
         # routes_gateway.py, etc.) compare next_action against the real
         # kernel's per-operation contract before they'll persist state or

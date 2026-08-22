@@ -188,8 +188,8 @@ class ProcessUpdateSenderIdentityTests(unittest.IsolatedAsyncioTestCase):
             captured_sender_ids.append(kwargs.get("sender_id"))
             return True
 
-        with patch("server_modules.sage_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)), \
-             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch_sage_reply_safe):
+        with patch("server_modules.agent_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)), \
+             patch("server_modules.agent_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch_sage_reply_safe):
             await hosted._process_update(
                 _telegram_update(update_id=1, chat_id=-100555, chat_type="group", text="hi from alice", from_id=111, first_name="Alice", addressed=True)
             )
@@ -213,7 +213,7 @@ class ProcessUpdateSenderIdentityTests(unittest.IsolatedAsyncioTestCase):
             captured.update(kwargs)
             return "compacted"
 
-        with patch("server_modules.sage_command_dispatcher.dispatch_command", new=_fake_dispatch_command), \
+        with patch("server_modules.agent_command_dispatcher.dispatch_command", new=_fake_dispatch_command), \
              patch.object(hosted, "send_message_safe", new=AsyncMock(return_value=True)):
             await hosted._process_update(
                 _telegram_update(update_id=3, chat_id=-100555, chat_type="group", text="/compact", from_id=333, first_name="Carol", addressed=True)

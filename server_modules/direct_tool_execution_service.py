@@ -888,7 +888,7 @@ def execute_single_direct_tool_call(
         # "document"), and goal__* (a project's durable goals — connector_id
         # == "goal") are all intrinsic to project membership, not a bindable
         # connector — none has an agent_connector_bindings row to ever check
-        # (see sage_agent_runtime_service.py's _PROJECT_SCOPED_CONNECTOR_IDS
+        # (see agent_turn_runtime_service.py's _PROJECT_SCOPED_CONNECTOR_IDS
         # comment). Gated on the guard's own project_id instead, mirroring
         # the prompt-time grant in _specialist_tool_allowed /
         # _filter_registry_for_specialist.

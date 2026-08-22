@@ -13,7 +13,7 @@ trace is the transparency record the product shows the customer (the agent
 reading, writing, running a command, planning). A lost trace is a product gap,
 not log noise.
 
-Root cause: ``sage_agent_runtime_service._run_sage_action_loop_v3`` passed the
+Root cause: ``agent_turn_runtime_service._run_sage_action_loop_v3`` passed the
 MODULE CONSTANT ``SAGE_THREAD_ID`` ("sage-main") to ``start_trace`` instead of
 the caller's real thread id — while ``_handle_sage_chat_unguarded`` had already
 called ``thread_service.ensure_master_thread`` on that real id one frame up.
@@ -37,7 +37,7 @@ import pathlib
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from server_modules import agent_trace_service, run_service, sage_agent_runtime_service
+from server_modules import agent_trace_service, run_service, agent_turn_runtime_service
 
 
 _SERVER_MODULES = pathlib.Path(__file__).resolve().parents[1]
@@ -110,7 +110,7 @@ class SageActionLoopTracesTheRealThreadTests(unittest.TestCase):
         with (
             patch("server_modules.kill_switch_gate.evaluate_kill_switch", return_value=self._decision()),
             patch(
-                "server_modules.sage_agent_runtime_service.thread_service.get_thread",
+                "server_modules.agent_turn_runtime_service.thread_service.get_thread",
                 new=AsyncMock(return_value={"metadata": {}}),
             ),
             patch(
@@ -119,13 +119,13 @@ class SageActionLoopTracesTheRealThreadTests(unittest.TestCase):
             ),
             patch.object(agent_trace_service, "start_trace", new=start_trace_mock),
             patch.object(
-                sage_agent_runtime_service.claude_agent_sdk_bridge,
+                agent_turn_runtime_service.claude_agent_sdk_bridge,
                 "collect_events_via_claude_agent_sdk",
                 new=collect_mock,
             ),
         ):
             _run(
-                sage_agent_runtime_service._run_sage_action_loop_v3(
+                agent_turn_runtime_service._run_sage_action_loop_v3(
                     workspace_id="ws-1",
                     tenant_id="tenant-1",
                     message="hello",
@@ -160,7 +160,7 @@ class SageActionLoopTracesTheRealThreadTests(unittest.TestCase):
         kwargs = self._start_trace_kwargs(
             conversation_thread_id="thread_agent_ainstall_32048436b4e14ec5"
         )
-        self.assertNotEqual(kwargs["thread_id"], sage_agent_runtime_service.SAGE_THREAD_ID)
+        self.assertNotEqual(kwargs["thread_id"], agent_turn_runtime_service.SAGE_THREAD_ID)
 
     def test_no_thread_traces_as_null_rather_than_an_id_with_no_row(self):
         kwargs = self._start_trace_kwargs(conversation_thread_id="")
@@ -175,7 +175,7 @@ class SageActionLoopThreadIdIsRequiredTests(unittest.TestCase):
     caller never named a scope and the code invented one."""
 
     def test_conversation_thread_id_has_no_default(self):
-        signature = inspect.signature(sage_agent_runtime_service._run_sage_action_loop_v3)
+        signature = inspect.signature(agent_turn_runtime_service._run_sage_action_loop_v3)
         parameter = signature.parameters["conversation_thread_id"]
         self.assertIs(
             parameter.default,
@@ -187,7 +187,7 @@ class SageActionLoopThreadIdIsRequiredTests(unittest.TestCase):
     def test_the_trace_call_does_not_reference_the_module_constant(self):
         """Structural, because a behavioural test only covers today's callers.
         Re-substituting the constant here type-checks, runs, and is silent."""
-        calls = _start_trace_call_nodes("sage_agent_runtime_service")
+        calls = _start_trace_call_nodes("agent_turn_runtime_service")
         self.assertEqual(len(calls), 1)
         thread_id_arg = _keyword(calls[0], "thread_id")
         self.assertIsNotNone(thread_id_arg)

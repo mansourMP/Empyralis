@@ -3,15 +3,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from server_modules import sage_memory_service, workspace_context_memory_adapter
+from server_modules import assistant_memory_service, workspace_context_memory_adapter
 
 
 class SageMemoryRedStrippingTests(unittest.TestCase):
     def test_critical_restricted_memory_is_withheld_from_default_sage_context(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir) / "workspace-1"
-            with patch("server_modules.sage_memory_service.workspace_context.workspace_scope_dir", return_value=root):
-                sage_memory_service.upsert_memory_entry(
+            with patch("server_modules.assistant_memory_service.workspace_context.workspace_scope_dir", return_value=root):
+                assistant_memory_service.upsert_memory_entry(
                     workspace_id="workspace-1",
                     category="critical_restricted",
                     title="Production API key",
@@ -19,7 +19,7 @@ class SageMemoryRedStrippingTests(unittest.TestCase):
                     actor_user_id="user-1",
                 )
 
-                block = sage_memory_service.build_sage_memory_context_block(workspace_id="workspace-1")
+                block = assistant_memory_service.build_sage_memory_context_block(workspace_id="workspace-1")
 
         self.assertIn("Restricted memory exists but is withheld from model context.", block)
         self.assertNotIn("sk-production-secret-123456", block)
@@ -50,11 +50,11 @@ class SageMemoryRedStrippingTests(unittest.TestCase):
                 return_value="",
             ),
             patch(
-                "server_modules.sage_memory_service.build_sage_memory_context_block",
+                "server_modules.assistant_memory_service.build_sage_memory_context_block",
                 return_value="",
             ),
             patch(
-                "server_modules.sage_services_service.build_sage_services_memory_block",
+                "server_modules.assistant_services_service.build_sage_services_memory_block",
                 return_value="",
             ),
         ):
@@ -88,11 +88,11 @@ class SageMemoryRedStrippingTests(unittest.TestCase):
                 return_value="",
             ),
             patch(
-                "server_modules.sage_memory_service.build_sage_memory_context_block",
+                "server_modules.assistant_memory_service.build_sage_memory_context_block",
                 return_value="",
             ),
             patch(
-                "server_modules.sage_services_service.build_sage_services_memory_block",
+                "server_modules.assistant_services_service.build_sage_services_memory_block",
                 return_value="",
             ),
             patch(
@@ -137,11 +137,11 @@ class SageMemoryRedStrippingTests(unittest.TestCase):
                 return_value="",
             ),
             patch(
-                "server_modules.sage_memory_service.build_sage_memory_context_block",
+                "server_modules.assistant_memory_service.build_sage_memory_context_block",
                 return_value="",
             ),
             patch(
-                "server_modules.sage_services_service.build_sage_services_memory_block",
+                "server_modules.assistant_services_service.build_sage_services_memory_block",
                 return_value="",
             ),
             patch(

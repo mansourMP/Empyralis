@@ -424,7 +424,7 @@ def test_acp_turn_endpoint_wrong_rust_action_blocks_before_handle_sage_chat():
                 side_effect=lambda _command, decision: decision,
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.handle_sage_chat",
+                "server_modules.agent_turn_runtime_service.handle_sage_chat",
                 new=AsyncMock(side_effect=AssertionError("should not execute Sage turn")),
             ) as handle_mock,
         ):
@@ -462,7 +462,7 @@ def test_acp_turn_endpoint_enforces_workspace_access_before_handle_sage_chat():
                 side_effect=HTTPException(status_code=403, detail="Workspace is not accessible for this user."),
             ) as access_mock,
             patch(
-                "server_modules.sage_agent_runtime_service.handle_sage_chat",
+                "server_modules.agent_turn_runtime_service.handle_sage_chat",
                 new=AsyncMock(side_effect=AssertionError("should not execute Sage turn")),
             ) as handle_mock,
         ):
@@ -498,7 +498,7 @@ def test_acp_turn_endpoint_rejects_payload_workspace_mismatch_before_handle_sage
             patch.object(routes_gateway, "enforce_workspace_access", return_value="ws-1") as access_mock,
             patch.object(routes_gateway, "workspace_tenant_id", return_value="tenant-1"),
             patch(
-                "server_modules.sage_agent_runtime_service.handle_sage_chat",
+                "server_modules.agent_turn_runtime_service.handle_sage_chat",
                 new=AsyncMock(side_effect=AssertionError("should not execute Sage turn")),
             ) as handle_mock,
         ):

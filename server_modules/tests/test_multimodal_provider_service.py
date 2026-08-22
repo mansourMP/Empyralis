@@ -76,7 +76,7 @@ def test_voice_policy_still_blocks_transcribed_approval_attempt():
         ),
         patch("server_modules.voice_notification_policy_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
         patch("server_modules.voice_notification_policy_service.security_audit_service.emit_security_audit_event"),
-        patch("server_modules.sage_turn_adapter.execute_sage_turn", new=AsyncMock()) as mock_execute,
+        patch("server_modules.agent_turn_adapter.execute_sage_turn", new=AsyncMock()) as mock_execute,
     ):
         transcript = _run(service.transcribe_audio_bytes(b"audio", "audio/webm", provider="openai"))["transcript"]
         result = _run(voice_notification_policy_service.execute_voice_sage_task(

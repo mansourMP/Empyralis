@@ -63,7 +63,7 @@ def _resolve_heartbeat_scope(
 
 def _resolve_workspace_default_ai_provider(workspace_id: str) -> str:
     """The same "ONE AI ROAD, NO FALLBACK" resolution
-    sage_agent_runtime_service._resolve_cloud_provider uses for a live chat
+    agent_turn_runtime_service._resolve_cloud_provider uses for a live chat
     turn (explicit workspace sage_ai_provider if set, else the platform
     DeepSeek default via entitlements, else a raw DeepSeek BYOK key) --
     reimplemented here rather than imported because that module is mid-edit

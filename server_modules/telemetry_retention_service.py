@@ -43,7 +43,7 @@ deliberately NOT reused here, for reasons worth stating up front:
 
 Every env var below follows the same on/off vocabulary and fresh-read-per-
 call convention as EMPYRALIS_PRIMARY_COMPACTION_ENABLED /
-EMPYRALIS_FORCE_LEGACY_ENGINE (server_modules/sage_agent_runtime_service.py)
+EMPYRALIS_FORCE_LEGACY_ENGINE (server_modules/agent_turn_runtime_service.py)
 -- read from os.environ on every call rather than cached at import time, so
 toggling it in production takes effect on the next scheduled tick without a
 restart.

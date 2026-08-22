@@ -149,7 +149,7 @@ def grant_from_install_fields(
     """The pure core: decide a grant from an install row already in hand.
 
     Separate from the async resolver below so the turn path
-    (sage_agent_runtime_service._resolve_specialist_toolset), which already
+    (agent_turn_runtime_service._resolve_specialist_toolset), which already
     holds the install bundle, spends ZERO extra queries -- the same reason
     DocumentScope resolves read and write scope from one lookup.
     """

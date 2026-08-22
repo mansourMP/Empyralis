@@ -2,7 +2,7 @@
 tools actually did this turn — independent of prompt wording or model choice.
 
 Built 2026-07-10 after a prompt-only fix (tool-honesty instructions added to
-both sage_agent_runtime_service.py's specialist prompt and
+both agent_turn_runtime_service.py's specialist prompt and
 direct_chat_prompt_service.py's build_system_prompt) measurably helped but
 was not reliable: live-testing on fresh, zero-history agents with
 deepseek-chat, the model still denied a web__search call that had just
@@ -10,7 +10,7 @@ succeeded and returned real results — on some attempts, not others, same
 prompt. That's the case for a structural check, not another prompt tweak.
 
 Two live pipelines reach a "final reply, about to be delivered" point with no
-shared code between them (sage_agent_runtime_service.py's
+shared code between them (agent_turn_runtime_service.py's
 _run_sage_action_loop_v3 for Sage/console-mediated chat;
 direct_chat_generation_service.py's stream_provider_backed_direct_chat for a
 specialist's own Chat tab / api/turn). This module is the shared LOGIC both
@@ -596,7 +596,7 @@ def build_narrated_call_fallback_reply(tools: list[ToolTraceEntry]) -> str:
 
 def _failed_tool_detail(tool: ToolTraceEntry) -> str:
     # "error" is the field failed entries actually carry in both live pipelines
-    # (direct_chat_generation_service.py and sage_agent_runtime_service.py both
+    # (direct_chat_generation_service.py and agent_turn_runtime_service.py both
     # set entry["error"] on a failed tool — see _collect_sage_operator_loop_v3_
     # events and the direct-chat tool loop). "output" is read too, defensively,
     # in case a caller hands this a differently-shaped entry.
@@ -718,7 +718,7 @@ def build_bare_intent_fallback_reply(tools: list[ToolTraceEntry]) -> str:
 # already used. Each pipeline supplies its own — Sage's action loop and the
 # direct-chat loop have no shared regeneration mechanism any more than they
 # have a shared reply-delivery point (see module docstring), and one is an
-# async def caller (sage_agent_runtime_service.py) while the other is a
+# async def caller (agent_turn_runtime_service.py) while the other is a
 # *synchronous* generator (direct_chat_generation_service.py's
 # stream_provider_backed_direct_chat — confirmed via its `def`, not
 # `async def`, signature; its own tool-execution already bridges async/sync
@@ -774,7 +774,7 @@ def _decide(reply_text: str, tool_trace: Optional[list[ToolTraceEntry]]) -> Opti
         # regeneration is the CORRECT outcome there, not a risk. Here the
         # opposite is true: the trace already proves the tool succeeded this
         # turn, so handing this reply to Sage's regenerate_fn (a full action
-        # loop with tools live, see sage_agent_runtime_service.py's
+        # loop with tools live, see agent_turn_runtime_service.py's
         # _sage_action_loop_regenerate) would risk the model calling the SAME
         # side-effecting tool a second time for real — an actual double
         # execution, not just a narrated one, and strictly worse than the
@@ -841,7 +841,7 @@ async def apply_tool_honesty_guard(
     regenerate_fn: RegenerateFn,
     enabled: Optional[bool] = None,
 ) -> dict[str, Any]:
-    """Async variant — for async def callers (sage_agent_runtime_service.py's
+    """Async variant — for async def callers (agent_turn_runtime_service.py's
     handle_sage_chat). The full guard: check -> regenerate once on mismatch
     (via the caller's own `await regenerate_fn(correction_text)` ->
     Optional[str]) -> deterministic honest fallback if the regeneration ALSO

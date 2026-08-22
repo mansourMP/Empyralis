@@ -205,7 +205,7 @@ class CutOverChannelGroupGateTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(return_value=dm_decision) if isinstance(dm_decision, dict) else dm_decision,
             ),
             patch(
-                "server_modules.sage_command_dispatcher.dispatch_command",
+                "server_modules.agent_command_dispatcher.dispatch_command",
                 new=AsyncMock(return_value=None),
             ),
             patch(

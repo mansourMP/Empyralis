@@ -9,7 +9,7 @@ from server_modules import (
     safe_mode_service,
 )
 from server_modules.agent_manifest import AgentManifest
-from server_modules.sage_agent_runtime_contract import SageTurnResult
+from server_modules.agent_turn_runtime_contract import SageTurnResult
 
 
 def _deployed_agent_row(
@@ -71,7 +71,7 @@ class AgentChannelRouterTests(unittest.IsolatedAsyncioTestCase):
     async def test_slack_guild_routes_through_execute_sage_turn(self):
         """Slack Guild webhook calls execute_sage_turn with channel_origin='slack_guild'."""
         with patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn",
+            "server_modules.agent_turn_adapter.execute_sage_turn",
             new=AsyncMock(return_value=SageTurnResult(
                 message="Slack response from Sage.",
                 trace_id="trace-slack-1",
@@ -105,7 +105,7 @@ class AgentChannelRouterTests(unittest.IsolatedAsyncioTestCase):
     async def test_discord_guild_routes_through_execute_sage_turn(self):
         """Discord Guild webhook calls execute_sage_turn with channel_origin='discord_guild'."""
         with patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn",
+            "server_modules.agent_turn_adapter.execute_sage_turn",
             new=AsyncMock(return_value=SageTurnResult(
                 message="Discord response from Sage.",
                 trace_id="trace-discord-1",
@@ -137,7 +137,7 @@ class AgentChannelRouterTests(unittest.IsolatedAsyncioTestCase):
     async def test_github_routes_through_execute_sage_turn(self):
         """GitHub webhook calls execute_sage_turn with channel_origin='github'."""
         with patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn",
+            "server_modules.agent_turn_adapter.execute_sage_turn",
             new=AsyncMock(return_value=SageTurnResult(
                 message="GitHub response from Sage.",
                 trace_id="trace-github-1",
@@ -180,7 +180,7 @@ class AgentChannelRouterTests(unittest.IsolatedAsyncioTestCase):
         test_unimplemented_channel_returns_unavailable for the companion
         "unauthorized" (unmapped) case, which must still be refused."""
         with patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn",
+            "server_modules.agent_turn_adapter.execute_sage_turn",
             new=AsyncMock(return_value=SageTurnResult(
                 message="WhatsApp response from Sage.",
                 trace_id="trace-whatsapp-1",
@@ -212,7 +212,7 @@ class AgentChannelRouterTests(unittest.IsolatedAsyncioTestCase):
     async def test_customer_message_dict_extracts_text_field(self):
         """When customer_message is a dict, the 'text' field is extracted."""
         with patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn",
+            "server_modules.agent_turn_adapter.execute_sage_turn",
             new=AsyncMock(return_value=SageTurnResult(
                 message="Dict extracted OK.",
                 trace_id="trace-dict-1",
@@ -233,7 +233,7 @@ class AgentChannelRouterTests(unittest.IsolatedAsyncioTestCase):
     async def test_customer_message_dict_falls_back_to_json(self):
         """When customer_message is a dict without text/goal keys, it serialises as JSON."""
         with patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn",
+            "server_modules.agent_turn_adapter.execute_sage_turn",
             new=AsyncMock(return_value=SageTurnResult(
                 message="JSON fallback OK.",
                 trace_id="trace-json-1",
@@ -263,7 +263,7 @@ class AgentChannelRouterTests(unittest.IsolatedAsyncioTestCase):
         """The core fix: is_group/chat_type/chat_label in metadata reach
         the actual message text execute_sage_turn receives."""
         with patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn",
+            "server_modules.agent_turn_adapter.execute_sage_turn",
             new=AsyncMock(return_value=SageTurnResult(
                 message="Sure thing.",
                 trace_id="trace-group-1",
@@ -298,7 +298,7 @@ class AgentChannelRouterTests(unittest.IsolatedAsyncioTestCase):
         """is_group=False must say "private", never "shared channel" --
         proves this isn't a hardcoded always-group assumption."""
         with patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn",
+            "server_modules.agent_turn_adapter.execute_sage_turn",
             new=AsyncMock(return_value=SageTurnResult(message="ok", trace_id="trace-dm-1")),
         ) as execute_mock:
             await agent_channel_router.route_inbound_channel_message(
@@ -323,7 +323,7 @@ class AgentChannelRouterTests(unittest.IsolatedAsyncioTestCase):
         that real shape -- not just against metadata=None, which the
         other tests in this class already cover."""
         with patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn",
+            "server_modules.agent_turn_adapter.execute_sage_turn",
             new=AsyncMock(return_value=SageTurnResult(message="ok", trace_id="trace-noop-1")),
         ) as execute_mock:
             await agent_channel_router.route_inbound_channel_message(
@@ -352,7 +352,7 @@ class AgentChannelRouterTests(unittest.IsolatedAsyncioTestCase):
         context prefix would silently break every Studio-connector
         directive the moment a connector starts sending this metadata."""
         with patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn",
+            "server_modules.agent_turn_adapter.execute_sage_turn",
             new=AsyncMock(return_value=SageTurnResult(message="ok", trace_id="trace-cmd-1")),
         ) as execute_mock:
             await agent_channel_router.route_inbound_channel_message(
@@ -483,7 +483,7 @@ class AgentChannelRouterTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(return_value=specialist_ctx),
             ) as resolve_mock,
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(return_value=SageTurnResult(
                     message="Reply as the specialist.",
                     trace_id="trace-1",
@@ -517,7 +517,7 @@ class AgentChannelRouterTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(return_value=[]),
             ),
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(return_value=SageTurnResult(
                     message="Reply as Sage.",
                     trace_id="trace-2",

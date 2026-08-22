@@ -31,7 +31,7 @@ FLEET_TOOL_PREFIX = "fleet_"
 # "tool_toggles" are DELIBERATELY absent — there is no more per-agent
 # Tools enable/disable checklist. An agent gets whatever the platform
 # provides; a specialist's real toolset comes from
-# sage_agent_runtime_service._resolve_specialist_toolset (core tools +
+# agent_turn_runtime_service._resolve_specialist_toolset (core tools +
 # _UNGATED_JUDGMENT_TOOL_NAMES, both unconditional, + actual connector
 # bindings), never a stored per-tool switch. "connectors" stays — it is a
 # genuine "did the owner connect a real third-party account" gate, not a
@@ -103,7 +103,7 @@ _VALID_MODEL_MODES = {"platform_credits", "byok_api", "cli_subscription", "local
 _VALID_MODEL_RUNTIMES = {"claude_code", "codex", "grok_build", "cursor_cli", "ollama"}
 # Reasoning-effort picker (Fleet Model tab, model_config.reasoning_effort;
 # also what /thinking now persists — see command_registry.py's
-# _handle_thinking). Kept in sync with sage_agent_runtime_service.py's own
+# _handle_thinking). Kept in sync with agent_turn_runtime_service.py's own
 # _VALID_REASONING_EFFORTS (same duplicate-but-documented-across-layers
 # pattern as _VALID_MODEL_RUNTIMES above, not a shared import — that module
 # is far heavier and this one must stay importable from lightweight
@@ -120,7 +120,7 @@ _VALID_REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
 # so a value saved before the ladder was unified keeps validating.
 #
 # The per-runtime NATIVE vocabulary still exists — it just moved to where the
-# value is actually sent (sage_agent_runtime_service.clamp_cli_reasoning_
+# value is actually sent (agent_turn_runtime_service.clamp_cli_reasoning_
 # effort), so an "ultra" saved on a claude_code agent clamps to "max" on the
 # wire rather than being rejected at save time. Kept in sync with that
 # module's _NATIVE_CLI_REASONING_EFFORTS_BY_RUNTIME.
@@ -137,7 +137,7 @@ _VALID_CLI_REASONING_EFFORTS_BY_RUNTIME = {
 }
 # MAN-310 Phase 1: which turn engine drives an agent whose model_config.mode
 # is platform_credits/byok_api. "legacy" (also what an unset/absent value
-# means — see sage_agent_runtime_service.py's handle_sage_chat resolution)
+# means — see agent_turn_runtime_service.py's handle_sage_chat resolution)
 # is the existing direct_chat_generation_service.stream_provider_backed_
 # direct_chat path; "claude_agent_sdk" selects claude_agent_sdk_bridge.
 # ENGINE_ID at the turn seam (_run_sage_action_loop_v3's _resolve_turn_
@@ -272,7 +272,7 @@ def resolve_agent_skills(
     _MAX_SKILLS_PER_AGENT's own docstring for the storage shape/precedent).
 
     `enabled_only=True` is what claude_agent_sdk_bridge's turn construction
-    wants (sage_agent_runtime_service._resolve_specialist_toolset calls this
+    wants (agent_turn_runtime_service._resolve_specialist_toolset calls this
     with it on) — a disabled skill must never reach the CLI as a real
     SKILL.md, so filtering happens here rather than trusting every caller to
     remember to check the flag itself. `enabled_only=False` (default) is
@@ -782,7 +782,7 @@ async def _resolve_cloud_agent_readiness_uncached(
     unconditionally, regardless of whether the bound model_config could
     actually produce a turn).
 
-    Mirrors sage_agent_runtime_service._resolve_agent_cloud_provider's mode
+    Mirrors agent_turn_runtime_service._resolve_agent_cloud_provider's mode
     dispatch (platform_credits / byok_api / cli_subscription / local) and
     calls the SAME credential-resolution primitives it uses — but
     deliberately does NOT call that function directly. Both this function
@@ -830,7 +830,7 @@ async def _resolve_cloud_agent_readiness_uncached(
             # platform_credits mode, not Sage's — must never fail because of
             # an unrelated misconfiguration on Sage's own card (see
             # _resolve_cloud_provider's docstring).
-            from server_modules.sage_agent_runtime_service import _resolve_cloud_provider
+            from server_modules.agent_turn_runtime_service import _resolve_cloud_provider
 
             await _resolve_cloud_provider(workspace_id, check_master_model_config=False)
             return True, ""
@@ -853,7 +853,7 @@ async def _resolve_cloud_agent_readiness_uncached(
             if not gateway_binding:
                 return False, f"{mode} mode requires a paired computer, but none is bound."
             if mode == "cli_subscription":
-                from server_modules.sage_agent_runtime_service import _VALID_CLI_SUBSCRIPTION_RUNTIMES
+                from server_modules.agent_turn_runtime_service import _VALID_CLI_SUBSCRIPTION_RUNTIMES
 
                 runtime = str(mc.get("runtime") or "claude_code").strip().lower() or "claude_code"
                 if runtime not in _VALID_CLI_SUBSCRIPTION_RUNTIMES:
@@ -1408,7 +1408,7 @@ async def fleet_get_agent_tools(
     listed here is already available to the agent itself (core tools,
     _UNGATED_JUDGMENT_TOOL_NAMES, and anything backed by a real connector
     binding or resolved capability; see
-    sage_agent_runtime_service._resolve_specialist_toolset).
+    agent_turn_runtime_service._resolve_specialist_toolset).
 
     2026-08-21: there is no per-tool WHO-may-trigger control either. The
     audience tool tier and its `mandate.audience_tools` grant are deleted
@@ -2188,7 +2188,7 @@ async def fleet_configure_agent(
 
 # ── Owner-only stop control ────────────────────────────────────────────────
 # kill_switch_gate.py is the real enforcement (agent:{id}/workspace:{id}
-# keys, checked by sage_agent_runtime_service._run_sage_action_loop_v3
+# keys, checked by agent_turn_runtime_service._run_sage_action_loop_v3
 # before any turn work happens) — it has no actor/timestamp fields of its
 # own, so who/when/reason live in the entity's own metadata here, same
 # pattern routes_gateway.py's agent-computer emergency-stop already uses.

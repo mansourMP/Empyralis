@@ -9,7 +9,7 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from server_modules import sage_reply_dispatcher as srd
+from server_modules import agent_reply_dispatcher as srd
 
 
 class FakeTransport:

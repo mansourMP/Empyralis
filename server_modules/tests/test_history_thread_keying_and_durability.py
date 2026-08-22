@@ -10,13 +10,13 @@ docs/design/audit-history-memory.md (gaps #4, #5, #7):
   2. WeChat Official and Telegram-Hosted now read/write through the
      durable agent_conversation_memory JSONL store (belt-and-braces next
      to the SQL thread store), the same fix personal channels already had
-     — see sage_reply_dispatcher.dispatch_sage_reply's new
+     — see agent_reply_dispatcher.dispatch_sage_reply's new
      channel_prior_messages/conversation_memory parameters and their call
      sites in wechat_official_service.py / sage_telegram_hosted_service.py.
 
 This module is additive: it does not replace any existing test file, and
 it never touches skills_service.py/tool_registry_service.py/memory tool
-files/inbound_envelope.py/sage_turn_adapter.py/channel_adapter.py/
+files/inbound_envelope.py/agent_turn_adapter.py/channel_adapter.py/
 direct_chat_generation_service.py.
 """
 
@@ -34,7 +34,7 @@ from unittest.mock import AsyncMock, patch
 from server_modules import agent_channel_router
 from server_modules import agent_conversation_memory
 from server_modules import connectors_actions
-from server_modules import sage_reply_dispatcher
+from server_modules import agent_reply_dispatcher
 from server_modules import sage_telegram_hosted_service as hosted
 from server_modules import wechat_official_service
 from server_modules.connectors import discord_connector
@@ -44,8 +44,8 @@ from server_modules.inbound_envelope import (
     InboundEnvelope,
     SurfaceKind,
 )
-from server_modules.sage_agent_runtime_contract import SageTurnResult
-from server_modules.sage_command_dispatcher import agent_sender_thread_id
+from server_modules.agent_turn_runtime_contract import SageTurnResult
+from server_modules.agent_command_dispatcher import agent_sender_thread_id
 
 
 class _IsolatedConversationsMixin:
@@ -77,7 +77,7 @@ class StudioConnectorThreadKeyingTests(unittest.IsolatedAsyncioTestCase):
     async def _route(self, *, channel_key: str, envelope: InboundEnvelope, actor_id: str = "") -> str:
         turn_result = SageTurnResult(message="ok")
         with patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn",
+            "server_modules.agent_turn_adapter.execute_sage_turn",
             new=AsyncMock(return_value=turn_result),
         ) as mock_turn:
             await agent_channel_router.route_inbound_channel_message(
@@ -171,7 +171,7 @@ class StudioConnectorThreadKeyingTests(unittest.IsolatedAsyncioTestCase):
         in, so execute_sage_turn's own (frozen) fallback still runs."""
         turn_result = SageTurnResult(message="ok")
         with patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn",
+            "server_modules.agent_turn_adapter.execute_sage_turn",
             new=AsyncMock(return_value=turn_result),
         ) as mock_turn:
             await agent_channel_router.route_inbound_channel_message(
@@ -262,11 +262,11 @@ class DiscordDmThreadKeyingTests(unittest.IsolatedAsyncioTestCase):
                 return_value="ws-1",
             ),
             patch(
-                "server_modules.sage_command_dispatcher.dispatch_command",
+                "server_modules.agent_command_dispatcher.dispatch_command",
                 new=AsyncMock(return_value=None),
             ),
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(return_value=sage_result),
             ) as mock_turn,
             patch(
@@ -326,11 +326,11 @@ class DormantDiscordDmWebhookBranchTests(unittest.IsolatedAsyncioTestCase):
             patch("server_modules.connectors_actions.discord_build_run_goal_from_event", return_value="goal"),
             patch.object(connectors_actions, "_append_channel_event", None, create=True),
             patch(
-                "server_modules.sage_command_dispatcher.dispatch_command",
+                "server_modules.agent_command_dispatcher.dispatch_command",
                 new=AsyncMock(return_value=None),
             ),
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(return_value=sage_result),
             ) as mock_turn,
         ):
@@ -389,7 +389,7 @@ def _no_op_directives(**kwargs):
 
 
 class DispatchSageReplyConversationMemoryTests(_IsolatedConversationsMixin, unittest.IsolatedAsyncioTestCase):
-    """sage_reply_dispatcher.dispatch_sage_reply's new channel_prior_messages
+    """agent_reply_dispatcher.dispatch_sage_reply's new channel_prior_messages
     (read) / conversation_memory (write) parameters — the shared mechanism
     both wechat_official_service.py and sage_telegram_hosted_service.py
     now route through."""
@@ -407,9 +407,9 @@ class DispatchSageReplyConversationMemoryTests(_IsolatedConversationsMixin, unit
 
         with (
             patch("server_modules.command_registry.process_message", new=AsyncMock(side_effect=_no_op_directives)),
-            patch("server_modules.sage_turn_adapter.execute_sage_turn", new=AsyncMock(return_value=turn_result)),
+            patch("server_modules.agent_turn_adapter.execute_sage_turn", new=AsyncMock(return_value=turn_result)),
         ):
-            delivered = await sage_reply_dispatcher.dispatch_sage_reply(
+            delivered = await agent_reply_dispatcher.dispatch_sage_reply(
                 transport=transport,
                 workspace_id="ws-wc",
                 message="Hello agent",
@@ -436,7 +436,7 @@ class DispatchSageReplyConversationMemoryTests(_IsolatedConversationsMixin, unit
         self.assertEqual(turns[1]["content"], "Hi there, customer!")
         # The assistant's own reply is never tagged with the sender's
         # envelope — only the inbound user turn is (see
-        # sage_reply_dispatcher.dispatch_sage_reply's docstring).
+        # agent_reply_dispatcher.dispatch_sage_reply's docstring).
         self.assertNotIn("metadata", turns[1])
 
     async def test_channel_prior_messages_forwarded_to_execute_sage_turn(self):
@@ -447,10 +447,10 @@ class DispatchSageReplyConversationMemoryTests(_IsolatedConversationsMixin, unit
         with (
             patch("server_modules.command_registry.process_message", new=AsyncMock(side_effect=_no_op_directives)),
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn", new=AsyncMock(return_value=turn_result),
+                "server_modules.agent_turn_adapter.execute_sage_turn", new=AsyncMock(return_value=turn_result),
             ) as mock_turn,
         ):
-            await sage_reply_dispatcher.dispatch_sage_reply(
+            await agent_reply_dispatcher.dispatch_sage_reply(
                 transport=transport,
                 workspace_id="ws-wc",
                 message="second message",
@@ -469,9 +469,9 @@ class DispatchSageReplyConversationMemoryTests(_IsolatedConversationsMixin, unit
         turn_result = SageTurnResult(message="ok")
         with (
             patch("server_modules.command_registry.process_message", new=AsyncMock(side_effect=_no_op_directives)),
-            patch("server_modules.sage_turn_adapter.execute_sage_turn", new=AsyncMock(return_value=turn_result)),
+            patch("server_modules.agent_turn_adapter.execute_sage_turn", new=AsyncMock(return_value=turn_result)),
         ):
-            await sage_reply_dispatcher.dispatch_sage_reply(
+            await agent_reply_dispatcher.dispatch_sage_reply(
                 transport=transport, workspace_id="ws-x", message="hi", channel_origin="telegram_hosted",
             )
         turns = agent_conversation_memory.load_recent_turns(
@@ -533,7 +533,7 @@ class WeChatDurableMemoryTests(_IsolatedConversationsMixin, unittest.IsolatedAsy
                 "server_modules.wechat_official_service.send_wechat_text_message",
                 new=AsyncMock(return_value={"ok": True}),
             ),
-            patch("server_modules.sage_turn_adapter.execute_sage_turn", new=turn_mock),
+            patch("server_modules.agent_turn_adapter.execute_sage_turn", new=turn_mock),
             patch(
                 "server_modules.channel_pairing_service.get_channel_pairing_service",
                 return_value=_authorized_wechat_pairing_service(),
@@ -589,7 +589,7 @@ class WeChatDurableMemoryTests(_IsolatedConversationsMixin, unittest.IsolatedAsy
                 "server_modules.wechat_official_service.send_wechat_text_message",
                 new=AsyncMock(return_value={"ok": True}),
             ),
-            patch("server_modules.sage_turn_adapter.execute_sage_turn", new=AsyncMock(return_value=turn_result)),
+            patch("server_modules.agent_turn_adapter.execute_sage_turn", new=AsyncMock(return_value=turn_result)),
             patch(
                 "server_modules.channel_pairing_service.get_channel_pairing_service",
                 return_value=_authorized_wechat_pairing_service(),
@@ -649,8 +649,8 @@ class TelegramHostedDurableMemoryTests(_IsolatedConversationsMixin, unittest.Iso
 
         with (
             patch("server_modules.sage_telegram_hosted_service._telegram_api", new=AsyncMock(return_value={"ok": True, "result": {}})),
-            patch("server_modules.sage_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)),
-            patch("server_modules.sage_turn_adapter.execute_sage_turn", new=turn_mock),
+            patch("server_modules.agent_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)),
+            patch("server_modules.agent_turn_adapter.execute_sage_turn", new=turn_mock),
         ):
             handled_1 = await hosted._process_update(
                 self._update(chat_id="chat-42", sender_id="tg-user-1", text="Hi agent", message_id=1)
@@ -681,8 +681,8 @@ class TelegramHostedDurableMemoryTests(_IsolatedConversationsMixin, unittest.Iso
 
         with (
             patch("server_modules.sage_telegram_hosted_service._telegram_api", new=AsyncMock(return_value={"ok": True, "result": {}})),
-            patch("server_modules.sage_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)),
-            patch("server_modules.sage_turn_adapter.execute_sage_turn", new=AsyncMock(return_value=turn_result)),
+            patch("server_modules.agent_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)),
+            patch("server_modules.agent_turn_adapter.execute_sage_turn", new=AsyncMock(return_value=turn_result)),
         ):
             await hosted._process_update(
                 self._update(chat_id="chat-A", sender_id="u-1", text="from chat A", message_id=1)

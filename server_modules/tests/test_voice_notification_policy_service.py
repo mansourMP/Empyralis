@@ -61,7 +61,7 @@ class VoiceNotificationPolicyServiceTests(unittest.TestCase):
         with (
             patch("server_modules.voice_notification_policy_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
             patch("server_modules.voice_notification_policy_service.security_audit_service.emit_security_audit_event"),
-            patch("server_modules.sage_turn_adapter.execute_sage_turn", new=AsyncMock(return_value=fake_result)) as mock_execute,
+            patch("server_modules.agent_turn_adapter.execute_sage_turn", new=AsyncMock(return_value=fake_result)) as mock_execute,
         ):
             result = _run(service.execute_voice_sage_task(
                 workspace_id="ws-1",
@@ -80,7 +80,7 @@ class VoiceNotificationPolicyServiceTests(unittest.TestCase):
         with (
             patch("server_modules.voice_notification_policy_service.activity_ledger_service.append_activity_event", new=AsyncMock()) as mock_activity,
             patch("server_modules.voice_notification_policy_service.security_audit_service.emit_security_audit_event") as mock_audit,
-            patch("server_modules.sage_turn_adapter.execute_sage_turn", new=AsyncMock()) as mock_execute,
+            patch("server_modules.agent_turn_adapter.execute_sage_turn", new=AsyncMock()) as mock_execute,
         ):
             result = _run(service.execute_voice_sage_task(
                 workspace_id="ws-1",

@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 
-from server_modules import sage_services_service
+from server_modules import assistant_services_service
 
 
 class SageServicesServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -13,13 +13,13 @@ class SageServicesServiceTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir) / "workspace-1"
             with (
-                patch("server_modules.sage_services_service.workspace_context.workspace_scope_dir", return_value=root),
+                patch("server_modules.assistant_services_service.workspace_context.workspace_scope_dir", return_value=root),
                 patch(
-                    "server_modules.sage_services_service.personal_context_engine.publish_event",
+                    "server_modules.assistant_services_service.personal_context_engine.publish_event",
                     new=AsyncMock(return_value={"id": "evt-1"}),
                 ) as publish_mock,
             ):
-                payload = await sage_services_service.create_service_entry(
+                payload = await assistant_services_service.create_service_entry(
                     tenant_id="tenant-1",
                     workspace_id="workspace-1",
                     service_id="flashcards",
@@ -42,13 +42,13 @@ class SageServicesServiceTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir) / "workspace-1"
             with (
-                patch("server_modules.sage_services_service.workspace_context.workspace_scope_dir", return_value=root),
+                patch("server_modules.assistant_services_service.workspace_context.workspace_scope_dir", return_value=root),
                 patch(
-                    "server_modules.sage_services_service.personal_context_engine.publish_event",
+                    "server_modules.assistant_services_service.personal_context_engine.publish_event",
                     new=AsyncMock(return_value={"id": "evt-2"}),
                 ) as publish_mock,
             ):
-                payload = await sage_services_service.update_service_profile(
+                payload = await assistant_services_service.update_service_profile(
                     tenant_id="tenant-1",
                     workspace_id="workspace-1",
                     service_id="language_coach",
@@ -73,14 +73,14 @@ class SageServicesServiceTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir) / "workspace-1"
             with (
-                patch("server_modules.sage_services_service.workspace_context.workspace_scope_dir", return_value=root),
+                patch("server_modules.assistant_services_service.workspace_context.workspace_scope_dir", return_value=root),
                 patch(
-                    "server_modules.sage_services_service.personal_context_engine.publish_event",
+                    "server_modules.assistant_services_service.personal_context_engine.publish_event",
                     new=AsyncMock(return_value={"id": "evt-blocked"}),
                 ),
             ):
                 with self.assertRaises(HTTPException) as ctx:
-                    await sage_services_service.create_service_entry(
+                    await assistant_services_service.create_service_entry(
                         tenant_id="tenant-1",
                         workspace_id="workspace-1",
                         service_id="flashcards",
@@ -98,13 +98,13 @@ class SageServicesServiceTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir) / "workspace-1"
             with (
-                patch("server_modules.sage_services_service.workspace_context.workspace_scope_dir", return_value=root),
+                patch("server_modules.assistant_services_service.workspace_context.workspace_scope_dir", return_value=root),
                 patch(
-                    "server_modules.sage_services_service.personal_context_engine.publish_event",
+                    "server_modules.assistant_services_service.personal_context_engine.publish_event",
                     new=AsyncMock(return_value={"id": "evt-explicit"}),
                 ) as publish_mock,
             ):
-                payload = await sage_services_service.create_service_entry(
+                payload = await assistant_services_service.create_service_entry(
                     tenant_id="tenant-1",
                     workspace_id="workspace-1",
                     service_id="flashcards",
@@ -133,8 +133,8 @@ class SageServicesServiceTests(unittest.IsolatedAsyncioTestCase):
     def test_build_memory_block_summarizes_all_three_services(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir) / "workspace-1"
-            with patch("server_modules.sage_services_service.workspace_context.workspace_scope_dir", return_value=root):
-                sage_services_service._save_state(
+            with patch("server_modules.assistant_services_service.workspace_context.workspace_scope_dir", return_value=root):
+                assistant_services_service._save_state(
                     "workspace-1",
                     {
                         "version": 1,
@@ -161,7 +161,7 @@ class SageServicesServiceTests(unittest.IsolatedAsyncioTestCase):
                         },
                     },
                 )
-                block = sage_services_service.build_sage_services_memory_block(workspace_id="workspace-1")
+                block = assistant_services_service.build_sage_services_memory_block(workspace_id="workspace-1")
 
             self.assertIn("Flashcards", block)
             self.assertIn("Language Coach", block)

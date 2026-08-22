@@ -26,7 +26,7 @@ The fix has three layers, tested here as three layers:
 
 NOTE on "fail closed": commit 8cc8d69dd's per-agent memory tool executors
 error outright when no agent identity resolves. This fix deliberately does
-NOT copy that for the file/shell connector: sage_agent_runtime_service.py's
+NOT copy that for the file/shell connector: agent_turn_runtime_service.py's
 _run_sage_action_loop_v3 (3 call sites, each commented "empty for Sage")
 proves the owner-facing agent's OWN turn — the primary, highest-volume
 caller of this exact connector when a box is paired — never has
@@ -36,7 +36,7 @@ not just a specialist edge case. Empty is instead treated the same way
 PLATFORM-MAP.md Part 27.1 already treats it for memory: a stable,
 server-controlled signal for "this is the owner-facing agent's own turn"
 (never model-forgeable), which keeps today's existing, workspace-level
-mount — while any SPECIALIST identity, which sage_agent_runtime_service.py
+mount — while any SPECIALIST identity, which agent_turn_runtime_service.py
 always stamps as a real, non-empty, server-controlled id when one is
 active, gets properly isolated. That's the property these tests prove.
 """
@@ -48,7 +48,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from server_modules import hardware_action_broker_service as broker
-from server_modules import sage_agent_runtime_service
+from server_modules import agent_turn_runtime_service
 from server_modules import skills_service
 from server_modules import direct_tool_execution_service
 from server_modules import direct_chat_operator_binding_service
@@ -368,7 +368,7 @@ class BrokerThreadsAgentInstallIdTests(unittest.TestCase):
 # arguments), that a real specialist identity is threaded through so it
 # gets isolated at layer 1, and that the owner-facing agent's own turn
 # (session_ctx with no agent_install_id at all — verified as the real
-# shape sage_agent_runtime_service.py produces for Sage's own turn) is left
+# shape agent_turn_runtime_service.py produces for Sage's own turn) is left
 # on today's unchanged, working behavior rather than broken by a hard
 # fail-closed gate.
 # ─────────────────────────────────────────────────────────────────────────
@@ -418,7 +418,7 @@ class DirectToolConnectorIdentityGateTests(unittest.TestCase):
 
     def test_owner_facing_agent_own_turn_keeps_working_with_no_identity(self) -> None:
         """The verified real shape of Sage's own turn
-        (sage_agent_runtime_service.py's _run_sage_action_loop_v3 passes
+        (agent_turn_runtime_service.py's _run_sage_action_loop_v3 passes
         agent_install_id=_spec_install_id, explicitly commented "empty for
         Sage", at all 3 of its call sites — session_ctx never gets
         active_agent_install_id/agent_install_id set for this case). This
@@ -438,7 +438,7 @@ class DirectToolConnectorIdentityGateTests(unittest.TestCase):
                     thread_id="thread-1",
                     index=1,
                     # No agent_install_id / active_agent_install_id at all —
-                    # exactly what sage_agent_runtime_service.py produces
+                    # exactly what agent_turn_runtime_service.py produces
                     # for Sage's own turn.
                     session_ctx={"authority_tier": "owner"},
                     callbacks=self._callbacks(),
@@ -550,7 +550,7 @@ class DirectToolConnectorIdentityGateTests(unittest.TestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# Layer 0: sage_agent_runtime_service.handle_sage_chat / _run_sage_action_
+# Layer 0: agent_turn_runtime_service.handle_sage_chat / _run_sage_action_
 # loop_v3 — the STAMPING side of the invariant Layer 3 above assumes but
 # never itself proves. Every DirectToolConnectorIdentityGateTests case
 # constructs session_ctx BY HAND (e.g.
@@ -562,7 +562,7 @@ class DirectToolConnectorIdentityGateTests(unittest.TestCase):
 # dropped `session_ctx["active_agent_install_id"] = _acting_install_id`
 # inside _run_sage_action_loop_v3, or stopped passing
 # agent_install_id=_spec_install_id from handle_sage_chat into it (3 call
-# sites, verified above at sage_agent_runtime_service.py ~4607/4686), would
+# sites, verified above at agent_turn_runtime_service.py ~4607/4686), would
 # leave every Layer 3 test green while every real specialist turn silently
 # fell back to Sage's workspace-wide mount — exactly the residual risk this
 # class closes.
@@ -609,36 +609,36 @@ class SpecialistTurnStampsAgentInstallIdOntoSessionCtxTests(unittest.TestCase):
         }]
         with (
             patch(
-                "server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile",
+                "server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile",
                 return_value={"profile": {"user_name": "", "identity_summary": "", "communication_style": "", "recurring_responsibility": "", "standing_rules": []}},
             ),
-            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
-            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
+            patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block", return_value=""),
             patch("server_modules.memory_service.get_memory", return_value=""),
-            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
-            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.agent_turn_runtime_service.assistant_health_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
             patch(
-                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                "server_modules.agent_turn_runtime_service._resolve_cloud_provider",
                 new=AsyncMock(return_value=("deepseek", {"api_key": "sk-workspace-default"})),
             ),
             patch(
-                "server_modules.sage_agent_runtime_service._resolve_agent_cloud_provider",
+                "server_modules.agent_turn_runtime_service._resolve_agent_cloud_provider",
                 new=AsyncMock(return_value=("deepseek", {"api_key": "sk-workspace-default"}, "platform_credits")),
             ),
-            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
+            patch("server_modules.agent_turn_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
             patch(
-                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
+                "server_modules.agent_turn_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
                 return_value={"runtime_ok": True, "local_gateway_online": True},
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
+                "server_modules.agent_turn_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
             ) as mock_stream,
-            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
-            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
-            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+            patch("server_modules.agent_turn_runtime_service.persist_interaction"),
+            patch("server_modules.agent_turn_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.agent_turn_runtime_service.security_audit_service.emit_security_audit_event"),
         ):
             mock_stream.return_value = iter(stream_events)
-            _run(sage_agent_runtime_service.handle_sage_chat(
+            _run(agent_turn_runtime_service.handle_sage_chat(
                 workspace_id="ws-1", message="hello",
                 specialist_context=specialist_context,
             ))

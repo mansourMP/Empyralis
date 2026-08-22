@@ -2,7 +2,7 @@
 Single command registry — one source of truth for every /command.
 
 Replaces the two if/elif chains in:
-  - sage_command_dispatcher.py  (channel commands)
+  - agent_command_dispatcher.py  (channel commands)
   - direct_chat_response_service.py  (web slash commands)
 
 Both surfaces dispatch from this registry.  Commands that only make sense
@@ -157,7 +157,7 @@ def _channel_linked_owner_ids(workspace_id: str, channel_origin: str) -> set[str
     nothing anywhere saying why.
 
     This is the same authoritative source, reached the same way, that
-    sage_agent_runtime_service._resolve_channel_sender_class already uses
+    agent_turn_runtime_service._resolve_channel_sender_class already uses
     for the turn's owner/audience tool-authority decision, and that
     personal_channels_service._is_owner_message already trusts for the
     DM-policy gate that runs BEFORE this command is ever dispatched. So a
@@ -166,7 +166,7 @@ def _channel_linked_owner_ids(workspace_id: str, channel_origin: str) -> set[str
 
     ``channel_origin`` narrows to that channel's own linked identity when
     the caller knows it (every real channel dispatch does —
-    sage_command_dispatcher.dispatch_command forwards it). With no
+    agent_command_dispatcher.dispatch_command forwards it). With no
     channel_origin the union across channels is returned, preserving the
     channel-agnostic posture the identity_links branch already had; that is
     only reachable from callers that never supplied one, and a miss there
@@ -478,8 +478,8 @@ def parse(text: str) -> tuple[str, str]:
 # kwargs.get("services") and degrade to a stub reply ("... not loaded.") when
 # it is None. _handle_tools / _handle_status also read
 # kwargs.get("availability_payload") / kwargs.get("tool_capabilities"). Every
-# live caller of this module (sage_turn_adapter.execute_sage_turn's "/"
-# command block, and sage_command_dispatcher.dispatch_command — the two
+# live caller of this module (agent_turn_adapter.execute_sage_turn's "/"
+# command block, and agent_command_dispatcher.dispatch_command — the two
 # entry points every channel and web chat route through) used to pass none
 # of these, so all five commands ran permanently degraded. Fixed by building
 # them here, once, and having both callers forward the result — see each
@@ -509,7 +509,7 @@ class _SlashCommandServices:
     resurrect dead-code assumptions and do work nothing here needs.
 
     Backed by the SAME production-wired functions
-    `sage_agent_runtime_service._direct_tool_bundle` already calls on every
+    `agent_turn_runtime_service._direct_tool_bundle` already calls on every
     ordinary (non-command) Sage turn to build that turn's own tool
     availability payload
     (`direct_chat_runtime_exports._active_run_count` /
@@ -597,7 +597,7 @@ async def dispatch(
     # Owner-gated commands (e.g. /bash, /config, /mcp, /plugins, /debug) must
     # never execute for a non-owner sender. process_message() already checks
     # this before calling into dispatch() for its own callers, but
-    # sage_command_dispatcher.py (every customer-facing channel — Telegram,
+    # agent_command_dispatcher.py (every customer-facing channel — Telegram,
     # Discord, WhatsApp, Slack, WeChat, iMessage) calls dispatch() directly,
     # so the check must also live here or those channels get an ungated
     # shell/config/plugin command. Silently treat as unrecognized (None) —
@@ -742,7 +742,7 @@ def _register_builtins() -> None:
 async def _handle_new(
     *, workspace_id: str, remainder: str, surface: str, **kwargs: Any
 ) -> Dict[str, Any]:
-    from server_modules.sage_command_dispatcher import _handle_new as _impl
+    from server_modules.agent_command_dispatcher import _handle_new as _impl
     channel_origin = str(kwargs.get("channel_origin") or kwargs.get("sender_id") or "")
     result = await _impl(workspace_id, channel_origin)
     return {"reply": result}
@@ -751,7 +751,7 @@ async def _handle_new(
 async def _handle_compact(
     *, workspace_id: str, remainder: str, surface: str, **kwargs: Any
 ) -> Dict[str, Any]:
-    from server_modules.sage_command_dispatcher import _handle_compact as _impl
+    from server_modules.agent_command_dispatcher import _handle_compact as _impl
     thread_id = str(kwargs.get("thread_id", "sage-main"))
     result = await _impl(workspace_id, thread_id)
     return {"reply": result}
@@ -805,7 +805,7 @@ async def _handle_main(
     *, workspace_id: str, surface: str, **kwargs: Any
 ) -> Dict[str, Any]:
     """Switch back to the sage-main thread."""
-    from server_modules.sage_command_dispatcher import _handle_main as _impl
+    from server_modules.agent_command_dispatcher import _handle_main as _impl
     channel_origin = str(kwargs.get("channel_origin") or kwargs.get("sender_id") or "")
     await _impl(workspace_id, channel_origin)
     return {"reply": "Heads up: back to the main thread."}
@@ -920,7 +920,7 @@ async def _handle_model(
 
     # ── Persist ────────────────────────────────────────────────────────
     try:
-        from server_modules.sage_agent_runtime_service import (
+        from server_modules.agent_turn_runtime_service import (
             set_persisted_model_preference,
         )
         await set_persisted_model_preference(workspace_id, resolved)
@@ -947,12 +947,12 @@ async def _handle_thinking(
     # sage_ai_reasoning_effort metadata this used to write. That old field
     # was inert: nothing but /config's own display ever read it back, so a
     # value set here never reached an actual reply turn (see
-    # sage_agent_runtime_service.py's handle_sage_chat / _run_sage_action_
+    # agent_turn_runtime_service.py's handle_sage_chat / _run_sage_action_
     # loop_v3, which now consult model_config.reasoning_effort instead).
     #
     # Targets whichever agent is acting THIS turn: the resolved specialist
     # when the caller threads one through (kwargs["agent_install_id"] —
-    # sage_turn_adapter.py does this for channel turns), else the
+    # agent_turn_adapter.py does this for channel turns), else the
     # workspace's own master (Sage) install — the common case for both web
     # Sage chat and the "Direct Chat" runs-API surface, neither of which has
     # a specialist concept to lose here.

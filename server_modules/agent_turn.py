@@ -771,7 +771,7 @@ def sage_chat_attachment_dict_from_turn_attachment(attachment: TurnAttachment) -
     ``AgentTurnRequest.attachments`` (``List[TurnAttachment]``) and the
     Sage-native pipeline's ``attachments: list[dict]`` (``handle_sage_chat``,
     ``NormalizedSageTurn``, ``_load_attachment_context`` in
-    sage_agent_runtime_service.py, and channel wrappers) are two distinct,
+    agent_turn_runtime_service.py, and channel wrappers) are two distinct,
     internally-consistent type contracts. Call this at the boundary where
     the former hands off into the latter — never pass a bare
     ``TurnAttachment`` across that boundary; every consumer downstream of
@@ -1604,7 +1604,7 @@ async def agent_turn(
 
     # ── Canonical inbound envelope (docs/design/inbound-envelope-design.md) ──
     # agent_turn() is the generic turn entry for run-start/durable/direct-chat
-    # turns alike; it does NOT itself route through sage_turn_adapter.
+    # turns alike; it does NOT itself route through agent_turn_adapter.
     # execute_sage_turn — the one chokepoint every OTHER channel uses for
     # envelope header injection. Scoped narrowly to the literal console/
     # mobile direct-chat surface this file already names

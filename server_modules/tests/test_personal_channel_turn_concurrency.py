@@ -1,7 +1,7 @@
 """Two messages arriving close together on the SAME personal-channel thread
 used to start two concurrent turns reading torn thread history.
 dispatch_sage_reply already prevented this for hosted-bot/WeChat-official
-channels via sage_reply_dispatcher._CHANNEL_TURN_LOCKS; personal channels
+channels via agent_reply_dispatcher._CHANNEL_TURN_LOCKS; personal channels
 (WhatsApp, Telegram-personal, Discord DMs, and the whole local-bridge/
 OpenClaw family) never had it — personal_channel_sage_bridge_service.py's
 _execute_channel_turn_with_envelope called execute_sage_turn directly, with
@@ -27,7 +27,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from server_modules import openclaw_channel_registry, personal_channel_sage_bridge_service
-from server_modules.sage_agent_runtime_contract import SageTurnResult
+from server_modules.agent_turn_runtime_contract import SageTurnResult
 
 # RETARGETED 2026-08-15 from build_whatsapp_personal_reply_async, deleted that
 # day: it hardcoded `whatsapp_personal`, a key the OpenClaw cutover removed and
@@ -87,7 +87,7 @@ class PersonalChannelTurnSerializationTests(unittest.TestCase):
                 ),
             )
 
-        with patch("server_modules.sage_turn_adapter.execute_sage_turn", new=AsyncMock(side_effect=fake_turn)):
+        with patch("server_modules.agent_turn_adapter.execute_sage_turn", new=AsyncMock(side_effect=fake_turn)):
             asyncio.run(run_case())
 
         self.assertEqual(max_observed_concurrency, 1, "two turns for the same thread ran concurrently")
@@ -138,7 +138,7 @@ class PersonalChannelTurnSerializationTests(unittest.TestCase):
                 ),
             )
 
-        with patch("server_modules.sage_turn_adapter.execute_sage_turn", new=AsyncMock(side_effect=fake_turn)):
+        with patch("server_modules.agent_turn_adapter.execute_sage_turn", new=AsyncMock(side_effect=fake_turn)):
             asyncio.run(run_case())
 
         self.assertEqual(
@@ -188,7 +188,7 @@ class PersonalChannelTurnSerializationTests(unittest.TestCase):
                 ),
             )
 
-        with patch("server_modules.sage_turn_adapter.execute_sage_turn", new=AsyncMock(side_effect=fake_turn)):
+        with patch("server_modules.agent_turn_adapter.execute_sage_turn", new=AsyncMock(side_effect=fake_turn)):
             asyncio.run(run_case())
 
         self.assertEqual(max_observed_concurrency, 1, "two WhatsApp turns for the same number ran concurrently")

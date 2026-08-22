@@ -16,7 +16,7 @@ Channel adapters receive the SAME notification and degrade gracefully:
   :func:`render_error_notification_text`
 
 ``classify_error_notification`` shares the identical 5-bucket keyword logic
-with :func:`sage_command_dispatcher.classify_error`.  The two functions must
+with :func:`agent_command_dispatcher.classify_error`.  The two functions must
 stay in sync — any keyword change in one must be mirrored in the other.
 """
 
@@ -157,9 +157,9 @@ def classify_error_notification(
     """Map an error string to a fully-formed ErrorNotification.
 
     Uses the SAME 5-bucket keyword logic as
-    :func:`sage_command_dispatcher.classify_error`.  Keep them in sync.
+    :func:`agent_command_dispatcher.classify_error`.  Keep them in sync.
     """
-    from server_modules.sage_command_dispatcher import (
+    from server_modules.agent_command_dispatcher import (
         SAGE_AI_LIMIT_REPLY,
         SAGE_AI_NEEDS_ATTENTION_REPLY,
         SAGE_ERROR_REPLY,

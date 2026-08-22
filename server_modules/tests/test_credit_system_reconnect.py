@@ -57,7 +57,7 @@ class CreditConversionTests(unittest.TestCase):
     def test_zero_cost_turn_charges_nothing(self):
         # No ground-truth cost (e.g. pricing unknown) must never be
         # guessed into a charge — see the reconnect call site's
-        # `_sage_usd_cost is not None` guard in sage_agent_runtime_service.py.
+        # `_sage_usd_cost is not None` guard in agent_turn_runtime_service.py.
         self.assertEqual(billing_credit_config.credits_for_turn_cost_usd(0), 0)
         self.assertEqual(billing_credit_config.credits_for_turn_cost_usd(None), 0)
 

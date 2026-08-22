@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from server_modules import rust_runtime_kernel_client, sage_memory_service, workspace_context
+from server_modules import rust_runtime_kernel_client, assistant_memory_service, workspace_context
 
 
 DREAMING_STAGING_DIR = ".dreams"
@@ -109,8 +109,8 @@ def _prune_staging(workspace_id: str) -> None:
 
 
 def light_sleep(workspace_id: str) -> Dict[str, Any]:
-    state = sage_memory_service._safe_read_json(
-        sage_memory_service._state_file(workspace_id)
+    state = assistant_memory_service._safe_read_json(
+        assistant_memory_service._state_file(workspace_id)
     )
     entries: List[Dict[str, Any]] = state.get("entries", [])
 
@@ -145,7 +145,7 @@ def light_sleep(workspace_id: str) -> Dict[str, Any]:
     if merged > 0:
         state["entries"] = deduped
         state["updated_at"] = _utc_now_iso()
-        target = sage_memory_service._state_file(workspace_id)
+        target = assistant_memory_service._state_file(workspace_id)
         _write_dreaming_json(
             operation="write_sage_dreaming_memory_state",
             workspace_id=workspace_id,
@@ -166,8 +166,8 @@ def light_sleep(workspace_id: str) -> Dict[str, Any]:
 
 
 def rem_sleep(workspace_id: str) -> Dict[str, Any]:
-    state = sage_memory_service._safe_read_json(
-        sage_memory_service._state_file(workspace_id)
+    state = assistant_memory_service._safe_read_json(
+        assistant_memory_service._state_file(workspace_id)
     )
     entries: List[Dict[str, Any]] = state.get("entries", [])
     if len(entries) < 2:
@@ -214,7 +214,7 @@ def rem_sleep(workspace_id: str) -> Dict[str, Any]:
     if cross_refs > 0:
         state["entries"] = entries
         state["updated_at"] = _utc_now_iso()
-        target = sage_memory_service._state_file(workspace_id)
+        target = assistant_memory_service._state_file(workspace_id)
         _write_dreaming_json(
             operation="write_sage_dreaming_memory_state",
             workspace_id=workspace_id,
@@ -239,8 +239,8 @@ def deep_sleep(
     max_age_days: int = 30,
     max_entries: int = 50,
 ) -> Dict[str, Any]:
-    state = sage_memory_service._safe_read_json(
-        sage_memory_service._state_file(workspace_id)
+    state = assistant_memory_service._safe_read_json(
+        assistant_memory_service._state_file(workspace_id)
     )
     entries: List[Dict[str, Any]] = state.get("entries", [])
 
@@ -299,7 +299,7 @@ def deep_sleep(
     if pruned > 0 or promoted > 0 or demoted > 0:
         state["entries"] = kept
         state["updated_at"] = _utc_now_iso()
-        target = sage_memory_service._state_file(workspace_id)
+        target = assistant_memory_service._state_file(workspace_id)
         _write_dreaming_json(
             operation="write_sage_dreaming_memory_state",
             workspace_id=workspace_id,

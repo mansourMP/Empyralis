@@ -15,7 +15,7 @@ import asyncio
 
 LOGGER = logging.getLogger(__name__)
 
-from server_modules.sage_command_dispatcher import SAGE_ERROR_REPLY  # noqa: E402
+from server_modules.agent_command_dispatcher import SAGE_ERROR_REPLY  # noqa: E402
 from server_modules import runtime_config as runtime_config
 
 PAIRING_CODE_LENGTH = 6
@@ -1510,7 +1510,7 @@ async def _process_update(update: dict) -> bool:
 
     GUARANTEED RESPONSE: every inbound message path ends with at least one
     sent message — an answer, an honest error, or a plain fallback. Never silence.
-    All reliability logic is owned by the shared-core sage_reply_dispatcher.
+    All reliability logic is owned by the shared-core agent_reply_dispatcher.
     """
     parsed = parse_telegram_update(update)
     if parsed is None:
@@ -1579,7 +1579,7 @@ async def _process_update(update: dict) -> bool:
     )
 
     # ── Shared command dispatcher (handles /compact, /new, /help, etc.) ──
-    from server_modules.sage_command_dispatcher import dispatch_command
+    from server_modules.agent_command_dispatcher import dispatch_command
     cmd_reply = await dispatch_command(
         command=message_text,
         workspace_id=workspace_id,
@@ -1612,7 +1612,7 @@ async def _process_update(update: dict) -> bool:
     # ── Route through shared-core reply dispatcher ──
     # This ONE call owns: typing, execute_sage_turn, error classification,
     # [SILENT] suppression, message splitting, guaranteed fallback.
-    from server_modules.sage_reply_dispatcher import dispatch_sage_reply_safe
+    from server_modules.agent_reply_dispatcher import dispatch_sage_reply_safe
 
     transport = TelegramHostedTransport(str(chat_id))
     return await dispatch_sage_reply_safe(

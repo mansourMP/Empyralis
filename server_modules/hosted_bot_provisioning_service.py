@@ -42,7 +42,7 @@ POOL_BOT_VAULT_PROVIDER = "telegram_bot"
 # unclaimed's own docstring (personal_channels_repository.py) for why this
 # exists and why it is safe: a BYO bot has no phone/QR pairing step to prove
 # "this Telegram account is the owner", and command_registry._is_sender_owner
-# / sage_agent_runtime_service._resolve_channel_sender_class both read
+# / agent_turn_runtime_service._resolve_channel_sender_class both read
 # personal_channels_repository as their ONLY authoritative source (CLAUDE.md:
 # "identity_links is a dead column"). Without a writer for the BYO family,
 # EVERY sender on a BYO bot — the true owner included — was permanently
@@ -600,7 +600,7 @@ async def route_agent_inbound(
 
     # Owner-recognition claim — private DMs only. A BYO bot has no phone/QR
     # pairing step, so command_registry._is_sender_owner and
-    # sage_agent_runtime_service._resolve_channel_sender_class (both read
+    # agent_turn_runtime_service._resolve_channel_sender_class (both read
     # personal_channels_repository as their one authoritative source) could
     # never recognize ANY sender as owner, the real owner included — see
     # BYO_OWNER_CLAIM_CHANNEL_KEY's own comment above. First private DM
@@ -666,7 +666,7 @@ async def route_agent_inbound(
     # history/memory scope, distinct from the workspace's sage-main thread.
     thread_id = f"thread_agent_{agent_install_id}"
 
-    from server_modules.sage_reply_dispatcher import dispatch_sage_reply_safe
+    from server_modules.agent_reply_dispatcher import dispatch_sage_reply_safe
 
     delivered = await dispatch_sage_reply_safe(
         transport=transport,

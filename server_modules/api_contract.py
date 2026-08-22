@@ -387,7 +387,7 @@ def build_turn_chat_body(turn_request: AgentTurnRequest) -> Dict[str, Any]:
 
 
 def _serialize_transparency_events(raw: Any) -> List[Dict[str, Any]]:
-    """result["transparency_events"] (see sage_agent_runtime_service's
+    """result["transparency_events"] (see agent_turn_runtime_service's
     handle_sage_chat) holds raw AgentTransparencyEvent dataclass instances,
     not plain dicts — convert each to its public payload shape. Duck-typed
     (hasattr check) rather than importing AgentTransparencyEvent, and

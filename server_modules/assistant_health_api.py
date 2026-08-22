@@ -5,7 +5,7 @@ from typing import Optional
 from fastapi import Depends
 
 from server_modules.auth import enforce_workspace_access, workspace_tenant_id
-from server_modules.sage_heartbeat_service import build_sage_heartbeat_snapshot
+from server_modules.assistant_health_service import build_sage_heartbeat_snapshot
 
 
 def register_sage_heartbeat_routes(app) -> None:

@@ -149,17 +149,17 @@ def classify_error(
 ) -> str:
     """Map an error string to the appropriate user-facing reply constant.
 
-    Delegates to the single source of truth in :mod:`sage_command_dispatcher`.
+    Delegates to the single source of truth in :mod:`agent_command_dispatcher`.
     This re-export exists so existing callers in this module don't need to
-    change; new callers should import directly from sage_command_dispatcher.
+    change; new callers should import directly from agent_command_dispatcher.
     """
-    from server_modules.sage_command_dispatcher import classify_error as _ce
+    from server_modules.agent_command_dispatcher import classify_error as _ce
     return _ce(error_text, raw_error=raw_error, is_platform_credits=is_platform_credits)
 
 
 def _build_setup_hint(workspace_id: str) -> str:
     """Build the "AI & Setup" link suffix for error messages."""
-    from server_modules.sage_agent_runtime_service import _SAGE_AI_SETUP_PATH
+    from server_modules.agent_turn_runtime_service import _SAGE_AI_SETUP_PATH
 
     _ws_id = str(workspace_id or "").strip()
     _setup_path = f"/w/{_ws_id}{_SAGE_AI_SETUP_PATH}" if _ws_id else _SAGE_AI_SETUP_PATH
@@ -282,7 +282,7 @@ async def dispatch_sage_reply(
     Returns:
         True if at least one message was sent to the user.
     """
-    from server_modules.sage_turn_adapter import execute_sage_turn
+    from server_modules.agent_turn_adapter import execute_sage_turn
     from server_modules.channel_adapter import filter_channel_outbound_reply
 
     sent_any = False

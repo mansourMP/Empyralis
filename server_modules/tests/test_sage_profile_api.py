@@ -4,7 +4,7 @@ import types
 import unittest
 from unittest.mock import patch
 
-from server_modules import sage_profile_api
+from server_modules import assistant_profile_api
 
 
 class _FakeApp:
@@ -38,13 +38,13 @@ class SageProfileApiTests(unittest.TestCase):
         sys.modules["server"] = fake_server
         try:
             app = _FakeApp()
-            sage_profile_api.register_sage_profile_routes(app)
+            assistant_profile_api.register_sage_profile_routes(app)
             route = app.routes[("GET", "/api/sage-profile")]
             with (
-                patch("server_modules.sage_profile_api.enforce_workspace_access", return_value="workspace-1"),
-                patch("server_modules.sage_profile_api.workspace_tenant_id", return_value="tenant-1"),
+                patch("server_modules.assistant_profile_api.enforce_workspace_access", return_value="workspace-1"),
+                patch("server_modules.assistant_profile_api.workspace_tenant_id", return_value="tenant-1"),
                 patch(
-                    "server_modules.sage_profile_api.list_sage_profile",
+                    "server_modules.assistant_profile_api.list_sage_profile",
                     return_value={"profile": {"user_name": "Mansur"}, "bootstrap": {"complete": False}},
                 ) as list_mock,
             ):
@@ -69,19 +69,19 @@ class SageProfileApiTests(unittest.TestCase):
         sys.modules["server"] = fake_server
         try:
             app = _FakeApp()
-            sage_profile_api.register_sage_profile_routes(app)
+            assistant_profile_api.register_sage_profile_routes(app)
             route = app.routes[("PATCH", "/api/sage-profile")]
             with (
-                patch("server_modules.sage_profile_api.enforce_workspace_access", return_value="workspace-1"),
-                patch("server_modules.sage_profile_api.workspace_tenant_id", return_value="tenant-1"),
+                patch("server_modules.assistant_profile_api.enforce_workspace_access", return_value="workspace-1"),
+                patch("server_modules.assistant_profile_api.workspace_tenant_id", return_value="tenant-1"),
                 patch(
-                    "server_modules.sage_profile_api.upsert_sage_profile",
+                    "server_modules.assistant_profile_api.upsert_sage_profile",
                     return_value={"profile": {"user_name": "Mansur"}, "bootstrap": {"complete": True}},
                 ) as update_mock,
             ):
                 payload = asyncio.run(
                     route(
-                        sage_profile_api.SageProfileUpdateRequest(
+                        assistant_profile_api.SageProfileUpdateRequest(
                             workspace_id="workspace-1",
                             user_name="Mansur",
                             identity_summary="Builds Empyralis.",
@@ -107,19 +107,19 @@ class SageProfileApiTests(unittest.TestCase):
         sys.modules["server"] = fake_server
         try:
             app = _FakeApp()
-            sage_profile_api.register_sage_profile_routes(app)
+            assistant_profile_api.register_sage_profile_routes(app)
             route = app.routes[("POST", "/api/sage-profile/bootstrap/answer")]
             with (
-                patch("server_modules.sage_profile_api.enforce_workspace_access", return_value="workspace-1"),
-                patch("server_modules.sage_profile_api.workspace_tenant_id", return_value="tenant-1"),
+                patch("server_modules.assistant_profile_api.enforce_workspace_access", return_value="workspace-1"),
+                patch("server_modules.assistant_profile_api.workspace_tenant_id", return_value="tenant-1"),
                 patch(
-                    "server_modules.sage_profile_api.answer_sage_profile_bootstrap",
+                    "server_modules.assistant_profile_api.answer_sage_profile_bootstrap",
                     return_value={"bootstrap": {"complete": False, "current_question": {"id": "identity_summary"}}},
                 ) as answer_mock,
             ):
                 payload = asyncio.run(
                     route(
-                        sage_profile_api.SageProfileBootstrapAnswerRequest(
+                        assistant_profile_api.SageProfileBootstrapAnswerRequest(
                             workspace_id="workspace-1",
                             answer="Mansur",
                         ),

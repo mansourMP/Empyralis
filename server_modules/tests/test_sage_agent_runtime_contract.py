@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from server_modules.sage_agent_runtime_contract import (
+from server_modules.agent_turn_runtime_contract import (
     SAGE_MODE,
     SAGE_RUNTIME_KIND,
     SAGE_ALLOWED_SURFACES,

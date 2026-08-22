@@ -27,7 +27,7 @@ hardware access is policy-locked and can only change by changing the preset.
 `enabled_tools`/`tool_toggles` restriction. There is no more per-agent Tools
 enable/disable checklist — every agent, regardless of preset, gets core
 tools plus everything with no third-party integration behind it
-unconditionally (sage_agent_runtime_service._UNGATED_JUDGMENT_TOOL_NAMES),
+unconditionally (agent_turn_runtime_service._UNGATED_JUDGMENT_TOOL_NAMES),
 plus anything backed by a real connector binding or resolved capability.
 The knowledge preset's real, still-enforced restriction is hardware_access
 ("none", policy-locked) — that boundary is untouched by this change.

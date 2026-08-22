@@ -322,7 +322,7 @@ class OwnerIdentityReachesTheAuthorityChainTests(_Base):
     """The link is only worth anything if the turn's own tool-authority
     decision sees it. That decision reads a THIRD function
     (personal_channels_repository.list_owner_linked_channel_identities_for_workspace,
-    via sage_agent_runtime_service._resolve_channel_sender_class), so prove
+    via agent_turn_runtime_service._resolve_channel_sender_class), so prove
     the write lands where that function looks rather than assuming it."""
 
     async def test_the_workspace_owner_lookup_sees_the_link(self) -> None:
@@ -341,11 +341,11 @@ class OwnerIdentityReachesTheAuthorityChainTests(_Base):
         through to "audience" — which strips EVERY tool, so the agent
         refused its own owner a shell command on a turn whose envelope
         header already said "your owner". Observed live 2026-08-15."""
-        from server_modules import sage_agent_runtime_service
+        from server_modules import agent_turn_runtime_service
 
         self._link()
         self.assertEqual(
-            await sage_agent_runtime_service._resolve_channel_sender_class(
+            await agent_turn_runtime_service._resolve_channel_sender_class(
                 channel_origin=CHANNEL_KEY,
                 sender_id=f"telegram:{OWNER_SENDER_ID}",
                 workspace_id="ws-owner",
@@ -353,7 +353,7 @@ class OwnerIdentityReachesTheAuthorityChainTests(_Base):
             "owner",
         )
         self.assertEqual(
-            await sage_agent_runtime_service._resolve_channel_sender_class(
+            await agent_turn_runtime_service._resolve_channel_sender_class(
                 channel_origin=CHANNEL_KEY,
                 sender_id=f"telegram:{STRANGER_SENDER_ID}",
                 workspace_id="ws-owner",
@@ -402,7 +402,7 @@ class ChannelOriginSurvivesTheTurnAdapterTests(_Base):
 
     async def test_an_openclaw_channel_keeps_its_real_key(self) -> None:
         from server_modules.channel_adapter import normalize_sage_inbound
-        from server_modules.sage_turn_adapter import _channel_origin_for_turn
+        from server_modules.agent_turn_adapter import _channel_origin_for_turn
 
         turn = normalize_sage_inbound(
             workspace_id="ws-owner", message="hi", channel_origin=CHANNEL_KEY,
@@ -414,7 +414,7 @@ class ChannelOriginSurvivesTheTurnAdapterTests(_Base):
         it matches no channel key anywhere — this half of the bug was never
         specific to the new channels."""
         from server_modules.channel_adapter import normalize_sage_inbound
-        from server_modules.sage_turn_adapter import _channel_origin_for_turn
+        from server_modules.agent_turn_adapter import _channel_origin_for_turn
 
         turn = normalize_sage_inbound(
             workspace_id="ws-owner", message="hi", channel_origin="telegram_hosted",
@@ -425,7 +425,7 @@ class ChannelOriginSurvivesTheTurnAdapterTests(_Base):
 
     async def test_every_live_channel_key_survives(self) -> None:
         from server_modules.channel_adapter import normalize_sage_inbound
-        from server_modules.sage_turn_adapter import _channel_origin_for_turn
+        from server_modules.agent_turn_adapter import _channel_origin_for_turn
 
         for channel_key in sorted(personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS):
             with self.subTest(channel_key=channel_key):

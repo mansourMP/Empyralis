@@ -217,12 +217,12 @@ class PerAgentAIBindingTests(unittest.TestCase):
     def test_byok_api_missing_provider_raises(self):
         """Agent bound to byok_api without specifying provider raises RuntimeError."""
         with patch(
-            "server_modules.sage_agent_runtime_service._ledger_provider_unavailable",
+            "server_modules.agent_turn_runtime_service._ledger_provider_unavailable",
             new=AsyncMock(),
         ):
             with self.assertRaises(RuntimeError) as ctx:
                 _run(
-                    sage_agent_runtime_service._resolve_agent_cloud_provider(
+                    agent_turn_runtime_service._resolve_agent_cloud_provider(
                         workspace_id="ws-test",
                         agent_model_config={
                             "mode": "byok_api",
@@ -237,11 +237,11 @@ class PerAgentAIBindingTests(unittest.TestCase):
     def test_platform_credits_delegates_to_default(self):
         """platform_credits mode delegates to workspace default resolution."""
         with patch(
-            "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+            "server_modules.agent_turn_runtime_service._resolve_cloud_provider",
             new=AsyncMock(return_value=("deepseek", {"api_key": "test"})),
         ):
             provider, creds, billing = _run(
-                sage_agent_runtime_service._resolve_agent_cloud_provider(
+                agent_turn_runtime_service._resolve_agent_cloud_provider(
                     workspace_id="ws-test",
                     agent_model_config={"mode": "platform_credits"},
                     agent_id="agent-pc-1",
@@ -256,12 +256,12 @@ class PerAgentAIBindingTests(unittest.TestCase):
         silent fallback to platform credits, and never the old permanent-stub
         'not yet available' message (this mode is real now)."""
         with patch(
-            "server_modules.sage_agent_runtime_service._ledger_provider_unavailable",
+            "server_modules.agent_turn_runtime_service._ledger_provider_unavailable",
             new=AsyncMock(),
         ):
             with self.assertRaises(RuntimeError) as ctx:
                 _run(
-                    sage_agent_runtime_service._resolve_agent_cloud_provider(
+                    agent_turn_runtime_service._resolve_agent_cloud_provider(
                         workspace_id="ws-test",
                         agent_model_config={"mode": "cli_subscription"},
                         agent_id="agent-cli-1",
@@ -278,7 +278,7 @@ class PerAgentAIBindingTests(unittest.TestCase):
         readiness checks, and the actual CLI spawn happen at the turn seam,
         not here) — so nothing is ever charged to platform credits."""
         provider, creds, billing = _run(
-            sage_agent_runtime_service._resolve_agent_cloud_provider(
+            agent_turn_runtime_service._resolve_agent_cloud_provider(
                 workspace_id="ws-test",
                 agent_model_config={
                     "mode": "cli_subscription",
@@ -297,7 +297,7 @@ class PerAgentAIBindingTests(unittest.TestCase):
         """An unset runtime defaults to claude_code, never a fabricated or
         empty runtime string."""
         provider, _creds, billing = _run(
-            sage_agent_runtime_service._resolve_agent_cloud_provider(
+            agent_turn_runtime_service._resolve_agent_cloud_provider(
                 workspace_id="ws-test",
                 agent_model_config={"mode": "cli_subscription", "gateway_binding": "gateway_abc123"},
                 agent_id="agent-cli-3",
@@ -311,12 +311,12 @@ class PerAgentAIBindingTests(unittest.TestCase):
         its own distinct honest message — never silently coerced to a
         supported one."""
         with patch(
-            "server_modules.sage_agent_runtime_service._ledger_provider_unavailable",
+            "server_modules.agent_turn_runtime_service._ledger_provider_unavailable",
             new=AsyncMock(),
         ):
             with self.assertRaises(RuntimeError) as ctx:
                 _run(
-                    sage_agent_runtime_service._resolve_agent_cloud_provider(
+                    agent_turn_runtime_service._resolve_agent_cloud_provider(
                         workspace_id="ws-test",
                         agent_model_config={
                             "mode": "cli_subscription",
@@ -334,12 +334,12 @@ class PerAgentAIBindingTests(unittest.TestCase):
         """BYO-brain Phase 2: local mode with NO bound box raises an honest
         'no computer is bound' error — never a silent fallback."""
         with patch(
-            "server_modules.sage_agent_runtime_service._ledger_provider_unavailable",
+            "server_modules.agent_turn_runtime_service._ledger_provider_unavailable",
             new=AsyncMock(),
         ):
             with self.assertRaises(RuntimeError) as ctx:
                 _run(
-                    sage_agent_runtime_service._resolve_agent_cloud_provider(
+                    agent_turn_runtime_service._resolve_agent_cloud_provider(
                         workspace_id="ws-test",
                         agent_model_config={"mode": "local"},
                         agent_id="agent-local-1",
@@ -352,7 +352,7 @@ class PerAgentAIBindingTests(unittest.TestCase):
         'local' billing mode (dispatch happens at the turn seam, not here) —
         so nothing is ever charged to platform credits."""
         provider, creds, billing = _run(
-            sage_agent_runtime_service._resolve_agent_cloud_provider(
+            agent_turn_runtime_service._resolve_agent_cloud_provider(
                 workspace_id="ws-test",
                 agent_model_config={
                     "mode": "local",
@@ -369,12 +369,12 @@ class PerAgentAIBindingTests(unittest.TestCase):
     def test_two_agents_different_providers(self):
         """Two agents with different model_config resolve to different providers."""
         with patch(
-            "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+            "server_modules.agent_turn_runtime_service._resolve_cloud_provider",
             new=AsyncMock(return_value=("deepseek", {"api_key": "test"})),
         ):
             # Agent 1: platform_credits → deepseek
             prov1, _, bill1 = _run(
-                sage_agent_runtime_service._resolve_agent_cloud_provider(
+                agent_turn_runtime_service._resolve_agent_cloud_provider(
                     workspace_id="ws-test",
                     agent_model_config={"mode": "platform_credits"},
                     agent_id="agent-1",
@@ -384,15 +384,15 @@ class PerAgentAIBindingTests(unittest.TestCase):
             self.assertEqual(bill1, "platform_credits")
 
         with patch(
-            "server_modules.sage_agent_runtime_service.direct_chat_credentials",
+            "server_modules.agent_turn_runtime_service.direct_chat_credentials",
             return_value={"api_key": "sk-byok"},
         ), patch(
-            "server_modules.sage_agent_runtime_service.supports_direct_message_native_chat",
+            "server_modules.agent_turn_runtime_service.supports_direct_message_native_chat",
             return_value=True,
         ):
             # Agent 2: byok_api → anthropic
             prov2, _, bill2 = _run(
-                sage_agent_runtime_service._resolve_agent_cloud_provider(
+                agent_turn_runtime_service._resolve_agent_cloud_provider(
                     workspace_id="ws-test",
                     agent_model_config={
                         "mode": "byok_api",
@@ -421,20 +421,20 @@ class PerAgentAIBindingTests(unittest.TestCase):
         )
         with (
             patch(
-                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                "server_modules.agent_turn_runtime_service._resolve_cloud_provider",
                 new=exploding_workspace_default,
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.direct_chat_credentials",
+                "server_modules.agent_turn_runtime_service.direct_chat_credentials",
                 return_value={"api_key": "sk-agent-own-anthropic-key"},
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.supports_direct_message_native_chat",
+                "server_modules.agent_turn_runtime_service.supports_direct_message_native_chat",
                 return_value=True,
             ),
         ):
             provider, creds, billing = _run(
-                sage_agent_runtime_service._resolve_agent_cloud_provider(
+                agent_turn_runtime_service._resolve_agent_cloud_provider(
                     workspace_id="ws-test",
                     agent_model_config={"mode": "platform_credits", "provider": "anthropic"},
                     agent_id="agent-pc-own-provider",
@@ -454,23 +454,23 @@ class PerAgentAIBindingTests(unittest.TestCase):
 
         with (
             patch(
-                "server_modules.sage_agent_runtime_service.direct_chat_credentials",
+                "server_modules.agent_turn_runtime_service.direct_chat_credentials",
                 side_effect=_fake_credentials,
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.supports_direct_message_native_chat",
+                "server_modules.agent_turn_runtime_service.supports_direct_message_native_chat",
                 return_value=True,
             ),
         ):
             prov1, creds1, bill1 = _run(
-                sage_agent_runtime_service._resolve_agent_cloud_provider(
+                agent_turn_runtime_service._resolve_agent_cloud_provider(
                     workspace_id="ws-test",
                     agent_model_config={"mode": "platform_credits", "provider": "anthropic"},
                     agent_id="agent-default-1",
                 )
             )
             prov2, creds2, bill2 = _run(
-                sage_agent_runtime_service._resolve_agent_cloud_provider(
+                agent_turn_runtime_service._resolve_agent_cloud_provider(
                     workspace_id="ws-test",
                     agent_model_config={"mode": "platform_credits", "provider": "openai"},
                     agent_id="agent-default-2",
@@ -494,20 +494,20 @@ class PerAgentAIBindingTests(unittest.TestCase):
         AI-Setup page) — the agent's resolved provider must not move."""
         with (
             patch(
-                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                "server_modules.agent_turn_runtime_service._resolve_cloud_provider",
                 new=AsyncMock(return_value=("gemini", {"api_key": "sk-new-workspace-default"})),
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.direct_chat_credentials",
+                "server_modules.agent_turn_runtime_service.direct_chat_credentials",
                 return_value={"api_key": "sk-agent-own-openai-key"},
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.supports_direct_message_native_chat",
+                "server_modules.agent_turn_runtime_service.supports_direct_message_native_chat",
                 return_value=True,
             ),
         ):
             provider, creds, billing = _run(
-                sage_agent_runtime_service._resolve_agent_cloud_provider(
+                agent_turn_runtime_service._resolve_agent_cloud_provider(
                     workspace_id="ws-test",
                     agent_model_config={"mode": "platform_credits", "provider": "openai"},
                     agent_id="agent-pinned-to-openai",
@@ -527,11 +527,11 @@ class PerAgentAIBindingTests(unittest.TestCase):
         gap: the create-agent wizard now asks for a provider on every new
         agent, so only already-unconfigured agents take this path."""
         with patch(
-            "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+            "server_modules.agent_turn_runtime_service._resolve_cloud_provider",
             new=AsyncMock(return_value=("gemini", {"api_key": "sk-new-workspace-default"})),
         ) as mock_default:
             provider, creds, billing = _run(
-                sage_agent_runtime_service._resolve_agent_cloud_provider(
+                agent_turn_runtime_service._resolve_agent_cloud_provider(
                     workspace_id="ws-test",
                     agent_model_config={"mode": "platform_credits"},
                     agent_id="agent-legacy-no-provider",
@@ -555,21 +555,21 @@ class PerAgentAIBindingTests(unittest.TestCase):
         with (
             patch("server_modules.activity_ledger_service.append_activity_event", new=mock_ledger),
             patch(
-                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                "server_modules.agent_turn_runtime_service._resolve_cloud_provider",
                 new=exploding_workspace_default,
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.direct_chat_credentials",
+                "server_modules.agent_turn_runtime_service.direct_chat_credentials",
                 return_value={},
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.supports_direct_message_native_chat",
+                "server_modules.agent_turn_runtime_service.supports_direct_message_native_chat",
                 return_value=False,
             ),
         ):
             with self.assertRaises(RuntimeError) as ctx:
                 _run(
-                    sage_agent_runtime_service._resolve_agent_cloud_provider(
+                    agent_turn_runtime_service._resolve_agent_cloud_provider(
                         workspace_id="ws-test",
                         agent_model_config={"mode": "platform_credits", "provider": "anthropic"},
                         agent_id="agent-pc-dead-key",
@@ -592,7 +592,7 @@ class PerAgentAIBindingTests(unittest.TestCase):
             new=mock_ledger,
         ):
             _run(
-                sage_agent_runtime_service._ledger_provider_unavailable(
+                agent_turn_runtime_service._ledger_provider_unavailable(
                     workspace_id="ws-test",
                     agent_id="agent-byok-2",
                     mode="byok_api",
@@ -609,12 +609,12 @@ class PerAgentAIBindingTests(unittest.TestCase):
     def test_unknown_mode_raises(self):
         """Unknown model_config mode raises RuntimeError."""
         with patch(
-            "server_modules.sage_agent_runtime_service._ledger_provider_unavailable",
+            "server_modules.agent_turn_runtime_service._ledger_provider_unavailable",
             new=AsyncMock(),
         ):
             with self.assertRaises(RuntimeError) as ctx:
                 _run(
-                    sage_agent_runtime_service._resolve_agent_cloud_provider(
+                    agent_turn_runtime_service._resolve_agent_cloud_provider(
                         workspace_id="ws-test",
                         agent_model_config={"mode": "quantum_computer"},
                         agent_id="agent-q-1",
@@ -1014,7 +1014,7 @@ class FleetSeedAndBootstrapTests(unittest.TestCase):
 
 
 # Import at module level for test usage
-from server_modules import sage_agent_runtime_service
+from server_modules import agent_turn_runtime_service
 
 
 class GatewayBrainDispatchTests(unittest.TestCase):
@@ -1034,11 +1034,11 @@ class GatewayBrainDispatchTests(unittest.TestCase):
             "server_modules.gateway_execution_service.execute_tool_via_gateway",
             new=exec_mock,
         ), patch(
-            "server_modules.sage_agent_runtime_service._ledger_gateway_brain_turn",
+            "server_modules.agent_turn_runtime_service._ledger_gateway_brain_turn",
             new=brain_ledger,
         ):
             reply, usage, model = _run(
-                sage_agent_runtime_service._dispatch_local_gateway_brain(
+                agent_turn_runtime_service._dispatch_local_gateway_brain(
                     workspace_id="ws-1", tenant_id="default", agent_id="a1",
                     gateway_binding="gw-1", runtime="ollama", model="llama3.2",
                     system_prompt="You are a bot.", user_message="hello",
@@ -1062,12 +1062,12 @@ class GatewayBrainDispatchTests(unittest.TestCase):
     def test_dispatch_without_binding_raises_no_fallback(self):
         unavail = AsyncMock()
         with patch(
-            "server_modules.sage_agent_runtime_service._ledger_provider_unavailable",
+            "server_modules.agent_turn_runtime_service._ledger_provider_unavailable",
             new=unavail,
         ):
             with self.assertRaises(RuntimeError) as ctx:
                 _run(
-                    sage_agent_runtime_service._dispatch_local_gateway_brain(
+                    agent_turn_runtime_service._dispatch_local_gateway_brain(
                         workspace_id="ws-1", tenant_id="default", agent_id="a1",
                         gateway_binding="", runtime="ollama", model="",
                         system_prompt="S", user_message="U",
@@ -1085,12 +1085,12 @@ class GatewayBrainDispatchTests(unittest.TestCase):
             "server_modules.gateway_execution_service.execute_tool_via_gateway",
             new=exec_mock,
         ), patch(
-            "server_modules.sage_agent_runtime_service._ledger_provider_unavailable",
+            "server_modules.agent_turn_runtime_service._ledger_provider_unavailable",
             new=unavail,
         ):
             with self.assertRaises(RuntimeError) as ctx:
                 _run(
-                    sage_agent_runtime_service._dispatch_local_gateway_brain(
+                    agent_turn_runtime_service._dispatch_local_gateway_brain(
                         workspace_id="ws-1", tenant_id="default", agent_id="a1",
                         gateway_binding="gw-1", runtime="ollama", model="llama3.2",
                         system_prompt="S", user_message="U",
@@ -1105,12 +1105,12 @@ class GatewayBrainDispatchTests(unittest.TestCase):
             "server_modules.gateway_execution_service.execute_tool_via_gateway",
             new=exec_mock,
         ), patch(
-            "server_modules.sage_agent_runtime_service._ledger_provider_unavailable",
+            "server_modules.agent_turn_runtime_service._ledger_provider_unavailable",
             new=AsyncMock(),
         ):
             with self.assertRaises(RuntimeError) as ctx:
                 _run(
-                    sage_agent_runtime_service._dispatch_local_gateway_brain(
+                    agent_turn_runtime_service._dispatch_local_gateway_brain(
                         workspace_id="ws-1", tenant_id="default", agent_id="a1",
                         gateway_binding="gw-1", runtime="ollama", model="llama3.2",
                         system_prompt="S", user_message="U",
@@ -1124,12 +1124,12 @@ class GatewayBrainDispatchTests(unittest.TestCase):
             "server_modules.gateway_execution_service.execute_tool_via_gateway",
             new=exec_mock,
         ), patch(
-            "server_modules.sage_agent_runtime_service._ledger_provider_unavailable",
+            "server_modules.agent_turn_runtime_service._ledger_provider_unavailable",
             new=AsyncMock(),
         ):
             with self.assertRaises(RuntimeError) as ctx:
                 _run(
-                    sage_agent_runtime_service._dispatch_local_gateway_brain(
+                    agent_turn_runtime_service._dispatch_local_gateway_brain(
                         workspace_id="ws-1", tenant_id="default", agent_id="a1",
                         gateway_binding="gw-1", runtime="ollama", model="llama3.2",
                         system_prompt="S", user_message="U",

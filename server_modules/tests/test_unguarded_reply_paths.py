@@ -3,7 +3,7 @@ channel AND on the way to disk.
 
 THE BUG THIS LOCKS DOWN
 -----------------------
-`sage_agent_runtime_service.handle_sage_chat` applied
+`agent_turn_runtime_service.handle_sage_chat` applied
 `_guard_sage_visible_reply` once, near the end of a ~2,300-line function. Two
 branches returned hundreds of lines before reaching it:
 
@@ -13,7 +13,7 @@ branches returned hundreds of lines before reaching it:
       ├─ action loop                           guard -> return
       └─ cloud fallthrough                     guard -> return
 
-`sage_turn_adapter.execute_sage_turn` relays `result["message"]` verbatim and
+`agent_turn_adapter.execute_sage_turn` relays `result["message"]` verbatim and
 `personal_channels_service` hands that straight to WhatsApp, Telegram, Signal,
 iMessage and the OpenClaw-transported channels, so both branches reached a real
 recipient with secrets, RED / private-memory markers and internal tool markup
@@ -60,8 +60,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from server_modules import sage_agent_runtime_service
-from server_modules import sage_turn_adapter
+from server_modules import agent_turn_runtime_service
+from server_modules import agent_turn_adapter
 from server_modules import thread_service
 from server_modules.specialist_runtime_context import SpecialistRuntimeContext
 
@@ -105,7 +105,7 @@ class _CapturedTurns:
 def _drive_gateway_brain_turn(*, mode: str, runtime: str, reply: str):
     """Drive a BYO-brain turn through the SAME call a channel relay makes.
 
-    `sage_turn_adapter.execute_sage_turn` is the single ingress every channel
+    `agent_turn_adapter.execute_sage_turn` is the single ingress every channel
     uses, and `SageTurnResult.message` is the exact string
     `personal_channels_service` hands to WhatsApp/Telegram/Signal/iMessage —
     so asserting on it is asserting on what a recipient receives, not on an
@@ -137,14 +137,14 @@ def _drive_gateway_brain_turn(*, mode: str, runtime: str, reply: str):
     # importlib.reload() parts of server_modules, so a dotted-path patch can
     # bind a different module object than the code under test is holding.
     with (
-        patch.object(sage_agent_runtime_service.sage_profile_service, "list_sage_profile", return_value={"profile": {}}),
-        patch.object(sage_agent_runtime_service.workspace_context, "read_workspace_context_files", return_value={}),
-        patch.object(sage_agent_runtime_service.sage_heartbeat_service, "build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
-        patch.object(sage_agent_runtime_service, "list_skill_definitions", return_value=[]),
-        patch.object(sage_agent_runtime_service, "_resolve_cloud_provider", new=AsyncMock(return_value=("deepseek", {"api_key": "sk-workspace-default"}))),
-        patch.object(sage_agent_runtime_service, dispatch_attr, new=mock_dispatch),
-        patch.object(sage_agent_runtime_service, "persist_interaction"),
-        patch.object(sage_agent_runtime_service.activity_ledger_service, "append_activity_event", new=AsyncMock()),
+        patch.object(agent_turn_runtime_service.assistant_profile_service, "list_sage_profile", return_value={"profile": {}}),
+        patch.object(agent_turn_runtime_service.workspace_context, "read_workspace_context_files", return_value={}),
+        patch.object(agent_turn_runtime_service.assistant_health_service, "build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+        patch.object(agent_turn_runtime_service, "list_skill_definitions", return_value=[]),
+        patch.object(agent_turn_runtime_service, "_resolve_cloud_provider", new=AsyncMock(return_value=("deepseek", {"api_key": "sk-workspace-default"}))),
+        patch.object(agent_turn_runtime_service, dispatch_attr, new=mock_dispatch),
+        patch.object(agent_turn_runtime_service, "persist_interaction"),
+        patch.object(agent_turn_runtime_service.activity_ledger_service, "append_activity_event", new=AsyncMock()),
         # The Rust kernel binary is not built in test environments; its
         # decision is not what this test is about.
         patch.object(
@@ -154,7 +154,7 @@ def _drive_gateway_brain_turn(*, mode: str, runtime: str, reply: str):
         ),
         patch.object(thread_service.control_plane_repository, "upsert_agent_turn", new=captured.upsert),
     ):
-        result = _run(sage_turn_adapter.execute_sage_turn(
+        result = _run(agent_turn_adapter.execute_sage_turn(
             workspace_id="ws-1",
             message=USER_MESSAGE,
             specialist_context=spec,
@@ -282,8 +282,8 @@ class VisibleGuardIdempotenceTests(unittest.TestCase):
             "",
         ):
             with self.subTest(sample=sample[:32]):
-                once, _ = sage_agent_runtime_service._guard_sage_visible_reply(sample)
-                twice, _ = sage_agent_runtime_service._guard_sage_visible_reply(once)
+                once, _ = agent_turn_runtime_service._guard_sage_visible_reply(sample)
+                twice, _ = agent_turn_runtime_service._guard_sage_visible_reply(once)
                 self.assertEqual(once, twice)
 
 
@@ -296,7 +296,7 @@ class StructuralGuardSeamTests(unittest.TestCase):
 
     @staticmethod
     def _module_tree() -> ast.Module:
-        path = Path(sage_agent_runtime_service.__file__)
+        path = Path(agent_turn_runtime_service.__file__)
         return ast.parse(path.read_text())
 
     @staticmethod
@@ -349,10 +349,10 @@ class StructuralGuardSeamTests(unittest.TestCase):
     }
 
     def test_no_other_module_reaches_the_unguarded_body(self):
-        root = Path(sage_agent_runtime_service.__file__).parent
+        root = Path(agent_turn_runtime_service.__file__).parent
         offenders = []
         for path in root.rglob("*.py"):
-            if path.name in {"sage_agent_runtime_service.py", Path(__file__).name}:
+            if path.name in {"agent_turn_runtime_service.py", Path(__file__).name}:
                 continue
             if path.name in self._STRUCTURAL_INSPECTION_ONLY_FILES:
                 continue

@@ -25,7 +25,7 @@ import unittest
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, patch
 
-from server_modules.sage_turn_adapter import execute_sage_turn
+from server_modules.agent_turn_adapter import execute_sage_turn
 
 
 def _run(coro):
@@ -54,33 +54,33 @@ class ContextPolicyDefaultE2ETests(unittest.TestCase):
         None`) rather than the existing tests' dict, which doesn't satisfy
         TraceContext's actual attribute contract."""
         patches = [
-            patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile",
+            patch("server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile",
                   return_value={"profile": {"user_name": "Test"}}),
-            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files",
+            patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files",
                   return_value={}),
-            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block",
+            patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block",
                   return_value=""),
-            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot",
+            patch("server_modules.agent_turn_runtime_service.assistant_health_service.build_sage_heartbeat_snapshot",
                   new=AsyncMock(return_value={})),
-            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
-            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+            patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider",
                   return_value=("deepseek", {"api_key": "test-key"})),
-            patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback",
+            patch("server_modules.agent_turn_runtime_service.generate_chat_reply_with_provider_fallback",
                   return_value=("OK", {"model": "deepseek-chat"}, "deepseek", "")),
-            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
-            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event",
+            patch("server_modules.agent_turn_runtime_service.persist_interaction"),
+            patch("server_modules.agent_turn_runtime_service.activity_ledger_service.append_activity_event",
                   new=AsyncMock()),
-            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
-            patch("server_modules.sage_agent_runtime_service.thread_service.ensure_master_thread",
+            patch("server_modules.agent_turn_runtime_service.security_audit_service.emit_security_audit_event"),
+            patch("server_modules.agent_turn_runtime_service.thread_service.ensure_master_thread",
                   new=AsyncMock()),
-            patch("server_modules.sage_agent_runtime_service.thread_service.get_thread",
+            patch("server_modules.agent_turn_runtime_service.thread_service.get_thread",
                   new=AsyncMock(return_value={"turns": []})),
-            patch("server_modules.sage_agent_runtime_service.agent_trace_service.start_trace",
+            patch("server_modules.agent_turn_runtime_service.agent_trace_service.start_trace",
                   new=AsyncMock(return_value=None)),
             # Routes into the action_result-is-None fallback branch, where B2
             # (and the Phase 5C context policy this test exercises) actually
             # lives — see the module docstring.
-            patch("server_modules.sage_agent_runtime_service._run_sage_action_loop_v3",
+            patch("server_modules.agent_turn_runtime_service._run_sage_action_loop_v3",
                   new=AsyncMock(return_value=None)),
             # Force a big raw model window so only the policy clamp (or lack
             # of one) decides whether compaction triggers at ~166K estimated.
@@ -102,7 +102,7 @@ class ContextPolicyDefaultE2ETests(unittest.TestCase):
         got clamped below the ~166K estimated size."""
         with ExitStack() as stack:
             flush_mock = stack.enter_context(patch(
-                "server_modules.sage_agent_runtime_service._run_memory_flush_before_compaction",
+                "server_modules.agent_turn_runtime_service._run_memory_flush_before_compaction",
                 new=AsyncMock(return_value=False),
             ))
             for p in self._base_patches(get_master_install=get_master_install):

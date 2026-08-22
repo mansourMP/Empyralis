@@ -2796,7 +2796,7 @@ async def workstation_sage_turns_sse(
     resolved_workspace_id = enforce_workspace_access(
         current_user, workspace_id, minimum_role="member",
     )
-    from server_modules.sage_agent_runtime_service import SAGE_THREAD_ID
+    from server_modules.agent_turn_runtime_service import SAGE_THREAD_ID
 
     async def _turn_event_generator():
         import asyncio as _asyncio
@@ -4334,9 +4334,9 @@ async def acp_turn_endpoint(
         translate_gateway_to_acp,
         build_acp_error,
     )
-    from server_modules.sage_agent_runtime_service import handle_sage_chat
+    from server_modules.agent_turn_runtime_service import handle_sage_chat
     from server_modules.channel_adapter import normalize_sage_inbound, filter_outbound_reply
-    from server_modules.sage_agent_runtime_contract import SageTurnResult
+    from server_modules.agent_turn_runtime_contract import SageTurnResult
 
     resolved_workspace_id = enforce_workspace_access(
         current_user,

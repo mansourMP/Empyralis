@@ -1,20 +1,20 @@
 import asyncio
 from unittest.mock import AsyncMock, patch
 
-from server_modules import rust_runtime_kernel_client, sage_heartbeat_service
+from server_modules import rust_runtime_kernel_client, assistant_health_service
 
 
 def test_sage_heartbeat_snapshot_uses_rust_runtime_health_decision() -> None:
     async def run() -> None:
         with patch.object(
-            sage_heartbeat_service,
+            assistant_health_service,
             "list_sage_profile",
             return_value={
                 "profile": {"complete": True, "recurring_responsibility": "watch queue"},
                 "bootstrap": {"complete": True},
             },
         ), patch.object(
-            sage_heartbeat_service.bounded_scheduler_service,
+            assistant_health_service.bounded_scheduler_service,
             "scheduler_status_snapshot",
             new=AsyncMock(
                 return_value={
@@ -32,15 +32,15 @@ def test_sage_heartbeat_snapshot_uses_rust_runtime_health_decision() -> None:
                 }
             ),
         ), patch.object(
-            sage_heartbeat_service,
+            assistant_health_service,
             "runtime_lane_queue_snapshot",
             return_value={"queued_count": 0, "running_now_count": 0},
         ), patch.object(
-            sage_heartbeat_service,
+            assistant_health_service,
             "_plugin_health_snapshot",
             return_value={"ok": True},
         ), patch.object(
-            sage_heartbeat_service,
+            assistant_health_service,
             "_rust_kernel_health_snapshot",
             return_value={"available": True},
         ), patch.object(
@@ -65,7 +65,7 @@ def test_sage_heartbeat_snapshot_uses_rust_runtime_health_decision() -> None:
                 "readiness": {"ready": True},
             },
         ) as kernel:
-            snapshot = await sage_heartbeat_service.build_sage_heartbeat_snapshot(
+            snapshot = await assistant_health_service.build_sage_heartbeat_snapshot(
                 tenant_id="tenant-1",
                 workspace_id="workspace-1",
             )
@@ -84,14 +84,14 @@ def test_sage_heartbeat_snapshot_uses_rust_runtime_health_decision() -> None:
 def test_sage_heartbeat_snapshot_blocks_on_unexpected_rust_next_action() -> None:
     async def run() -> None:
         with patch.object(
-            sage_heartbeat_service,
+            assistant_health_service,
             "list_sage_profile",
             return_value={
                 "profile": {"complete": True, "recurring_responsibility": "watch queue"},
                 "bootstrap": {"complete": True},
             },
         ), patch.object(
-            sage_heartbeat_service.bounded_scheduler_service,
+            assistant_health_service.bounded_scheduler_service,
             "scheduler_status_snapshot",
             new=AsyncMock(
                 return_value={
@@ -109,15 +109,15 @@ def test_sage_heartbeat_snapshot_blocks_on_unexpected_rust_next_action() -> None
                 }
             ),
         ), patch.object(
-            sage_heartbeat_service,
+            assistant_health_service,
             "runtime_lane_queue_snapshot",
             return_value={"queued_count": 0, "running_now_count": 0},
         ), patch.object(
-            sage_heartbeat_service,
+            assistant_health_service,
             "_plugin_health_snapshot",
             return_value={"ok": True},
         ), patch.object(
-            sage_heartbeat_service,
+            assistant_health_service,
             "_rust_kernel_health_snapshot",
             return_value={"available": True},
         ), patch.object(
@@ -143,7 +143,7 @@ def test_sage_heartbeat_snapshot_blocks_on_unexpected_rust_next_action() -> None
             },
         ):
             try:
-                await sage_heartbeat_service.build_sage_heartbeat_snapshot(
+                await assistant_health_service.build_sage_heartbeat_snapshot(
                     tenant_id="tenant-1",
                     workspace_id="workspace-1",
                 )

@@ -6,7 +6,7 @@ from fastapi import Depends
 
 from server_modules import security_audit_service
 from server_modules.auth import enforce_workspace_access, workspace_tenant_id
-from server_modules.sage_memory_service import (
+from server_modules.assistant_memory_service import (
     delete_memory_entry,
     export_sage_memory,
     list_sage_memory,

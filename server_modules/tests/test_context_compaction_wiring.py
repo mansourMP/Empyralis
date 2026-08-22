@@ -1,7 +1,7 @@
 """Tests for docs/design/audit-context-currency.md fixes #1-#4: wiring the
 existing LLM-summarized compaction (server_modules/compaction_service.py)
 into the PRIMARY generation path instead of leaving it reachable only from
-sage_agent_runtime_service.handle_sage_chat's narrow fallback branch.
+agent_turn_runtime_service.handle_sage_chat's narrow fallback branch.
 
 Covers:
   - Fix #1 (proactive): stream_provider_backed_direct_chat compacts BEFORE
@@ -10,7 +10,7 @@ Covers:
   - Fix #2 (reactive): a provider context-overflow ("failure" event) is
     caught, compacted, and retried ONCE — never more than once per turn.
   - Fix #3 (budget preflight): _action_loop_context_budget_preflight in
-    sage_agent_runtime_service.py runs a token-based check ahead of the
+    agent_turn_runtime_service.py runs a token-based check ahead of the
     primary action loop (_run_sage_action_loop_v3), replacing the fixed
     SAGE_THREAD_MAX_TURNS=10 turn-count cap as the only guard there.
   - Fix #4 (catalog currency): provider_profiles.py resolves real context
@@ -36,7 +36,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from server_modules import compaction_service
 from server_modules import direct_chat_generation_service
 from server_modules import provider_profiles
-from server_modules import sage_agent_runtime_service
+from server_modules import agent_turn_runtime_service
 
 
 def _run(coro):
@@ -520,14 +520,14 @@ class PrimaryPathReactiveCompactionRetryTests(unittest.TestCase):
         self.assertNotEqual(final_payloads[-1]["error"], "")
 
 
-# ── Fix #3: sage_agent_runtime_service._action_loop_context_budget_preflight ─
+# ── Fix #3: agent_turn_runtime_service._action_loop_context_budget_preflight ─
 
 class ActionLoopContextBudgetPreflightTests(unittest.TestCase):
     def test_returns_unchanged_when_under_budget(self) -> None:
         prior = [{"role": "user", "content": "hi"}]
         with patch("server_modules.compaction_service.resolve_context_window", return_value=1_000_000):
             result = _run(
-                sage_agent_runtime_service._action_loop_context_budget_preflight(
+                agent_turn_runtime_service._action_loop_context_budget_preflight(
                     workspace_id="ws-1", tenant_id="default", thread_id="thread-1",
                     provider="anthropic", model="claude-haiku-4-5-20251001",
                     system_prompt="sys", user_message="hi",
@@ -545,7 +545,7 @@ class ActionLoopContextBudgetPreflightTests(unittest.TestCase):
             return_value=False,
         ), patch("server_modules.compaction_service.resolve_context_window", return_value=1):
             result = _run(
-                sage_agent_runtime_service._action_loop_context_budget_preflight(
+                agent_turn_runtime_service._action_loop_context_budget_preflight(
                     workspace_id="ws-1", tenant_id="default", thread_id="thread-1",
                     provider="anthropic", model="claude-haiku-4-5-20251001",
                     system_prompt="sys", user_message="hi",
@@ -560,7 +560,7 @@ class ActionLoopContextBudgetPreflightTests(unittest.TestCase):
         prior = [{"role": "user", "content": "x" * 10000}]
         with patch("server_modules.compaction_service.resolve_context_window", return_value=1):
             result = _run(
-                sage_agent_runtime_service._action_loop_context_budget_preflight(
+                agent_turn_runtime_service._action_loop_context_budget_preflight(
                     workspace_id="ws-1", tenant_id="default", thread_id="thread-1",
                     provider="anthropic", model="claude-haiku-4-5-20251001",
                     system_prompt="sys", user_message="hi",
@@ -592,9 +592,9 @@ class ActionLoopContextBudgetPreflightTests(unittest.TestCase):
         ), patch(
             "server_modules.compaction_service.find_cut_point_with_fallback", return_value=(2, False),
         ), patch("server_modules.compaction_service.compact_turns", new=AsyncMock(return_value="Summary text.")), \
-             patch.object(sage_agent_runtime_service, "_run_memory_flush_before_compaction", new=AsyncMock(return_value=True)):
+             patch.object(agent_turn_runtime_service, "_run_memory_flush_before_compaction", new=AsyncMock(return_value=True)):
             result = _run(
-                sage_agent_runtime_service._action_loop_context_budget_preflight(
+                agent_turn_runtime_service._action_loop_context_budget_preflight(
                     workspace_id="ws-1", tenant_id="default", thread_id="thread-1",
                     provider="anthropic", model="claude-haiku-4-5-20251001",
                     system_prompt="sys", user_message="hi",
@@ -627,9 +627,9 @@ class ActionLoopContextBudgetPreflightTests(unittest.TestCase):
         ), patch(
             "server_modules.compaction_service.find_cut_point_with_fallback", return_value=(2, False),
         ), patch("server_modules.compaction_service.compact_turns", new=compact_turns_mock), \
-             patch.object(sage_agent_runtime_service, "_run_memory_flush_before_compaction", new=AsyncMock(return_value=True)):
+             patch.object(agent_turn_runtime_service, "_run_memory_flush_before_compaction", new=AsyncMock(return_value=True)):
             _run(
-                sage_agent_runtime_service._action_loop_context_budget_preflight(
+                agent_turn_runtime_service._action_loop_context_budget_preflight(
                     workspace_id="ws-1", tenant_id="default", thread_id="thread-1",
                     provider="anthropic", model="claude-haiku-4-5-20251001",
                     system_prompt="sys", user_message="hi",
@@ -657,9 +657,9 @@ class ActionLoopContextBudgetPreflightTests(unittest.TestCase):
         ), patch(
             "server_modules.compaction_service.find_cut_point_with_fallback", return_value=(2, False),
         ), patch("server_modules.compaction_service.compact_turns", new=compact_turns_mock), \
-             patch.object(sage_agent_runtime_service, "_run_memory_flush_before_compaction", new=AsyncMock(return_value=True)):
+             patch.object(agent_turn_runtime_service, "_run_memory_flush_before_compaction", new=AsyncMock(return_value=True)):
             result = _run(
-                sage_agent_runtime_service._action_loop_context_budget_preflight(
+                agent_turn_runtime_service._action_loop_context_budget_preflight(
                     workspace_id="ws-1", tenant_id="default", thread_id="thread-1",
                     provider="anthropic", model="claude-haiku-4-5-20251001",
                     system_prompt="sys", user_message="hi",
@@ -680,9 +680,9 @@ class ActionLoopContextBudgetPreflightTests(unittest.TestCase):
             "server_modules.compaction_service.resolve_context_window", return_value=40_000,
         ), patch(
             "server_modules.compaction_service.effective_compaction_threshold", return_value=1,
-        ), patch.object(sage_agent_runtime_service, "_run_memory_flush_before_compaction", new=AsyncMock(return_value=False)):
+        ), patch.object(agent_turn_runtime_service, "_run_memory_flush_before_compaction", new=AsyncMock(return_value=False)):
             result = _run(
-                sage_agent_runtime_service._action_loop_context_budget_preflight(
+                agent_turn_runtime_service._action_loop_context_budget_preflight(
                     workspace_id="ws-1", tenant_id="default", thread_id="thread-1",
                     provider="anthropic", model="claude-haiku-4-5-20251001",
                     system_prompt="sys", user_message="hi",

@@ -314,7 +314,7 @@ def build_registry_entries(
     # 4. Workspace-connected MCP tools (Phase A wiring —
     # docs/design/mcp-applications-plan.md). This function intentionally has
     # no workspace_id parameter (see the call site comment in
-    # sage_agent_runtime_service.py's _direct_tool_bundle(), which is where
+    # agent_turn_runtime_service.py's _direct_tool_bundle(), which is where
     # workspace_id is actually in scope) — the MCP tool payloads are instead
     # injected by the caller into availability_payload["mcp_tools"], already
     # shaped exactly like the app_tools payloads above

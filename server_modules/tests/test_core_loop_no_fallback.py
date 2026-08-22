@@ -14,7 +14,7 @@ import tempfile
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from server_modules.sage_agent_runtime_service import (
+from server_modules.agent_turn_runtime_service import (
     SAGE_AI_LIMIT_MESSAGE,
     SAGE_AI_NEEDS_ATTENTION_MESSAGE,
     _SAGE_AI_SETUP_PATH,
@@ -58,10 +58,10 @@ class NoFallbackProviderResolutionTests(unittest.TestCase):
 
         ws_p, adm_p = self._patch_workspace(sage_ai_provider=selected_provider)
         creds_p = patch(
-            "server_modules.sage_agent_runtime_service.direct_chat_credentials"
+            "server_modules.agent_turn_runtime_service.direct_chat_credentials"
         )
         supp_p = patch(
-            "server_modules.sage_agent_runtime_service.supports_direct_message_native_chat"
+            "server_modules.agent_turn_runtime_service.supports_direct_message_native_chat"
         )
 
         with ws_p, adm_p, creds_p as mock_creds, supp_p as mock_supports:
@@ -91,11 +91,11 @@ class NoFallbackProviderResolutionTests(unittest.TestCase):
 
         ws_p, adm_p = self._patch_workspace(sage_ai_provider=selected_provider)
         creds_p = patch(
-            "server_modules.sage_agent_runtime_service.direct_chat_credentials",
+            "server_modules.agent_turn_runtime_service.direct_chat_credentials",
             return_value=valid_creds,
         )
         supp_p = patch(
-            "server_modules.sage_agent_runtime_service.supports_direct_message_native_chat",
+            "server_modules.agent_turn_runtime_service.supports_direct_message_native_chat",
             return_value=True,
         )
 
@@ -114,11 +114,11 @@ class NoFallbackProviderResolutionTests(unittest.TestCase):
 
         ws_p, adm_p = self._patch_workspace(sage_ai_provider="")
         creds_p = patch(
-            "server_modules.sage_agent_runtime_service.direct_chat_credentials",
+            "server_modules.agent_turn_runtime_service.direct_chat_credentials",
             return_value={"api_key": "sk-platform-deepseek-key"},
         )
         supp_p = patch(
-            "server_modules.sage_agent_runtime_service.supports_direct_message_native_chat",
+            "server_modules.agent_turn_runtime_service.supports_direct_message_native_chat",
             return_value=True,
         )
         ent_p = patch(
@@ -143,11 +143,11 @@ class NoFallbackProviderResolutionTests(unittest.TestCase):
         # but the resolver should NEVER call it for anthropic — it goes
         # straight to platform, which is exhausted.
         creds_p = patch(
-            "server_modules.sage_agent_runtime_service.direct_chat_credentials",
+            "server_modules.agent_turn_runtime_service.direct_chat_credentials",
             return_value={},
         )
         supp_p = patch(
-            "server_modules.sage_agent_runtime_service.supports_direct_message_native_chat",
+            "server_modules.agent_turn_runtime_service.supports_direct_message_native_chat",
             return_value=False,
         )
         ent_p = patch(
@@ -176,10 +176,10 @@ class NoFallbackProviderResolutionTests(unittest.TestCase):
 
         ws_p, adm_p = self._patch_workspace(sage_ai_provider=selected_provider)
         creds_p = patch(
-            "server_modules.sage_agent_runtime_service.direct_chat_credentials"
+            "server_modules.agent_turn_runtime_service.direct_chat_credentials"
         )
         supp_p = patch(
-            "server_modules.sage_agent_runtime_service.supports_direct_message_native_chat"
+            "server_modules.agent_turn_runtime_service.supports_direct_message_native_chat"
         )
 
         with ws_p, adm_p, creds_p as mock_creds, supp_p as mock_supports:
@@ -215,11 +215,11 @@ class NoFallbackProviderResolutionTests(unittest.TestCase):
 
         ws_p, adm_p = self._patch_workspace(sage_ai_provider="")
         creds_p = patch(
-            "server_modules.sage_agent_runtime_service.direct_chat_credentials",
+            "server_modules.agent_turn_runtime_service.direct_chat_credentials",
             return_value={},
         )
         supp_p = patch(
-            "server_modules.sage_agent_runtime_service.supports_direct_message_native_chat",
+            "server_modules.agent_turn_runtime_service.supports_direct_message_native_chat",
             return_value=False,
         )
         ent_p = patch(
@@ -248,11 +248,11 @@ class NoFallbackProviderResolutionTests(unittest.TestCase):
 
         ws_p, adm_p = self._patch_workspace(sage_ai_provider="")
         creds_p = patch(
-            "server_modules.sage_agent_runtime_service.direct_chat_credentials",
+            "server_modules.agent_turn_runtime_service.direct_chat_credentials",
             return_value={},
         )
         supp_p = patch(
-            "server_modules.sage_agent_runtime_service.supports_direct_message_native_chat",
+            "server_modules.agent_turn_runtime_service.supports_direct_message_native_chat",
             return_value=False,
         )
 
@@ -322,11 +322,11 @@ class MasterModelConfigHonestBlockTests(unittest.TestCase):
             return_value=MagicMock(sage_ai_provider=""),
         )
         creds_p = patch(
-            "server_modules.sage_agent_runtime_service.direct_chat_credentials",
+            "server_modules.agent_turn_runtime_service.direct_chat_credentials",
             return_value={"api_key": "sk-platform-deepseek-key"},
         )
         supp_p = patch(
-            "server_modules.sage_agent_runtime_service.supports_direct_message_native_chat",
+            "server_modules.agent_turn_runtime_service.supports_direct_message_native_chat",
             return_value=True,
         )
         ent_p = patch(
@@ -661,7 +661,7 @@ class HardStopMessageTests(unittest.TestCase):
 
     def test_sage_command_dispatcher_has_exhaustion_messages(self):
         """The command dispatcher must export error classification messages."""
-        from server_modules.sage_command_dispatcher import (
+        from server_modules.agent_command_dispatcher import (
             SAGE_AI_LIMIT_REPLY,
             SAGE_AI_NEEDS_ATTENTION_REPLY,
             SAGE_RATE_LIMITED_REPLY,
@@ -743,7 +743,7 @@ class ClassifyErrorTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from server_modules.sage_command_dispatcher import classify_error
+        from server_modules.agent_command_dispatcher import classify_error
         cls._classify = staticmethod(classify_error)
 
     def _classify(self, error_text, *, is_platform_credits=True):

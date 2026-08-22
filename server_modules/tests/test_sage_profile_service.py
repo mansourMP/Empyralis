@@ -3,15 +3,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from server_modules import sage_profile_service
+from server_modules import assistant_profile_service
 
 
 class SageProfileServiceTests(unittest.TestCase):
     def test_bootstrap_answers_progress_and_sync_workspace_files(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir) / "workspace-1"
-            with patch("server_modules.sage_profile_service.workspace_context.workspace_scope_dir", return_value=root):
-                payload = sage_profile_service.answer_sage_profile_bootstrap(
+            with patch("server_modules.assistant_profile_service.workspace_context.workspace_scope_dir", return_value=root):
+                payload = assistant_profile_service.answer_sage_profile_bootstrap(
                     workspace_id="workspace-1",
                     answer="Mansur",
                     actor_user_id="user-1",
@@ -26,7 +26,7 @@ class SageProfileServiceTests(unittest.TestCase):
                     "Keep my inbox triaged every morning.",
                     "Never send external messages without approval.",
                 ):
-                    payload = sage_profile_service.answer_sage_profile_bootstrap(
+                    payload = assistant_profile_service.answer_sage_profile_bootstrap(
                         workspace_id="workspace-1",
                         answer=answer,
                         actor_user_id="user-1",
@@ -52,8 +52,8 @@ class SageProfileServiceTests(unittest.TestCase):
     def test_upsert_profile_normalizes_standing_rules_text(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir) / "workspace-2"
-            with patch("server_modules.sage_profile_service.workspace_context.workspace_scope_dir", return_value=root):
-                payload = sage_profile_service.upsert_sage_profile(
+            with patch("server_modules.assistant_profile_service.workspace_context.workspace_scope_dir", return_value=root):
+                payload = assistant_profile_service.upsert_sage_profile(
                     workspace_id="workspace-2",
                     actor_user_id="user-2",
                     user_name="Owner",

@@ -222,7 +222,7 @@ class PrivateMemoryUsesTheRealProductionSessionShapeTests(unittest.TestCase):
     """The shape a LIVE turn actually passes — not the one a fixture invents.
 
     Every test above builds `session_ctx={"user_id": ...}` by hand, flat. A
-    real turn does not look like that. `sage_agent_runtime_service`'s turn
+    real turn does not look like that. `agent_turn_runtime_service`'s turn
     builder produces:
 
         session_ctx = {
@@ -256,7 +256,7 @@ class PrivateMemoryUsesTheRealProductionSessionShapeTests(unittest.TestCase):
         )
 
     def _production_session_ctx(self, user_id):
-        """Mirrors sage_agent_runtime_service's own turn builder."""
+        """Mirrors agent_turn_runtime_service's own turn builder."""
         return {
             "authority_tier": "owner",
             "metadata": {

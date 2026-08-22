@@ -348,7 +348,7 @@ def _unlimited_credit_workspace_ids() -> frozenset[str]:
 
     Comma-separated workspace_ids, read from the environment only — never
     hardcoded here, never committed. Same comma-split / trimmed /
-    case-insensitive convention as sage_agent_runtime_service.py's
+    case-insensitive convention as agent_turn_runtime_service.py's
     EMPYRALIS_PRIMARY_COMPACTION_ENABLED / EMPYRALIS_FORCE_LEGACY_ENGINE env
     vars. Defaults to empty (disabled) when unset, so this is a no-op for
     every workspace until someone deliberately sets the var on the server.
@@ -638,7 +638,7 @@ def hosted_sage_ai_access_state(
             # asserts this by identity precisely because this literal used
             # to drift from platform_event.AI_LIMIT_REACHED_WEB: rewording
             # the shared message (2026-08-19, dropping a "→" this surface
-            # renders as a dead click affordance) fixed sage_command_
+            # renders as a dead click affordance) fixed agent_command_
             # dispatcher's copy and silently left this one behind.
             message = AI_LIMIT_REACHED_WEB.detail
         else:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
-from server_modules import control_plane_repository, mini_apps_service, sage_memory_service
+from server_modules import control_plane_repository, mini_apps_service, assistant_memory_service
 
 
 RETENTION_CLASSES: Dict[str, Dict[str, Any]] = {
@@ -162,7 +162,7 @@ async def build_workspace_retention_inventory(
     )
     sql_store_counts = dict(sql_inventory.get("stores") or {})
     mini_apps_export = mini_apps_service.export_mini_apps_state(workspace_id)
-    sage_export = sage_memory_service.export_sage_memory(workspace_id=workspace_id)
+    sage_export = assistant_memory_service.export_sage_memory(workspace_id=workspace_id)
     stores: List[Dict[str, Any]] = []
     for store in DATA_STORE_CATALOG:
         store_id = str(store.get("store_id") or "").strip()
@@ -203,7 +203,7 @@ async def export_workspace_data(
         "tenant_id": tenant_id,
         "workspace_id": workspace_id,
         "inventory": inventory,
-        "sage_memory": sage_memory_service.export_sage_memory(workspace_id=workspace_id),
+        "sage_memory": assistant_memory_service.export_sage_memory(workspace_id=workspace_id),
         "mini_apps": mini_apps_service.export_mini_apps_state(workspace_id),
     }
     if include_business_insights and deployed_agent_id:
@@ -273,9 +273,9 @@ async def purge_workspace_scope_data(
         "deleted_counts": dict(deleted_counts),
     }
     if wipe_sage_memory_data:
-        payload["sage_memory_wipe"] = sage_memory_service.wipe_sage_memory(
+        payload["sage_memory_wipe"] = assistant_memory_service.wipe_sage_memory(
             workspace_id=workspace_id,
-            confirm=sage_memory_service.SAGE_MEMORY_WIPE_CONFIRMATION,
+            confirm=assistant_memory_service.SAGE_MEMORY_WIPE_CONFIRMATION,
         )
     if wipe_mini_apps_data:
         payload["mini_apps_wipe"] = mini_apps_service.wipe_mini_apps_state(workspace_id)

@@ -1405,7 +1405,7 @@ class AgentTurnTests(unittest.TestCase):
         self.assertEqual(resolution.turn_request.actor.id, "user-1")
 
     # ── Regression coverage: attaching any file used to crash the turn.
-    # _load_attachment_context (sage_agent_runtime_service.py) calls .get()
+    # _load_attachment_context (agent_turn_runtime_service.py) calls .get()
     # on every item in the attachment list it receives — it only ever
     # understood the flat SageChatAttachment dict shape
     # ({file_id, filename, safe_filename, content_type, size, url}), never

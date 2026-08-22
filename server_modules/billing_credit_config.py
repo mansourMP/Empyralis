@@ -2,7 +2,7 @@
 
 Every dollar-to-credit conversion, every free-allowance size, and every
 margin multiplier used anywhere in the platform (backend billing/
-entitlements, the credit-debit reconnect in ``sage_agent_runtime_service``,
+entitlements, the credit-debit reconnect in ``agent_turn_runtime_service``,
 and the frontend billing page) is derived from the constants in this one
 file. If a number governing "how many credits does X cost" or "how
 generous is the free tier" needs tuning, it is tuned HERE — nowhere else
@@ -61,7 +61,7 @@ should hardcode a dollar-to-credit rate or a free-allowance size.
    debits ``min(current_balance, credits_owed)`` and never raises for an
    insufficient balance. A turn that would drive the balance negative
    still completes; the shortfall is only logged (see
-   ``sage_agent_runtime_service``'s reconnect call site). This module
+   ``agent_turn_runtime_service``'s reconnect call site). This module
    intentionally does NOT gate turns on remaining balance — that hard-
    stop concern belongs to the pre-existing, separately-tested
    ``entitlements_service.hosted_sage_ai_access_state`` policy gate
@@ -221,7 +221,7 @@ def credits_for_turn_cost_usd(raw_cost_usd: Any) -> int:
     to the next whole credit, and floors at MIN_CREDITS_CHARGED_PER_TURN
     so any turn that did real work costs a legible, non-zero number of
     credits. This is the ONLY function that should compute "how many
-    credits does this turn cost" — see sage_agent_runtime_service's
+    credits does this turn cost" — see agent_turn_runtime_service's
     reconnect call site.
     """
     raw = max(0.0, _safe_float(raw_cost_usd))

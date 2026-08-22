@@ -59,7 +59,7 @@ MEMBER_BOX = "gw_member_laptop"
 
 
 def _session_ctx(*, user_id, gateway_id=None, hardware_access=None):
-    """Mirrors the shape `sage_agent_runtime_service` actually builds.
+    """Mirrors the shape `agent_turn_runtime_service` actually builds.
 
     The human identity is NESTED under `metadata.user_id` with a top-level
     `sender_id` mirror — production does not put `user_id` at the top level, and

@@ -6737,7 +6737,7 @@ async def _ensure_durable_turn_provider(
         return turn_request
 
     workspace_id = str(turn_request.workspace_id or "").strip() or "default"
-    from server_modules import sage_agent_runtime_service as _sage_runtime
+    from server_modules import agent_turn_runtime_service as _sage_runtime
 
     provider, _credentials = await _sage_runtime._resolve_cloud_provider(workspace_id)
     provider = str(provider or "").strip()

@@ -368,7 +368,7 @@ test("codex: a 401 Unauthorized turn.failed classifies as not_authenticated (aft
 // to another provider": each CLI's own real not-signed-in wording classifies
 // as CliRunError.kind === "not_authenticated", which runtime.ts's
 // cliErrorMessage() turns into "<Runtime> on this Gateway is not signed in
-// (...)" and sage_agent_runtime_service.py's _friendly_cli_subscription_error
+// (...)" and agent_turn_runtime_service.py's _friendly_cli_subscription_error
 // turns into the CLI_SUBSCRIPTION_*_NOT_AUTHENTICATED PlatformEvent — an
 // explicit, loud "reconnect needed" message, never a silent no-op and never a
 // switch to a different runtime (runCliSubscription only ever retries the

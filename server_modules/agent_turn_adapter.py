@@ -31,7 +31,7 @@ from server_modules.inbound_envelope import (
     envelope_allows_owner_commands,
     prepend_envelope_header,
 )
-from server_modules.sage_agent_runtime_contract import (
+from server_modules.agent_turn_runtime_contract import (
     SAGE_MODE,
     SageTurnContract,
     SageTurnResult,
@@ -60,7 +60,7 @@ def _channel_origin_for_turn(turn: Any, resolved_channel_origin: str) -> str:
          real key — which normalize_sage_inbound was handed and did not
          keep — is gone by the time anything asks which channel this was.
 
-    Together they are why sage_agent_runtime_service._resolve_channel_sender_class
+    Together they are why agent_turn_runtime_service._resolve_channel_sender_class
     could never match a channel binding, so an owner recognised by the DM
     gate arrived at the turn as "audience" and had every tool stripped.
 
@@ -151,7 +151,7 @@ async def execute_sage_turn(
     Returns:
         SageTurnResult with message, tool_calls, approvals, trace, etc.
     """
-    from server_modules.sage_agent_runtime_service import handle_sage_chat
+    from server_modules.agent_turn_runtime_service import handle_sage_chat
 
     # ── Resolve input: task data structure or individual parameters ──
     turn = None
@@ -208,10 +208,10 @@ async def execute_sage_turn(
     if not resolved_thread_id and resolved_channel_origin:
         _spec_agent_id = str(getattr(specialist_context, "agent_install_id", "") or "").strip()
         if _spec_agent_id:
-            from server_modules.sage_command_dispatcher import agent_sender_thread_id as _astid
+            from server_modules.agent_command_dispatcher import agent_sender_thread_id as _astid
             resolved_thread_id = _astid(_spec_agent_id, resolved_sender_id)
         else:
-            from server_modules.sage_command_dispatcher import get_active_thread as _gat
+            from server_modules.agent_command_dispatcher import get_active_thread as _gat
             resolved_thread_id = await _gat(resolved_workspace_id, resolved_channel_origin)
     if not resolved_thread_id:
         resolved_thread_id = "sage-main"
@@ -239,7 +239,7 @@ async def execute_sage_turn(
         envelope if isinstance(envelope, InboundEnvelope) else None
     )
 
-    from server_modules.sage_agent_runtime_service import _SAGE_AI_SETUP_PATH
+    from server_modules.agent_turn_runtime_service import _SAGE_AI_SETUP_PATH
 
     # ── Directive & shortcut processing ─────────────────────────────────
     # Strip /model, /thinking, /help etc. before the LLM sees the message.

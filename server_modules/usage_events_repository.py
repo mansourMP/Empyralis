@@ -71,7 +71,7 @@ async def record_usage_from_context(
     `mode` (payer) overrides the contextvar mode when supplied. `metadata`
     rides straight through to record_usage_event's own JSONB `metadata`
     column — e.g. per-model contextWindow / canonicalModel breakdown (see
-    sage_agent_runtime_service's claude_agent_sdk-engine metering call)."""
+    agent_turn_runtime_service's claude_agent_sdk-engine metering call)."""
     attr = USAGE_ATTRIBUTION.get()
     if not isinstance(attr, dict) or not str(attr.get("workspace_id") or "").strip():
         return None

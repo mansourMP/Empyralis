@@ -11,7 +11,7 @@ dashboard/activity feed only.
 This file proves that rule holds at every layer:
   1. platform_event.py — the suppression registry itself.
   2. channel_adapter.filter_channel_outbound_reply — the shared choke point.
-  3. sage_reply_dispatcher.dispatch_sage_reply(_safe) — the Telegram-hosted /
+  3. agent_reply_dispatcher.dispatch_sage_reply(_safe) — the Telegram-hosted /
      Discord / Slack dispatcher: a turn error, an empty turn, AND a status
      string smuggled in as a "successful" message must all produce ZERO
      transport.send_message calls. A raised exception (dispatch_sage_reply_safe)
@@ -40,9 +40,9 @@ from unittest.mock import AsyncMock, patch
 
 from server_modules import channel_adapter, channel_lane_contract_service, inbound_envelope
 from server_modules import openclaw_channel_registry, personal_channels_service, platform_event
-from server_modules import sage_reply_dispatcher as srd
+from server_modules import agent_reply_dispatcher as srd
 from server_modules import personal_channel_sage_bridge_service as bridge
-from server_modules.sage_agent_runtime_contract import SageTurnResult
+from server_modules.agent_turn_runtime_contract import SageTurnResult
 
 
 # ─── 1. platform_event registry ─────────────────────────────────────────
@@ -154,7 +154,7 @@ class FilterChannelOutboundReplyTests(unittest.TestCase):
         )
 
 
-# ─── 3. sage_reply_dispatcher — Telegram-hosted / Discord / Slack ───────
+# ─── 3. agent_reply_dispatcher — Telegram-hosted / Discord / Slack ───────
 
 
 class _FakeTransport:
@@ -199,7 +199,7 @@ class DispatchSageReplyChannelSilenceTests(unittest.TestCase):
         transport = _FakeTransport()
         with (
             patch("server_modules.command_registry.process_message", new=AsyncMock(side_effect=_no_op_directives)),
-            patch("server_modules.sage_turn_adapter.execute_sage_turn", new=AsyncMock(return_value=turn_result)),
+            patch("server_modules.agent_turn_adapter.execute_sage_turn", new=AsyncMock(return_value=turn_result)),
         ):
             asyncio.run(
                 srd.dispatch_sage_reply(
@@ -248,7 +248,7 @@ class DispatchSageReplyChannelSilenceTests(unittest.TestCase):
         with (
             patch("server_modules.command_registry.process_message", new=AsyncMock(side_effect=_no_op_directives)),
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(side_effect=RuntimeError("cli_subscription generation timed out")),
             ),
         ):
@@ -308,7 +308,7 @@ class BridgeServiceNeverReturnsSendableErrorTextTests(unittest.TestCase):
         async def run_case():
             with (
                 patch(
-                    "server_modules.sage_turn_adapter.execute_sage_turn",
+                    "server_modules.agent_turn_adapter.execute_sage_turn",
                     new=AsyncMock(side_effect=RuntimeError("boom")),
                 ),
                 patch(
@@ -344,7 +344,7 @@ class BridgeServiceNeverReturnsSendableErrorTextTests(unittest.TestCase):
         async def run_case():
             with (
                 patch(
-                    "server_modules.sage_turn_adapter.execute_sage_turn",
+                    "server_modules.agent_turn_adapter.execute_sage_turn",
                     new=AsyncMock(side_effect=RuntimeError("boom")),
                 ),
                 patch(
@@ -421,7 +421,7 @@ class PersonalChannelsServiceDeliveryBackstopTests(unittest.TestCase):
                             return_value=self._allow_decision("protocol_route"),
                         ),
                         patch(
-                            "server_modules.sage_command_dispatcher.dispatch_command",
+                            "server_modules.agent_command_dispatcher.dispatch_command",
                             new=AsyncMock(return_value=None),
                         ),
                         patch.object(

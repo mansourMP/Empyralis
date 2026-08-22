@@ -817,7 +817,7 @@ def list_owner_linked_channel_identities_for_workspace(
     It is what _is_owner_message (personal_channels_service.py) already
     checks for the DM-policy gate that runs before every reply.
 
-    sage_agent_runtime_service.py's owner/audience tool-authority
+    agent_turn_runtime_service.py's owner/audience tool-authority
     classification uses this — and ONLY this — as of the fix that added
     this function; see that module's own comment on why
     workspace.identity_links must never be consulted for the SAME

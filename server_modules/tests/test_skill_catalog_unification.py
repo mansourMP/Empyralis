@@ -1,7 +1,7 @@
 """Focused test module for docs/design/audit-skills.md's top-3 fix list:
 
 1. One catalog — skill_registry.list_skill_definitions is the single source
-   of truth; sage_skills_api no longer carries a hardcoded fake pack; the 6
+   of truth; assistant_skills_api no longer carries a hardcoded fake pack; the 6
    bundled skills (skills/<id>/SKILL.md) are real files with real content.
 2. skill_invoke — a real ToolDescriptor, dispatched in the live tool-call
    path (skills_service.execute_single_direct_tool_call AND the
@@ -30,7 +30,7 @@ from server_modules import direct_tool_execution_service
 from server_modules import installed_skills
 from server_modules import rust_runtime_kernel_client
 from server_modules import sage_instruction_compiler_service
-from server_modules import sage_skills_api
+from server_modules import assistant_skills_api
 from server_modules import skill_registry
 from server_modules import skills_registry
 from server_modules import skills_service
@@ -201,13 +201,13 @@ class SkillCatalogUnificationTests(_SkillFixtureMixin, unittest.TestCase):
         self._stop_skill_roots()
 
     def test_no_hardcoded_curated_pack_survives_in_sage_skills_api(self) -> None:
-        self.assertFalse(hasattr(sage_skills_api, "_CURATED_SKILL_PACK"))
-        self.assertFalse(hasattr(sage_skills_api, "CuratedSkillDefinition"))
+        self.assertFalse(hasattr(assistant_skills_api, "_CURATED_SKILL_PACK"))
+        self.assertFalse(hasattr(assistant_skills_api, "CuratedSkillDefinition"))
 
     def test_installed_skill_flows_through_skill_registry_into_sage_skills_api(self) -> None:
         """A skill dropped into the workspace skill root becomes visible
         through the SAME catalog (skill_registry.list_skill_definitions)
-        both list_skill_definitions() and sage_skills_api read — proving
+        both list_skill_definitions() and assistant_skills_api read — proving
         item 3's "Tools tab and the model's manifest describe the same set"
         requirement end-to-end, not just by code inspection."""
         self._write_custom_skill(
@@ -219,7 +219,7 @@ class SkillCatalogUnificationTests(_SkillFixtureMixin, unittest.TestCase):
         definitions = {d.id: d for d in skill_registry.list_skill_definitions(workspace_id="ws-1")}
         self.assertIn("acme-quote-builder", definitions)
 
-        payload = sage_skills_api._build_sage_skills_payload(workspace_id="ws-1", tenant_id="t-1")
+        payload = assistant_skills_api._build_sage_skills_payload(workspace_id="ws-1", tenant_id="t-1")
         by_id = {item["id"]: item for item in payload["items"]}
         self.assertIn("acme-quote-builder", by_id)
         self.assertEqual(by_id["acme-quote-builder"]["status"], "ready")
@@ -228,7 +228,7 @@ class SkillCatalogUnificationTests(_SkillFixtureMixin, unittest.TestCase):
             "Builds a customer quote from the workspace price list.",
         )
 
-        capabilities = sage_skills_api.build_sage_capabilities_payload(workspace_id="ws-1", tenant_id="t-1")
+        capabilities = assistant_skills_api.build_sage_capabilities_payload(workspace_id="ws-1", tenant_id="t-1")
         skill_records = [item for item in capabilities["items"] if item.get("skill_id") == "acme-quote-builder"]
         self.assertEqual(len(skill_records), 1)
         # Every skill capability record dispatches through the ONE real
@@ -459,7 +459,7 @@ class ProgressiveDisclosureTests(_SkillFixtureMixin, unittest.TestCase):
             description="A skill used only to check progressive disclosure.",
             body=f"# Leak Check Skill\n\n{marker}\n\nA very long procedure body follows..." + ("x" * 2000),
         )
-        capabilities = sage_skills_api.build_sage_capabilities_payload(workspace_id="ws-1", tenant_id="t-1")
+        capabilities = assistant_skills_api.build_sage_capabilities_payload(workspace_id="ws-1", tenant_id="t-1")
         manifest = sage_instruction_compiler_service.build_model_capability_manifest(capabilities)
         text = sage_instruction_compiler_service._capability_manifest_text(manifest)
 
@@ -477,7 +477,7 @@ class ProgressiveDisclosureTests(_SkillFixtureMixin, unittest.TestCase):
             description="Checks the full instruction bundle for body leakage.",
             body=f"# Bundle Leak Check\n\n{marker}",
         )
-        capability_payload = sage_skills_api.build_sage_capabilities_payload(workspace_id="ws-1", tenant_id="t-1")
+        capability_payload = assistant_skills_api.build_sage_capabilities_payload(workspace_id="ws-1", tenant_id="t-1")
         bundle = sage_instruction_compiler_service.build_sage_instruction_bundle(
             workspace_id="ws-1",
             message="what skills do you have?",

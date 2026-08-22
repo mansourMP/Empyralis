@@ -4,7 +4,7 @@
 enable/disable checklist, so presets no longer seed an `enabled_tools`
 restriction at all — every agent, regardless of preset, gets core tools plus
 everything with no third-party integration behind it unconditionally (see
-sage_agent_runtime_service._UNGATED_JUDGMENT_TOOL_NAMES), plus anything
+agent_turn_runtime_service._UNGATED_JUDGMENT_TOOL_NAMES), plus anything
 backed by a real connector binding or resolved capability. This file used to
 assert the OPPOSITE (a fresh "standard" agent ships with only a safe-basics
 allowlist, shell/file-write/computer-click/hardware-action excluded) — that

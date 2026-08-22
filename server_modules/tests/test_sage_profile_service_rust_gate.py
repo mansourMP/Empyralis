@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from server_modules import sage_profile_service
+from server_modules import assistant_profile_service
 
 
 _ALLOW_DECISION = {
@@ -28,19 +28,19 @@ class SageProfileServiceRustGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             with mock.patch.object(
-                sage_profile_service.workspace_context,
+                assistant_profile_service.workspace_context,
                 "workspace_scope_dir",
                 side_effect=self._workspace_scope(root),
             ), mock.patch.object(
-                sage_profile_service.rust_runtime_kernel_client,
+                assistant_profile_service.rust_runtime_kernel_client,
                 "runtime_state_store_decision",
                 return_value=dict(_ALLOW_DECISION),
             ) as rust_decision, mock.patch.object(
-                sage_profile_service,
+                assistant_profile_service,
                 "sync_profile_context_files",
                 return_value={},
             ):
-                result = sage_profile_service.upsert_sage_profile(
+                result = assistant_profile_service.upsert_sage_profile(
                     workspace_id="workspace-1",
                     actor_user_id="owner-1",
                     user_name="Mansur",
@@ -66,16 +66,16 @@ class SageProfileServiceRustGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             with mock.patch.object(
-                sage_profile_service.workspace_context,
+                assistant_profile_service.workspace_context,
                 "workspace_scope_dir",
                 side_effect=self._workspace_scope(root),
             ), mock.patch.object(
-                sage_profile_service.rust_runtime_kernel_client,
+                assistant_profile_service.rust_runtime_kernel_client,
                 "runtime_state_store_decision",
                 return_value=block_decision,
             ):
-                with self.assertRaises(sage_profile_service.SageProfileRustGateError):
-                    sage_profile_service.upsert_sage_profile(
+                with self.assertRaises(assistant_profile_service.SageProfileRustGateError):
+                    assistant_profile_service.upsert_sage_profile(
                         workspace_id="workspace-1",
                         actor_user_id="owner-1",
                         user_name="Mansur",
@@ -91,16 +91,16 @@ class SageProfileServiceRustGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             with mock.patch.object(
-                sage_profile_service.workspace_context,
+                assistant_profile_service.workspace_context,
                 "workspace_scope_dir",
                 side_effect=self._workspace_scope(root),
             ), mock.patch.object(
-                sage_profile_service.rust_runtime_kernel_client,
+                assistant_profile_service.rust_runtime_kernel_client,
                 "runtime_state_store_decision",
                 return_value=wrong_action,
             ):
-                with self.assertRaises(sage_profile_service.SageProfileRustGateError) as raised:
-                    sage_profile_service.upsert_sage_profile(
+                with self.assertRaises(assistant_profile_service.SageProfileRustGateError) as raised:
+                    assistant_profile_service.upsert_sage_profile(
                         workspace_id="workspace-1",
                         actor_user_id="owner-1",
                         user_name="Mansur",
@@ -113,30 +113,30 @@ class SageProfileServiceRustGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             with mock.patch.object(
-                sage_profile_service.workspace_context,
+                assistant_profile_service.workspace_context,
                 "workspace_scope_dir",
                 side_effect=self._workspace_scope(root),
             ):
-                result = sage_profile_service.list_sage_profile(workspace_id="workspace-1")
+                result = assistant_profile_service.list_sage_profile(workspace_id="workspace-1")
 
             self.assertEqual(result["profile"]["user_name"], "")
             self.assertFalse((root / "workspace-1" / "sage_profile.json").exists())
 
     def test_projection_write_uses_existing_workspace_context_rust_operation(self) -> None:
         with mock.patch.object(
-            sage_profile_service.workspace_context,
+            assistant_profile_service.workspace_context,
             "read_workspace_context_files",
             return_value={},
         ), mock.patch.object(
-            sage_profile_service.workspace_context,
+            assistant_profile_service.workspace_context,
             "write_workspace_context_file",
             return_value={"filename": "USER.md"},
         ) as context_write, mock.patch.object(
-            sage_profile_service.rust_runtime_kernel_client,
+            assistant_profile_service.rust_runtime_kernel_client,
             "runtime_state_store_decision",
             return_value=dict(_ALLOW_DECISION),
         ) as rust_decision:
-            sage_profile_service.sync_profile_context_files(
+            assistant_profile_service.sync_profile_context_files(
                 workspace_id="workspace-1",
                 profile={"user_name": "Mansur"},
             )

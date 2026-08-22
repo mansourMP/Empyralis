@@ -691,7 +691,7 @@ async def delete_project(
 
       * workspace_agent_installs.project_id — a NULL here is not merely
         untidy, it SILENTLY REVOKES the whole project-scoped toolset.
-        sage_agent_runtime_service._specialist_tool_allowed grants the
+        agent_turn_runtime_service._specialist_tool_allowed grants the
         `project_task__*` / `document__*` / `goal__*` families on
         `bool(toolset["project_id"])` alone (CLAUDE.md: "project membership
         is the grant, not a connector binding"), so an agent whose project

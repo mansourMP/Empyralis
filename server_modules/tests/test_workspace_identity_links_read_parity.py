@@ -8,7 +8,7 @@ Postgres: identity_links is a REAL, written-to JSONB column
 `UPDATE workspaces SET identity_links = $2::jsonb ...`) that
 get_workspace_by_id's own SELECT never named. Every reader of the
 returned record — command_registry._is_sender_owner (the slash-command
-owner gate), sage_agent_runtime_service's per-turn sender-class
+owner gate), agent_turn_runtime_service's per-turn sender-class
 resolution (owner vs audience — which tools/authority a channel message
 gets for the WHOLE turn, not just slash commands), and
 routes_workspaces.py's identity-links settings endpoints — did
@@ -27,7 +27,7 @@ nothing downstream needs backend-specific handling.
 
 FAIL-CLOSED, NOT FAIL-OPEN (traced precisely before this fix, not
 assumed): both command_registry._is_sender_owner and
-sage_agent_runtime_service's sender-class resolution treat an
+agent_turn_runtime_service's sender-class resolution treat an
 empty/missing identity_links as "not linked" and therefore DENY elevated
 (owner) trust — never grant it. So the live consequence of this bug was
 never a non-owner passing an owner gate; it was the opposite — a real,
@@ -207,7 +207,7 @@ class WorkspaceIdentityLinksReadParityTests(unittest.TestCase):
         """The parity contract itself: regardless of backend, the returned
         record always carries an identity_links key whose value is a
         dict — never absent, never None, never a raw JSON string — so
-        command_registry._is_sender_owner and sage_agent_runtime_service's
+        command_registry._is_sender_owner and agent_turn_runtime_service's
         sender-class resolution read it identically on either. This is
         the actual root shape of the original bug (two backends silently
         disagreeing), so it is asserted directly rather than only
@@ -249,7 +249,7 @@ class WorkspaceIdentityLinksReadParityTests(unittest.TestCase):
 
 class OwnerCheckReadsRealIdentityLinksTests(unittest.TestCase):
     """The actual regression this closes: command_registry._is_sender_owner
-    (the slash-command owner gate, and — via sage_agent_runtime_service's
+    (the slash-command owner gate, and — via agent_turn_runtime_service's
     identically-shaped bindings construction — the same fact every channel
     turn's owner/audience classification depends on) now sees real,
     persisted identity_links instead of always getting None."""

@@ -49,7 +49,7 @@ def _request(**overrides) -> AgentTurnRequest:
 
 
 class _StubResolver:
-    """Stands in for sage_agent_runtime_service._resolve_cloud_provider."""
+    """Stands in for agent_turn_runtime_service._resolve_cloud_provider."""
 
     def __init__(self, provider: str):
         self.provider = provider
@@ -65,7 +65,7 @@ class DurableTurnProviderResolutionTests(unittest.TestCase):
         """Patch the PACKAGE ATTRIBUTE, not sys.modules.
 
         `_ensure_durable_turn_provider` does `from server_modules import
-        sage_agent_runtime_service`, and that reads the attribute off the
+        agent_turn_runtime_service`, and that reads the attribute off the
         already-imported `server_modules` package before it ever consults
         sys.modules. So a sys.modules stand-in works only when nothing else
         has imported the real module yet — i.e. it passes when this file runs
@@ -79,29 +79,29 @@ class DurableTurnProviderResolutionTests(unittest.TestCase):
         import server_modules
 
         resolver = _StubResolver(provider)
-        real = getattr(server_modules, "sage_agent_runtime_service", None)
-        stub = types.ModuleType("server_modules.sage_agent_runtime_service")
+        real = getattr(server_modules, "agent_turn_runtime_service", None)
+        stub = types.ModuleType("server_modules.agent_turn_runtime_service")
         stub._resolve_cloud_provider = resolver  # type: ignore[attr-defined]
 
-        real_in_sys = sys.modules.get("server_modules.sage_agent_runtime_service")
-        setattr(server_modules, "sage_agent_runtime_service", stub)
-        sys.modules["server_modules.sage_agent_runtime_service"] = stub
+        real_in_sys = sys.modules.get("server_modules.agent_turn_runtime_service")
+        setattr(server_modules, "agent_turn_runtime_service", stub)
+        sys.modules["server_modules.agent_turn_runtime_service"] = stub
         try:
             result = asyncio.run(run_service._ensure_durable_turn_provider(request))
         finally:
             # Restore both, always — a leaked stand-in poisons every later test
             # that imports this module for real.
             if real is not None:
-                setattr(server_modules, "sage_agent_runtime_service", real)
+                setattr(server_modules, "agent_turn_runtime_service", real)
             else:
                 try:
-                    delattr(server_modules, "sage_agent_runtime_service")
+                    delattr(server_modules, "agent_turn_runtime_service")
                 except AttributeError:
                     pass
             if real_in_sys is not None:
-                sys.modules["server_modules.sage_agent_runtime_service"] = real_in_sys
+                sys.modules["server_modules.agent_turn_runtime_service"] = real_in_sys
             else:
-                sys.modules.pop("server_modules.sage_agent_runtime_service", None)
+                sys.modules.pop("server_modules.agent_turn_runtime_service", None)
         return result, resolver
 
     def test_a_turn_with_no_provider_gets_the_workspace_one(self):

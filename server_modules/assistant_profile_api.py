@@ -5,7 +5,7 @@ from typing import Optional
 from fastapi import Depends
 
 from server_modules.auth import enforce_workspace_access, workspace_tenant_id
-from server_modules.sage_profile_service import (
+from server_modules.assistant_profile_service import (
     answer_sage_profile_bootstrap,
     list_sage_profile,
     upsert_sage_profile,

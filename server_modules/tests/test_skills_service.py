@@ -655,9 +655,9 @@ class SkillsServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir) / "workspace-1"
             with (
-                patch("server_modules.sage_services_service.workspace_context.workspace_scope_dir", return_value=root),
+                patch("server_modules.assistant_services_service.workspace_context.workspace_scope_dir", return_value=root),
                 patch(
-                    "server_modules.sage_services_service.personal_context_engine.publish_event",
+                    "server_modules.assistant_services_service.personal_context_engine.publish_event",
                     new=AsyncMock(return_value={"id": "evt-1"}),
                 ),
             ):
@@ -1414,7 +1414,7 @@ class GenerateImageCapabilityResolutionTests(unittest.TestCase):
 
     def test_sage_own_turn_resolves_with_empty_agent_id_not_specialist_bleed(self):
         """No agent_id in session_ctx == Sage's own turn (matches
-        sage_agent_runtime_service._acting_install_id's convention) — must
+        agent_turn_runtime_service._acting_install_id's convention) — must
         resolve against Sage's OWN capability_config via the master-install
         path, never a specialist's."""
         resolution = agent_capability_service.CapabilityResolution(

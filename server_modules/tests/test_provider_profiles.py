@@ -389,7 +389,7 @@ class GrokBuildCursorCliProviderCatalogTests(unittest.TestCase):
         # Same treatment as claude_code_cli: cli_subscription providers never
         # appear in the general BYOK/workspace provider catalog — they are
         # resolved directly by the Fleet gateway rail instead (fleet_tools.py
-        # / sage_agent_runtime_service.py), never through provider_profiles'
+        # / agent_turn_runtime_service.py), never through provider_profiles'
         # credential-resolution machinery.
         self.assertNotIn("xai_grok_cli", provider_profiles.WORKSPACE_USER_FACING_AI_PROVIDERS)
         self.assertNotIn("cursor_cli", provider_profiles.WORKSPACE_USER_FACING_AI_PROVIDERS)
@@ -402,7 +402,7 @@ class GrokBuildCursorCliProviderCatalogTests(unittest.TestCase):
     def test_resolve_provider_adapter_fails_loudly_for_the_new_provider_ids_directly(self) -> None:
         # These two ids are consumed ONLY through the Fleet cli_subscription
         # rail (which never calls resolve_provider_adapter at all — see
-        # sage_agent_runtime_service.py's cli_subscription dispatch branch).
+        # agent_turn_runtime_service.py's cli_subscription dispatch branch).
         # No GrokBuildCLIAdapter/CursorCLIAdapter was built (that would be a
         # DIFFERENT feature — Sage's own local-CLI direct-chat path, out of
         # scope for the Fleet gateway rail this addition wires). Confirm that

@@ -1,6 +1,6 @@
 """BYO bot owner-recognition claim — the gap this closes:
 
-command_registry._is_sender_owner and sage_agent_runtime_service.
+command_registry._is_sender_owner and agent_turn_runtime_service.
 _resolve_channel_sender_class both read personal_channels_repository as
 their ONLY authoritative source for "is this sender the owner" (see
 test_command_registry_channel_owner_identity.py / test_channel_sender_
@@ -41,7 +41,7 @@ from unittest.mock import AsyncMock, patch
 from server_modules import command_registry
 from server_modules import hosted_bot_provisioning_service as prov
 from server_modules import personal_channels_repository
-from server_modules import sage_agent_runtime_service
+from server_modules import agent_turn_runtime_service
 
 
 def _run(coro):
@@ -190,14 +190,14 @@ class ClaimReachesToolAuthorityAndCommandOwnershipTests(unittest.TestCase):
 
     def test_the_claimed_owner_gets_owner_tool_authority(self) -> None:
         with self._patched_db_path():
-            result = _run(sage_agent_runtime_service._resolve_channel_sender_class(
+            result = _run(agent_turn_runtime_service._resolve_channel_sender_class(
                 channel_origin="telegram_agent_byo", sender_id=_OWNER_ID, workspace_id="ws-byo",
             ))
         self.assertEqual(result, "owner")
 
     def test_a_stranger_on_the_same_bot_still_gets_only_audience_authority(self) -> None:
         with self._patched_db_path():
-            result = _run(sage_agent_runtime_service._resolve_channel_sender_class(
+            result = _run(agent_turn_runtime_service._resolve_channel_sender_class(
                 channel_origin="telegram_agent_byo", sender_id=_STRANGER_ID, workspace_id="ws-byo",
             ))
         self.assertEqual(result, "audience")
@@ -243,7 +243,7 @@ class RouteAgentInboundClaimWiringTests(unittest.IsolatedAsyncioTestCase):
             patch.object(prov, "resolve_bot_token", return_value="tok"),
             patch("server_modules.specialist_runtime_context.resolve_specialist_runtime_context", new=AsyncMock(return_value=None)),
             patch("server_modules.agent_registry_repository.get_workspace_agent_install_bundle", new=AsyncMock(return_value={"metadata": {}})),
-            patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=AsyncMock(return_value=True)),
+            patch("server_modules.agent_reply_dispatcher.dispatch_sage_reply_safe", new=AsyncMock(return_value=True)),
             patch("server_modules.personal_channels_repository.claim_channel_owner_identity_if_unclaimed") as claim_mock,
         ):
             await prov.route_agent_inbound(
@@ -266,7 +266,7 @@ class RouteAgentInboundClaimWiringTests(unittest.IsolatedAsyncioTestCase):
             patch("server_modules.sage_telegram_hosted_service.text_addresses_bot", return_value=True),
             patch("server_modules.specialist_runtime_context.resolve_specialist_runtime_context", new=AsyncMock(return_value=None)),
             patch("server_modules.agent_registry_repository.get_workspace_agent_install_bundle", new=AsyncMock(return_value={"metadata": {}})),
-            patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=AsyncMock(return_value=True)),
+            patch("server_modules.agent_reply_dispatcher.dispatch_sage_reply_safe", new=AsyncMock(return_value=True)),
             patch("server_modules.personal_channels_repository.claim_channel_owner_identity_if_unclaimed") as claim_mock,
         ):
             await prov.route_agent_inbound(
@@ -288,7 +288,7 @@ class RouteAgentInboundClaimWiringTests(unittest.IsolatedAsyncioTestCase):
             patch.object(prov, "resolve_bot_token", return_value="tok"),
             patch("server_modules.specialist_runtime_context.resolve_specialist_runtime_context", new=AsyncMock(return_value=None)),
             patch("server_modules.agent_registry_repository.get_workspace_agent_install_bundle", new=AsyncMock(return_value={"metadata": {}})),
-            patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch),
+            patch("server_modules.agent_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch),
             patch(
                 "server_modules.personal_channels_repository.claim_channel_owner_identity_if_unclaimed",
                 side_effect=RuntimeError("db unavailable"),

@@ -235,7 +235,7 @@ async def get_active_thread(
 
     LEGACY_UNSCOPED path: only reached today when no specialist agent is
     resolved for the turn (running as Sage/master) — see
-    sage_turn_adapter.execute_sage_turn's thread-resolution branch, which
+    agent_turn_adapter.execute_sage_turn's thread-resolution branch, which
     routes specialist turns through agent_sender_thread_id() instead so
     different agents (and different senders) on the same channel type don't
     share this one workspace+channel-type pointer.
@@ -320,7 +320,7 @@ async def dispatch_command(
     from server_modules.command_registry import dispatch as _dispatch
     from server_modules.command_registry import build_service_kwargs_for_text as _build_service_kwargs
 
-    # Same gap sage_turn_adapter.execute_sage_turn's own command block had:
+    # Same gap agent_turn_adapter.execute_sage_turn's own command block had:
     # /stop /model /tools /status /debug read a `services` and/or
     # `availability_payload`/`tool_capabilities` kwarg that a bare
     # command_registry.dispatch() call never supplies. This is the OTHER

@@ -202,7 +202,7 @@ function buildCliPrompt(
 /** Maps a CLI failure into a precise, honest message. This text is what the
  *  control plane's platform-voice error mapper pattern-matches on (mirroring
  *  how the Ollama path's "unreachable"/"HTTP 4xx" wording already gets
- *  matched by sage_agent_runtime_service._friendly_gateway_brain_error) — so
+ *  matched by agent_turn_runtime_service._friendly_gateway_brain_error) — so
  *  the distinct phrases below ("not installed", "not signed in", "timed
  *  out", "exited unexpectedly") matter, not just the human readability. */
 function cliErrorMessage(runtime: CliSubscriptionRuntime, error: unknown): string {
@@ -307,7 +307,7 @@ export class GatewayLLMRuntime {
       const model = token(args.model);
       // Same "unset means use the CLI's own default" convention as model —
       // validation of which value is legal for claude_code vs codex happens
-      // upstream on the control plane (fleet_tools.py / sage_agent_runtime_
+      // upstream on the control plane (fleet_tools.py / agent_turn_runtime_
       // service.py); this Gateway trusts what it's given and only decides
       // whether to append a flag at all (see cli-runner.ts's buildInvocation).
       const reasoningEffort = token(args.reasoning_effort);

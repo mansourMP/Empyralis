@@ -829,7 +829,7 @@ function buildCostDisplayRows(matrix: UsageMatrixRow[]): CostDisplayRow[] {
  * steps — LIVE, via SSE, while a turn is still running (that's the reason
  * to open this page at all; removing the composer must never mean losing
  * the ability to watch work happen). Control happens over the channel
- * itself, via the `/command` surface `sage_command_dispatcher` already
+ * itself, via the `/command` surface `agent_command_dispatcher` already
  * dispatches on every personal channel — never from a screen here.
  *
  * AgentChat.tsx and its composer are UNCHANGED and still real code — they

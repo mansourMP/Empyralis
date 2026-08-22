@@ -61,11 +61,11 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from server_modules import agent_trace_service, claude_agent_sdk_bridge
-from server_modules import sage_agent_runtime_service
+from server_modules import agent_turn_runtime_service
 from server_modules.tests.test_default_engine_credit_debit import _TurnHarness
 
 
-SAGE_RUNTIME_SOURCE = Path(sage_agent_runtime_service.__file__)
+SAGE_RUNTIME_SOURCE = Path(agent_turn_runtime_service.__file__)
 
 
 def _run(coro):
@@ -76,7 +76,7 @@ def _agent_traces_columns() -> set[str]:
     """The real ``agent_traces`` column names, read out of the repository's own
     DDL -- so the stand-in row below is answerable to the table it stands in
     for instead of to itself."""
-    ddl = (Path(sage_agent_runtime_service.__file__).parent / "control_plane_repository.py").read_text(
+    ddl = (Path(agent_turn_runtime_service.__file__).parent / "control_plane_repository.py").read_text(
         encoding="utf-8"
     )
     start = ddl.index("CREATE TABLE IF NOT EXISTS agent_traces (")
@@ -158,7 +158,7 @@ class _TracedTurn:
             )
             stack.enter_context(
                 patch(
-                    "server_modules.sage_agent_runtime_service.agent_trace_service.start_trace",
+                    "server_modules.agent_turn_runtime_service.agent_trace_service.start_trace",
                     new=start_trace,
                 )
             )
@@ -271,7 +271,7 @@ class ActionLoopPublishesTheTraceItOpenedTests(unittest.TestCase):
             ),
             patch("server_modules.kill_switch_gate.evaluate_kill_switch", return_value=self._decision()),
             patch(
-                "server_modules.sage_agent_runtime_service.thread_service.get_thread",
+                "server_modules.agent_turn_runtime_service.thread_service.get_thread",
                 new=AsyncMock(return_value={"metadata": {}}),
             ),
             patch(
@@ -280,13 +280,13 @@ class ActionLoopPublishesTheTraceItOpenedTests(unittest.TestCase):
             ),
             patch.object(agent_trace_service, "start_trace", new=AsyncMock(return_value=context)),
             patch.object(
-                sage_agent_runtime_service.claude_agent_sdk_bridge,
+                agent_turn_runtime_service.claude_agent_sdk_bridge,
                 "collect_events_via_claude_agent_sdk",
                 new=collect_mock,
             ),
         ):
             return _run(
-                sage_agent_runtime_service._run_sage_action_loop_v3(
+                agent_turn_runtime_service._run_sage_action_loop_v3(
                     workspace_id="ws-1",
                     tenant_id="tenant-1",
                     message="hello",

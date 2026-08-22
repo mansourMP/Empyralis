@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from server_modules import auth as auth_module
-from server_modules.sage_doctor_service import SageDoctorService
+from server_modules.assistant_doctor_service import SageDoctorService
 
 router = APIRouter(prefix="/api")
 get_current_user = auth_module.get_current_user

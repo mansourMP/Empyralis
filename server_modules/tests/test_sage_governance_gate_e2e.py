@@ -277,36 +277,36 @@ class TelegramHostedE2ETests(unittest.TestCase):
     def test_text_reply_flows_through_execute_sage_turn(self):
         """A plain-text 'hello' routes through execute_sage_turn and gets a reply."""
         with (
-            patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile",
+            patch("server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile",
                   return_value={"profile": {"user_name": "Test", "identity_summary": "Tester"}}),
-            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files",
+            patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files",
                   return_value={}),
-            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block",
+            patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block",
                   return_value=""),
-            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot",
+            patch("server_modules.agent_turn_runtime_service.assistant_health_service.build_sage_heartbeat_snapshot",
                   new=AsyncMock(return_value={})),
-            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
-            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+            patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider",
                   return_value=("deepseek", {"api_key": "test-key"})),
-            patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback",
+            patch("server_modules.agent_turn_runtime_service.generate_chat_reply_with_provider_fallback",
                   return_value=("Hey Mansur! How can I help?", {"model": "deepseek-chat"}, "deepseek", "")),
             # The line above patches the LEGACY fallback seam only; an
             # ordinary turn reaches the provider through the streaming one.
             # See server_modules/tests/support_live_llm_stubs.py.
             patched_provider_calls(reply="Hey Mansur! How can I help?", usage={"model": "deepseek-chat"}, provider="deepseek"),
-            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
-            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event",
+            patch("server_modules.agent_turn_runtime_service.persist_interaction"),
+            patch("server_modules.agent_turn_runtime_service.activity_ledger_service.append_activity_event",
                   new=AsyncMock()),
-            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
-            patch("server_modules.sage_agent_runtime_service.thread_service.ensure_master_thread",
+            patch("server_modules.agent_turn_runtime_service.security_audit_service.emit_security_audit_event"),
+            patch("server_modules.agent_turn_runtime_service.thread_service.ensure_master_thread",
                   new=AsyncMock()),
-            patch("server_modules.sage_agent_runtime_service.thread_service.get_thread",
+            patch("server_modules.agent_turn_runtime_service.thread_service.get_thread",
                   new=AsyncMock(return_value={"turns": []})),
             # Suppress Rust kernel errors from trace service (non-fatal in production)
-            patch("server_modules.sage_agent_runtime_service.agent_trace_service.start_trace",
+            patch("server_modules.agent_turn_runtime_service.agent_trace_service.start_trace",
                   new=AsyncMock(return_value={"trace_id": "mock-trace-1"})),
         ):
-            from server_modules.sage_turn_adapter import execute_sage_turn
+            from server_modules.agent_turn_adapter import execute_sage_turn
 
             result = _run(execute_sage_turn(
                 workspace_id="ws-1",
@@ -324,35 +324,35 @@ class TelegramHostedE2ETests(unittest.TestCase):
     def test_channel_metadata_flows_through(self):
         """channel_origin and sender info flow through to a successful reply."""
         with (
-            patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile",
+            patch("server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile",
                   return_value={"profile": {"user_name": "Test"}}),
-            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files",
+            patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files",
                   return_value={}),
-            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block",
+            patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block",
                   return_value=""),
-            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot",
+            patch("server_modules.agent_turn_runtime_service.assistant_health_service.build_sage_heartbeat_snapshot",
                   new=AsyncMock(return_value={})),
-            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
-            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+            patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider",
                   return_value=("deepseek", {"api_key": "test-key"})),
-            patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback",
+            patch("server_modules.agent_turn_runtime_service.generate_chat_reply_with_provider_fallback",
                   return_value=("Hi Alice!", {"model": "deepseek-chat"}, "deepseek", "")),
             # The line above patches the LEGACY fallback seam only; an
             # ordinary turn reaches the provider through the streaming one.
             # See server_modules/tests/support_live_llm_stubs.py.
             patched_provider_calls(reply="Hi Alice!", usage={"model": "deepseek-chat"}, provider="deepseek"),
-            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
-            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event",
+            patch("server_modules.agent_turn_runtime_service.persist_interaction"),
+            patch("server_modules.agent_turn_runtime_service.activity_ledger_service.append_activity_event",
                   new=AsyncMock()),
-            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
-            patch("server_modules.sage_agent_runtime_service.thread_service.ensure_master_thread",
+            patch("server_modules.agent_turn_runtime_service.security_audit_service.emit_security_audit_event"),
+            patch("server_modules.agent_turn_runtime_service.thread_service.ensure_master_thread",
                   new=AsyncMock()),
-            patch("server_modules.sage_agent_runtime_service.thread_service.get_thread",
+            patch("server_modules.agent_turn_runtime_service.thread_service.get_thread",
                   new=AsyncMock(return_value={"turns": []})),
-            patch("server_modules.sage_agent_runtime_service.agent_trace_service.start_trace",
+            patch("server_modules.agent_turn_runtime_service.agent_trace_service.start_trace",
                   new=AsyncMock(return_value={"trace_id": "mock-trace-2"})),
         ):
-            from server_modules.sage_turn_adapter import execute_sage_turn
+            from server_modules.agent_turn_adapter import execute_sage_turn
 
             result = _run(execute_sage_turn(
                 workspace_id="ws-1",
@@ -367,7 +367,7 @@ class TelegramHostedE2ETests(unittest.TestCase):
 
     def test_empty_message_raises_value_error(self):
         """Empty message raises ValueError before reaching the LLM."""
-        from server_modules.sage_turn_adapter import execute_sage_turn
+        from server_modules.agent_turn_adapter import execute_sage_turn
 
         with self.assertRaises(ValueError) as ctx:
             _run(execute_sage_turn(
@@ -379,7 +379,7 @@ class TelegramHostedE2ETests(unittest.TestCase):
 
     def test_empty_workspace_raises_value_error(self):
         """Empty workspace_id raises ValueError."""
-        from server_modules.sage_turn_adapter import execute_sage_turn
+        from server_modules.agent_turn_adapter import execute_sage_turn
 
         with self.assertRaises(ValueError) as ctx:
             _run(execute_sage_turn(
@@ -425,39 +425,39 @@ class TelegramHostedApprovalE2ETests(unittest.TestCase):
         """Action loop V3 → shell__exec tool call → approval logged for audit, execution proceeds.
         With internalized governance, the approval is recorded in approvals_required
         for the audit trail but NEVER blocks execution. Consumers see no approval UI."""
-        from server_modules import sage_agent_runtime_service
+        from server_modules import agent_turn_runtime_service
 
         with (
-            patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile",
+            patch("server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile",
                   return_value={"profile": {}}),
-            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files",
+            patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files",
                   return_value={}),
-            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block",
+            patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block",
                   return_value=""),
-            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot",
+            patch("server_modules.agent_turn_runtime_service.assistant_health_service.build_sage_heartbeat_snapshot",
                   new=AsyncMock(return_value={})),
-            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
-            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+            patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider",
                   return_value=("openai", {"api_key": "test-key"})),
-            patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback"),
-            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities",
+            patch("server_modules.agent_turn_runtime_service.generate_chat_reply_with_provider_fallback"),
+            patch("server_modules.agent_turn_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities",
                   return_value=[]),
-            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
+            patch("server_modules.agent_turn_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
                   return_value={"runtime_ok": True, "local_gateway_online": True}),
-            patch("server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
+            patch("server_modules.agent_turn_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
                   return_value=self._approval_stream_event("ls -la /tmp")),
-            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
-            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event",
+            patch("server_modules.agent_turn_runtime_service.persist_interaction"),
+            patch("server_modules.agent_turn_runtime_service.activity_ledger_service.append_activity_event",
                   new=AsyncMock()),
-            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
-            patch("server_modules.sage_agent_runtime_service.thread_service.ensure_master_thread",
+            patch("server_modules.agent_turn_runtime_service.security_audit_service.emit_security_audit_event"),
+            patch("server_modules.agent_turn_runtime_service.thread_service.ensure_master_thread",
                   new=AsyncMock()),
-            patch("server_modules.sage_agent_runtime_service.thread_service.get_thread",
+            patch("server_modules.agent_turn_runtime_service.thread_service.get_thread",
                   new=AsyncMock(return_value={"turns": []})),
-            patch("server_modules.sage_agent_runtime_service.agent_trace_service.start_trace",
+            patch("server_modules.agent_turn_runtime_service.agent_trace_service.start_trace",
                   new=AsyncMock(return_value={"trace_id": "mock-trace-3"})),
         ):
-            result = _run(sage_agent_runtime_service.handle_sage_chat(
+            result = _run(agent_turn_runtime_service.handle_sage_chat(
                 workspace_id="ws-1",
                 message="run command: ls -la /tmp",
             ))
@@ -478,39 +478,39 @@ class TelegramHostedApprovalE2ETests(unittest.TestCase):
     def test_action_loop_with_telegram_hosted_channel_origin(self):
         """Governance gate fires identically with telegram_hosted channel_origin.
         With internalized governance, approval is logged for audit but never blocks."""
-        from server_modules import sage_agent_runtime_service
+        from server_modules import agent_turn_runtime_service
 
         with (
-            patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile",
+            patch("server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile",
                   return_value={"profile": {}}),
-            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files",
+            patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files",
                   return_value={}),
-            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block",
+            patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block",
                   return_value=""),
-            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot",
+            patch("server_modules.agent_turn_runtime_service.assistant_health_service.build_sage_heartbeat_snapshot",
                   new=AsyncMock(return_value={})),
-            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
-            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+            patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider",
                   return_value=("openai", {"api_key": "test-key"})),
-            patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback"),
-            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities",
+            patch("server_modules.agent_turn_runtime_service.generate_chat_reply_with_provider_fallback"),
+            patch("server_modules.agent_turn_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities",
                   return_value=[]),
-            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
+            patch("server_modules.agent_turn_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
                   return_value={"runtime_ok": True, "local_gateway_online": True}),
-            patch("server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
+            patch("server_modules.agent_turn_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
                   return_value=self._approval_stream_event("pwd")),
-            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
-            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event",
+            patch("server_modules.agent_turn_runtime_service.persist_interaction"),
+            patch("server_modules.agent_turn_runtime_service.activity_ledger_service.append_activity_event",
                   new=AsyncMock()),
-            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
-            patch("server_modules.sage_agent_runtime_service.thread_service.ensure_master_thread",
+            patch("server_modules.agent_turn_runtime_service.security_audit_service.emit_security_audit_event"),
+            patch("server_modules.agent_turn_runtime_service.thread_service.ensure_master_thread",
                   new=AsyncMock()),
-            patch("server_modules.sage_agent_runtime_service.thread_service.get_thread",
+            patch("server_modules.agent_turn_runtime_service.thread_service.get_thread",
                   new=AsyncMock(return_value={"turns": []})),
-            patch("server_modules.sage_agent_runtime_service.agent_trace_service.start_trace",
+            patch("server_modules.agent_turn_runtime_service.agent_trace_service.start_trace",
                   new=AsyncMock(return_value={"trace_id": "mock-trace-4"})),
         ):
-            result = _run(sage_agent_runtime_service.handle_sage_chat(
+            result = _run(agent_turn_runtime_service.handle_sage_chat(
                 workspace_id="ws-1",
                 message="run: pwd",
                 channel_origin="telegram_hosted",

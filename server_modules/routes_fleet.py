@@ -1538,7 +1538,7 @@ async def fleet_create_document(
     WHO CAN WRITE: `member` -- project membership is the natural grant for
     this surface, the same boundary project_task__* tools were given
     earlier (a project-member specialist gets those tools unconditionally
-    off its own project_id, see sage_agent_runtime_service.py's
+    off its own project_id, see agent_turn_runtime_service.py's
     _direct_tool_bundle). A project's documents are shared, ordinary-work
     content its members maintain together -- filing one is not a more
     privileged act than filing a task, so it is gated at the same `member`

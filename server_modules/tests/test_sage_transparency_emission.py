@@ -1,10 +1,10 @@
-"""Tests for server_modules.sage_transparency_service."""
+"""Tests for server_modules.assistant_transparency_service."""
 
 from __future__ import annotations
 
 import unittest
 
-from server_modules.sage_transparency_service import (
+from server_modules.assistant_transparency_service import (
     emit_sage_turn_transparency_events,
     events_to_payloads,
 )
@@ -117,7 +117,7 @@ class SageTransparencyEmissionTests(unittest.TestCase):
         """blocked_tools is populated by SEVERAL structurally different
         producers, and every real one today is a failure or bookkeeping
         anomaly, never a genuine tool-capability policy decision. The
-        entry shape below is the REAL shape sage_agent_runtime_service.
+        entry shape below is the REAL shape agent_turn_runtime_service.
         _collect_sage_operator_loop_v3_events actually appends for a
         provider/SDK trace.failed event — not an invented one. Before this
         fix, ANY non-empty blocked_tools (including this one) emitted

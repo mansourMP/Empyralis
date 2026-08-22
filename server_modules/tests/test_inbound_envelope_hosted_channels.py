@@ -35,7 +35,7 @@ from unittest import mock as mock_module
 from unittest.mock import AsyncMock, patch
 
 from server_modules.inbound_envelope import SurfaceKind
-from server_modules.sage_command_dispatcher import agent_sender_thread_id
+from server_modules.agent_command_dispatcher import agent_sender_thread_id
 
 
 # ═══════════════════════════ WeChat Official ═══════════════════════════
@@ -98,8 +98,8 @@ class WeChatHostedEnvelopeTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(wechat, "_resolve_binding_and_credential", new=AsyncMock(return_value=self._resolved)), \
              patch.object(wechat, "verify_wechat_server_signature", return_value=True), \
-             patch("server_modules.sage_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)), \
-             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch_sage_reply_safe), \
+             patch("server_modules.agent_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)), \
+             patch("server_modules.agent_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch_sage_reply_safe), \
              patch(
                  "server_modules.channel_pairing_service.get_channel_pairing_service",
                  return_value=_authorized_pairing_service(),
@@ -135,8 +135,8 @@ class WeChatHostedEnvelopeTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(wechat, "_resolve_binding_and_credential", new=AsyncMock(return_value=self._resolved)), \
              patch.object(wechat, "verify_wechat_server_signature", return_value=True), \
-             patch("server_modules.sage_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)), \
-             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch_sage_reply_safe), \
+             patch("server_modules.agent_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)), \
+             patch("server_modules.agent_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch_sage_reply_safe), \
              patch(
                  "server_modules.channel_pairing_service.get_channel_pairing_service",
                  return_value=_authorized_pairing_service(),
@@ -159,8 +159,8 @@ class WeChatHostedEnvelopeTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(wechat, "_resolve_binding_and_credential", new=AsyncMock(return_value=self._resolved)), \
              patch.object(wechat, "verify_wechat_server_signature", return_value=True), \
-             patch("server_modules.sage_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)), \
-             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch_sage_reply_safe), \
+             patch("server_modules.agent_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)), \
+             patch("server_modules.agent_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch_sage_reply_safe), \
              patch(
                  "server_modules.channel_pairing_service.get_channel_pairing_service",
                  return_value=_authorized_pairing_service(),
@@ -188,8 +188,8 @@ class WeChatHostedEnvelopeTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(wechat, "_resolve_binding_and_credential", new=AsyncMock(return_value=self._resolved)), \
              patch.object(wechat, "verify_wechat_server_signature", return_value=True), \
-             patch("server_modules.sage_command_dispatcher.dispatch_command", new=cmd_mock), \
-             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=reply_mock), \
+             patch("server_modules.agent_command_dispatcher.dispatch_command", new=cmd_mock), \
+             patch("server_modules.agent_reply_dispatcher.dispatch_sage_reply_safe", new=reply_mock), \
              patch(
                  "server_modules.channel_pairing_service.get_channel_pairing_service",
                  return_value=_authorized_pairing_service(),
@@ -239,8 +239,8 @@ class WeChatOfficialGate1Tests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(wechat, "_resolve_binding_and_credential", new=AsyncMock(return_value=self._resolved)), \
              patch.object(wechat, "verify_wechat_server_signature", return_value=True), \
-             patch("server_modules.sage_command_dispatcher.dispatch_command", new=cmd_mock), \
-             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=reply_mock), \
+             patch("server_modules.agent_command_dispatcher.dispatch_command", new=cmd_mock), \
+             patch("server_modules.agent_reply_dispatcher.dispatch_sage_reply_safe", new=reply_mock), \
              patch.object(wechat.WeChatOfficialTransport, "send_message", new=send_mock), \
              patch(
                  "server_modules.channel_pairing_service.get_channel_pairing_service",
@@ -277,8 +277,8 @@ class WeChatOfficialGate1Tests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(wechat, "_resolve_binding_and_credential", new=AsyncMock(return_value=self._resolved)), \
              patch.object(wechat, "verify_wechat_server_signature", return_value=True), \
-             patch("server_modules.sage_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)), \
-             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=reply_mock), \
+             patch("server_modules.agent_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)), \
+             patch("server_modules.agent_reply_dispatcher.dispatch_sage_reply_safe", new=reply_mock), \
              patch(
                  "server_modules.channel_pairing_service.get_channel_pairing_service",
                  return_value=pairing_service,
@@ -343,8 +343,8 @@ class TelegramHostedEnvelopeTests(unittest.IsolatedAsyncioTestCase):
             captured.update(kwargs)
             return True
 
-        with patch("server_modules.sage_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)), \
-             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch_sage_reply_safe):
+        with patch("server_modules.agent_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)), \
+             patch("server_modules.agent_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch_sage_reply_safe):
             await hosted._process_update(
                 _telegram_update(update_id=1, chat_id=555444, chat_type="private", text="hello", from_id=555444)
             )
@@ -703,7 +703,7 @@ class ConsoleDirectChatEnvelopeTests(unittest.TestCase):
     def test_console_envelope_reaches_execute_sage_turn(self) -> None:
         from server_modules import agent_turn, direct_chat_service
         from server_modules.inbound_envelope import InboundEnvelope, EnvelopeSender, SurfaceKind
-        from server_modules.sage_agent_runtime_contract import SageTurnResult
+        from server_modules.agent_turn_runtime_contract import SageTurnResult
 
         console_envelope = InboundEnvelope(
             platform="console",
@@ -738,7 +738,7 @@ class ConsoleDirectChatEnvelopeTests(unittest.TestCase):
             captured.update(kwargs)
             return SageTurnResult(message="Nothing on your calendar.", trace_id="t1", provider="deepseek", model="deepseek-chat")
 
-        with patch("server_modules.sage_turn_adapter.execute_sage_turn", new=_fake_execute_sage_turn):
+        with patch("server_modules.agent_turn_adapter.execute_sage_turn", new=_fake_execute_sage_turn):
             result = asyncio.run(direct_chat_service.execute_direct_chat_turn_request(
                 turn_request=turn_request,
                 current_user={"user_id": "user-1", "email": "mansur@example.com"},
@@ -761,7 +761,7 @@ class ConsoleDirectChatEnvelopeTests(unittest.TestCase):
         non-console/mobile or non-sync agent_turn() path) must reach
         execute_sage_turn with envelope=None — unchanged legacy behavior."""
         from server_modules import agent_turn, direct_chat_service
-        from server_modules.sage_agent_runtime_contract import SageTurnResult
+        from server_modules.agent_turn_runtime_contract import SageTurnResult
 
         turn_request = agent_turn.AgentTurnRequest(
             tenant_id="tenant-1",
@@ -788,7 +788,7 @@ class ConsoleDirectChatEnvelopeTests(unittest.TestCase):
             captured.update(kwargs)
             return SageTurnResult(message="hi", trace_id="t2", provider="deepseek", model="deepseek-chat")
 
-        with patch("server_modules.sage_turn_adapter.execute_sage_turn", new=_fake_execute_sage_turn):
+        with patch("server_modules.agent_turn_adapter.execute_sage_turn", new=_fake_execute_sage_turn):
             result = asyncio.run(direct_chat_service.execute_direct_chat_turn_request(
                 turn_request=turn_request,
                 current_user={"user_id": "user-2"},
@@ -855,10 +855,10 @@ class DiscordTrueDmEnvelopeTests(unittest.IsolatedAsyncioTestCase):
             "server_modules.discord_pairing_service.get_workspace_for_discord_user",
             return_value="ws-1",
         ), patch(
-            "server_modules.sage_command_dispatcher.dispatch_command",
+            "server_modules.agent_command_dispatcher.dispatch_command",
             new=AsyncMock(return_value=None),
         ), patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn",
+            "server_modules.agent_turn_adapter.execute_sage_turn",
             new=_fake_execute_sage_turn,
         ):
             await discord_connector._handle_dm_via_gateway(message)

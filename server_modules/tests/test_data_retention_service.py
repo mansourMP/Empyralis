@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from server_modules import data_retention_service, mini_apps_service, sage_memory_service, workspace_context
+from server_modules import data_retention_service, mini_apps_service, assistant_memory_service, workspace_context
 
 
 def test_catalog_exposes_required_retention_classes_and_stores() -> None:
@@ -45,7 +45,7 @@ async def test_workspace_inventory_merges_sql_and_file_backed_counts(monkeypatch
         lambda workspace_id: {"workspace_id": workspace_id, "total_records": 7},
     )
     monkeypatch.setattr(
-        data_retention_service.sage_memory_service,
+        data_retention_service.assistant_memory_service,
         "export_sage_memory",
         lambda workspace_id: {"workspace_id": workspace_id, "summary": {"total_count": 11}},
     )
@@ -84,7 +84,7 @@ async def test_export_workspace_data_sanitizes_insight_records(monkeypatch: pyte
 
     monkeypatch.setattr(data_retention_service, "build_workspace_retention_inventory", fake_inventory)
     monkeypatch.setattr(
-        data_retention_service.sage_memory_service,
+        data_retention_service.assistant_memory_service,
         "export_sage_memory",
         lambda workspace_id: {"workspace_id": workspace_id, "summary": {"total_count": 0}, "items": []},
     )
@@ -204,7 +204,7 @@ def test_purge_workspace_clears_sage_and_mini_app_state() -> None:
                 "calorie_tracking",
                 records=[{"id": "meal-1", "kind": "meal", "summary": "Chicken bowl"}],
             )
-            sage_memory_service.upsert_memory_entry(
+            assistant_memory_service.upsert_memory_entry(
                 workspace_id="ws-1",
                 category="safe_general",
                 title="Tone",
@@ -243,6 +243,6 @@ def test_purge_workspace_clears_sage_and_mini_app_state() -> None:
             assert payload["mini_apps_wipe"]["deleted_records_count"] == 1
             assert payload["sage_memory_wipe"]["deleted_count"] == 1
             assert mini_apps_service.list_mini_app_contracts("ws-1")["count"] == 0
-            assert len(sage_memory_service.list_sage_memory(workspace_id="ws-1")["items"]) == 0
+            assert len(assistant_memory_service.list_sage_memory(workspace_id="ws-1")["items"]) == 0
         finally:
             workspace_context._WORKSPACE_DIR = original_workspace_dir

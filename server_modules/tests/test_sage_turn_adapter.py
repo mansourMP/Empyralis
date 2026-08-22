@@ -5,13 +5,13 @@ import types
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from server_modules.sage_agent_runtime_contract import (
+from server_modules.agent_turn_runtime_contract import (
     SAGE_MODE,
     SAGE_RESPONSE_KEYS,
     SageTurnResult,
     normalize_sage_mode,
 )
-from server_modules.sage_turn_adapter import (
+from server_modules.agent_turn_adapter import (
     execute_sage_turn,
     execute_sage_turn_for_channel,
 )
@@ -40,7 +40,7 @@ class SageTurnAdapterParityTests(unittest.TestCase):
 
     def test_api_path_returns_sage_turn_result(self):
         with patch(
-            "server_modules.sage_agent_runtime_service.handle_sage_chat",
+            "server_modules.agent_turn_runtime_service.handle_sage_chat",
             new=AsyncMock(return_value=self._mock_sage_chat()),
         ):
             result = _run(execute_sage_turn(
@@ -53,7 +53,7 @@ class SageTurnAdapterParityTests(unittest.TestCase):
 
     def test_channel_path_returns_dict_with_all_keys(self):
         with patch(
-            "server_modules.sage_agent_runtime_service.handle_sage_chat",
+            "server_modules.agent_turn_runtime_service.handle_sage_chat",
             new=AsyncMock(return_value=self._mock_sage_chat()),
         ):
             result = _run(execute_sage_turn_for_channel(
@@ -75,7 +75,7 @@ class SageTurnAdapterParityTests(unittest.TestCase):
         returns sage_result.as_dict())."""
         media_item = {"kind": "image", "source_path": "/tmp/fox.png", "mime_type": "image/png"}
         with patch(
-            "server_modules.sage_agent_runtime_service.handle_sage_chat",
+            "server_modules.agent_turn_runtime_service.handle_sage_chat",
             new=AsyncMock(return_value=self._mock_sage_chat(media=[media_item])),
         ):
             api_result = _run(execute_sage_turn(workspace_id="ws-1", message="send me that fox"))
@@ -94,7 +94,7 @@ class SageTurnAdapterParityTests(unittest.TestCase):
         handle_sage_chat's result dict has no "media" key at all then, and
         both paths must default to [], not KeyError/None."""
         with patch(
-            "server_modules.sage_agent_runtime_service.handle_sage_chat",
+            "server_modules.agent_turn_runtime_service.handle_sage_chat",
             new=AsyncMock(return_value=self._mock_sage_chat()),
         ):
             api_result = _run(execute_sage_turn(workspace_id="ws-1", message="hello"))
@@ -109,7 +109,7 @@ class SageTurnAdapterParityTests(unittest.TestCase):
     def test_both_paths_enforce_owner_sage_mode(self):
         for surface_channel in ("whatsapp_personal", "telegram_personal"):
             with patch(
-                "server_modules.sage_agent_runtime_service.handle_sage_chat",
+                "server_modules.agent_turn_runtime_service.handle_sage_chat",
                 new=AsyncMock(return_value=self._mock_sage_chat()),
             ) as mock_handle:
                 _run(execute_sage_turn_for_channel(
@@ -129,7 +129,7 @@ class SageTurnAdapterParityTests(unittest.TestCase):
             approvals_required=[{"type": "tool_action", "skill_id": "email-access", "label": "Email", "reason": "test"}],
         )
         with patch(
-            "server_modules.sage_agent_runtime_service.handle_sage_chat",
+            "server_modules.agent_turn_runtime_service.handle_sage_chat",
             new=AsyncMock(return_value=blocked_result),
         ):
             api_result = _run(execute_sage_turn(workspace_id="ws-1", message="send email"))
@@ -143,7 +143,7 @@ class SageTurnAdapterParityTests(unittest.TestCase):
 
     def test_both_paths_emit_same_response_keys(self):
         with patch(
-            "server_modules.sage_agent_runtime_service.handle_sage_chat",
+            "server_modules.agent_turn_runtime_service.handle_sage_chat",
             new=AsyncMock(return_value=self._mock_sage_chat()),
         ):
             api_result = _run(execute_sage_turn(workspace_id="ws-1", message="hello"))
@@ -159,7 +159,7 @@ class SageTurnAdapterParityTests(unittest.TestCase):
 
     def test_channel_surface_detection(self):
         with patch(
-            "server_modules.sage_agent_runtime_service.handle_sage_chat",
+            "server_modules.agent_turn_runtime_service.handle_sage_chat",
             new=AsyncMock(return_value=self._mock_sage_chat()),
         ) as mock_handle:
             _run(execute_sage_turn_for_channel(
@@ -191,7 +191,7 @@ class SageTurnAdapterParityTests(unittest.TestCase):
             return self._mock_sage_chat()
 
         with patch(
-            "server_modules.sage_agent_runtime_service.handle_sage_chat",
+            "server_modules.agent_turn_runtime_service.handle_sage_chat",
             new=AsyncMock(side_effect=fake_handle),
         ):
             _run(execute_sage_turn_for_channel(
@@ -258,7 +258,7 @@ class TriageRulingTests(unittest.TestCase):
                 new=AsyncMock(return_value=triage_enabled_install),
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.handle_sage_chat",
+                "server_modules.agent_turn_runtime_service.handle_sage_chat",
                 new=AsyncMock(return_value=self._mock_sage_chat()),
             ) as handle_mock,
         ):
@@ -311,7 +311,7 @@ class SageTurnAdapterAgentIdRoutingTests(unittest.TestCase):
                 new=AsyncMock(return_value=fake_context),
             ) as resolve_mock,
             patch(
-                "server_modules.sage_agent_runtime_service.handle_sage_chat",
+                "server_modules.agent_turn_runtime_service.handle_sage_chat",
                 new=AsyncMock(return_value=self._mock_sage_chat()),
             ) as handle_mock,
         ):
@@ -341,7 +341,7 @@ class SageTurnAdapterAgentIdRoutingTests(unittest.TestCase):
                 new=AsyncMock(side_effect=AssertionError("must not be called when agent_id is empty")),
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.handle_sage_chat",
+                "server_modules.agent_turn_runtime_service.handle_sage_chat",
                 new=AsyncMock(return_value=self._mock_sage_chat()),
             ) as handle_mock,
         ):
@@ -364,7 +364,7 @@ class SageTurnAdapterAgentIdRoutingTests(unittest.TestCase):
                 new=AsyncMock(side_effect=RuntimeError("registry unavailable")),
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.handle_sage_chat",
+                "server_modules.agent_turn_runtime_service.handle_sage_chat",
                 new=AsyncMock(return_value=self._mock_sage_chat()),
             ) as handle_mock,
         ):
@@ -411,13 +411,13 @@ class SageTurnAdapterThreadKeyingTests(unittest.TestCase):
                 new=AsyncMock(return_value=self._fake_specialist_context(agent_id)),
             ),
             patch(
-                "server_modules.sage_command_dispatcher.get_active_thread",
+                "server_modules.agent_command_dispatcher.get_active_thread",
                 new=AsyncMock(side_effect=AssertionError(
                     "get_active_thread must not be called for a resolved specialist turn"
                 )),
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.handle_sage_chat",
+                "server_modules.agent_turn_runtime_service.handle_sage_chat",
                 new=AsyncMock(return_value=self._mock_sage_chat()),
             ) as handle_mock,
         ):
@@ -466,11 +466,11 @@ class SageTurnAdapterThreadKeyingTests(unittest.TestCase):
         "sage-main" and any existing per-channel override."""
         with (
             patch(
-                "server_modules.sage_command_dispatcher.get_active_thread",
+                "server_modules.agent_command_dispatcher.get_active_thread",
                 new=AsyncMock(return_value="sage-main"),
             ) as get_active_mock,
             patch(
-                "server_modules.sage_agent_runtime_service.handle_sage_chat",
+                "server_modules.agent_turn_runtime_service.handle_sage_chat",
                 new=AsyncMock(return_value=self._mock_sage_chat()),
             ) as handle_mock,
         ):
@@ -491,11 +491,11 @@ class SageTurnAdapterThreadKeyingTests(unittest.TestCase):
         thread — no regression for an existing conversation."""
         with (
             patch(
-                "server_modules.sage_command_dispatcher.get_active_thread",
+                "server_modules.agent_command_dispatcher.get_active_thread",
                 new=AsyncMock(return_value="thread_prior_conversation_abc123"),
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.handle_sage_chat",
+                "server_modules.agent_turn_runtime_service.handle_sage_chat",
                 new=AsyncMock(return_value=self._mock_sage_chat()),
             ) as handle_mock,
         ):
@@ -544,7 +544,7 @@ class FallbackCommandDispatchSenderIdTests(unittest.TestCase):
     def test_owner_sender_id_reaches_the_fallback_owner_gated_command(self):
         sage_chat = AsyncMock()
         with (
-            patch("server_modules.sage_agent_runtime_service.handle_sage_chat", new=sage_chat),
+            patch("server_modules.agent_turn_runtime_service.handle_sage_chat", new=sage_chat),
             patch(
                 "server_modules.control_plane_repository.get_workspace_by_id",
                 new=AsyncMock(return_value={"created_by_user_id": "owner-1", "identity_links": {}}),
@@ -572,7 +572,7 @@ class FallbackCommandDispatchSenderIdTests(unittest.TestCase):
         not this shared one."""
         sage_chat = AsyncMock(return_value=self._mock_sage_chat_payload())
         with (
-            patch("server_modules.sage_agent_runtime_service.handle_sage_chat", new=sage_chat),
+            patch("server_modules.agent_turn_runtime_service.handle_sage_chat", new=sage_chat),
             patch(
                 "server_modules.control_plane_repository.get_workspace_by_id",
                 new=AsyncMock(return_value={"created_by_user_id": "someone-else", "identity_links": {}}),

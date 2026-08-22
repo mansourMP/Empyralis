@@ -316,7 +316,7 @@ export function reasoningEffortLabel(value: string): string {
 }
 
 // Which model_config modes apply reasoning_effort through the CLOUD provider
-// call — see sage_agent_runtime_service.py's handle_sage_chat /
+// call — see agent_turn_runtime_service.py's handle_sage_chat /
 // _run_sage_action_loop_v3: both reach stream_provider_backed_direct_chat,
 // which applies this natively for models whose provider exposes the wire
 // param and as a strong system-prompt instruction otherwise. cli_subscription

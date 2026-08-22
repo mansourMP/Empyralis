@@ -45,7 +45,7 @@ class SageChatApiContractTests(unittest.TestCase):
         self.assertEqual(req.source_channel, "mobile_voice")
 
     def test_mode_gate_rejects_non_owner_sage(self):
-        from server_modules.sage_agent_runtime_service import ALLOWED_MODES
+        from server_modules.agent_turn_runtime_service import ALLOWED_MODES
 
         self.assertNotIn("customer_live", ALLOWED_MODES)
         self.assertNotIn("studio_agent", ALLOWED_MODES)
@@ -54,17 +54,17 @@ class SageChatApiContractTests(unittest.TestCase):
 
     def test_response_contract_keys(self):
         with (
-            patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile") as mock_profile,
-            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files") as mock_files,
-            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block") as mock_mem,
-            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
-            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
-            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider") as mock_provider,
-            patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback") as mock_generate,
+            patch("server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile") as mock_profile,
+            patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files") as mock_files,
+            patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block") as mock_mem,
+            patch("server_modules.agent_turn_runtime_service.assistant_health_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider") as mock_provider,
+            patch("server_modules.agent_turn_runtime_service.generate_chat_reply_with_provider_fallback") as mock_generate,
             patched_provider_calls(reply="Reply", usage={"model": "gpt-4o"}, provider="openai") as sage_stream,
-            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
-            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
-            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+            patch("server_modules.agent_turn_runtime_service.persist_interaction"),
+            patch("server_modules.agent_turn_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.agent_turn_runtime_service.security_audit_service.emit_security_audit_event"),
         ):
             mock_profile.return_value = {"profile": {"user_name": "", "identity_summary": "", "communication_style": "", "recurring_responsibility": "", "standing_rules": []}}
             mock_files.return_value = {}
@@ -73,7 +73,7 @@ class SageChatApiContractTests(unittest.TestCase):
             mock_generate.return_value = ("Reply", {"model": "gpt-4o"}, "openai", "")
 
             result = asyncio.run(
-                __import__("server_modules.sage_agent_runtime_service", fromlist=["handle_sage_chat"]).handle_sage_chat(
+                __import__("server_modules.agent_turn_runtime_service", fromlist=["handle_sage_chat"]).handle_sage_chat(
                     workspace_id="ws-1", message="hello",
                 )
             )
@@ -99,17 +99,17 @@ class SageChatApiContractTests(unittest.TestCase):
 
     def test_prompt_includes_identity_guardrails(self):
         with (
-            patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile") as mock_profile,
-            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files") as mock_files,
-            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block") as mock_mem,
-            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
-            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
-            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider") as mock_provider,
-            patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback") as mock_generate,
+            patch("server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile") as mock_profile,
+            patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files") as mock_files,
+            patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block") as mock_mem,
+            patch("server_modules.agent_turn_runtime_service.assistant_health_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider") as mock_provider,
+            patch("server_modules.agent_turn_runtime_service.generate_chat_reply_with_provider_fallback") as mock_generate,
             patched_provider_calls(reply="Ok", provider="deepseek") as sage_stream,
-            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
-            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
-            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+            patch("server_modules.agent_turn_runtime_service.persist_interaction"),
+            patch("server_modules.agent_turn_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.agent_turn_runtime_service.security_audit_service.emit_security_audit_event"),
         ):
             mock_profile.return_value = {"profile": {"user_name": "", "identity_summary": "", "communication_style": "", "recurring_responsibility": "", "standing_rules": []}}
             mock_files.return_value = {}
@@ -118,7 +118,7 @@ class SageChatApiContractTests(unittest.TestCase):
             mock_generate.return_value = ("Ok", {}, "deepseek", "")
 
             asyncio.run(
-                __import__("server_modules.sage_agent_runtime_service", fromlist=["handle_sage_chat"]).handle_sage_chat(
+                __import__("server_modules.agent_turn_runtime_service", fromlist=["handle_sage_chat"]).handle_sage_chat(
                     workspace_id="ws-1", message="hello",
                 )
             )

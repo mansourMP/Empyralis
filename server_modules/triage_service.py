@@ -9,12 +9,12 @@ identity-to-behavior dispatch built on top of resolve_sender_identity below)
 was removed per founder ruling (2026-07-23): "Every single message goes to
 the reasoning model, absolutely. We are not going to have filters that flag
 a message and don't deliver it. No hardcoded outputs — everything is the
-agent's own reasoning." See server_modules/sage_turn_adapter.py's
+agent's own reasoning." See server_modules/agent_turn_adapter.py's
 execute_sage_turn for the (now unconditional) call path.
 
 resolve_sender_identity itself survives: it is a plain classifier (no
 blocking, no reply substitution) consumed elsewhere for tool-visibility and
-authority-tier decisions — e.g. sage_agent_runtime_service.py's per-turn
+authority-tier decisions — e.g. agent_turn_runtime_service.py's per-turn
 sender_class resolution and personal_channels_service.py's owner-self-chat
 detection. Those are output/permission concerns (which tools an already-
 in-scope turn may use), not input gating, and are outside this ruling.

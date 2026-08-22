@@ -798,7 +798,7 @@ async def _handle_discord_interaction(
     user_id = str((interaction.get("user") or interaction.get("member", {}).get("user") or {}).get("id") or "").strip()
 
     # Dispatch via shared command dispatcher
-    from server_modules.sage_command_dispatcher import dispatch_command as _dispatch_cmd
+    from server_modules.agent_command_dispatcher import dispatch_command as _dispatch_cmd
     reply = await _dispatch_cmd(
         command=f"/{command_name}",
         workspace_id=workspace_id,

@@ -132,7 +132,7 @@ def _enforce_sage_memory_state_decision(
                 "storage_engine": "durable_postgres",
                 "tenant_id": _coerce_text(workspace_id) or "default",
                 "workspace_id": _coerce_text(workspace_id) or "default",
-                "actor_id": _coerce_text(actor_user_id) or "sage_memory_service",
+                "actor_id": _coerce_text(actor_user_id) or "assistant_memory_service",
                 "status": status,
                 "payload": record,
                 "payload_bytes": payload_bytes,

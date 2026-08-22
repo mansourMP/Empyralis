@@ -20,7 +20,7 @@ class CanonicalUsagePayerTests(unittest.TestCase):
     """The usage matrix's `source` column must always read as one of the
     four canonical ledger payers (credit_ledger_contract.LEDGER_PAYERS),
     never a raw internal mode token — including `cli_subscription`, the
-    literal value sage_agent_runtime_service._meter_and_ledger_cli_subscription_turn
+    literal value agent_turn_runtime_service._meter_and_ledger_cli_subscription_turn
     writes for CLI-subscription (Claude Code / Codex) turns."""
 
     def test_platform_credits_aliases(self) -> None:

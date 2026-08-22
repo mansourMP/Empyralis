@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from server_modules import routes_doctor
-from server_modules.sage_doctor_service import CHECK_SPECS, SageDoctorService
+from server_modules.assistant_doctor_service import CHECK_SPECS, SageDoctorService
 
 
 class TestSageDoctorService:
@@ -19,8 +19,8 @@ class TestSageDoctorService:
     #   test 1: all checks return structured results
     # ------------------------------------------------------------------
 
-    @patch("server_modules.sage_doctor_service.SageDoctorService._resolve_gateway_id", return_value="gw-1")
-    @patch("server_modules.sage_doctor_service.SageDoctorService._list_vault_connectors", return_value=[
+    @patch("server_modules.assistant_doctor_service.SageDoctorService._resolve_gateway_id", return_value="gw-1")
+    @patch("server_modules.assistant_doctor_service.SageDoctorService._list_vault_connectors", return_value=[
         {"connector": "slack", "id": "cred-1"},
         {"connector": "discord_bot", "id": "cred-2"},
         {"connector": "google_workspace", "id": "cred-3"},
@@ -66,7 +66,7 @@ class TestSageDoctorService:
                 return_value=[{"id": "mcp-1"}],
             ),
             patch(
-                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                "server_modules.agent_turn_runtime_service._resolve_cloud_provider",
                 return_value=("deepseek", {"api_key": "test"}),
             ),
             patch(
@@ -137,7 +137,7 @@ class TestSageDoctorService:
                 return_value=[],
             ),
             patch(
-                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                "server_modules.agent_turn_runtime_service._resolve_cloud_provider",
                 side_effect=RuntimeError("No cloud provider is configured for Sage."),
             ),
             patch(
@@ -209,7 +209,7 @@ class TestSageDoctorService:
                 return_value=[{"id": "mcp-1"}],
             ),
             patch(
-                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                "server_modules.agent_turn_runtime_service._resolve_cloud_provider",
                 return_value=("deepseek", {"api_key": "test"}),
             ),
             patch(
@@ -275,7 +275,7 @@ class TestSageDoctorService:
                 return_value=[],
             ),
             patch(
-                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                "server_modules.agent_turn_runtime_service._resolve_cloud_provider",
                 side_effect=RuntimeError("No cloud provider is configured for Sage."),
             ),
             patch(
@@ -355,7 +355,7 @@ class TestSageDoctorService:
                 return_value=[],
             ),
             patch(
-                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                "server_modules.agent_turn_runtime_service._resolve_cloud_provider",
                 side_effect=RuntimeError("No cloud provider is configured for Sage."),
             ),
             patch(

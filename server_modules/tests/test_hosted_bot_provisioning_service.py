@@ -41,7 +41,7 @@ class RouteAgentInboundSenderIdentityTests(unittest.IsolatedAsyncioTestCase):
              patch("server_modules.specialist_runtime_context.resolve_specialist_runtime_context", new=AsyncMock(return_value=None)), \
              patch("server_modules.agent_registry_repository.get_workspace_agent_install_bundle", new=AsyncMock(return_value={"metadata": {}})), \
              patch("server_modules.personal_channels_repository.claim_channel_owner_identity_if_unclaimed"), \
-             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch):
+             patch("server_modules.agent_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch):
             result = await prov.route_agent_inbound(
                 agent_install_id="agent-1",
                 chat_id="-100999",
@@ -66,7 +66,7 @@ class RouteAgentInboundSenderIdentityTests(unittest.IsolatedAsyncioTestCase):
              patch("server_modules.specialist_runtime_context.resolve_specialist_runtime_context", new=AsyncMock(return_value=None)), \
              patch("server_modules.agent_registry_repository.get_workspace_agent_install_bundle", new=AsyncMock(return_value={"metadata": {}})), \
              patch("server_modules.personal_channels_repository.claim_channel_owner_identity_if_unclaimed"), \
-             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch):
+             patch("server_modules.agent_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch):
             await prov.route_agent_inbound(
                 agent_install_id="agent-1", chat_id="-100999", message="hi", sender_id="111",
             )
@@ -91,7 +91,7 @@ class RouteAgentInboundSenderIdentityTests(unittest.IsolatedAsyncioTestCase):
              patch("server_modules.specialist_runtime_context.resolve_specialist_runtime_context", new=AsyncMock(return_value=None)), \
              patch("server_modules.agent_registry_repository.get_workspace_agent_install_bundle", new=AsyncMock(return_value={"metadata": {}})), \
              patch("server_modules.personal_channels_repository.claim_channel_owner_identity_if_unclaimed"), \
-             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch):
+             patch("server_modules.agent_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch):
             await prov.route_agent_inbound(
                 agent_install_id="agent-1", chat_id="555444", message="hi",
             )

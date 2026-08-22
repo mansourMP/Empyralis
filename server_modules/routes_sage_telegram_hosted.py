@@ -254,7 +254,7 @@ async def telegram_webhook(request: Request) -> dict:
     )
 
     # ── Shared command dispatcher ──
-    from server_modules.sage_command_dispatcher import dispatch_command
+    from server_modules.agent_command_dispatcher import dispatch_command
     cmd_reply = await dispatch_command(
         command=message_text,
         workspace_id=workspace_id,
@@ -287,7 +287,7 @@ async def telegram_webhook(request: Request) -> dict:
     # This ONE call owns: typing, execute_sage_turn, error classification,
     # [SILENT] suppression, message splitting, guaranteed fallback.
     # The TelegramHostedTransport provides only the raw send/typing/format primitives.
-    from server_modules.sage_reply_dispatcher import dispatch_sage_reply_safe
+    from server_modules.agent_reply_dispatcher import dispatch_sage_reply_safe
 
     _transport = hosted.TelegramHostedTransport(str(chat_id))
     delivered = await dispatch_sage_reply_safe(
@@ -430,7 +430,7 @@ async def dev_poll_once() -> dict:
         )
 
         # ── Shared command dispatcher (handles /compact, /new, /help, etc.) ──
-        from server_modules.sage_command_dispatcher import dispatch_command
+        from server_modules.agent_command_dispatcher import dispatch_command
         cmd_reply = await dispatch_command(
             command=message_text,
             workspace_id=workspace_id,
@@ -458,7 +458,7 @@ async def dev_poll_once() -> dict:
             _dev_mem_prior = []
 
         # ── Route through shared-core reply dispatcher ──
-        from server_modules.sage_reply_dispatcher import dispatch_sage_reply_safe
+        from server_modules.agent_reply_dispatcher import dispatch_sage_reply_safe
 
         _transport = hosted.TelegramHostedTransport(str(chat_id))
         await dispatch_sage_reply_safe(

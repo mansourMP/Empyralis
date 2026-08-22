@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from server_modules import sage_profile_service, workspace_context
+from server_modules import assistant_profile_service, workspace_context
 
 
 class WorkspaceContextFilesTests(unittest.TestCase):
@@ -32,19 +32,19 @@ class WorkspaceContextFilesTests(unittest.TestCase):
         # 2026-07-23 root-taxonomy removal: onboarding no longer projects
         # into IDENTITY.md (removed from ALLOWED_CONTEXT_FILENAMES entirely)
         # -- it projects into the memory/files/profile.md topic file
-        # instead (sage_profile_service.SAGE_PROFILE_MEMORY_TOPIC_FILE). The
+        # instead (assistant_profile_service.SAGE_PROFILE_MEMORY_TOPIC_FILE). The
         # same "never clobber a manual edit" guarantee is asserted against
         # that new target.
         with tempfile.TemporaryDirectory() as tempdir:
             with patch("server_modules.workspace_context._WORKSPACE_DIR", Path(tempdir)):
                 manual_content = "# Owner Profile\n\n- Manually edited file text.\n"
                 workspace_context.write_workspace_context_file(
-                    sage_profile_service.SAGE_PROFILE_MEMORY_TOPIC_FILE,
+                    assistant_profile_service.SAGE_PROFILE_MEMORY_TOPIC_FILE,
                     manual_content,
                     workspace_id="workspace-1",
                 )
 
-                sage_profile_service.sync_profile_context_files(
+                assistant_profile_service.sync_profile_context_files(
                     workspace_id="workspace-1",
                     profile={
                         "identity_summary": "Structured profile text.",
@@ -53,7 +53,7 @@ class WorkspaceContextFilesTests(unittest.TestCase):
 
                 self.assertEqual(
                     workspace_context.read_workspace_context_file(
-                        sage_profile_service.SAGE_PROFILE_MEMORY_TOPIC_FILE,
+                        assistant_profile_service.SAGE_PROFILE_MEMORY_TOPIC_FILE,
                         workspace_id="workspace-1",
                     ),
                     manual_content,

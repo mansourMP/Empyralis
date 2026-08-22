@@ -18,7 +18,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from server_modules import sage_agent_runtime_service as sage
+from server_modules import agent_turn_runtime_service as sage
 from server_modules import direct_tool_execution_service as dtx
 from server_modules import skills_service
 from server_modules.direct_chat_operator_binding_service import parse_tool_name as _parse_tool_name

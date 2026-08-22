@@ -3,7 +3,7 @@ Architecture guard — verifies that the channel plane is cleanly separated
 from the execution plane (Step 3 contract).
 
 Channel files may import:
-  - channel_adapter, sage_turn_adapter, sage_command_dispatcher, channel_gateway_bridge
+  - channel_adapter, agent_turn_adapter, agent_command_dispatcher, channel_gateway_bridge
   - gateway_protocol_service (for dispatch_channel_outbound — channel delivery)
   - gateway_execution_service (for channel configuration — pairing/QR setup)
 
@@ -32,7 +32,7 @@ CHANNEL_FILES = {
     "personal_channels_service.py",     # Path B bridge — allowed gateway_execution_service
     "channel_adapter.py",
     "sage_telegram_hosted_service.py",
-    "sage_turn_adapter.py",
+    "agent_turn_adapter.py",
     "channel_gateway_bridge.py",
     "channel_blocking_policy_service.py",
     "channel_concurrency_service.py",
@@ -124,7 +124,7 @@ def test_path_a_channels_are_pure() -> None:
         "routes_sage_telegram_hosted.py",
         "channel_adapter.py",
         "sage_telegram_hosted_service.py",
-        "sage_turn_adapter.py",
+        "agent_turn_adapter.py",
     ]
     violations = []
     for fn in pure_channel_files:

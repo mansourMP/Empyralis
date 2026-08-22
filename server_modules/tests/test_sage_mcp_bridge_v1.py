@@ -13,8 +13,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
-from server_modules import sage_agent_runtime_service
-from server_modules.sage_transparency_service import (
+from server_modules import agent_turn_runtime_service
+from server_modules.assistant_transparency_service import (
     emit_sage_turn_transparency_events,
 )
 from server_modules.skill_registry import SkillDefinition
@@ -108,22 +108,22 @@ class TestApprovedMCPToolExecutes(unittest.TestCase):
             {"type": "final", "payload": {"reply": "Stock level: 42 units.", "actions": [], "error": ""}},
         ]
         with (
-            patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile", return_value={"profile": {}}),
-            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
-            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
-            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
-            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[mcp_skill]),
-            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider", return_value=("openai", {"api_key": "test-key"})),
-            patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback", return_value=_GENERATE_STUB),
-            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
-            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability", return_value={"runtime_ok": False}),
-            patch("server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat", return_value=iter(stream_events)),
-            patch("server_modules.sage_agent_runtime_service.skill_registry.execute_skill", new=AsyncMock()) as mock_skill,
-            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
-            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
-            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+            patch("server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile", return_value={"profile": {}}),
+            patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
+            patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.agent_turn_runtime_service.assistant_health_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[mcp_skill]),
+            patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider", return_value=("openai", {"api_key": "test-key"})),
+            patch("server_modules.agent_turn_runtime_service.generate_chat_reply_with_provider_fallback", return_value=_GENERATE_STUB),
+            patch("server_modules.agent_turn_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
+            patch("server_modules.agent_turn_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability", return_value={"runtime_ok": False}),
+            patch("server_modules.agent_turn_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat", return_value=iter(stream_events)),
+            patch("server_modules.agent_turn_runtime_service.skill_registry.execute_skill", new=AsyncMock()) as mock_skill,
+            patch("server_modules.agent_turn_runtime_service.persist_interaction"),
+            patch("server_modules.agent_turn_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.agent_turn_runtime_service.security_audit_service.emit_security_audit_event"),
         ):
-            result = _run(sage_agent_runtime_service.handle_sage_chat(
+            result = _run(agent_turn_runtime_service.handle_sage_chat(
                 workspace_id="ws-1",
                 message="use the mcp stock inventory tool please",
             ))
@@ -153,22 +153,22 @@ class TestDisabledMCPToolDoesNotExecute(unittest.TestCase):
             {"type": "final", "payload": {"reply": "I cannot do that.", "actions": [], "error": ""}},
         ]
         with (
-            patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile", return_value={"profile": {}}),
-            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
-            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
-            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
-            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
-            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider", return_value=("openai", {"api_key": "test-key"})),
-            patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback", return_value=_GENERATE_STUB),
-            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
-            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability", return_value={"runtime_ok": False}),
-            patch("server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat", return_value=iter(stream_events)),
-            patch("server_modules.sage_agent_runtime_service.skill_registry.execute_skill", new=AsyncMock()) as mock_skill,
-            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
-            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
-            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+            patch("server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile", return_value={"profile": {}}),
+            patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
+            patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.agent_turn_runtime_service.assistant_health_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider", return_value=("openai", {"api_key": "test-key"})),
+            patch("server_modules.agent_turn_runtime_service.generate_chat_reply_with_provider_fallback", return_value=_GENERATE_STUB),
+            patch("server_modules.agent_turn_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
+            patch("server_modules.agent_turn_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability", return_value={"runtime_ok": False}),
+            patch("server_modules.agent_turn_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat", return_value=iter(stream_events)),
+            patch("server_modules.agent_turn_runtime_service.skill_registry.execute_skill", new=AsyncMock()) as mock_skill,
+            patch("server_modules.agent_turn_runtime_service.persist_interaction"),
+            patch("server_modules.agent_turn_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.agent_turn_runtime_service.security_audit_service.emit_security_audit_event"),
         ):
-            result = _run(sage_agent_runtime_service.handle_sage_chat(
+            result = _run(agent_turn_runtime_service.handle_sage_chat(
                 workspace_id="ws-1",
                 message="use the mcp stock lookup tool for item 123",
             ))
@@ -223,22 +223,22 @@ class TestMCPFailureReturnsControlledError(unittest.TestCase):
             {"type": "final", "payload": {"reply": "", "actions": [], "error": ""}},
         ]
         with (
-            patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile", return_value={"profile": {}}),
-            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
-            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
-            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
-            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[mcp_skill]),
-            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider", return_value=("openai", {"api_key": "test-key"})),
-            patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback", return_value=_GENERATE_STUB),
-            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
-            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability", return_value={"runtime_ok": False}),
-            patch("server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat", return_value=iter(stream_events)),
-            patch("server_modules.sage_agent_runtime_service.skill_registry.execute_skill", new=AsyncMock()) as mock_skill,
-            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
-            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
-            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+            patch("server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile", return_value={"profile": {}}),
+            patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
+            patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.agent_turn_runtime_service.assistant_health_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[mcp_skill]),
+            patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider", return_value=("openai", {"api_key": "test-key"})),
+            patch("server_modules.agent_turn_runtime_service.generate_chat_reply_with_provider_fallback", return_value=_GENERATE_STUB),
+            patch("server_modules.agent_turn_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
+            patch("server_modules.agent_turn_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability", return_value={"runtime_ok": False}),
+            patch("server_modules.agent_turn_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat", return_value=iter(stream_events)),
+            patch("server_modules.agent_turn_runtime_service.skill_registry.execute_skill", new=AsyncMock()) as mock_skill,
+            patch("server_modules.agent_turn_runtime_service.persist_interaction"),
+            patch("server_modules.agent_turn_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.agent_turn_runtime_service.security_audit_service.emit_security_audit_event"),
         ):
-            result = _run(sage_agent_runtime_service.handle_sage_chat(
+            result = _run(agent_turn_runtime_service.handle_sage_chat(
                 workspace_id="ws-1",
                 message="use mcp inventory please",
             ))
@@ -287,22 +287,22 @@ class TestMCPToolResultIncludedInFinalResponse(unittest.TestCase):
             {"type": "final", "payload": {"reply": "Warehouse stock: 150 units available.", "actions": [], "error": ""}},
         ]
         with (
-            patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile", return_value={"profile": {}}),
-            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
-            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
-            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
-            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[mcp_skill]),
-            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider", return_value=("openai", {"api_key": "test-key"})),
-            patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback", return_value=_GENERATE_STUB),
-            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
-            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability", return_value={"runtime_ok": False}),
-            patch("server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat", return_value=iter(stream_events)),
-            patch("server_modules.sage_agent_runtime_service.skill_registry.execute_skill", new=AsyncMock()) as mock_skill,
-            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
-            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
-            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+            patch("server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile", return_value={"profile": {}}),
+            patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
+            patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.agent_turn_runtime_service.assistant_health_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[mcp_skill]),
+            patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider", return_value=("openai", {"api_key": "test-key"})),
+            patch("server_modules.agent_turn_runtime_service.generate_chat_reply_with_provider_fallback", return_value=_GENERATE_STUB),
+            patch("server_modules.agent_turn_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
+            patch("server_modules.agent_turn_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability", return_value={"runtime_ok": False}),
+            patch("server_modules.agent_turn_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat", return_value=iter(stream_events)),
+            patch("server_modules.agent_turn_runtime_service.skill_registry.execute_skill", new=AsyncMock()) as mock_skill,
+            patch("server_modules.agent_turn_runtime_service.persist_interaction"),
+            patch("server_modules.agent_turn_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.agent_turn_runtime_service.security_audit_service.emit_security_audit_event"),
         ):
-            result = _run(sage_agent_runtime_service.handle_sage_chat(
+            result = _run(agent_turn_runtime_service.handle_sage_chat(
                 workspace_id="ws-1",
                 message="use mcp warehouse stock count please",
             ))
@@ -347,7 +347,7 @@ class TestStudioAgentsDoNotInheritSageMCPPermissions(unittest.TestCase):
         self.assertEqual(definition.source, "mcp_registry")
         self.assertEqual(definition.execution_adapter, "mcp_tool")
         builtin_source = getattr(
-            sage_agent_runtime_service.skill_registry, "_BUILT_IN_SOURCE", "built_in"
+            agent_turn_runtime_service.skill_registry, "_BUILT_IN_SOURCE", "built_in"
         )
         self.assertNotEqual(definition.source, builtin_source)
 
@@ -380,10 +380,10 @@ class TestStudioAgentsDoNotInheritSageMCPPermissions(unittest.TestCase):
         )
         all_skills = [mcp_skill]
         with patch(
-            "server_modules.sage_agent_runtime_service.list_skill_definitions",
+            "server_modules.agent_turn_runtime_service.list_skill_definitions",
             return_value=all_skills,
         ):
-            catalog = sage_agent_runtime_service._load_safe_skill_catalog(
+            catalog = agent_turn_runtime_service._load_safe_skill_catalog(
                 workspace_id="ws-1"
             )
 

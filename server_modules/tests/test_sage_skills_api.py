@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from server_modules import sage_skills_api
+from server_modules import assistant_skills_api
 
 
 class _FakeApp:
@@ -31,15 +31,15 @@ class SageSkillsApiTests(unittest.TestCase):
     /api/sage-skills and /api/sage-capabilities now source every skill from
     skill_registry.list_skill_definitions, the same catalog skill_invoke
     dispatches against. Patching server_modules.skill_registry.
-    list_installed_skills (not sage_skills_api.list_installed_skills, which
+    list_installed_skills (not assistant_skills_api.list_installed_skills, which
     no longer exists in this module) controls the filesystem-scanned half of
     that catalog; the ~20 real _BUILT_IN_SKILLS entries are always present
     alongside it, so assertions below are existence-based rather than
     fixed-index."""
 
     def test_no_hardcoded_curated_pack_remains(self) -> None:
-        self.assertFalse(hasattr(sage_skills_api, "_CURATED_SKILL_PACK"))
-        self.assertFalse(hasattr(sage_skills_api, "CuratedSkillDefinition"))
+        self.assertFalse(hasattr(assistant_skills_api, "_CURATED_SKILL_PACK"))
+        self.assertFalse(hasattr(assistant_skills_api, "CuratedSkillDefinition"))
 
     def test_get_route_normalizes_installed_skill_states_and_reasons(self) -> None:
         fake_server = types.ModuleType("server")
@@ -52,7 +52,7 @@ class SageSkillsApiTests(unittest.TestCase):
         try:
             # A real path is needed here (not just an inline "skill_body"
             # string) because skill_registry.SkillDefinition only carries a
-            # `path`, not the body text itself — sage_skills_api re-reads
+            # `path`, not the body text itself — assistant_skills_api re-reads
             # SKILL.md from disk for the Level-2 detail view
             # (_skill_definition_body), same as it does for the 6 real
             # bundled skills this task authored.
@@ -65,11 +65,11 @@ class SageSkillsApiTests(unittest.TestCase):
             (skill_dir / "README.md").write_text("Vault helper skill package.", encoding="utf-8")
 
             app = _FakeApp()
-            sage_skills_api.register_sage_skills_routes(app)
+            assistant_skills_api.register_sage_skills_routes(app)
             route = app.routes[("GET", "/api/sage-skills")]
             with (
-                patch("server_modules.sage_skills_api.enforce_workspace_access", return_value="workspace-1"),
-                patch("server_modules.sage_skills_api.workspace_tenant_id", return_value="tenant-1"),
+                patch("server_modules.assistant_skills_api.enforce_workspace_access", return_value="workspace-1"),
+                patch("server_modules.assistant_skills_api.workspace_tenant_id", return_value="tenant-1"),
                 patch(
                     "server_modules.skill_registry.list_installed_skills",
                     return_value=[
@@ -170,11 +170,11 @@ class SageSkillsApiTests(unittest.TestCase):
         sys.modules["server"] = fake_server
         try:
             app = _FakeApp()
-            sage_skills_api.register_sage_skills_routes(app)
+            assistant_skills_api.register_sage_skills_routes(app)
             route = app.routes[("GET", "/api/sage-capabilities")]
             with (
-                patch("server_modules.sage_skills_api.enforce_workspace_access", return_value="workspace-1"),
-                patch("server_modules.sage_skills_api.workspace_tenant_id", return_value="tenant-1"),
+                patch("server_modules.assistant_skills_api.enforce_workspace_access", return_value="workspace-1"),
+                patch("server_modules.assistant_skills_api.workspace_tenant_id", return_value="tenant-1"),
                 patch(
                     "server_modules.skill_registry.list_installed_skills",
                     return_value=[
@@ -194,7 +194,7 @@ class SageSkillsApiTests(unittest.TestCase):
                     ],
                 ),
                 patch(
-                    "server_modules.sage_skills_api.mcp_registry_service.list_workspace_mcp_servers",
+                    "server_modules.assistant_skills_api.mcp_registry_service.list_workspace_mcp_servers",
                     return_value=[
                         {
                             "server_id": "server-1",

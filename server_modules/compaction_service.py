@@ -29,7 +29,7 @@ LOGGER = logging.getLogger(__name__)
 # the ENTIRE turns list from scratch every time via this chars/4 heuristic,
 # with no plumbing to carry a prior turn's real provider usage forward as
 # a baseline. Wiring that in would mean threading last-response usage
-# (already computed — see sage_agent_runtime_service.py's `usage` dict
+# (already computed — see agent_turn_runtime_service.py's `usage` dict
 # from generate_chat_reply_with_provider_fallback, and
 # scripts/orion_local_worker_llm.py's usage_masked shapes) through into
 # every should_compact/find_cut_point call site, plus a place to persist

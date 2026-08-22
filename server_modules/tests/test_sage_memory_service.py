@@ -3,15 +3,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from server_modules import sage_memory_service
+from server_modules import assistant_memory_service
 
 
 class SageMemoryServiceTests(unittest.TestCase):
     def test_upsert_memory_entry_persists_category_and_trace(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir) / "workspace-1"
-            with patch("server_modules.sage_memory_service.workspace_context.workspace_scope_dir", return_value=root):
-                payload = sage_memory_service.upsert_memory_entry(
+            with patch("server_modules.assistant_memory_service.workspace_context.workspace_scope_dir", return_value=root):
+                payload = assistant_memory_service.upsert_memory_entry(
                     workspace_id="workspace-1",
                     category="private",
                     title="Preferred timezone",
@@ -29,8 +29,8 @@ class SageMemoryServiceTests(unittest.TestCase):
     def test_update_and_pin_memory_entry_append_trace_history(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir) / "workspace-1"
-            with patch("server_modules.sage_memory_service.workspace_context.workspace_scope_dir", return_value=root):
-                created = sage_memory_service.upsert_memory_entry(
+            with patch("server_modules.assistant_memory_service.workspace_context.workspace_scope_dir", return_value=root):
+                created = assistant_memory_service.upsert_memory_entry(
                     workspace_id="workspace-1",
                     category="safe_general",
                     title="Current project",
@@ -38,7 +38,7 @@ class SageMemoryServiceTests(unittest.TestCase):
                     actor_user_id="user-1",
                 )
                 entry_id = created["entry"]["id"]
-                updated = sage_memory_service.upsert_memory_entry(
+                updated = assistant_memory_service.upsert_memory_entry(
                     workspace_id="workspace-1",
                     entry_id=entry_id,
                     category="safe_general",
@@ -46,7 +46,7 @@ class SageMemoryServiceTests(unittest.TestCase):
                     content="Preparing the Sage private beta launch plan.",
                     actor_user_id="user-2",
                 )
-                pinned = sage_memory_service.set_memory_entry_pinned(
+                pinned = assistant_memory_service.set_memory_entry_pinned(
                     workspace_id="workspace-1",
                     entry_id=entry_id,
                     pinned=True,
@@ -60,15 +60,15 @@ class SageMemoryServiceTests(unittest.TestCase):
     def test_build_sage_memory_context_block_groups_categories(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir) / "workspace-1"
-            with patch("server_modules.sage_memory_service.workspace_context.workspace_scope_dir", return_value=root):
-                sage_memory_service.upsert_memory_entry(
+            with patch("server_modules.assistant_memory_service.workspace_context.workspace_scope_dir", return_value=root):
+                assistant_memory_service.upsert_memory_entry(
                     workspace_id="workspace-1",
                     category="private",
                     title="Timezone",
                     content="Uses Asia/Shanghai.",
                     actor_user_id="user-1",
                 )
-                sage_memory_service.upsert_memory_entry(
+                assistant_memory_service.upsert_memory_entry(
                     workspace_id="workspace-1",
                     category="sensitive",
                     title="Status updates",
@@ -76,7 +76,7 @@ class SageMemoryServiceTests(unittest.TestCase):
                     pinned=True,
                     actor_user_id="user-1",
                 )
-                block = sage_memory_service.build_sage_memory_context_block(workspace_id="workspace-1")
+                block = assistant_memory_service.build_sage_memory_context_block(workspace_id="workspace-1")
 
             self.assertIn("Agent memory", block)
             self.assertIn("Private", block)
@@ -86,16 +86,16 @@ class SageMemoryServiceTests(unittest.TestCase):
     def test_critical_memory_is_withheld_from_default_context(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir) / "workspace-1"
-            with patch("server_modules.sage_memory_service.workspace_context.workspace_scope_dir", return_value=root):
-                sage_memory_service.upsert_memory_entry(
+            with patch("server_modules.assistant_memory_service.workspace_context.workspace_scope_dir", return_value=root):
+                assistant_memory_service.upsert_memory_entry(
                     workspace_id="workspace-1",
                     category="critical_restricted",
                     title="Production API key",
                     content="sk-secret123456",
                     actor_user_id="user-1",
                 )
-                default_block = sage_memory_service.build_sage_memory_context_block(workspace_id="workspace-1")
-                restricted_block = sage_memory_service.build_sage_memory_context_block(
+                default_block = assistant_memory_service.build_sage_memory_context_block(workspace_id="workspace-1")
+                restricted_block = assistant_memory_service.build_sage_memory_context_block(
                     workspace_id="workspace-1",
                     include_restricted=True,
                 )
@@ -108,9 +108,9 @@ class SageMemoryServiceTests(unittest.TestCase):
     def test_upsert_memory_entry_enforces_workspace_memory_limit(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir) / "workspace-1"
-            with patch("server_modules.sage_memory_service.workspace_context.workspace_scope_dir", return_value=root):
-                for index in range(sage_memory_service.SAGE_MEMORY_ENTRY_LIMIT):
-                    sage_memory_service.upsert_memory_entry(
+            with patch("server_modules.assistant_memory_service.workspace_context.workspace_scope_dir", return_value=root):
+                for index in range(assistant_memory_service.SAGE_MEMORY_ENTRY_LIMIT):
+                    assistant_memory_service.upsert_memory_entry(
                         workspace_id="workspace-1",
                         category="safe_general",
                         title=f"Memory {index}",
@@ -119,7 +119,7 @@ class SageMemoryServiceTests(unittest.TestCase):
                     )
 
                 with self.assertRaises(Exception) as context:
-                    sage_memory_service.upsert_memory_entry(
+                    assistant_memory_service.upsert_memory_entry(
                         workspace_id="workspace-1",
                         category="safe_general",
                         title="Overflow",
@@ -132,8 +132,8 @@ class SageMemoryServiceTests(unittest.TestCase):
     def test_legacy_memory_categories_map_to_sensitivity_classes(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir) / "workspace-1"
-            with patch("server_modules.sage_memory_service.workspace_context.workspace_scope_dir", return_value=root):
-                payload = sage_memory_service.upsert_memory_entry(
+            with patch("server_modules.assistant_memory_service.workspace_context.workspace_scope_dir", return_value=root):
+                payload = assistant_memory_service.upsert_memory_entry(
                     workspace_id="workspace-1",
                     category="personal_context",
                     title="Timezone",
@@ -146,15 +146,15 @@ class SageMemoryServiceTests(unittest.TestCase):
     def test_export_memory_returns_structured_payload_and_markdown(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir) / "workspace-1"
-            with patch("server_modules.sage_memory_service.workspace_context.workspace_scope_dir", return_value=root):
-                sage_memory_service.upsert_memory_entry(
+            with patch("server_modules.assistant_memory_service.workspace_context.workspace_scope_dir", return_value=root):
+                assistant_memory_service.upsert_memory_entry(
                     workspace_id="workspace-1",
                     category="safe_general",
                     title="Launch focus",
                     content="Keep the public demo web-first.",
                     actor_user_id="user-1",
                 )
-                payload = sage_memory_service.export_sage_memory(workspace_id="workspace-1")
+                payload = assistant_memory_service.export_sage_memory(workspace_id="workspace-1")
 
             self.assertEqual(payload["export_type"], "sage_memory")
             self.assertEqual(payload["summary"]["total_count"], 1)
@@ -165,8 +165,8 @@ class SageMemoryServiceTests(unittest.TestCase):
     def test_wipe_memory_requires_confirmation_and_clears_entries(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir) / "workspace-1"
-            with patch("server_modules.sage_memory_service.workspace_context.workspace_scope_dir", return_value=root):
-                sage_memory_service.upsert_memory_entry(
+            with patch("server_modules.assistant_memory_service.workspace_context.workspace_scope_dir", return_value=root):
+                assistant_memory_service.upsert_memory_entry(
                     workspace_id="workspace-1",
                     category="private",
                     title="Timezone",
@@ -174,15 +174,15 @@ class SageMemoryServiceTests(unittest.TestCase):
                     actor_user_id="user-1",
                 )
                 with self.assertRaises(Exception) as context:
-                    sage_memory_service.wipe_sage_memory(
+                    assistant_memory_service.wipe_sage_memory(
                         workspace_id="workspace-1",
                         actor_user_id="user-1",
                         confirm="wipe",
                     )
-                wiped = sage_memory_service.wipe_sage_memory(
+                wiped = assistant_memory_service.wipe_sage_memory(
                     workspace_id="workspace-1",
                     actor_user_id="user-1",
-                    confirm=sage_memory_service.SAGE_MEMORY_WIPE_CONFIRMATION,
+                    confirm=assistant_memory_service.SAGE_MEMORY_WIPE_CONFIRMATION,
                 )
 
             self.assertEqual(getattr(context.exception, "status_code", None), 400)

@@ -12,7 +12,7 @@ Ground-truth audit that motivated this: docs/design/inbound-attribution-audit.md
 
 Construction happens in each channel's inbound path; transport happens on
 NormalizedSageTurn.envelope (channel_adapter.py); injection happens ONCE, in
-sage_turn_adapter.execute_sage_turn(), the single chokepoint every channel
+agent_turn_adapter.execute_sage_turn(), the single chokepoint every channel
 routes through. This module deliberately imports nothing from the runtime so
 every channel service can import it without cycles.
 """

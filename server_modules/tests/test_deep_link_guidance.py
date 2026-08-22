@@ -21,7 +21,7 @@ import ast
 import unittest
 from pathlib import Path
 
-from server_modules import sage_agent_runtime_service as runtime
+from server_modules import agent_turn_runtime_service as runtime
 from server_modules import secret_redaction_service
 
 

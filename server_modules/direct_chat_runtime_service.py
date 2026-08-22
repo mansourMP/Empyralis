@@ -2,7 +2,7 @@
 
 build_direct_operator_reply / build_chat_turn_event_stream / execute_chat_turn
 below (this module's chat producer) call direct_chat_generation_service
-directly, bypassing sage_agent_runtime_service.handle_sage_chat entirely —
+directly, bypassing agent_turn_runtime_service.handle_sage_chat entirely —
 meaning no pre-LLM kill-switch check and no authority_tier stamping. Traced
 every path that could reach them for every real web-chat turn
 (execution_mode="sync", response_mode="stream", what every live client
@@ -12,7 +12,7 @@ sends) and confirmed none do:
     (called from agent_turn(), turn_runtime.py:71), which unconditionally
     calls direct_chat_service.execute_direct_chat_turn_request() — the
     "UNIFIED ENTRY" function that routes through
-    sage_turn_adapter.execute_sage_turn() -> handle_sage_chat() (the
+    agent_turn_adapter.execute_sage_turn() -> handle_sage_chat() (the
     kill-switch + mandate path). That function's entire body touches its
     `services: DirectChatExecutionServices` parameter exactly once (for
     chat_stream_key()) — build_direct_operator_reply/build_chat_turn_event_stream
@@ -908,7 +908,7 @@ def build_direct_operator_reply(
     # Use the SAME entitlement-gated resolver as Sage/channels.
     # Explicit provider request is honored; default = platform (DeepSeek, credit-gated).
     try:
-        from server_modules.sage_agent_runtime_service import _resolve_cloud_provider as _resolve_provider
+        from server_modules.agent_turn_runtime_service import _resolve_cloud_provider as _resolve_provider
         provider, direct_chat_credentials = run_async_tool_call(_resolve_provider(normalized_workspace_id))
     except Exception as _prov_err:
         _prov_msg = str(_prov_err).strip() or "Provider unavailable"

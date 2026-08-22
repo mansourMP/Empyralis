@@ -158,10 +158,10 @@ class DiscordSageIngressRoutingTests(unittest.TestCase):
                   return_value=True),
             patch("server_modules.connectors.discord_bot_runtime_service.should_trigger_agent_run",
                   return_value=True),
-            patch("server_modules.sage_turn_adapter.execute_sage_turn",
+            patch("server_modules.agent_turn_adapter.execute_sage_turn",
                   new=AsyncMock(return_value=sage_result)) as mock_sage_turn,
             patch("server_modules.connectors.discord_connector.send_dm") as mock_send_dm,
-            patch("server_modules.sage_command_dispatcher.dispatch_command",
+            patch("server_modules.agent_command_dispatcher.dispatch_command",
                   new=AsyncMock(return_value=None)),
         ):
             result = _run(svc.handle_parsed_event(
@@ -208,10 +208,10 @@ class DiscordSageIngressRoutingTests(unittest.TestCase):
                   return_value=True),
             patch("server_modules.connectors.discord_bot_runtime_service.should_trigger_agent_run",
                   return_value=True),
-            patch("server_modules.sage_turn_adapter.execute_sage_turn",
+            patch("server_modules.agent_turn_adapter.execute_sage_turn",
                   new=AsyncMock()) as mock_sage_turn,
             patch("server_modules.connectors.discord_connector.send_dm") as mock_send_dm,
-            patch("server_modules.sage_command_dispatcher.dispatch_command",
+            patch("server_modules.agent_command_dispatcher.dispatch_command",
                   new=AsyncMock(return_value="Available commands: /help, /memory, /status")) as mock_dispatch,
         ):
             result = _run(svc.handle_parsed_event(
@@ -249,7 +249,7 @@ class DiscordSageIngressRoutingTests(unittest.TestCase):
                   return_value=True),
             patch("server_modules.connectors.discord_bot_runtime_service.should_trigger_agent_run",
                   return_value=True),
-            patch("server_modules.sage_turn_adapter.execute_sage_turn",
+            patch("server_modules.agent_turn_adapter.execute_sage_turn",
                   new=AsyncMock()) as mock_sage_turn,
             patch("server_modules.connectors.discord_bot_runtime_service.build_run_goal_from_event",
                   return_value={"goal": "help the user", "target": "specialist"}),
@@ -288,7 +288,7 @@ class DiscordSageIngressRoutingTests(unittest.TestCase):
                   return_value=True),
             patch("server_modules.connectors.discord_bot_runtime_service.should_trigger_agent_run",
                   return_value=True),
-            patch("server_modules.sage_turn_adapter.execute_sage_turn",
+            patch("server_modules.agent_turn_adapter.execute_sage_turn",
                   new=AsyncMock()) as mock_sage_turn,
         ):
             result = _run(svc.handle_parsed_event(
@@ -321,9 +321,9 @@ class DiscordSageIngressRoutingTests(unittest.TestCase):
                   return_value=True),
             patch("server_modules.connectors.discord_bot_runtime_service.should_trigger_agent_run",
                   return_value=True),
-            patch("server_modules.sage_turn_adapter.execute_sage_turn",
+            patch("server_modules.agent_turn_adapter.execute_sage_turn",
                   new=AsyncMock(side_effect=RuntimeError("simulated failure"))),
-            patch("server_modules.sage_command_dispatcher.dispatch_command",
+            patch("server_modules.agent_command_dispatcher.dispatch_command",
                   new=AsyncMock(return_value=None)),
         ):
             result = _run(svc.handle_parsed_event(
@@ -359,10 +359,10 @@ class DiscordSageIngressRoutingTests(unittest.TestCase):
                   return_value=True),
             patch("server_modules.connectors.discord_bot_runtime_service.should_trigger_agent_run",
                   return_value=True),
-            patch("server_modules.sage_turn_adapter.execute_sage_turn",
+            patch("server_modules.agent_turn_adapter.execute_sage_turn",
                   new=AsyncMock(return_value=sage_result)),
             patch("server_modules.connectors.discord_connector.send_dm") as mock_send_dm,
-            patch("server_modules.sage_command_dispatcher.dispatch_command",
+            patch("server_modules.agent_command_dispatcher.dispatch_command",
                   new=AsyncMock(return_value=None)),
         ):
             result = _run(svc.handle_parsed_event(

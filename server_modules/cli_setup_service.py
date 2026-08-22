@@ -206,7 +206,7 @@ _LOGIN_FAILED_EVENT_BY_RUNTIME = {
 def _friendly_cli_setup_error(reason: str, *, login: bool, runtime: str) -> str:
     """Map a raw dispatch/readiness reason (or a wrapped Gateway-side
     CliInstallError/CliLoginError message) to a platform-voice message, one
-    per distinct failure mode — mirrors sage_agent_runtime_service.
+    per distinct failure mode — mirrors agent_turn_runtime_service.
     _friendly_cli_subscription_error's shape for the cli_setup (install /
     sign-in) action family."""
     r = str(reason or "").strip().lower()

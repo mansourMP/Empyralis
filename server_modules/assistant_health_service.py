@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from server_modules import bounded_scheduler_service
 from server_modules.runtime_lane_queue import runtime_lane_queue_snapshot
-from server_modules.sage_profile_service import list_sage_profile
+from server_modules.assistant_profile_service import list_sage_profile
 
 
 def _coerce_text(value: Any) -> str:
