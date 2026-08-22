@@ -17,13 +17,48 @@ Captured on 2026-08-22 from the parent checkout with no rename applied:
 | Live MCP tool names | 29 |
 | Database schema table/column entries | 1,397 |
 | Environment variable names plus dynamic reads | 2 lists |
-| Persisted/protocol/high-signal literals | 5,004 |
+| Persisted/protocol/high-signal literals | 4,979 |
 | Frontend build-route strings | 22 |
 | Frontend CSS class references | 1,347 |
 
 The database snapshot was taken from the local Postgres catalog using the same
 information-schema query the tool runs against the configured runtime database.
 No database writes were performed.
+
+## The baseline was machine-dependent, and every worktree saw a false diff
+
+Re-measured on 2026-08-22 in a clean worktree of the same commit: the
+comparison reported **changed** before a single line was renamed. Two scanner
+flaws, both fixed here, both of the family this repository already documents —
+a checker that cries wolf is one people stop reading, and this is the checker
+the whole rename depends on.
+
+**1. It scanned git-ignored local junk.** The walk kept anything on disk with a
+source suffix. The primary checkout carries `empyralis-gateway/dist.bak`
+(ignored by `*.bak`), 167 stale compiled files, and the original baseline was
+captured with them in scope. So the baseline pinned contract items that exist
+in no tracked file — `PHONE_CODE_EXPIRED`, `SESSION_PASSWORD_NEEDED`,
+`AUTH_KEY_UNREGISTERED` and the rest of the gramjs Telegram vocabulary this
+repository deleted — plus 12 environment names from the same dead build. The
+scan is now restricted to `git ls-files`, and raises rather than falling back
+if git cannot answer. Measured after the fix: the primary checkout and a clean
+worktree produce byte-identical file sets (2,228), environment names (639) and
+literals (4,979).
+
+**2. It treated a source filename as a persisted contract.** Fifteen values
+were the basename of a tracked source file (`sage_agent_runtime_service.py`,
+`channel_adapter.py`, `agent-create-model.ts`, …), collected only because the
+constant holding them happens to be uppercase (`_SAGE_RUNTIME_PATH`,
+`LIVE_HANDLER`). A module path is not a persisted value, a wire field, or a
+phrase anyone types, and keeping it would make the guard fire on the one thing
+an internal rename is supposed to change while proving nothing: what a renamed
+route module exposes is measured directly by `http_routes` off the live
+`server.app`. The exclusion is an exact match against tracked-file basenames,
+never a `.py` suffix test, so a persisted value that merely looks like a
+filename stays in the guard.
+
+Both fixes were applied and the baseline regenerated **before** any rename, so
+neither can be mistaken for accommodating one.
 
 ## Determinism check
 
