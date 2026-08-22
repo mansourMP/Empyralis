@@ -6,7 +6,7 @@ from typing import Any, Mapping, Sequence
 
 from server_modules.channel_adapter import ChannelOrigin
 
-from server_modules import sage_skills_api
+from server_modules import assistant_skills_api
 from server_modules import tool_registry_service
 from server_modules import workspace_context
 from server_modules import workspace_context_memory_adapter
@@ -938,7 +938,7 @@ def build_sage_instruction_bundle(
     normalized_workspace_id = _coerce_text(workspace_id)
     normalized_message = _coerce_text(message)
     if capability_payload is None:
-        capability_payload = sage_skills_api.build_sage_capabilities_payload(
+        capability_payload = assistant_skills_api.build_sage_capabilities_payload(
             workspace_id=normalized_workspace_id,
             tenant_id=_coerce_text(tenant_id),
         )

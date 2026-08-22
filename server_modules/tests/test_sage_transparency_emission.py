@@ -1,10 +1,10 @@
-"""Tests for server_modules.sage_transparency_service."""
+"""Tests for server_modules.assistant_transparency_service."""
 
 from __future__ import annotations
 
 import unittest
 
-from server_modules.sage_transparency_service import (
+from server_modules.assistant_transparency_service import (
     emit_sage_turn_transparency_events,
     events_to_payloads,
 )

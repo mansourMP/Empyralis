@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from server_modules import sage_services_service
+from server_modules import assistant_services_service
 
 
 _ALLOW_DECISION = {
@@ -29,19 +29,19 @@ class SageServicesServiceRustGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             with mock.patch.object(
-                sage_services_service.workspace_context,
+                assistant_services_service.workspace_context,
                 "workspace_scope_dir",
                 side_effect=self._workspace_scope(root),
             ), mock.patch.object(
-                sage_services_service.rust_runtime_kernel_client,
+                assistant_services_service.rust_runtime_kernel_client,
                 "runtime_state_store_decision",
                 return_value=dict(_ALLOW_DECISION),
             ) as rust_decision, mock.patch.object(
-                sage_services_service.personal_context_engine,
+                assistant_services_service.personal_context_engine,
                 "publish_event",
                 new=mock.AsyncMock(),
             ):
-                asyncio.run(sage_services_service.create_service_entry(
+                asyncio.run(assistant_services_service.create_service_entry(
                     tenant_id="tenant-1",
                     workspace_id="workspace-1",
                     service_id="flashcards",
@@ -70,20 +70,20 @@ class SageServicesServiceRustGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             with mock.patch.object(
-                sage_services_service.workspace_context,
+                assistant_services_service.workspace_context,
                 "workspace_scope_dir",
                 side_effect=self._workspace_scope(root),
             ), mock.patch.object(
-                sage_services_service.rust_runtime_kernel_client,
+                assistant_services_service.rust_runtime_kernel_client,
                 "runtime_state_store_decision",
                 return_value=block_decision,
             ), mock.patch.object(
-                sage_services_service.personal_context_engine,
+                assistant_services_service.personal_context_engine,
                 "publish_event",
                 new=mock.AsyncMock(),
             ):
-                with self.assertRaises(sage_services_service.SageServicesRustGateError):
-                    asyncio.run(sage_services_service.update_service_profile(
+                with self.assertRaises(assistant_services_service.SageServicesRustGateError):
+                    asyncio.run(assistant_services_service.update_service_profile(
                         tenant_id="tenant-1",
                         workspace_id="workspace-1",
                         service_id="flashcards",
@@ -101,20 +101,20 @@ class SageServicesServiceRustGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             with mock.patch.object(
-                sage_services_service.workspace_context,
+                assistant_services_service.workspace_context,
                 "workspace_scope_dir",
                 side_effect=self._workspace_scope(root),
             ), mock.patch.object(
-                sage_services_service.rust_runtime_kernel_client,
+                assistant_services_service.rust_runtime_kernel_client,
                 "runtime_state_store_decision",
                 return_value=wrong_action,
             ), mock.patch.object(
-                sage_services_service.personal_context_engine,
+                assistant_services_service.personal_context_engine,
                 "publish_event",
                 new=mock.AsyncMock(),
             ):
-                with self.assertRaises(sage_services_service.SageServicesRustGateError) as raised:
-                    asyncio.run(sage_services_service.update_service_profile(
+                with self.assertRaises(assistant_services_service.SageServicesRustGateError) as raised:
+                    asyncio.run(assistant_services_service.update_service_profile(
                         tenant_id="tenant-1",
                         workspace_id="workspace-1",
                         service_id="flashcards",
@@ -129,11 +129,11 @@ class SageServicesServiceRustGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             with mock.patch.object(
-                sage_services_service.workspace_context,
+                assistant_services_service.workspace_context,
                 "workspace_scope_dir",
                 side_effect=self._workspace_scope(root),
             ), mock.patch.object(
-                sage_services_service.rust_runtime_kernel_client,
+                assistant_services_service.rust_runtime_kernel_client,
                 "runtime_state_store_decision",
                 side_effect=[
                     dict(_ALLOW_DECISION),
@@ -142,11 +142,11 @@ class SageServicesServiceRustGateTests(unittest.TestCase):
                     {**_ALLOW_DECISION, "next_action": "delete_sage_service_entry"},
                 ],
             ) as rust_decision, mock.patch.object(
-                sage_services_service.personal_context_engine,
+                assistant_services_service.personal_context_engine,
                 "publish_event",
                 new=mock.AsyncMock(),
             ):
-                created = asyncio.run(sage_services_service.create_service_entry(
+                created = asyncio.run(assistant_services_service.create_service_entry(
                     tenant_id="tenant-1",
                     workspace_id="workspace-1",
                     service_id="flashcards",
@@ -156,7 +156,7 @@ class SageServicesServiceRustGateTests(unittest.TestCase):
                 entry_id = created["service"]["entries"][0]["id"]
                 rust_decision.reset_mock()
 
-                asyncio.run(sage_services_service.update_service_entry(
+                asyncio.run(assistant_services_service.update_service_entry(
                     tenant_id="tenant-1",
                     workspace_id="workspace-1",
                     service_id="flashcards",
@@ -164,7 +164,7 @@ class SageServicesServiceRustGateTests(unittest.TestCase):
                     entry={"front": "One?", "back": "Updated"},
                     actor_user_id="owner-1",
                 ))
-                asyncio.run(sage_services_service.set_service_entry_pinned(
+                asyncio.run(assistant_services_service.set_service_entry_pinned(
                     tenant_id="tenant-1",
                     workspace_id="workspace-1",
                     service_id="flashcards",
@@ -172,7 +172,7 @@ class SageServicesServiceRustGateTests(unittest.TestCase):
                     pinned=True,
                     actor_user_id="owner-1",
                 ))
-                asyncio.run(sage_services_service.delete_service_entry(
+                asyncio.run(assistant_services_service.delete_service_entry(
                     tenant_id="tenant-1",
                     workspace_id="workspace-1",
                     service_id="flashcards",

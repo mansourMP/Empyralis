@@ -4,7 +4,7 @@ import types
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from server_modules import sage_heartbeat_api
+from server_modules import assistant_health_api
 
 
 class _FakeApp:
@@ -32,13 +32,13 @@ class SageHeartbeatApiTests(unittest.TestCase):
         sys.modules["server"] = fake_server
         try:
             app = _FakeApp()
-            sage_heartbeat_api.register_sage_heartbeat_routes(app)
+            assistant_health_api.register_sage_heartbeat_routes(app)
             route = app.routes[("GET", "/api/sage-heartbeat")]
             with (
-                patch("server_modules.sage_heartbeat_api.enforce_workspace_access", return_value="workspace-1"),
-                patch("server_modules.sage_heartbeat_api.workspace_tenant_id", return_value="tenant-1"),
+                patch("server_modules.assistant_health_api.enforce_workspace_access", return_value="workspace-1"),
+                patch("server_modules.assistant_health_api.workspace_tenant_id", return_value="tenant-1"),
                 patch(
-                    "server_modules.sage_heartbeat_api.build_sage_heartbeat_snapshot",
+                    "server_modules.assistant_health_api.build_sage_heartbeat_snapshot",
                     new=AsyncMock(return_value={"profile": {"recurring_responsibility": "Inbox"}}),
                 ) as snapshot_mock,
             ):

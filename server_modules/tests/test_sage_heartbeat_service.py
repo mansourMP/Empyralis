@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 from datetime import datetime, timezone
 
-from server_modules import sage_heartbeat_service
+from server_modules import assistant_health_service
 
 
 class SageHeartbeatServiceTests(unittest.TestCase):
@@ -38,7 +38,7 @@ class SageHeartbeatServiceTests(unittest.TestCase):
 
         with (
             patch(
-                "server_modules.sage_heartbeat_service.list_sage_profile",
+                "server_modules.assistant_health_service.list_sage_profile",
                 return_value={
                     "profile": {
                         "recurring_responsibility": "Keep my inbox triaged.",
@@ -48,7 +48,7 @@ class SageHeartbeatServiceTests(unittest.TestCase):
                 },
             ),
             patch(
-                "server_modules.sage_heartbeat_service.bounded_scheduler_service.scheduler_status_snapshot",
+                "server_modules.assistant_health_service.bounded_scheduler_service.scheduler_status_snapshot",
                 new=AsyncMock(
                     return_value={
                         "policy": {
@@ -82,7 +82,7 @@ class SageHeartbeatServiceTests(unittest.TestCase):
                 ),
             ),
             patch(
-                "server_modules.sage_heartbeat_service.runtime_lane_queue_snapshot",
+                "server_modules.assistant_health_service.runtime_lane_queue_snapshot",
                 return_value={
                     "running": True,
                     "pending_count": 2,
@@ -128,7 +128,7 @@ class SageHeartbeatServiceTests(unittest.TestCase):
                 },
             ),
             patch(
-                "server_modules.sage_heartbeat_service.bounded_scheduler_service.quiet_hours_status_snapshot",
+                "server_modules.assistant_health_service.bounded_scheduler_service.quiet_hours_status_snapshot",
                 return_value={
                     "active": True,
                     "label": "Quiet hours active until 07:00",
@@ -136,16 +136,16 @@ class SageHeartbeatServiceTests(unittest.TestCase):
                 },
             ),
             patch(
-                "server_modules.sage_heartbeat_service._heartbeat_snapshot_decision",
+                "server_modules.assistant_health_service._heartbeat_snapshot_decision",
                 side_effect=fake_heartbeat_snapshot,
             ),
             patch(
-                "server_modules.sage_heartbeat_service._runtime_health_decision",
+                "server_modules.assistant_health_service._runtime_health_decision",
                 side_effect=fake_runtime_health_decision,
             ) as rust_health_mock,
         ):
             payload = asyncio.run(
-                sage_heartbeat_service.build_sage_heartbeat_snapshot(
+                assistant_health_service.build_sage_heartbeat_snapshot(
                     tenant_id="tenant-1",
                     workspace_id="workspace-1",
                 )

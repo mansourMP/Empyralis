@@ -212,7 +212,7 @@ def _enforce_proof_log_state_decision(*, record: Dict[str, Any]) -> Dict[str, An
                 "storage_engine": "durable_postgres",
                 "tenant_id": _coerce_text(record.get("tenant_id")) or "default",
                 "workspace_id": _coerce_text(record.get("workspace_id")) or "default",
-                "actor_id": _coerce_text(record.get("actor_user_id")) or "sage_proof_log_service",
+                "actor_id": _coerce_text(record.get("actor_user_id")) or "assistant_audit_log_service",
                 "status": _coerce_text(record.get("status")) or "logged",
                 "payload": record,
                 "payload_bytes": payload_bytes,

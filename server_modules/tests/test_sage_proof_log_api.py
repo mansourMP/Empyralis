@@ -54,7 +54,7 @@ class SageProofLogApiTests(unittest.TestCase):
                 patch("server_modules.sage_chat_api.enforce_workspace_access", return_value="workspace-1") as access_mock,
                 patch("server_modules.sage_chat_api._resolve_tenant_id", return_value="tenant-1"),
                 patch(
-                    "server_modules.sage_chat_api.sage_proof_log_service.list_proof_logs",
+                    "server_modules.sage_chat_api.assistant_audit_log_service.list_proof_logs",
                     return_value={"items": [{"proof_id": "proof-1"}], "total_count": 1, "count": 1},
                 ) as list_mock,
             ):
@@ -84,7 +84,7 @@ class SageProofLogApiTests(unittest.TestCase):
                 patch("server_modules.sage_chat_api.enforce_workspace_access", return_value="workspace-1"),
                 patch("server_modules.sage_chat_api._resolve_tenant_id", return_value="tenant-1"),
                 patch(
-                    "server_modules.sage_chat_api.sage_proof_log_service.summarize_proof_logs",
+                    "server_modules.sage_chat_api.assistant_audit_log_service.summarize_proof_logs",
                     return_value={"total_count": 2, "checked_count": 3},
                 ),
             ):
@@ -103,7 +103,7 @@ class SageProofLogApiTests(unittest.TestCase):
             with (
                 patch("server_modules.sage_chat_api.enforce_workspace_access", return_value="workspace-1"),
                 patch("server_modules.sage_chat_api._resolve_tenant_id", return_value="tenant-1"),
-                patch("server_modules.sage_chat_api.sage_proof_log_service.get_proof_log", return_value=None),
+                patch("server_modules.sage_chat_api.assistant_audit_log_service.get_proof_log", return_value=None),
             ):
                 with self.assertRaises(HTTPException) as caught:
                     asyncio.run(route(proof_id="missing", workspace_id="workspace-1", current_user={"user_id": "user-1"}))

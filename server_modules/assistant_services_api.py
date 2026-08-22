@@ -5,7 +5,7 @@ from typing import Optional
 from fastapi import Depends
 
 from server_modules.auth import enforce_workspace_access, workspace_tenant_id
-from server_modules.sage_services_service import (
+from server_modules.assistant_services_service import (
     create_service_entry,
     delete_service_entry,
     list_sage_services,

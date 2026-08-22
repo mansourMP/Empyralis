@@ -655,9 +655,9 @@ class SkillsServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir) / "workspace-1"
             with (
-                patch("server_modules.sage_services_service.workspace_context.workspace_scope_dir", return_value=root),
+                patch("server_modules.assistant_services_service.workspace_context.workspace_scope_dir", return_value=root),
                 patch(
-                    "server_modules.sage_services_service.personal_context_engine.publish_event",
+                    "server_modules.assistant_services_service.personal_context_engine.publish_event",
                     new=AsyncMock(return_value={"id": "evt-1"}),
                 ),
             ):

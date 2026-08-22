@@ -1,7 +1,7 @@
 import pytest
 
 from server_modules import rust_runtime_kernel_client
-from server_modules import sage_heartbeat_service as heartbeat
+from server_modules import assistant_health_service as heartbeat
 
 pytestmark = pytest.mark.kernel
 

@@ -21,7 +21,7 @@ _WORKSPACE_DIR = _REPO_ROOT / ".orion-stack" / "workspace"
 # TOOLS.md), and MEMORY.md is the index-first memory -- durable per-user facts
 # (name, role, communication style, standing rules -- what USER.md/
 # IDENTITY.md/SOUL.md held) live in a MEMORY.md-indexed topic file
-# (memory/files/profile.md, see sage_profile_service.py), and goal notes
+# (memory/files/profile.md, see assistant_profile_service.py), and goal notes
 # (what GOALS.md held) live in memory/files/goals.md the same way.
 #
 # Existing workspaces that had a live turn before this ruling still have all

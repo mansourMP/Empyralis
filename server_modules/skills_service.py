@@ -2195,7 +2195,7 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
         # ── Skills: Level-2 progressive disclosure (docs/design/audit-skills.md §3.4) ──
         # The unified skill catalog (skill_registry.list_skill_definitions,
         # rendered into the system prompt as name+description-only entries by
-        # sage_skills_api._skill_capability_records) is Level 1. This tool is
+        # assistant_skills_api._skill_capability_records) is Level 1. This tool is
         # the single Level-2 entry point every one of those entries points
         # at: the model never gets a per-skill tool, it gets one dispatcher
         # that loads/executes the named skill on demand — mirroring Claude
@@ -5953,7 +5953,7 @@ def execute_single_direct_tool_call(
     callbacks: Any,
 ) -> str:
     from server_modules.tools_image_gen import generate_image as run_generate_image
-    from server_modules import sage_services_service
+    from server_modules import assistant_services_service
 
     connector_id, action_id = callbacks.parse_tool_name(str(tool_call.get("name") or ""))
     mandate_allowed, mandate_tier, mandate_unattributed = _authority_mandate_gate(
@@ -6144,7 +6144,7 @@ def execute_single_direct_tool_call(
     if connector_id == "skill" and action_id == "invoke":
         # Level-2 dispatch: the model gets a skill_id (and optional args)
         # from the Level-1 catalog listing in the system prompt
-        # (sage_skills_api._skill_capability_records, unified from
+        # (assistant_skills_api._skill_capability_records, unified from
         # skill_registry.list_skill_definitions) and this is the ONE call
         # site that turns it into a real execution — mirrors memory_search's
         # pattern immediately above rather than inventing a new dispatch
@@ -7407,7 +7407,7 @@ def execute_single_direct_tool_call(
         service_id = str(argument_payload.get("service_id") or "").strip()
         if not service_id:
             raise RuntimeError("Tool 'sage_service__list_state' requires a service_id.")
-        payload = sage_services_service.list_sage_services(workspace_id=workspace_id)
+        payload = assistant_services_service.list_sage_services(workspace_id=workspace_id)
         items = payload.get("items") if isinstance(payload, dict) else []
         for item in items or []:
             if str(item.get("id") or "").strip() == service_id:
@@ -7425,7 +7425,7 @@ def execute_single_direct_tool_call(
             "approval_source": "direct_tool",
         }
         result = callbacks.run_async_tool_call(
-            sage_services_service.update_service_profile(
+            assistant_services_service.update_service_profile(
                 tenant_id=tenant_id,
                 workspace_id=workspace_id,
                 service_id=service_id,
@@ -7448,7 +7448,7 @@ def execute_single_direct_tool_call(
             "approval_source": "direct_tool",
         }
         result = callbacks.run_async_tool_call(
-            sage_services_service.create_service_entry(
+            assistant_services_service.create_service_entry(
                 tenant_id=tenant_id,
                 workspace_id=workspace_id,
                 service_id=service_id,

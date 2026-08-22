@@ -4,7 +4,7 @@ import types
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from server_modules import sage_services_api
+from server_modules import assistant_services_api
 
 
 class _FakeApp:
@@ -44,13 +44,13 @@ class SageServicesApiTests(unittest.TestCase):
         sys.modules["server"] = fake_server
         try:
             app = _FakeApp()
-            sage_services_api.register_sage_services_routes(app)
+            assistant_services_api.register_sage_services_routes(app)
             route = app.routes[("GET", "/api/sage-services")]
             with (
-                patch("server_modules.sage_services_api.enforce_workspace_access", return_value="workspace-1"),
-                patch("server_modules.sage_services_api.workspace_tenant_id", return_value="tenant-1"),
+                patch("server_modules.assistant_services_api.enforce_workspace_access", return_value="workspace-1"),
+                patch("server_modules.assistant_services_api.workspace_tenant_id", return_value="tenant-1"),
                 patch(
-                    "server_modules.sage_services_api.list_sage_services",
+                    "server_modules.assistant_services_api.list_sage_services",
                     return_value={"items": [{"id": "flashcards"}], "updated_at": "2026-04-15T00:00:00Z", "memory_context": "Sage services state"},
                 ) as list_mock,
             ):
@@ -79,20 +79,20 @@ class SageServicesApiTests(unittest.TestCase):
         sys.modules["server"] = fake_server
         try:
             app = _FakeApp()
-            sage_services_api.register_sage_services_routes(app)
+            assistant_services_api.register_sage_services_routes(app)
             route = app.routes[("POST", "/api/sage-services/{service_id}/entries")]
             with (
-                patch("server_modules.sage_services_api.enforce_workspace_access", return_value="workspace-1"),
-                patch("server_modules.sage_services_api.workspace_tenant_id", return_value="tenant-1"),
+                patch("server_modules.assistant_services_api.enforce_workspace_access", return_value="workspace-1"),
+                patch("server_modules.assistant_services_api.workspace_tenant_id", return_value="tenant-1"),
                 patch(
-                    "server_modules.sage_services_api.create_service_entry",
+                    "server_modules.assistant_services_api.create_service_entry",
                     new=AsyncMock(return_value={"service": {"id": "flashcards"}}),
                 ) as create_mock,
             ):
                 payload = asyncio.run(
                     route(
                         "flashcards",
-                        sage_services_api.SageServiceEntryCreateRequest(
+                        assistant_services_api.SageServiceEntryCreateRequest(
                             workspace_id="workspace-1",
                             entry={"front": "SPA", "back": "Share Purchase Agreement"},
                         ),

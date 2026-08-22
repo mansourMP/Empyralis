@@ -6,7 +6,7 @@ from pathlib import Path
 
 from fastapi import Depends, File, HTTPException, Query, UploadFile
 
-from server_modules import activity_ledger_service, sage_proof_log_service, security_audit_service
+from server_modules import activity_ledger_service, assistant_audit_log_service, security_audit_service
 from server_modules import upload_content_policy, workspace_storage_service
 from server_modules.auth import enforce_workspace_access, workspace_tenant_id
 from server_modules.agent_turn_runtime_contract import (
@@ -352,7 +352,7 @@ def register_sage_chat_routes(app) -> None:
         workspace_id: str,
         status: str = "",
         surface: str = "",
-        limit: int = sage_proof_log_service.PROOF_LOG_DEFAULT_LIMIT,
+        limit: int = assistant_audit_log_service.PROOF_LOG_DEFAULT_LIMIT,
         current_user=Depends(member_dependency),
     ):
         if not workspace_id or not _coerce_text(workspace_id):
@@ -363,7 +363,7 @@ def register_sage_chat_routes(app) -> None:
             minimum_role="viewer",
         )
         tenant_id = _resolve_tenant_id(current_user, resolved_workspace_id)
-        payload = sage_proof_log_service.list_proof_logs(
+        payload = assistant_audit_log_service.list_proof_logs(
             workspace_id=resolved_workspace_id,
             tenant_id=tenant_id,
             status=status,
@@ -389,7 +389,7 @@ def register_sage_chat_routes(app) -> None:
             minimum_role="viewer",
         )
         tenant_id = _resolve_tenant_id(current_user, resolved_workspace_id)
-        payload = sage_proof_log_service.summarize_proof_logs(
+        payload = assistant_audit_log_service.summarize_proof_logs(
             workspace_id=resolved_workspace_id,
             tenant_id=tenant_id,
         )
@@ -415,7 +415,7 @@ def register_sage_chat_routes(app) -> None:
             minimum_role="viewer",
         )
         tenant_id = _resolve_tenant_id(current_user, resolved_workspace_id)
-        record = sage_proof_log_service.get_proof_log(
+        record = assistant_audit_log_service.get_proof_log(
             workspace_id=resolved_workspace_id,
             tenant_id=tenant_id,
             proof_id=proof_id,

@@ -29,10 +29,10 @@ from server_modules import (
     response_leak_guard_service,
     sage_daily_operator_service,
     sage_instruction_compiler_service,
-    sage_heartbeat_service,
+    assistant_health_service,
     assistant_memory_service,
-    sage_proof_log_service,
-    sage_profile_service,
+    assistant_audit_log_service,
+    assistant_profile_service,
     secret_redaction_service,
     security_audit_service,
     # No longer called directly here (the old keyword-matched MCP bridge that
@@ -89,7 +89,7 @@ from server_modules.agent_turn_runtime_contract import (
     SageTurnResult,
 )
 from server_modules.skill_registry import list_skill_definitions
-from server_modules.sage_transparency_service import emit_sage_turn_transparency_events
+from server_modules.assistant_transparency_service import emit_sage_turn_transparency_events
 from server_modules.transparency_event_store_service import persist_transparency_events
 from server_modules.provider_profiles import PROVIDER_MODEL_CATALOG, _build_provider_credential_candidates
 from scripts.orion_local_worker_llm import resolve_requested_model
@@ -2044,7 +2044,7 @@ async def set_persisted_model_preference(workspace_id: str, model: str, provider
 
 
 def _load_profile_context(*, workspace_id: str) -> str:
-    profile = sage_profile_service.list_sage_profile(workspace_id=workspace_id)
+    profile = assistant_profile_service.list_sage_profile(workspace_id=workspace_id)
     profile_data = profile.get("profile") if isinstance(profile.get("profile"), dict) else {}
 
     user_name = _coerce_text(profile_data.get("user_name"))
@@ -3683,9 +3683,9 @@ def _normalize_direct_action_approvals(final_payload: dict[str, Any]) -> list[di
 #
 # A same-day sibling fix (0cac7f2a7, merged as b54fe79b7) had moved this
 # classifier to a new leaf module, server_modules/sage_blocked_tools_
-# outcome.py, so sage_transparency_service.py's Work-tab/Inbox event
+# outcome.py, so assistant_transparency_service.py's Work-tab/Inbox event
 # emission could reuse it instead of growing its own copy of the
-# allowlist. That module is GONE too now (see sage_transparency_service.py
+# allowlist. That module is GONE too now (see assistant_transparency_service.py
 # — its blocked_tools handling collapsed to always emit "turn_failed",
 # the same reasoning as this file: the one condition the classifier
 # existed to detect, a real per-agent tool-policy code, can no longer
@@ -5884,7 +5884,7 @@ async def _handle_sage_chat_unguarded(
         used_context.append("attachments")
 
     try:
-        heartbeat_snapshot = await sage_heartbeat_service.build_sage_heartbeat_snapshot(
+        heartbeat_snapshot = await assistant_health_service.build_sage_heartbeat_snapshot(
             tenant_id=normalized_tenant_id,
             workspace_id=normalized_workspace_id,
         )
@@ -7083,7 +7083,7 @@ async def _handle_sage_chat_unguarded(
         proof_log_id = ""
         if proof_log_payload:
             try:
-                proof_record = sage_proof_log_service.append_proof_log(
+                proof_record = assistant_audit_log_service.append_proof_log(
                     tenant_id=normalized_tenant_id,
                     workspace_id=normalized_workspace_id,
                     actor_user_id=actor_user_id,

@@ -118,13 +118,13 @@ class SageWebSearchIndependenceTests(unittest.TestCase):
             "local_gateway_online": False,
         }
         with (
-            patch("server_modules.agent_turn_runtime_service.sage_profile_service.list_sage_profile",
+            patch("server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile",
                   return_value={"profile": {}}),
             patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files",
                   return_value={}),
             patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block",
                   return_value=""),
-            patch("server_modules.agent_turn_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot",
+            patch("server_modules.agent_turn_runtime_service.assistant_health_service.build_sage_heartbeat_snapshot",
                   new=AsyncMock(return_value={})),
             patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider",
@@ -260,13 +260,13 @@ class SageBrowserOnlineFlowTests(unittest.TestCase):
             {"type": "final", "payload": {"reply": "Done navigating.", "actions": [], "error": ""}},
         ]
         with (
-            patch("server_modules.agent_turn_runtime_service.sage_profile_service.list_sage_profile",
+            patch("server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile",
                   return_value={"profile": {}}),
             patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files",
                   return_value={}),
             patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block",
                   return_value=""),
-            patch("server_modules.agent_turn_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot",
+            patch("server_modules.agent_turn_runtime_service.assistant_health_service.build_sage_heartbeat_snapshot",
                   new=AsyncMock(return_value={})),
             patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider",
@@ -315,13 +315,13 @@ class SageBrowserOnlineFlowTests(unittest.TestCase):
             {"type": "final", "payload": {"reply": "Done.", "actions": [], "error": ""}},
         ]
         with (
-            patch("server_modules.agent_turn_runtime_service.sage_profile_service.list_sage_profile",
+            patch("server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile",
                   return_value={"profile": {}}),
             patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files",
                   return_value={}),
             patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block",
                   return_value=""),
-            patch("server_modules.agent_turn_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot",
+            patch("server_modules.agent_turn_runtime_service.assistant_health_service.build_sage_heartbeat_snapshot",
                   new=AsyncMock(return_value={})),
             patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider",
@@ -392,13 +392,13 @@ class SageBrowserOnlineFlowTests(unittest.TestCase):
             {"type": "final", "payload": {"reply": "Extracted DOM.", "actions": [], "error": ""}},
         ]
         with (
-            patch("server_modules.agent_turn_runtime_service.sage_profile_service.list_sage_profile",
+            patch("server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile",
                   return_value={"profile": {}}),
             patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files",
                   return_value={}),
             patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block",
                   return_value=""),
-            patch("server_modules.agent_turn_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot",
+            patch("server_modules.agent_turn_runtime_service.assistant_health_service.build_sage_heartbeat_snapshot",
                   new=AsyncMock(return_value={})),
             patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider",

@@ -54,7 +54,7 @@ class SageMemoryRedStrippingTests(unittest.TestCase):
                 return_value="",
             ),
             patch(
-                "server_modules.sage_services_service.build_sage_services_memory_block",
+                "server_modules.assistant_services_service.build_sage_services_memory_block",
                 return_value="",
             ),
         ):
@@ -92,7 +92,7 @@ class SageMemoryRedStrippingTests(unittest.TestCase):
                 return_value="",
             ),
             patch(
-                "server_modules.sage_services_service.build_sage_services_memory_block",
+                "server_modules.assistant_services_service.build_sage_services_memory_block",
                 return_value="",
             ),
             patch(
@@ -141,7 +141,7 @@ class SageMemoryRedStrippingTests(unittest.TestCase):
                 return_value="",
             ),
             patch(
-                "server_modules.sage_services_service.build_sage_services_memory_block",
+                "server_modules.assistant_services_service.build_sage_services_memory_block",
                 return_value="",
             ),
             patch(

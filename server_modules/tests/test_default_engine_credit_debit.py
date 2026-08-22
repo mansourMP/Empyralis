@@ -140,7 +140,7 @@ class _TurnHarness:
                 return_value=("Reply", legacy_usage or {}, "deepseek", ""),
             ),
             patch(
-                "server_modules.agent_turn_runtime_service.sage_profile_service.list_sage_profile",
+                "server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile",
                 return_value={
                     "profile": {
                         "user_name": "",
@@ -161,7 +161,7 @@ class _TurnHarness:
                 return_value="",
             ),
             patch(
-                "server_modules.agent_turn_runtime_service.sage_heartbeat_service."
+                "server_modules.agent_turn_runtime_service.assistant_health_service."
                 "build_sage_heartbeat_snapshot",
                 new=AsyncMock(return_value={}),
             ),

@@ -64,10 +64,10 @@ def _enter_handle_sage_chat_fixtures(stack: ExitStack, *, stream_events) -> dict
     Returns the mocks callers actually need to assert on, by name (not
     position) -- entered onto the caller's own ExitStack so cleanup is
     automatic and ordering-independent."""
-    stack.enter_context(patch("server_modules.agent_turn_runtime_service.sage_profile_service.list_sage_profile", return_value={"profile": {}}))
+    stack.enter_context(patch("server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile", return_value={"profile": {}}))
     stack.enter_context(patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files", return_value={}))
     stack.enter_context(patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block", return_value=""))
-    stack.enter_context(patch("server_modules.agent_turn_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})))
+    stack.enter_context(patch("server_modules.agent_turn_runtime_service.assistant_health_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})))
     stack.enter_context(patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]))
     stack.enter_context(patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider", return_value=("openai", {"api_key": "test-key"})))
     mock_generate = stack.enter_context(patch("server_modules.agent_turn_runtime_service.generate_chat_reply_with_provider_fallback"))

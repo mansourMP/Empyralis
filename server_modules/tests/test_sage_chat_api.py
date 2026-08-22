@@ -54,10 +54,10 @@ class SageChatApiContractTests(unittest.TestCase):
 
     def test_response_contract_keys(self):
         with (
-            patch("server_modules.agent_turn_runtime_service.sage_profile_service.list_sage_profile") as mock_profile,
+            patch("server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile") as mock_profile,
             patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files") as mock_files,
             patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block") as mock_mem,
-            patch("server_modules.agent_turn_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.agent_turn_runtime_service.assistant_health_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
             patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider") as mock_provider,
             patch("server_modules.agent_turn_runtime_service.generate_chat_reply_with_provider_fallback") as mock_generate,
@@ -99,10 +99,10 @@ class SageChatApiContractTests(unittest.TestCase):
 
     def test_prompt_includes_identity_guardrails(self):
         with (
-            patch("server_modules.agent_turn_runtime_service.sage_profile_service.list_sage_profile") as mock_profile,
+            patch("server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile") as mock_profile,
             patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files") as mock_files,
             patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block") as mock_mem,
-            patch("server_modules.agent_turn_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.agent_turn_runtime_service.assistant_health_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
             patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider") as mock_provider,
             patch("server_modules.agent_turn_runtime_service.generate_chat_reply_with_provider_fallback") as mock_generate,

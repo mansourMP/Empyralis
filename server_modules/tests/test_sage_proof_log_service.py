@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from server_modules import sage_proof_log_service
+from server_modules import assistant_audit_log_service
 
 
 class SageProofLogServiceTests(unittest.TestCase):
@@ -21,10 +21,10 @@ class SageProofLogServiceTests(unittest.TestCase):
             }
 
         with tempfile.TemporaryDirectory() as tmpdir, patch(
-            "server_modules.sage_proof_log_service.workspace_context.workspace_scope_dir",
+            "server_modules.assistant_audit_log_service.workspace_context.workspace_scope_dir",
             return_value=Path(tmpdir) / "ws-1",
         ), patch(
-            "server_modules.sage_proof_log_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
+            "server_modules.assistant_audit_log_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
             side_effect=_kernel,
         ):
             proof_log = {
@@ -38,7 +38,7 @@ class SageProofLogServiceTests(unittest.TestCase):
                 "approvals": [],
                 "metadata": {"api_key": "sk-test-secret-value"},
             }
-            record = sage_proof_log_service.append_proof_log(
+            record = assistant_audit_log_service.append_proof_log(
                 tenant_id="tenant-1",
                 workspace_id="ws-1",
                 actor_user_id="user-1",
@@ -49,7 +49,7 @@ class SageProofLogServiceTests(unittest.TestCase):
                 title="Morning brief",
                 source="sage_chat",
             )
-            duplicate = sage_proof_log_service.append_proof_log(
+            duplicate = assistant_audit_log_service.append_proof_log(
                 tenant_id="tenant-1",
                 workspace_id="ws-1",
                 actor_user_id="user-1",
@@ -66,7 +66,7 @@ class SageProofLogServiceTests(unittest.TestCase):
             self.assertEqual(calls[0][1]["state_class"], "sage_proof_logs")
             self.assertEqual(calls[0][1]["operation"], "append_sage_proof_log")
 
-            payload = sage_proof_log_service.list_proof_logs(
+            payload = assistant_audit_log_service.list_proof_logs(
                 workspace_id="ws-1",
                 tenant_id="tenant-1",
             )
@@ -74,7 +74,7 @@ class SageProofLogServiceTests(unittest.TestCase):
             self.assertEqual(payload["items"][0]["checked"][0]["tool"], "calendar")
             self.assertEqual(payload["items"][0]["proof_log"]["metadata"]["api_key"], "[redacted]")
 
-            detail = sage_proof_log_service.get_proof_log(
+            detail = assistant_audit_log_service.get_proof_log(
                 workspace_id="ws-1",
                 tenant_id="tenant-1",
                 proof_id=record["proof_id"],
@@ -82,7 +82,7 @@ class SageProofLogServiceTests(unittest.TestCase):
             self.assertIsNotNone(detail)
             self.assertEqual(detail["summary"]["checked_count"], 1)
 
-            summary = sage_proof_log_service.summarize_proof_logs(
+            summary = assistant_audit_log_service.summarize_proof_logs(
                 workspace_id="ws-1",
                 tenant_id="tenant-1",
             )

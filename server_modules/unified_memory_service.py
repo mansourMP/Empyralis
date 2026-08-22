@@ -398,7 +398,7 @@ def _ingestion_contract() -> List[Dict[str, Any]]:
 def _read_profile_text(*, workspace_id: str, agent_install_id: str | None = None) -> tuple[str, str]:
     """Founder ruling (2026-07-23, final): USER.md is removed from the
     root-file taxonomy -- onboarding now projects the owner profile into the
-    memory/files/profile.md topic file instead (see sage_profile_service.
+    memory/files/profile.md topic file instead (see assistant_profile_service.
     SAGE_PROFILE_MEMORY_TOPIC_FILE). Read that first; fall back to the raw
     legacy USER.md file for workspaces/installs that had real content
     written before this migration (never auto-created or written to

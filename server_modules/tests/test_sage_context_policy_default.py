@@ -54,13 +54,13 @@ class ContextPolicyDefaultE2ETests(unittest.TestCase):
         None`) rather than the existing tests' dict, which doesn't satisfy
         TraceContext's actual attribute contract."""
         patches = [
-            patch("server_modules.agent_turn_runtime_service.sage_profile_service.list_sage_profile",
+            patch("server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile",
                   return_value={"profile": {"user_name": "Test"}}),
             patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files",
                   return_value={}),
             patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block",
                   return_value=""),
-            patch("server_modules.agent_turn_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot",
+            patch("server_modules.agent_turn_runtime_service.assistant_health_service.build_sage_heartbeat_snapshot",
                   new=AsyncMock(return_value={})),
             patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider",

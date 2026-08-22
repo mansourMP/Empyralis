@@ -137,9 +137,9 @@ def _drive_gateway_brain_turn(*, mode: str, runtime: str, reply: str):
     # importlib.reload() parts of server_modules, so a dotted-path patch can
     # bind a different module object than the code under test is holding.
     with (
-        patch.object(agent_turn_runtime_service.sage_profile_service, "list_sage_profile", return_value={"profile": {}}),
+        patch.object(agent_turn_runtime_service.assistant_profile_service, "list_sage_profile", return_value={"profile": {}}),
         patch.object(agent_turn_runtime_service.workspace_context, "read_workspace_context_files", return_value={}),
-        patch.object(agent_turn_runtime_service.sage_heartbeat_service, "build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+        patch.object(agent_turn_runtime_service.assistant_health_service, "build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
         patch.object(agent_turn_runtime_service, "list_skill_definitions", return_value=[]),
         patch.object(agent_turn_runtime_service, "_resolve_cloud_provider", new=AsyncMock(return_value=("deepseek", {"api_key": "sk-workspace-default"}))),
         patch.object(agent_turn_runtime_service, dispatch_attr, new=mock_dispatch),

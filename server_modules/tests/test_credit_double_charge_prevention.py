@@ -338,12 +338,12 @@ class HandleSageChatWiringTests(unittest.TestCase):
     def _base_patches(usage: dict):
         return [
             patch(
-                "server_modules.agent_turn_runtime_service.sage_profile_service.list_sage_profile",
+                "server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile",
                 return_value={"profile": {"user_name": "", "identity_summary": "", "communication_style": "", "recurring_responsibility": "", "standing_rules": []}},
             ),
             patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
             patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block", return_value=""),
-            patch("server_modules.agent_turn_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.agent_turn_runtime_service.assistant_health_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
             patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider", return_value=("deepseek", {"api_key": "test-key"})),
             # Force the "cloud fallthrough" (text-only) branch deterministically
@@ -504,13 +504,13 @@ class HandleSageChatWiringTests(unittest.TestCase):
         }]
         with (
             patch(
-                "server_modules.agent_turn_runtime_service.sage_profile_service.list_sage_profile",
+                "server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile",
                 return_value={"profile": {"user_name": "", "identity_summary": "", "communication_style": "", "recurring_responsibility": "", "standing_rules": []}},
             ),
             patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
             patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block", return_value=""),
             patch("server_modules.memory_service.get_memory", return_value=""),
-            patch("server_modules.agent_turn_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.agent_turn_runtime_service.assistant_health_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
             patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider", return_value=("deepseek", {"api_key": "test-key"})),
             patch("server_modules.agent_turn_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),

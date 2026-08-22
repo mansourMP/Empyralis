@@ -277,13 +277,13 @@ class TelegramHostedE2ETests(unittest.TestCase):
     def test_text_reply_flows_through_execute_sage_turn(self):
         """A plain-text 'hello' routes through execute_sage_turn and gets a reply."""
         with (
-            patch("server_modules.agent_turn_runtime_service.sage_profile_service.list_sage_profile",
+            patch("server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile",
                   return_value={"profile": {"user_name": "Test", "identity_summary": "Tester"}}),
             patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files",
                   return_value={}),
             patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block",
                   return_value=""),
-            patch("server_modules.agent_turn_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot",
+            patch("server_modules.agent_turn_runtime_service.assistant_health_service.build_sage_heartbeat_snapshot",
                   new=AsyncMock(return_value={})),
             patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider",
@@ -324,13 +324,13 @@ class TelegramHostedE2ETests(unittest.TestCase):
     def test_channel_metadata_flows_through(self):
         """channel_origin and sender info flow through to a successful reply."""
         with (
-            patch("server_modules.agent_turn_runtime_service.sage_profile_service.list_sage_profile",
+            patch("server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile",
                   return_value={"profile": {"user_name": "Test"}}),
             patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files",
                   return_value={}),
             patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block",
                   return_value=""),
-            patch("server_modules.agent_turn_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot",
+            patch("server_modules.agent_turn_runtime_service.assistant_health_service.build_sage_heartbeat_snapshot",
                   new=AsyncMock(return_value={})),
             patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider",
@@ -428,13 +428,13 @@ class TelegramHostedApprovalE2ETests(unittest.TestCase):
         from server_modules import agent_turn_runtime_service
 
         with (
-            patch("server_modules.agent_turn_runtime_service.sage_profile_service.list_sage_profile",
+            patch("server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile",
                   return_value={"profile": {}}),
             patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files",
                   return_value={}),
             patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block",
                   return_value=""),
-            patch("server_modules.agent_turn_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot",
+            patch("server_modules.agent_turn_runtime_service.assistant_health_service.build_sage_heartbeat_snapshot",
                   new=AsyncMock(return_value={})),
             patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider",
@@ -481,13 +481,13 @@ class TelegramHostedApprovalE2ETests(unittest.TestCase):
         from server_modules import agent_turn_runtime_service
 
         with (
-            patch("server_modules.agent_turn_runtime_service.sage_profile_service.list_sage_profile",
+            patch("server_modules.agent_turn_runtime_service.assistant_profile_service.list_sage_profile",
                   return_value={"profile": {}}),
             patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files",
                   return_value={}),
             patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block",
                   return_value=""),
-            patch("server_modules.agent_turn_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot",
+            patch("server_modules.agent_turn_runtime_service.assistant_health_service.build_sage_heartbeat_snapshot",
                   new=AsyncMock(return_value={})),
             patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider",

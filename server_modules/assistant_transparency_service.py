@@ -7,7 +7,7 @@ chain-of-thought, private memory content, or model internals.
 
 Callers should:
 
-    from server_modules.sage_transparency_service import (
+    from server_modules.assistant_transparency_service import (
         emit_sage_turn_transparency_events,
     )
 
