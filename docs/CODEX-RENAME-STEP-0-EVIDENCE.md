@@ -17,7 +17,7 @@ Captured on 2026-08-22 from the parent checkout with no rename applied:
 | Live MCP tool names | 29 |
 | Database schema table/column entries | 1,397 |
 | Environment variable names plus dynamic reads | 2 lists |
-| Persisted/protocol/high-signal literals | 3,500 |
+| Persisted/protocol/high-signal literals | 5,004 |
 | Frontend build-route strings | 22 |
 | Frontend CSS class references | 1,347 |
 
@@ -35,6 +35,9 @@ Command:
 
 Result: exit 0. The repeat output was byte-identical to the checked-in
 baseline. The collector sorts every set-like surface and emits canonical JSON.
+Literal collection is limited to contract-shaped constant assignments, known
+persisted IDs, and human confirmation phrases; it excludes comments,
+docstrings, test prose, and quoted internal function references.
 
 ## Mutation-detection check
 

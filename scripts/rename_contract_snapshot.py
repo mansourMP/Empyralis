@@ -195,27 +195,49 @@ def collect_environment_variables() -> dict[str, list[str]]:
 def collect_contract_literals() -> list[str]:
     """Collect high-signal persisted/protocol/human strings.
 
-    This is intentionally conservative: all Sage-bearing literals and
-    explicit confirmation phrases are retained, plus identifier-like values
-    whose variable names make their contract role apparent.  Wire tool names
-    are covered by the live registries above.
+    This is intentionally conservative: string values assigned to
+    contract-shaped constants are retained, along with known persisted IDs
+    and explicit confirmation phrases. Comments, docstrings, test prose, and
+    quoted references to internal function names are not contracts. Wire tool
+    names are covered by the live registries above.
     """
 
     values: set[str] = {"WIPE SAGE MEMORY", "sage-main", "sage_main_agent"}
-    literal_pattern = re.compile(r"['\"]([^'\"\n]{1,180})['\"]")
+    key_hint = re.compile(
+        r"(?:SAGE|ID|KEY|TOKEN|SURFACE|THREAD|ACTION|TYPE|EVENT|CHANNEL|PROTOCOL|FIELD|CONFIRM|EXPORT|WIPE|MODE|STATUS)",
+        re.I,
+    )
     confirmation = re.compile(r"^[A-Z][A-Z0-9 _-]{5,}$")
     for path in _source_files():
         text = path.read_text(encoding="utf-8", errors="replace")
-        # This guard is intentionally a cheap prefilter.  Running a broad
-        # string-literal regex over generated TypeScript/resource files made
-        # the snapshot both slow and noisy; the rename-sensitive contract
-        # values are the Sage-bearing literals and explicit confirmations.
-        if not re.search(r"sage|\b(?:wipe|confirm)\b", text, re.I):
-            continue
-        for match in literal_pattern.finditer(text):
-            value = match.group(1).strip()
-            if "sage" in value.lower() or confirmation.fullmatch(value):
-                values.add(value)
+        if path.suffix == ".py":
+            try:
+                tree = ast.parse(text, filename=str(path))
+            except SyntaxError:
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+                    continue
+                targets = list(node.targets) if isinstance(node, ast.Assign) else [node.target]
+                target_names = " ".join(_attribute_name(target) for target in targets)
+                target_tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", target_names)
+                if not any(token.isupper() and key_hint.search(token) for token in target_tokens):
+                    continue
+                assigned_value = getattr(node, "value", None)
+                if assigned_value is None:
+                    continue
+                for value, _line in _literal_strings(assigned_value):
+                    if value.strip():
+                        values.add(value.strip())
+        else:
+            # Non-Python protocol constants are kept only for exact known
+            # persisted forms and human confirmation phrases.
+            for value in ("sage-main", "sage_main_agent"):
+                if value in text:
+                    values.add(value)
+            for value in re.findall(r"['\"]([A-Z][A-Z0-9 _-]{5,})['\"]", text):
+                if confirmation.fullmatch(value):
+                    values.add(value)
     return sorted(value for value in values if value)
 
 
