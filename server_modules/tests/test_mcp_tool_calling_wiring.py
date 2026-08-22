@@ -331,30 +331,55 @@ class McpDispatchBranchTests(unittest.TestCase):
                 )
         self.assertFalse(mock_invoke.called)
 
-    def test_authority_mandate_gate_still_blocks_mcp_calls_for_unattributed_audience_tier(self) -> None:
-        """The pre-existing authority-mandate gate (skills_service.
-        _authority_mandate_gate) runs BEFORE the MCP branch and must still
-        block a non-owner-tier caller from reaching it — the same as it
-        already does for every other connector."""
+    def test_an_mcp_call_is_no_longer_gated_by_the_callers_tier(self) -> None:
+        """INVERTED 2026-08-21. This used to assert that an
+        unattributed/audience-tier caller was blocked before reaching the MCP
+        branch, because an MCP tool has no audience_safe descriptor and the
+        gate was deny-by-default. The audience tool tier is deleted (see
+        server_modules/authority_mandate_service.py), so an MCP tool is an
+        ordinary tool and the call reaches the invoker.
+
+        This is the MCP half of the "no orphaned enforcement remains" proof —
+        MCP is the surface where deny-by-default bit hardest, since a
+        workspace's connected servers could never carry a manifest flag."""
         tool_call = {"name": "mcp__notion-work__search_pages", "arguments": {"query": "x"}}
         with patch.object(
-            mcp_registry_service, "invoke_workspace_mcp_tool_async", new=AsyncMock()
+            mcp_registry_service,
+            "invoke_workspace_mcp_tool_async",
+            new=AsyncMock(return_value={"ok": True, "content": "found"}),
         ) as mock_invoke:
             with patch("server_modules.activity_ledger_service.append_activity_event", new=AsyncMock()):
-                with self.assertRaises(RuntimeError):
-                    _run(
-                        skills_service.execute_single_direct_tool_call_async(
-                            tool_call=tool_call,
-                            workspace_id="ws-1",
-                            thread_id="thread-1",
-                            # authority_tier omitted entirely -> fails closed to
-                            # "audience", and an MCP tool has no audience_safe
-                            # descriptor, so the mandate gate must block it.
-                            session_ctx={},
-                            callbacks=_direct_tool_execution_callbacks(),
-                        )
+                _run(
+                    skills_service.execute_single_direct_tool_call_async(
+                        tool_call=tool_call,
+                        workspace_id="ws-1",
+                        thread_id="thread-1",
+                        # authority_tier omitted entirely -> still normalizes
+                        # to "audience" (that fail-closed default is kept) —
+                        # it just no longer costs an ordinary tool.
+                        session_ctx={},
+                        callbacks=_direct_tool_execution_callbacks(),
                     )
-        self.assertFalse(mock_invoke.called)
+                )
+        mock_invoke.assert_called_once()
+
+    def test_machine_administration_is_still_blocked_on_this_entrypoint(self) -> None:
+        """The other half, so the test above cannot be read as "the gate is
+        gone". It is not — it is narrower."""
+        with patch("server_modules.activity_ledger_service.append_activity_event", new=AsyncMock()):
+            with self.assertRaises(RuntimeError):
+                _run(
+                    skills_service.execute_single_direct_tool_call_async(
+                        tool_call={
+                            "name": "fleet__schedule_task",
+                            "arguments": {"when": "in 1 hour", "instruction": "x"},
+                        },
+                        workspace_id="ws-1",
+                        thread_id="thread-1",
+                        session_ctx={},
+                        callbacks=_direct_tool_execution_callbacks(),
+                    )
+                )
 
 
 class McpLiveGenerationLoopDispatchTests(unittest.TestCase):

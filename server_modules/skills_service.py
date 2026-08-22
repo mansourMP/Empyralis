@@ -53,9 +53,6 @@ class ToolDescriptor:
     parameters: Dict[str, Any] = field(default_factory=dict)
     requires_runtime: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
-    # Phase UB: audience safety manifest
-    audience_safe: bool = False
-    audience_note: str = ""
 
 
 def _normalize_action_list(value: Any) -> List[str]:
@@ -342,9 +339,6 @@ def _tool_payload_from_descriptor(descriptor: ToolDescriptor) -> Dict[str, Any]:
         "audit_event_type": permission_manifest["audit_event_type"],
         "permission_manifest": permission_manifest,
         "parameters": descriptor.parameters if isinstance(descriptor.parameters, dict) else {},
-        # Phase UB: audience safety manifest (drives tool-catalog scoping)
-        "audience_safe": bool(descriptor.audience_safe),
-        "audience_note": str(descriptor.audience_note or "").strip(),
     }
 
 
@@ -781,8 +775,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": ["summary"],
             },
-            audience_safe=True,
-            audience_note="Safe: only signals task completion, no privileged access.",
         ),
         ToolDescriptor(
             tool_name="update_plan",
@@ -821,8 +813,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": ["tasks"],
             },
-            audience_safe=True,
-            audience_note="Safe: only tracks this turn's own task list, no privileged access.",
         ),
         ToolDescriptor(
             tool_name="hardware__action",
@@ -859,8 +849,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": ["action"],
             },
-            audience_safe=False,
-            audience_note="Blocked: desktop/hardware control (shell, filesystem, browser, mouse/keyboard). Owner-only.",
         ),
         ToolDescriptor(
             tool_name="memory_search",
@@ -880,8 +868,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": ["query"],
             },
-            audience_safe=True,
-            audience_note="Safe: read-only memory search. Cannot modify instructions or config.",
         ),
         ToolDescriptor(
             tool_name="memory_write",
@@ -929,8 +915,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": ["path", "content"],
             },
-            audience_safe=False,
-            audience_note="Blocked: can write instructions/config to agent memory. Owner-only.",
         ),
         ToolDescriptor(
             tool_name="memory_write_private",
@@ -957,8 +941,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": ["content"],
             },
-            audience_safe=False,
-            audience_note="Blocked: writes a specific person's private preferences. Not available to external audiences.",
         ),
         ToolDescriptor(
             tool_name="memory_get_private",
@@ -974,15 +956,12 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 "properties": {},
                 "required": [],
             },
-            # Not audience_safe: an external/audience caller (e.g. an anonymous
-            # customer on a deployed channel) has no internal user_id to scope
-            # to at all, so this tool would always return empty for them — a
-            # dead control (CLAUDE.md: "if a control cannot be used in the
-            # current state, it is not rendered"). Restricting it keeps that
-            # true structurally rather than leaving an always-empty tool
-            # visible to a caller it can never help.
-            audience_safe=False,
-            audience_note="Blocked: private per-person memory is an internal-workspace-member concept only.",
+            # Note (was an audience_safe=False rationale until 2026-08-21,
+            # when the audience tier was deleted): an external caller has no
+            # internal user_id to scope to, so this tool simply returns empty
+            # for them. It is no longer hidden from them — _resolve_session_
+            # user_id's own refusal is the honest answer, and hiding a tool
+            # was never what made that true.
         ),
         ToolDescriptor(
             tool_name="memory_read",
@@ -997,8 +976,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": ["path"],
             },
-            audience_safe=True,
-            audience_note="Safe: read-only memory access. Cannot modify instructions or config.",
         ),
         ToolDescriptor(
             tool_name="memory_get",
@@ -1015,8 +992,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": ["path"],
             },
-            audience_safe=True,
-            audience_note="Safe: read-only memory excerpt. Cannot modify instructions or config.",
         ),
         ToolDescriptor(
             tool_name="memory_update",
@@ -1202,8 +1177,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": ["filename"],
             },
-            audience_safe=True,
-            audience_note="Safe: read-only version history. Cannot modify or rollback memory.",
         ),
         ToolDescriptor(
             tool_name="memory_rollback_version",
@@ -1229,8 +1202,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             action_id="search",
             description="Search the web and return the top 5 results with titles, URLs, and snippets.",
             parameters={"type": "object", "properties": {"query": {"type": "string", "description": "The search query to run."}}, "required": ["query"]},
-            audience_safe=True,
-            audience_note="Safe: read-only public web search. Cannot access private data or workspace internals.",
         ),
         ToolDescriptor(
             tool_name="web__fetch",
@@ -1239,8 +1210,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             action_id="fetch",
             description="Fetch a webpage and extract readable text from it.",
             parameters={"type": "object", "properties": {"url": {"type": "string", "description": "The URL to fetch."}}, "required": ["url"]},
-            audience_safe=True,
-            audience_note="Safe: read-only public web page fetch. Cannot access private data or workspace internals.",
         ),
         ToolDescriptor(
             tool_name="llm__task",
@@ -1324,8 +1293,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": ["service_id"],
             },
-            audience_safe=True,
-            audience_note="Safe: read-only service state lookup. Customer can check their own service data.",
         ),
         ToolDescriptor(
             tool_name="sage_service__update_profile",
@@ -1406,9 +1373,7 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
         # to the CALLING agent's own project (skills_service._project_task_
         # scope resolves it from session identity) — an agent cannot read or
         # edit another project's tasks by guessing an id, matching the
-        # locked "project is the collaboration boundary" ruling. All five
-        # are audience_safe: this is internal work-tracking, not a
-        # credential/instruction-bearing surface.
+        # locked "project is the collaboration boundary" ruling.
         ToolDescriptor(
             tool_name="project_task__create",
             label="Create task",
@@ -1437,8 +1402,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": ["title"],
             },
-            audience_safe=True,
-            audience_note="Safe: internal work-tracking scoped to this agent's own project.",
         ),
         ToolDescriptor(
             tool_name="project_task__list",
@@ -1477,8 +1440,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": [],
             },
-            audience_safe=True,
-            audience_note="Safe: read-only, scoped to this agent's own project.",
         ),
         ToolDescriptor(
             tool_name="project_task__get",
@@ -1498,8 +1459,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 "properties": {"task_id": {"type": "string", "description": "The task id."}},
                 "required": ["task_id"],
             },
-            audience_safe=True,
-            audience_note="Safe: read-only, scoped to this agent's own project.",
         ),
         ToolDescriptor(
             tool_name="project_task__set_parent",
@@ -1522,8 +1481,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": ["task_id"],
             },
-            audience_safe=True,
-            audience_note="Safe: scoped to this agent's own project.",
         ),
         ToolDescriptor(
             tool_name="project_task__update",
@@ -1565,8 +1522,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": ["task_id"],
             },
-            audience_safe=True,
-            audience_note="Safe: scoped to this agent's own project.",
         ),
         ToolDescriptor(
             tool_name="project_task__comment",
@@ -1586,8 +1541,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": ["task_id", "body"],
             },
-            audience_safe=True,
-            audience_note="Safe: scoped to this agent's own project.",
         ),
         ToolDescriptor(
             tool_name="project_task__assign",
@@ -1609,8 +1562,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": ["task_id", "agent_id"],
             },
-            audience_safe=True,
-            audience_note="Safe: scoped to this agent's own project.",
         ),
         # Labels. The vocabulary is per-WORKSPACE (shared across every
         # project) while attach/detach is scoped to the calling agent's own
@@ -1633,8 +1584,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 "label that actually exists — you cannot create new ones."
             ),
             parameters={"type": "object", "properties": {}, "required": []},
-            audience_safe=True,
-            audience_note="Safe: read-only workspace label vocabulary.",
         ),
         ToolDescriptor(
             tool_name="project_task__add_label",
@@ -1658,8 +1607,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": ["task_id", "label"],
             },
-            audience_safe=True,
-            audience_note="Safe: scoped to this agent's own project.",
         ),
         ToolDescriptor(
             tool_name="project_task__remove_label",
@@ -1679,8 +1626,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": ["task_id", "label"],
             },
-            audience_safe=True,
-            audience_note="Safe: scoped to this agent's own project.",
         ),
         # document__* (feat/document-agent-tools): the agent-facing side of a
         # project's owned markdown knowledge (project_documents_repository.py
@@ -1695,14 +1640,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
         # in" is one fact, not two), and every write stamps updated_by with
         # the acting agent's identity so the Documents UI can show who
         # changed what.
-        #
-        # NOT marked audience_safe: unlike project_task's internal
-        # work-tracking, a project's documents are free-text team knowledge
-        # that may say anything -- CLAUDE.md's "conservative default,
-        # enforced without asking" (written for personal/self-chat threads)
-        # applies just as well here. Omitted (defaults to audience_safe=False)
-        # rather than asserted, so these tools stay owner-only until a human
-        # decision says otherwise.
         #
         # document__edit is the one that matters: an exact-string,
         # unique-match replace modeled on Claude Code's own Edit tool
@@ -1818,9 +1755,10 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
         # sage_agent_runtime_service.py's _PROJECT_SCOPED_CONNECTOR_IDS),
         # and every action is scoped to the CALLING agent's own project
         # (resolved server-side via project_tasks_service.agent_project_id,
-        # the same resolver project_task__*/document__* use). audience_safe:
-        # like project_task, this is internal work-tracking, not a
-        # credential/instruction-bearing surface.
+        # the same resolver project_task__*/document__* use). goal__* is one
+        # of the two families the machine-administration floor still reserves
+        # to the owner (authority_mandate_service) — a goal SCHEDULES future
+        # turns, which is our "cron".
         ToolDescriptor(
             tool_name="goal__create",
             label="Create goal",
@@ -1867,8 +1805,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": ["goal_text"],
             },
-            audience_safe=True,
-            audience_note="Safe: internal work-tracking scoped to this agent's own project.",
         ),
         ToolDescriptor(
             tool_name="goal__list",
@@ -1895,8 +1831,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": [],
             },
-            audience_safe=True,
-            audience_note="Safe: read-only, scoped to this agent's own project.",
         ),
         ToolDescriptor(
             tool_name="goal__get",
@@ -1914,8 +1848,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 "properties": {"goal_id": {"type": "string", "description": "The goal id."}},
                 "required": ["goal_id"],
             },
-            audience_safe=True,
-            audience_note="Safe: read-only, scoped to this agent's own project.",
         ),
         ToolDescriptor(
             tool_name="goal__update",
@@ -1951,8 +1883,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 },
                 "required": ["goal_id"],
             },
-            audience_safe=True,
-            audience_note="Safe: scoped to this agent's own project.",
         ),
         ToolDescriptor(
             tool_name="browser__navigate",
@@ -2077,8 +2007,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             },
             risk_level="high",
             requires_approval=False,
-            audience_safe=False,
-            audience_note="Operator-only: creates a new fleet agent. Owner/operator access.",
         ),
         ToolDescriptor(
             tool_name="fleet__list_agents",
@@ -2091,8 +2019,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 "properties": {},
             },
             risk_level="low",
-            audience_safe=False,
-            audience_note="Operator-only: reads fleet agent list. Owner/operator access.",
         ),
         ToolDescriptor(
             tool_name="fleet__get_agent_activity",
@@ -2108,8 +2034,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 "required": ["agent_id"],
             },
             risk_level="low",
-            audience_safe=False,
-            audience_note="Operator-only: reads agent activity log. Owner/operator access.",
         ),
         ToolDescriptor(
             tool_name="fleet__get_project_activity",
@@ -2125,8 +2049,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 "required": ["project_id"],
             },
             risk_level="low",
-            audience_safe=False,
-            audience_note="Operator-only: reads project activity log. Owner/operator access.",
         ),
         ToolDescriptor(
             tool_name="fleet__configure_agent",
@@ -2158,8 +2080,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             },
             risk_level="high",
             requires_approval=False,
-            audience_safe=False,
-            audience_note="Operator-only: reconfigures a fleet agent. Owner/operator access.",
         ),
         ToolDescriptor(
             tool_name="fleet__schedule_task",
@@ -2193,19 +2113,12 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 "required": ["when", "instruction"],
             },
             risk_level="moderate",
-            # Not audience_safe by default: scheduling future work is a
-            # standing instruction with no live sender to re-check against
-            # when it executes. An end customer must not be able to queue
-            # arbitrary future agent behavior — the mandate gate ORs this
-            # manifest flag with the calling agent's mandate.audience_tools
-            # allowlist, so the owner opts specific agents into it, not the
-            # platform by default.
-            audience_safe=False,
-            audience_note=(
-                "Operator-only: schedules future work — for yourself (self-wakeup, no "
-                "agent_id) or for another agent (fleet management, explicit agent_id). "
-                "Owner/operator access."
-            ),
+            # Owner-only, permanently and by family rather than by flag:
+            # scheduling future work is a standing instruction with no live
+            # sender to re-check against when it executes. fleet__* is one of
+            # the two prefixes authority_mandate_service reserves to the
+            # owner — there is no per-agent opt-in that hands it to an end
+            # customer any more, and there should not be one.
         ),
         ToolDescriptor(
             tool_name="fleet__schedule_recurring_task",
@@ -2243,12 +2156,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 "required": ["cron", "instruction"],
             },
             risk_level="moderate",
-            audience_safe=False,
-            audience_note=(
-                "Operator-only: schedules recurring future work — for yourself (self-wakeup, "
-                "no agent_id) or for another agent (fleet management, explicit agent_id). "
-                "Owner/operator access."
-            ),
         ),
         ToolDescriptor(
             tool_name="fleet__list_recurring_tasks",
@@ -2264,8 +2171,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 "required": [],
             },
             risk_level="low",
-            audience_safe=False,
-            audience_note="Operator-only: lists recurring schedules. Owner/operator access.",
         ),
         ToolDescriptor(
             tool_name="fleet__cancel_recurring_task",
@@ -2286,8 +2191,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 "required": ["schedule_id"],
             },
             risk_level="moderate",
-            audience_safe=False,
-            audience_note="Operator-only: cancels a recurring schedule. Owner/operator access.",
         ),
         # ── Skills: Level-2 progressive disclosure (docs/design/audit-skills.md §3.4) ──
         # The unified skill catalog (skill_registry.list_skill_definitions,
@@ -2333,8 +2236,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 "required": ["skill_id"],
             },
             risk_level="high",
-            audience_safe=False,
-            audience_note="Blocked: skills can read/write files, run shell commands, or message people. Owner-only.",
         ),
         ToolDescriptor(
             tool_name="skill_write",
@@ -2392,8 +2293,6 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 "required": ["name", "description", "body"],
             },
             risk_level="medium",
-            audience_safe=False,
-            audience_note="Blocked: authors persistent workspace skill files. Owner-only.",
         ),
     ]
 
@@ -2833,12 +2732,11 @@ def first_non_empty_line(text: str) -> str:
 
 def tool_descriptor_for_name(tool_name: str) -> ToolDescriptor | None:
     """Look up a local/builtin ToolDescriptor by its literal tool-call name —
-    the same canonical enforcement id the Tools tab keys mandate grants by
-    (skill_registry.enforcement_tool_name). For callers outside the dispatch
-    path (e.g. fleet_get_agent_tools) that need manifest fields like
-    audience_safe without executing anything. Returns None for connector/MCP
-    actions, which have no ToolDescriptor at all — only local/builtin tools
-    do."""
+    the same canonical enforcement id skill_registry.enforcement_tool_name
+    produces. For callers outside the dispatch path (e.g.
+    fleet_get_agent_tools) that need manifest fields without executing
+    anything. Returns None for connector/MCP actions, which have no
+    ToolDescriptor at all — only local/builtin tools do."""
     clean_name = str(tool_name or "").strip()
     if not clean_name:
         return None
@@ -2848,89 +2746,54 @@ def tool_descriptor_for_name(tool_name: str) -> ToolDescriptor | None:
     return None
 
 
-def _tool_descriptor_for_mandate_gate(
-    connector_id: str,
-    action_id: str,
-    tool_name: str,
-) -> ToolDescriptor | None:
-    """Resolve the ToolDescriptor for a call, tolerant of tool_name
-    conventions that don't round-trip through tool_name_for_action().
-
-    tool_name_for_action() always reconstructs "{connector_id}__{action_id}"
-    (double underscore). That matches most descriptors (shell__exec,
-    hardware__action, web__search) but NOT the memory/task-completion
-    descriptors, which are registered with a single underscore or no
-    connector prefix at all (memory_search, memory_read, memory_get,
-    memory_list_versions, task_complete) — several of which are exactly the
-    audience_safe=True tools the customer_facing preset relies on. Matching
-    the raw tool_name first — before falling back to the connector/action
-    reconstruction — avoids silently mis-resolving those to "not found" and
-    therefore "not audience_safe", which would wrongly block an audience-safe
-    tool for every non-owner tier.
-    """
-    clean_name = str(tool_name or "").strip()
-    if clean_name:
-        for descriptor in list(_local_tool_descriptors()) + list(_builtin_tool_descriptors()):
-            if descriptor.tool_name == clean_name:
-                return descriptor
-    return tool_descriptor_for_action(connector_id, action_id)
-
-
 def _authority_mandate_gate(
     connector_id: str,
     action_id: str,
     session_ctx: Dict[str, Any] | None,
     tool_name: str = "",
-) -> tuple[bool, Optional[str], Optional[bool], bool]:
-    """Phase-Mandate: is this tool call inside the caller's authority tier?
+) -> tuple[bool, Optional[str], bool]:
+    """Is this tool call inside the caller's authority?
 
-    This is the hard-enforcement backstop behind audience_tool_filter's
-    visibility filter (server_modules/audience_tool_filter.py) — it holds
-    even if a non-audience_safe tool reached the LLM's tool list some other
-    way (a stale manifest, a bypassed filter, a durable run resuming outside
-    the turn that built its tool list).
+    2026-08-21: this is now the ONLY tool-authority enforcement on this path.
+    The visibility filter that used to run ahead of it (audience_tool_filter,
+    which stripped every non-audience_safe tool from a non-owner's tool list
+    mid-turn) is deleted, and so is the per-agent Tools tab that handed tools
+    back one at a time. The rule this gate applies is
+    authority_mandate_service.is_tool_call_allowed — allow everything except
+    the named machine-administration set (fleet__*, goal__*,
+    empyralis_configure_agent). See that module's docstring for the founder
+    decision and for the consequence, which is real and is not softened here:
+    anyone who can message an agent can now make it do anything that agent
+    can do.
 
-    FAIL-CLOSED: a session_ctx with no "authority_tier" key is treated as
-    audience, not owner — normalize_tier(None) already fails safe the same
-    way, so this just stops short-circuiting before that fail-safe engages.
-    Verified safe (see docs/mandate hardening report): the one live
-    stamping site, sage_agent_runtime_service.py's _run_sage_action_loop_v3,
-    covers every confirmed-live channel (Sage web/API chat, Telegram/
-    WhatsApp/Discord/Slack, personal channels), and a case that reached the
-    gate with a missing key turned out to be a genuine, live, unauthenticated
-    gap (a personal-channel fallback path offering hardware/memory-write
-    tools with no tier at all) — not a caller this default needed to protect.
+    The gate is kept — rather than deleted with the tier — because it is the
+    only place that can hold when a tool reaches the model some other way (a
+    stale prompt, a durable run resuming outside the turn that built its tool
+    list). A boundary that exists only in the tool list is not a boundary.
 
-    Returns (allowed, tier, audience_safe, unattributed). unattributed=True
-    means the key was absent — the tier shown is the audience default, not
-    something the caller actually declared. Callers ledger this
-    (mandate_unattributed) as a distinct, non-blocking observability signal
-    from an actual mandate_blocked event, so a producer that still isn't
-    stamping a tier stays visible instead of silently defaulting forever.
+    FAIL-CLOSED on the TIER: a session_ctx with no "authority_tier" key is
+    treated as audience, not owner — normalize_tier(None) already fails safe
+    the same way, so this just stops short-circuiting before that fail-safe
+    engages. Note that failing closed on the tier now costs a caller only the
+    machine-administration family, not its whole toolset.
+
+    Returns (allowed, tier, unattributed). unattributed=True means the key
+    was absent — the tier shown is the audience default, not something the
+    caller actually declared. Callers ledger this (mandate_unattributed) as a
+    distinct, non-blocking observability signal from an actual mandate_blocked
+    event, so a producer that still isn't stamping a tier stays visible
+    instead of silently defaulting forever.
     """
     session_metadata = session_ctx if isinstance(session_ctx, dict) else {}
     unattributed = "authority_tier" not in session_metadata
     tier = authority_mandate_service.normalize_tier(session_metadata.get("authority_tier"))
-    descriptor = _tool_descriptor_for_mandate_gate(connector_id, action_id, tool_name)
-    manifest_audience_safe = bool(descriptor.audience_safe) if descriptor is not None else False
-    mandate_audience_tools = session_metadata.get("mandate_audience_tools")
-    tool_key = authority_mandate_service.connector_tool_key(connector_id, action_id)
-    clean_tool_name = str(tool_name or "").strip()
-    # mandate.audience_tools holds two id spaces: "{connector_id}.{action_id}"
-    # for connector/MCP actions (no ToolDescriptor, checked via tool_key
-    # above), and the literal enforcement tool name for local/builtin tools
-    # granted through the Tools tab's Customer access control (checked via
-    # clean_tool_name here — that UI writes the same canonical id the tab
-    # already displays, not the dot form). Either match is sufficient.
-    mandate_audience_safe = authority_mandate_service.is_audience_tool_allowed(
-        mandate_audience_tools, tool_key
-    ) or (
-        bool(clean_tool_name)
-        and authority_mandate_service.is_audience_tool_allowed(mandate_audience_tools, clean_tool_name)
+    allowed = authority_mandate_service.is_tool_call_allowed(
+        tier,
+        tool_name=tool_name,
+        connector_id=connector_id,
+        action_id=action_id,
     )
-    audience_safe = manifest_audience_safe or mandate_audience_safe
-    allowed = authority_mandate_service.is_tool_call_allowed(tier, audience_safe=audience_safe)
-    return allowed, tier, audience_safe, unattributed
+    return allowed, tier, unattributed
 
 
 def _authority_mandate_blocked_ledger_kwargs(
@@ -2939,7 +2802,6 @@ def _authority_mandate_blocked_ledger_kwargs(
     action_id: str,
     tool_name: str,
     tier: str,
-    audience_safe: bool,
     workspace_id: str,
     thread_id: str,
     session_ctx: Dict[str, Any] | None,
@@ -2957,7 +2819,8 @@ def _authority_mandate_blocked_ledger_kwargs(
         title=f"Blocked: {tool_name or connector_id} requires the workspace owner",
         summary=(
             f"Tier '{tier}' attempted '{tool_name or f'{connector_id}.{action_id}'}', "
-            "which is not audience_safe. Blocked at the execution choke point."
+            "which is machine administration and is reserved to the workspace "
+            "owner. Blocked at the execution choke point."
         ),
         status="blocked",
         metadata={
@@ -2965,7 +2828,7 @@ def _authority_mandate_blocked_ledger_kwargs(
             "action_id": action_id or None,
             "tool_name": tool_name or None,
             "authority_tier": tier,
-            "audience_safe": audience_safe,
+            "owner_only": True,
         },
     )
 
@@ -5451,7 +5314,7 @@ async def execute_single_direct_tool_call_async(
         callbacks = _get_cb()
 
     connector_id, action_id = callbacks.parse_tool_name(str(tool_call.get("name") or ""))
-    mandate_allowed, mandate_tier, mandate_audience_safe, mandate_unattributed = _authority_mandate_gate(
+    mandate_allowed, mandate_tier, mandate_unattributed = _authority_mandate_gate(
         connector_id, action_id, session_ctx, tool_name=str(tool_call.get("name") or "")
     )
     if mandate_unattributed:
@@ -5480,7 +5343,6 @@ async def execute_single_direct_tool_call_async(
                     action_id=action_id,
                     tool_name=str(tool_call.get("name") or ""),
                     tier=mandate_tier or "",
-                    audience_safe=bool(mandate_audience_safe),
                     workspace_id=workspace_id,
                     thread_id=thread_id,
                     session_ctx=session_ctx,
@@ -6094,7 +5956,7 @@ def execute_single_direct_tool_call(
     from server_modules import sage_services_service
 
     connector_id, action_id = callbacks.parse_tool_name(str(tool_call.get("name") or ""))
-    mandate_allowed, mandate_tier, mandate_audience_safe, mandate_unattributed = _authority_mandate_gate(
+    mandate_allowed, mandate_tier, mandate_unattributed = _authority_mandate_gate(
         connector_id, action_id, session_ctx, tool_name=str(tool_call.get("name") or "")
     )
     if mandate_unattributed:
@@ -6126,7 +5988,6 @@ def execute_single_direct_tool_call(
                         action_id=action_id,
                         tool_name=str(tool_call.get("name") or ""),
                         tier=mandate_tier or "",
-                        audience_safe=bool(mandate_audience_safe),
                         workspace_id=workspace_id,
                         thread_id=thread_id,
                         session_ctx=session_ctx,

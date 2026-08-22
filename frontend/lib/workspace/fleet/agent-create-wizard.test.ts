@@ -341,15 +341,18 @@ assert(
 );
 assert(agentCreateSurfaceTitle(true, "   ") === "New agent", "a blank name never renders as an empty title");
 
-// ── "Tools" meant two different things, and only a SOURCE scan can see it ─
+// ── "Tools" meant two different things; now it means nothing ─────────────
 //
-// The Apps step embeds ConnectorsTab; Configure carries a separate,
-// genuinely different "Tools" section (the built-in capability toggles).
-// Both were once labelled Tools. The step id carries "apps" and never
-// "tools" (asserted above), so what is guarded here is the OTHER half: that
-// the three places naming the connector section still agree with each other,
-// and that none of them calls it Tools. Canaries below, because a scan that
-// silently stops matching reports green forever.
+// HISTORY, because this assertion inverted rather than relaxed. The Apps
+// step embeds ConnectorsTab; Configure ALSO carried a separate "Tools"
+// section, and both were once labelled Tools. That second section is gone
+// as of 2026-08-21 — the per-agent Tools tab and the tool-authority tier
+// behind it were deleted (server_modules/authority_mandate_service.py). So
+// the collision this block was written to guard cannot occur, and the
+// honest guard is the stronger one: assert the connector section is still
+// there, still named "Apps" in all three places, and that NO tab id "tools"
+// has come back. Canaries below, because a scan that silently stops
+// matching reports green forever.
 
 {
   const source = readFileSync(join(__dirname, "FleetAgentDetail.tsx"), "utf8");
@@ -362,9 +365,10 @@ assert(agentCreateSurfaceTitle(true, "   ") === "New agent", "a blank name never
     (m) => ({ id: m[1], label: m[2] }),
   );
   assert(rows.length >= 10, `CANARY: the tab rows still parse (found ${rows.length})`);
+  assert(rows.some((r) => r.id === "connectors"), "CANARY: the connectors tab still exists");
   assert(
-    rows.some((r) => r.id === "connectors") && rows.some((r) => r.id === "tools"),
-    "CANARY: both halves of the collision still exist as separate tabs",
+    !rows.some((r) => r.id === "tools"),
+    'the per-agent "Tools" tab stays deleted — reintroducing it reintroduces the tool-authority tier',
   );
 
   const labels = rows.map((r) => r.label.toLowerCase());
@@ -373,7 +377,7 @@ assert(agentCreateSurfaceTitle(true, "   ") === "New agent", "a blank name never
   const connectorsLabel = rows.find((r) => r.id === "connectors")?.label ?? "";
   assert(
     connectorsLabel.toLowerCase() !== "tools",
-    'the connector picker is never called "Tools" — that name belongs to the capability toggles',
+    'the connector picker is never called "Tools" — nothing in this product is',
   );
 
   // The connector section is NAMED in two more places (this codebase's own

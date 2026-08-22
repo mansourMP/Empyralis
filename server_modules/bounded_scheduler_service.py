@@ -1018,10 +1018,15 @@ async def schedule_task_assigned_wakeup(
     for its own genuinely-senderless context-engine events). The consuming
     scan (`_wake_request_tier`) treats an absent tier from an unrecognized
     producer as a REAL gap, not a documented default, and fails safe to
-    audience — so every task-assigned wake ran as audience tier, and an
-    audience-tier turn may only call `audience_safe` tools. `project_task.list`
-    is not one, so the resulting turn could not even read the task it had
-    just been handed (`mandate_blocked`, observed live 2026-08-13). Two
+    audience — so every task-assigned wake ran as audience tier, and at the
+    time an audience-tier turn could only call `audience_safe` tools.
+    `project_task.list` was not one, so the resulting turn could not even
+    read the task it had just been handed (`mandate_blocked`, observed live
+    2026-08-13). That tier is gone as of 2026-08-21 (see
+    authority_mandate_service) and this specific symptom can no longer recur,
+    but the tier is still what a wake carries as its recorded principal and
+    is still what decides the machine-administration floor, so stamping it
+    correctly still matters. Two
     distinct callers, two distinct correct tiers, so this takes an explicit
     `authority_tier` rather than hardcoding one value the way
     maybe_schedule_event_trigger safely can:

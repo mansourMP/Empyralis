@@ -1,4 +1,4 @@
-"""Execution-authority mandate — scoping, not approval.
+"""Execution-authority mandate — a narrow owner-only floor, not a tier system.
 
 Authority attaches to the INITIATING PRINCIPAL of a turn and is inherited by
 everything that turn spawns (runs, scheduled wake-ups, delegated specialist
@@ -6,7 +6,44 @@ calls). There is no approval UX here — a turn stays fully autonomous inside
 its mandate; a call outside its mandate is blocked outright with a
 platform-voice reply, never queued for a human to approve.
 
-Tiers:
+2026-08-21 — THE TOOL-CAPABILITY TIER IS GONE. Founder's decision, stated
+four times: *"tools removal is something that is going to happen anyways
+there is no question about it because nobody is going to do that shit not
+even me… I don't want to enable and disable and sit on the platform to press
+buttons every other week."* This is the same standing rule CLAUDE.md already
+records ("No tool-authority tiers — access to an agent is binary; never
+weaken an agent's tools per viewer, gate who can reach it") and the same
+posture as the 2026-08-19 destructive-action ruling (awareness in the prompt,
+never a mechanism).
+
+WHAT THAT REPLACED, so nobody rebuilds it: every tool used to carry an
+`audience_safe` flag on its ToolDescriptor, a non-owner sender had every
+unflagged tool stripped from the model's tool list mid-turn
+(audience_tool_filter.py, deleted), and an owner could hand individual tools
+back one at a time through a per-agent Tools tab that wrote
+`mandate.audience_tools` (deleted). Deny-by-default with an eight-tool
+allowlist, in other words — the inverse of what the transport we adopted
+does.
+
+WHAT IT IS NOW — OpenClaw's own shape, adopted rather than invented. Their
+gateway ALLOWS every tool by default and denies exactly three
+machine-administration ones (`GATEWAY_OWNER_ONLY_CORE_TOOLS = ["cron",
+"gateway", "nodes"]`), plus a handful of explicit owner checks on genuinely
+administrative actions. Ours is the same idea pointed at our own equivalents:
+the fleet/agent-configuration family and the scheduling family.
+
+    allowed = (tier is owner) OR (this tool is not machine administration)
+
+STATE THE CONSEQUENCE PLAINLY, because it is real: anyone allowed to MESSAGE
+an agent can now make it do anything that agent can do. The boundaries are
+the channel gates (DM policy, group allowlist, mention gating — they decide
+who may message it at all, before any model runs), agent reachability
+(agent_reachability_service), and the agent's own configuration. If that
+agent has hardware attached, "anything it can do" includes a shell on the
+owner's machine.
+
+Tiers (unchanged — they are still how a turn's principal is recorded, and
+they still decide the one thing below):
   owner    — the workspace owner/admin, acting directly (web/API session, or
              a channel message that matches the owner's linked identity).
   audience — end-customers over any channel. Also the fail-safe default for
@@ -15,12 +52,6 @@ Tiers:
              that was spawned by an earlier owner/audience turn carries that
              turn's tier permanently (see inherit_tier); a system turn with no
              traceable parent (bare platform automation) defaults to audience.
-
-Enforcement is a single rule: a non-owner tier may only call tools marked
-audience_safe in their ToolDescriptor manifest (skills_service.ToolDescriptor).
-"owner" is the only tier that ever bypasses that check — "audience" and
-"system" are both restricted, which is why callers don't need to special-case
-"system" anywhere except when they persist it for audit provenance.
 """
 
 from __future__ import annotations
@@ -50,15 +81,74 @@ MANDATE_BLOCKED_MESSAGE = (
 MANDATE_UNATTRIBUTED_EVENT_CLASS = "mandate_unattributed"
 
 
+# ── The owner-only floor: MACHINE ADMINISTRATION, and nothing else ──────────
+#
+# This list is named ONCE, here, and must not grow into a second sprawling
+# allowlist — that is the thing being deleted, and re-accumulating it one
+# "obviously sensitive" tool at a time is how it comes back. The test for
+# membership is not "could this be misused" (a shell can, and is deliberately
+# NOT here) — it is "does this administer the platform itself rather than do
+# the work the agent exists to do."
+#
+#   fleet__*   creating, reconfiguring, listing and inspecting AGENTS, plus
+#              scheduling and cancelling their recurring work. OpenClaw's
+#              "gateway" + "nodes" + "cron", in our vocabulary.
+#   goal__*    a goal is a durable retry loop that schedules future turns
+#              (see agent_goals / bounded_scheduler_service). Scheduling, so:
+#              OpenClaw's "cron". Denied whole, reads included, exactly as
+#              they deny the whole `cron` tool rather than half of it.
+#
+# Both are expressed as PREFIXES so a tool added to either family tomorrow is
+# covered the day it ships — a hand-listed set of the sixteen names that
+# exist today is the shape that goes stale silently.
+OWNER_ONLY_TOOL_PREFIXES = ("fleet__", "goal__")
+
+# The same two families reached through the connector/action id space
+# ("fleet"."schedule_task") rather than through a flat tool name, which is how
+# runs_execution's connector/MCP choke point sees them.
+OWNER_ONLY_CONNECTOR_IDS = frozenset({"fleet", "goal"})
+
+# Exact names outside those two prefixes. `empyralis_configure_agent` is the
+# MCP-server spelling of fleet__configure_agent (mcp_server.py) — the same
+# administrative action reached by an external agent over the MCP surface,
+# so it answers to the same rule. CLAUDE.md's agent-context-grant section is
+# explicit that a model must never be able to widen its own configuration.
+OWNER_ONLY_TOOL_NAMES = frozenset({"empyralis_configure_agent"})
+
+
+def is_owner_only_tool(
+    *,
+    tool_name: object = "",
+    connector_id: object = "",
+    action_id: object = "",
+) -> bool:
+    """Is this call machine administration (owner-only), by any of its names?
+
+    A caller may know the flat tool name, the connector/action pair, or both;
+    any one of them matching is sufficient. `action_id` is accepted so the
+    signature matches how the two choke points already address a call, and so
+    a future rule that needs it does not change every call site.
+    """
+    name = str(tool_name or "").strip().lower()
+    connector = str(connector_id or "").strip().lower()
+    if name:
+        if name in OWNER_ONLY_TOOL_NAMES:
+            return True
+        if any(name.startswith(prefix) for prefix in OWNER_ONLY_TOOL_PREFIXES):
+            return True
+    if connector and connector in OWNER_ONLY_CONNECTOR_IDS:
+        return True
+    return False
+
+
 def derive_tier_from_sender_class(sender_class: Optional[str]) -> str:
     """Derive the authority tier from a resolved sender classification.
 
     Mirrors triage_service.resolve_sender_identity()'s output
-    ("owner" | "audience" | "unknown") and audience_tool_filter's
-    resolve_sender_class(). Anything that isn't positively "owner" — audience,
-    unknown, empty, or garbage input — is "audience". This is the one and
-    only place "unknown" gets collapsed into a tier; it must fail toward the
-    least-privileged tier, never toward "owner".
+    ("owner" | "audience" | "unknown"). Anything that isn't positively
+    "owner" — audience, unknown, empty, or garbage input — is "audience".
+    This is the one and only place "unknown" gets collapsed into a tier; it
+    must fail toward the least-privileged tier, never toward "owner".
     """
     return TIER_OWNER if str(sender_class or "").strip().lower() == TIER_OWNER else TIER_AUDIENCE
 
@@ -99,32 +189,29 @@ def inherit_tier(parent_tier: object) -> str:
     return normalize_tier(parent_tier)
 
 
-def is_tool_call_allowed(tier: object, *, audience_safe: bool) -> bool:
-    """The single mandate enforcement rule.
+def is_tool_call_allowed(
+    tier: object,
+    *,
+    tool_name: object = "",
+    connector_id: object = "",
+    action_id: object = "",
+) -> bool:
+    """The single mandate enforcement rule — ALLOW by default.
 
-    Owner tier bypasses the check entirely. Every other tier — audience,
-    system, or anything invalid/unrecognized — may only call tools the
-    manifest marks audience_safe=True. Unrecognized tier values are
+    Owner tier is allowed everything. Every other tier — audience, system, or
+    anything invalid/unrecognized — is allowed everything EXCEPT machine
+    administration (is_owner_only_tool). Unrecognized tier values are
     normalized (fail safe to audience) before the check, so a caller can
-    never accidentally grant access by passing a malformed tier string.
+    never accidentally reach the owner branch by passing a malformed tier.
+
+    Note the direction of the default: a tool this function has never heard
+    of is ALLOWED, which is deliberate and is the inversion. The safety story
+    is no longer "the model cannot reach this tool" — it is "this sender
+    could not reach this agent at all" (the channel gates and
+    agent_reachability_service), decided before a model ever runs.
     """
-    return normalize_tier(tier) == TIER_OWNER or bool(audience_safe)
-
-
-def connector_tool_key(connector_id: object, action_id: object) -> str:
-    """Canonical id for a connector/MCP action inside a mandate.audience_tools
-    allowlist — "{connector_id}.{action_id}", matching the id format already
-    used for metering/ledger entries in runs_execution.py."""
-    return f"{str(connector_id or '').strip().lower()}.{str(action_id or '').strip().lower()}"
-
-
-def is_audience_tool_allowed(audience_tools: object, tool_key: str) -> bool:
-    """Owner-declared mandate check for connector/MCP actions, which have no
-    catalog-level audience_safe manifest flag (skills_service.ToolDescriptor
-    only covers local/builtin tools). Connector/MCP actions default to NOT
-    audience_safe — this is the only way one becomes audience-callable: the
-    owner explicitly lists it in this agent's mandate.audience_tools."""
-    if not isinstance(audience_tools, (list, tuple, set, frozenset)):
-        return False
-    key = str(tool_key or "").strip().lower()
-    return bool(key) and key in {str(t or "").strip().lower() for t in audience_tools}
+    if normalize_tier(tier) == TIER_OWNER:
+        return True
+    return not is_owner_only_tool(
+        tool_name=tool_name, connector_id=connector_id, action_id=action_id
+    )

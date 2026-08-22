@@ -71,6 +71,8 @@ export function HardwareTab({
   agentId,
   agent,
   onSaved,
+  reachableChannels = [],
+  channelsLoading = false,
 }: {
   workspaceId: string;
   agentId: string;
@@ -80,6 +82,17 @@ export function HardwareTab({
    *  of `agent`, and should catch up immediately rather than waiting out the
    *  next poll. */
   onSaved?: () => void;
+  /** Labels of the channels this agent is actually reachable on right now.
+   *  Passed down rather than fetched here: FleetAgentDetail (the only call
+   *  site) already computes it through isChannelConnected, and a second
+   *  opinion about "is this agent reachable" is exactly the kind of drift
+   *  this codebase keeps paying for. Used for one sentence — see the
+   *  hardware-reach note below. */
+  reachableChannels?: string[];
+  /** True while that channel list is still unknown. The note below renders
+   *  NOTHING while this is true: "no channel is connected" and "I have not
+   *  found out yet" are different facts and must not share one sentence. */
+  channelsLoading?: boolean;
 }) {
   const { gateways, loading: gatewaysLoading } = useWorkspaceGateways(workspaceId);
   const locked = !!agent?.hardware_access_locked;
@@ -187,15 +200,37 @@ export function HardwareTab({
       )}
 
       <div className="fleet-detail-section-title" style={brainBound ? { marginTop: 20 } : undefined}>Hardware access</div>
-      {/* Read-only — surfaces the existing audience_safe=False truth
-          (authority_mandate_service.py / triage_service.py), adds no new
-          enforcement. Whatever's picked below, it's reachable by the owner
-          only: a customer's message is always classified support-tier and
-          can never reach shell/hardware/command tools, regardless of this
-          agent's hardware_access setting. */}
-      <p className="fleet-hw-note" style={{ marginTop: 0 }}>
-        Owner only — customers can&apos;t trigger hardware, shell, or commands, no matter what they message.
-      </p>
+      {/* This paragraph used to read "Owner only — customers can't trigger
+          hardware, shell, or commands, no matter what they message." That
+          became FALSE on 2026-08-21, when the audience tool tier was deleted
+          (see server_modules/authority_mandate_service.py). Saying it now
+          would be the worst version of the outcome-honesty law: a security
+          claim, on the exact screen where the decision is made, describing a
+          mechanism that no longer exists.
+
+          What replaces it is ONE sentence, not a gate and not a
+          confirmation — CLAUDE.md forbids approval flows, and the founder
+          has settled that access to an agent is binary and gated by who can
+          REACH it. So: state the consequence, name the screen that actually
+          controls it, and get out of the way. Rendered only when hardware is
+          actually attached (nothing to say for a cloud-only agent) and only
+          once the channel list is known (see channelsLoading above). */}
+      {access !== "none" && !channelsLoading && (
+        <p className="fleet-hw-note" style={{ marginTop: 0 }}>
+          {reachableChannels.length > 0 ? (
+            <>
+              Anyone who can message this agent on {reachableChannels.join(", ")} can make it
+              run commands and read files on this computer. Channels is where you choose who
+              that is.
+            </>
+          ) : (
+            <>
+              Anyone who can message this agent can make it run commands and read files on
+              this computer. No channel is connected yet, so right now that is only you.
+            </>
+          )}
+        </p>
+      )}
       {locked ? (
         <p className="fleet-hw-note" style={{ marginTop: 0 }}>
           This is a <strong>Knowledge</strong> agent — hardware access is off and policy-locked. To

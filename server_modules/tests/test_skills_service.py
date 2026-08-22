@@ -1816,9 +1816,20 @@ class SendImageToolDescriptorTests(unittest.TestCase):
 
 
 class AuthorityMandateGateTests(unittest.TestCase):
-    """Phase-Mandate: execution-time enforcement in the tool-execution choke
-    point (skills_service.execute_single_direct_tool_call{,_async}) — the
-    hard backstop behind audience_tool_filter's visibility-only filter.
+    """Execution-time enforcement in the tool-execution choke point
+    (skills_service.execute_single_direct_tool_call{,_async}).
+
+    2026-08-21 — THIS CLASS INVERTED. It used to be the hard backstop behind
+    audience_tool_filter's visibility filter, proving that a non-owner could
+    not call a non-audience_safe tool. Both the filter and the flag are
+    deleted (see server_modules/authority_mandate_service.py for the founder
+    decision). The assertions below are rewritten to the new rule rather
+    than removed — several of them now prove the OPPOSITE of what they used
+    to, which is exactly the point: they are what fails loudly if a
+    tool-capability tier is ever reintroduced.
+
+    What is still enforced here, and is tested: the machine-administration
+    floor (fleet__*, goal__*, empyralis_configure_agent).
     """
 
     def _callbacks(self) -> direct_tool_execution_service.DirectToolExecutionCallbacks:
@@ -1850,13 +1861,26 @@ class AuthorityMandateGateTests(unittest.TestCase):
             get_memory_notebook_excerpt=lambda workspace_id, rel_path, from_line=None, line_count=None, agent_install_id=None: {},
         )
 
-    def test_audience_tier_blocks_non_audience_safe_tool_even_when_not_visibility_filtered(self) -> None:
-        """shell__exec is never audience_safe. Calling execute_single_direct_tool_call
-        directly (bypassing audience_tool_filter entirely, as if the visibility
-        filter had been skipped or a stale manifest let it through) must still
-        block for an audience-tier caller."""
-        with self.assertRaises(RuntimeError) as ctx:
-            skills_service.execute_single_direct_tool_call(
+    def test_audience_tier_reaches_the_real_shell_dispatch(self) -> None:
+        """THE INVERSION, at the sharpest tool available.
+
+        This test previously asserted that an audience-tier caller was
+        BLOCKED from shell__exec. It is now the proof that no orphaned
+        tool-tier enforcement survives anywhere on this path: an
+        audience-tier session reaches local_tool_executor.shell_execute, the
+        same real dispatch an owner reaches, and the mock is called exactly
+        once. State the consequence rather than softening it — this is what
+        the founder decided, and CLAUDE.md's own "access to an agent is
+        binary, gated by who can reach it" is the boundary that replaces it."""
+        with (
+            patch("server_modules.local_tool_executor.is_local_dev", return_value=True),
+            patch("server_modules.skills_service._local_direct_shell_worker_online_exact", return_value=True),
+            patch(
+                "server_modules.local_tool_executor.shell_execute",
+                return_value={"command": "echo hi", "exit_code": 0, "stdout": "hi", "stderr": ""},
+            ) as shell_execute_mock,
+        ):
+            raw = skills_service.execute_single_direct_tool_call(
                 tool_call={"name": "shell__exec", "arguments": {"command": "echo hi"}},
                 workspace_id="ws-1",
                 thread_id="thread-1",
@@ -1864,7 +1888,8 @@ class AuthorityMandateGateTests(unittest.TestCase):
                 session_ctx={"authority_tier": "audience"},
                 callbacks=self._callbacks(),
             )
-        self.assertEqual(str(ctx.exception), authority_mandate_service.MANDATE_BLOCKED_MESSAGE)
+        shell_execute_mock.assert_called_once()
+        self.assertIn('"command": "echo hi"', raw)
 
     def test_owner_tier_reaches_real_dispatch(self) -> None:
         """Owner tier bypasses the mandate gate — proceeds to the same
@@ -1893,18 +1918,18 @@ class AuthorityMandateGateTests(unittest.TestCase):
         self.assertIn('"command": "echo hi"', raw)
 
     def test_missing_authority_tier_key_fails_closed_to_audience(self) -> None:
-        """A session_ctx with no authority_tier key at all is FAIL-CLOSED,
-        not a pass-through: it's treated as audience (normalize_tier(None)'s
-        own fail-safe), so a non-audience_safe tool is blocked exactly as it
-        would be for an explicitly-audience-tier caller. Flipped from the
-        prior skip-enforcement behavior once the mandate hardening report
-        confirmed every live tier-stamping producer always stamps a tier —
-        a call site reaching this gate with the key missing is either a
-        genuine gap (see mandate_unattributed ledgering) or dead code, never
-        a caller this default needs to protect."""
+        """The fail-closed TIER default is kept, and this asserts it against
+        the one thing the tier still decides: a session_ctx with no
+        authority_tier key is treated as audience (normalize_tier(None)'s own
+        fail-safe), so machine administration is refused exactly as it would
+        be for an explicitly-audience-tier caller. Failing closed now costs a
+        caller only this family, not its whole toolset."""
         with self.assertRaises(RuntimeError) as ctx:
             skills_service.execute_single_direct_tool_call(
-                tool_call={"name": "shell__exec", "arguments": {"command": "echo hi"}},
+                tool_call={
+                    "name": "fleet__schedule_task",
+                    "arguments": {"agent_id": "agent-x", "when": "in 30 minutes", "instruction": "Follow up"},
+                },
                 workspace_id="ws-1",
                 thread_id="thread-1",
                 index=1,
@@ -1913,11 +1938,10 @@ class AuthorityMandateGateTests(unittest.TestCase):
             )
         self.assertEqual(str(ctx.exception), authority_mandate_service.MANDATE_BLOCKED_MESSAGE)
 
-    def test_missing_authority_tier_key_still_allows_audience_safe_tool(self) -> None:
-        """The fail-closed default only restricts non-audience_safe tools —
-        an audience_safe tool (e.g. memory_search) still dispatches normally
-        even with no authority_tier key, same as an explicit audience tier
-        would allow."""
+    def test_missing_authority_tier_key_still_allows_an_ordinary_tool(self) -> None:
+        """The fail-closed default restricts machine administration only —
+        an ordinary work tool (memory_search) dispatches normally with no
+        authority_tier key at all."""
         raw = skills_service.execute_single_direct_tool_call(
             tool_call={"name": "memory_search", "arguments": {"query": "goals"}},
             workspace_id="ws-1",
@@ -1928,13 +1952,12 @@ class AuthorityMandateGateTests(unittest.TestCase):
         )
         self.assertIn("MEMORY.md", raw)
 
-    def test_audience_tier_allows_audience_safe_tool(self) -> None:
-        """memory_search is audience_safe=True (part of the customer_facing
-        preset's 8-tool set) — an audience-tier caller may call it. This is
-        also a regression guard for tool_name resolution: memory_search does
-        NOT follow the connector__action double-underscore convention most
-        other tools use, so the gate must resolve it by raw tool_name, not
-        only via the connector_id/action_id reconstruction."""
+    def test_audience_tier_allows_an_ordinary_tool(self) -> None:
+        """An audience-tier caller may call memory_search. Kept (rather than
+        folded into the shell test above) as a regression guard for tool_name
+        handling: memory_search does NOT follow the connector__action
+        double-underscore convention, so the gate must cope with a raw
+        tool_name whose connector/action reconstruction is nonsense."""
         raw = skills_service.execute_single_direct_tool_call(
             tool_call={"name": "memory_search", "arguments": {"query": "hello"}},
             workspace_id="ws-1",
@@ -1945,14 +1968,19 @@ class AuthorityMandateGateTests(unittest.TestCase):
         )
         self.assertIn("MEMORY.md", raw)
 
-    def test_async_entrypoint_blocks_hardware_bound_connector_for_audience_tier(self) -> None:
+    def test_async_entrypoint_blocks_machine_administration_for_audience_tier(self) -> None:
         """execute_single_direct_tool_call_async handles hardware/file/shell/
         screenshot/computer on its own branch rather than always delegating
-        to the sync function — the gate must be checked there too."""
+        to the sync function — the gate must be checked there too. Pointed at
+        the machine-administration family now that shell is an ordinary tool
+        on both entrypoints (the sync half of that is asserted above)."""
 
         async def _run() -> str:
             return await skills_service.execute_single_direct_tool_call_async(
-                tool_call={"name": "shell__exec", "arguments": {"command": "echo hi"}},
+                tool_call={
+                    "name": "fleet__schedule_task",
+                    "arguments": {"agent_id": "agent-x", "when": "in 30 minutes", "instruction": "Follow up"},
+                },
                 workspace_id="ws-1",
                 thread_id="thread-1",
                 index=1,
@@ -1987,10 +2015,11 @@ class AuthorityMandateGateTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(propose_mock.call_args.kwargs["payload"]["authority_tier"], "owner")
 
-    def test_schedule_task_audience_tier_blocked_by_default(self) -> None:
-        """An end customer must not be able to schedule future agent work —
-        fleet__schedule_task is audience_safe=False and no mandate override
-        is set."""
+    def test_schedule_task_audience_tier_blocked(self) -> None:
+        """An end customer must not be able to schedule future agent work.
+        Not "by default" any more — permanently: fleet__* is one of the two
+        machine-administration prefixes and there is no per-agent override
+        that can hand it over (see the next test)."""
         with self.assertRaises(RuntimeError) as ctx:
             skills_service.execute_single_direct_tool_call(
                 tool_call={
@@ -2005,55 +2034,50 @@ class AuthorityMandateGateTests(unittest.TestCase):
             )
         self.assertEqual(str(ctx.exception), authority_mandate_service.MANDATE_BLOCKED_MESSAGE)
 
-    def test_schedule_task_audience_tier_allowed_when_owner_lists_it_in_mandate(self) -> None:
-        """The owner opts a specific agent into letting audience-tier callers
-        schedule work by listing 'fleet.schedule_task' in that agent's
-        mandate.audience_tools — the resulting wake request still carries
-        the audience tier (never upgraded), so its later execution stays
-        audience end-to-end."""
-        with patch(
-            "server_modules.bounded_scheduler_service.propose_self_wakeup",
-            new=AsyncMock(return_value={"accepted": True, "wake_request": {"id": "wake-2"}}),
-        ) as propose_mock:
-            raw = skills_service.execute_single_direct_tool_call(
-                tool_call={
-                    "name": "fleet__schedule_task",
-                    "arguments": {"agent_id": "agent-x", "when": "in 30 minutes", "instruction": "Follow up"},
-                },
-                workspace_id="ws-1",
-                thread_id="thread-1",
-                index=1,
-                session_ctx={"authority_tier": "audience", "mandate_audience_tools": ["fleet.schedule_task"]},
-                callbacks=self._callbacks(),
-            )
-        result = json.loads(raw)
-        self.assertTrue(result["ok"])
-        self.assertEqual(propose_mock.call_args.kwargs["payload"]["authority_tier"], "audience")
+    def test_a_stale_mandate_audience_tools_key_grants_nothing(self) -> None:
+        """THE DELETED OVERRIDE, asserted as dead.
 
-    def test_schedule_task_audience_tier_allowed_when_owner_lists_it_by_enforcement_id(self) -> None:
-        """The Tools tab's Customer access control writes the tool's literal
-        canonical enforcement id ("fleet__schedule_task"), not the connector.
-        action dot form the tool above uses — mandate.audience_tools must
-        recognize both id spaces, since fleet_get_agent_tools/the PATCH
-        round-trip on the enforcement id exclusively."""
-        with patch(
-            "server_modules.bounded_scheduler_service.propose_self_wakeup",
-            new=AsyncMock(return_value={"accepted": True, "wake_request": {"id": "wake-3"}}),
-        ) as propose_mock:
-            raw = skills_service.execute_single_direct_tool_call(
-                tool_call={
-                    "name": "fleet__schedule_task",
-                    "arguments": {"agent_id": "agent-x", "when": "in 30 minutes", "instruction": "Follow up"},
-                },
-                workspace_id="ws-1",
-                thread_id="thread-1",
-                index=1,
-                session_ctx={"authority_tier": "audience", "mandate_audience_tools": ["fleet__schedule_task"]},
-                callbacks=self._callbacks(),
-            )
-        result = json.loads(raw)
-        self.assertTrue(result["ok"])
-        self.assertEqual(propose_mock.call_args.kwargs["payload"]["authority_tier"], "audience")
+        Two tests used to live here proving the opposite: an owner could list
+        "fleet.schedule_task" (or "fleet__schedule_task" — the gate accepted
+        both id spaces) in an agent's mandate.audience_tools and an
+        audience-tier caller could then schedule work. That grant, its PATCH
+        key, and the Tools tab that wrote it are deleted.
+
+        This matters beyond tidiness: `mandate` metadata is left in place on
+        existing installs rather than migrated away, so a real production
+        session_ctx could still carry a stale copy of this key. It must
+        change NOTHING. Both historical id spellings are exercised, because
+        the deleted code accepted both and a partial resurrection would be
+        invisible otherwise."""
+        for stale in (["fleet.schedule_task"], ["fleet__schedule_task"]):
+            with self.subTest(stale=stale):
+                with patch(
+                    "server_modules.bounded_scheduler_service.propose_self_wakeup",
+                    new=AsyncMock(return_value={"accepted": True, "wake_request": {"id": "wake-x"}}),
+                ) as propose_mock:
+                    with self.assertRaises(RuntimeError) as ctx:
+                        skills_service.execute_single_direct_tool_call(
+                            tool_call={
+                                "name": "fleet__schedule_task",
+                                "arguments": {
+                                    "agent_id": "agent-x",
+                                    "when": "in 30 minutes",
+                                    "instruction": "Follow up",
+                                },
+                            },
+                            workspace_id="ws-1",
+                            thread_id="thread-1",
+                            index=1,
+                            session_ctx={
+                                "authority_tier": "audience",
+                                "mandate_audience_tools": stale,
+                            },
+                            callbacks=self._callbacks(),
+                        )
+                self.assertEqual(
+                    str(ctx.exception), authority_mandate_service.MANDATE_BLOCKED_MESSAGE
+                )
+                propose_mock.assert_not_called()
 
     def test_schedule_task_with_no_agent_id_schedules_the_caller_itself(self) -> None:
         """MAN-68 doctrine fix (audit-system-prompt-doctrine.md #1 ranked
@@ -2192,27 +2216,54 @@ class SubagentSpawnDispatchTests(unittest.TestCase):
         self.assertEqual(call_kwargs["tenant_id"], "tenant-1")
         self.assertEqual(call_kwargs["acting_agent_install_id"], "agent-pixel")
 
-    def test_audience_tier_is_blocked_before_reaching_the_bridge(self) -> None:
-        """subagent__spawn has no ToolDescriptor (audience_safe defaults
-        False) and is never added to mandate_audience_tools by default --
-        an audience-tier caller must be blocked by the mandate gate itself,
-        never reaching the specialist_guard check or the bridge."""
+    def test_audience_tier_reaches_the_bridge_and_the_specialist_guard_still_decides(self) -> None:
+        """INVERTED 2026-08-21. This used to assert the mandate gate blocked
+        subagent__spawn for an audience-tier caller (it had no ToolDescriptor,
+        so audience_safe defaulted False). subagent__spawn is an ordinary tool
+        now — what still decides whether it runs is the agent's OWN
+        configuration (specialist_guard.subagents_enabled), which is a
+        capability of the agent rather than a tier of its caller. That is the
+        distinction the founder's decision draws, so it is the one asserted."""
         with patch(
-            "server_modules.runtime_run_delegation_service.spawn_subagent_from_chat_turn"
+            "server_modules.runtime_run_delegation_service.spawn_subagent_from_chat_turn",
+            return_value={"ok": True, "run_id": "run-1"},
         ) as bridge_mock:
-            with self.assertRaises(RuntimeError) as ctx:
-                skills_service.execute_single_direct_tool_call(
-                    tool_call={"name": "subagent__spawn", "arguments": {"task_description": "Do a thing"}},
-                    workspace_id="ws-1",
-                    thread_id="thread-1",
-                    session_ctx={
-                        "authority_tier": "audience",
-                        "specialist_guard": {"agent_install_id": "agent-pixel", "subagents_enabled": True},
-                    },
-                    callbacks=self._callbacks(),
-                )
-        self.assertEqual(str(ctx.exception), authority_mandate_service.MANDATE_BLOCKED_MESSAGE)
-        bridge_mock.assert_not_called()
+            skills_service.execute_single_direct_tool_call(
+                tool_call={"name": "subagent__spawn", "arguments": {"task_description": "Do a thing"}},
+                workspace_id="ws-1",
+                thread_id="thread-1",
+                session_ctx={
+                    "authority_tier": "audience",
+                    "specialist_guard": {"agent_install_id": "agent-pixel", "subagents_enabled": True},
+                },
+                callbacks=self._callbacks(),
+            )
+        bridge_mock.assert_called_once()
+
+    def test_the_agents_own_config_still_refuses_when_subagents_are_disabled(self) -> None:
+        """The other half, so the test above cannot be read as "nothing
+        stops this": with subagents_enabled False the bridge is never
+        reached, for an audience-tier caller and an owner alike."""
+        for tier in ("owner", "audience"):
+            with self.subTest(tier=tier):
+                with patch(
+                    "server_modules.runtime_run_delegation_service.spawn_subagent_from_chat_turn"
+                ) as bridge_mock:
+                    raw = skills_service.execute_single_direct_tool_call(
+                        tool_call={"name": "subagent__spawn", "arguments": {"task_description": "Do a thing"}},
+                        workspace_id="ws-1",
+                        thread_id="thread-1",
+                        session_ctx={
+                            "authority_tier": tier,
+                            "specialist_guard": {
+                                "agent_install_id": "agent-pixel",
+                                "subagents_enabled": False,
+                            },
+                        },
+                        callbacks=self._callbacks(),
+                    )
+                self.assertEqual(json.loads(raw)["error"], "subagents_disabled")
+                bridge_mock.assert_not_called()
 
 
 class FormatHardwareActionResultDockerEvidenceTests(unittest.TestCase):

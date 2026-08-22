@@ -584,25 +584,24 @@ export type FleetConnector = {
   configured: boolean;
 };
 
-// 2026-08-14 (CLAUDE.md, founder decision): no more per-agent Tools
-// enable/disable checklist, so this type carries no `enabled` field —
-// every listed tool is already available to the agent itself. What's left
-// is Authority Mandate (Part 10) — Customer access, a WHO boundary, not a
-// WHAT-is-switchable one.
+// 2026-08-14: no per-agent Tools enable/disable checklist, so this type
+// carries no `enabled` field — every listed tool is already available to the
+// agent itself. 2026-08-21: no per-tool WHO-may-trigger control either
+// (`audience_safe`/`mandate_granted` are gone with the audience tool tier —
+// see server_modules/authority_mandate_service.py), and the Tools TAB that
+// was this type's only real consumer is deleted.
+//
+// The type survives because ConnectorPicker still reads the catalog for
+// `requires_connector` — "what does connecting this app actually give the
+// agent", derived from fleet_tools._CONNECTOR_REQUIRED_TOOLS. That is the
+// whole remaining job.
 export type FleetTool = {
   id: string;
   label: string;
   description: string;
   action_class: string;
-  // audience_safe is the platform's own manifest default (informational,
-  // never toggleable); mandate_granted reflects this owner's
-  // mandate.audience_tools list.
-  audience_safe: boolean;
-  mandate_granted: boolean;
   // Truth Map B1 — connector id (e.g. "google_workspace") this tool's real
-  // executor is bound behind, or null if none. Granting customer access
-  // does nothing for a connector-required tool until that connector is
-  // connected.
+  // executor is bound behind, or null if none.
   requires_connector: string | null;
 };
 

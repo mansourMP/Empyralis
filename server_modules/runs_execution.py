@@ -2353,76 +2353,46 @@ def _run_authority_tier(context: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _run_agent_mandate_audience_tools(context: Dict[str, Any]) -> List[str]:
-    """The calling agent's owner-declared mandate.audience_tools allowlist
-    (fleet_tools._ALLOWED_CONFIGURE_KEYS "mandate" patch), fetched fresh —
-    this execution surface has no pre-loaded specialist toolset the way the
-    live chat/skills_service path does."""
-    agent_id = str(context.get("agent_id") or context.get("deployed_agent_id") or "").strip() if isinstance(context, dict) else ""
-    if not agent_id:
-        return []
-    workspace_id = _workflow_tool_workspace_id(context) or ""
-    if not workspace_id:
-        return []
-    tenant_id = _workflow_tool_tenant_id(context) or "default"
-    try:
-        from server_modules import agent_registry_repository
-
-        bundle = asyncio.run(
-            agent_registry_repository.get_workspace_agent_install_bundle(
-                agent_id, tenant_id=tenant_id, workspace_id=workspace_id,
-            )
-        )
-    except Exception:
-        return []
-    if not isinstance(bundle, dict):
-        return []
-    meta = bundle.get("install_metadata") if isinstance(bundle.get("install_metadata"), dict) else bundle.get("metadata")
-    mandate = meta.get("mandate") if isinstance(meta, dict) and isinstance(meta.get("mandate"), dict) else {}
-    tools = mandate.get("audience_tools")
-    return [str(t) for t in tools] if isinstance(tools, list) else []
-
-
 def _connector_mandate_gate(
     connector_id: str,
     action_id: str,
     context: Dict[str, Any],
-) -> "tuple[bool, Optional[str], Optional[bool], bool]":
+) -> "tuple[bool, Optional[str], bool]":
     """The connector/MCP counterpart to skills_service._authority_mandate_gate
     — same enforcement rule (authority_mandate_service.is_tool_call_allowed),
     applied at the choke point runs/workflows take instead of skills_
     service's tool-call loop, which this function historically bypassed
     entirely.
 
-    Connector/MCP actions have no catalog-level audience_safe manifest
-    (skills_service.ToolDescriptor only covers local/builtin tools) — so
-    audience_safe here comes ONLY from the calling agent's
-    mandate.audience_tools allowlist. An unlisted connector/MCP action
-    defaults to NOT audience_safe (fail-safe), unlike manifest-backed tools.
+    2026-08-21: the rule this applies inverted. It used to be deny-by-default
+    — a connector/MCP action had no catalog-level audience_safe flag, so an
+    unlisted one was refused for every non-owner tier unless the owner had
+    named it in that agent's mandate.audience_tools allowlist. That allowlist,
+    its UI, and the per-agent lookup this function did to read it are all
+    deleted. A non-owner is now refused only machine administration (the
+    "fleet"/"goal" connector families); see authority_mandate_service's
+    docstring for the founder decision and for the consequence.
 
-    FAIL-CLOSED (mandate completion follow-up): absent tier now normalizes
-    to audience, same as skills_service's gate — never a pass-through.
-    Verified safe by enumerating every producer that reaches run_service.
-    create_run's single call site: agent-turn-spawned runs carry
-    authority_tier via serialize_agent_turn_request -> bind_agent_turn_
-    metadata -> metadata.agent_turn_request.authority_tier; child/subflow/
-    delegated runs inherit it via build_workflow_child_metadata's wholesale
-    parent-metadata copy; schedule-fired and webhook-ingested runs resolve
-    it through build_run_start_turn_request's current_user derivation
-    (fixed to no longer misresolve the "no real caller" system placeholder
-    to owner — see agent_turn._current_user_is_owner). Returns (allowed,
-    tier, audience_safe, unattributed) — unattributed=True means the key
-    was absent, ledgered as mandate_unattributed (non-blocking) rather than
+    FAIL-CLOSED on the TIER: absent tier normalizes to audience, same as
+    skills_service's gate — never a pass-through. Verified safe by
+    enumerating every producer that reaches run_service.create_run's single
+    call site: agent-turn-spawned runs carry authority_tier via
+    serialize_agent_turn_request -> bind_agent_turn_metadata ->
+    metadata.agent_turn_request.authority_tier; child/subflow/delegated runs
+    inherit it via build_workflow_child_metadata's wholesale parent-metadata
+    copy; schedule-fired and webhook-ingested runs resolve it through
+    build_run_start_turn_request's current_user derivation. Returns (allowed,
+    tier, unattributed) — unattributed=True means the key was absent,
+    ledgered as mandate_unattributed (non-blocking) rather than
     mandate_blocked, distinct from an actual denial.
     """
     raw_tier = _run_authority_tier(context)
     unattributed = raw_tier is None
     tier = authority_mandate_service.normalize_tier(raw_tier)
-    audience_tools = _run_agent_mandate_audience_tools(context)
-    tool_key = authority_mandate_service.connector_tool_key(connector_id, action_id)
-    audience_safe = authority_mandate_service.is_audience_tool_allowed(audience_tools, tool_key)
-    allowed = authority_mandate_service.is_tool_call_allowed(tier, audience_safe=audience_safe)
-    return allowed, tier, audience_safe, unattributed
+    allowed = authority_mandate_service.is_tool_call_allowed(
+        tier, connector_id=connector_id, action_id=action_id
+    )
+    return allowed, tier, unattributed
 
 
 def _connector_mandate_blocked_ledger_kwargs(
@@ -2430,7 +2400,6 @@ def _connector_mandate_blocked_ledger_kwargs(
     connector_id: str,
     action_id: str,
     tier: str,
-    audience_safe: bool,
     workspace_id: str,
     tenant_id: str,
     run_id: str,
@@ -2448,14 +2417,15 @@ def _connector_mandate_blocked_ledger_kwargs(
         title=f"Blocked: {connector_id}.{action_id} requires the workspace owner",
         summary=(
             f"Tier '{tier}' attempted '{connector_id}.{action_id}' in run {run_id} (node {node_id}), "
-            "which is not audience_safe. Blocked at the connector/MCP execution choke point."
+            "which is machine administration and is reserved to the workspace owner. "
+            "Blocked at the connector/MCP execution choke point."
         ),
         status="blocked",
         metadata={
             "connector_id": connector_id or None,
             "action_id": action_id or None,
             "authority_tier": tier,
-            "audience_safe": audience_safe,
+            "owner_only": True,
             "run_id": run_id or None,
             "node_id": node_id or None,
         },
@@ -2514,7 +2484,7 @@ def _workflow_execute_connector_action(
     if not requested_connector:
         raise RuntimeError("Connector action tool node is missing connector.")
 
-    mandate_allowed, mandate_tier, mandate_audience_safe, mandate_unattributed = _connector_mandate_gate(
+    mandate_allowed, mandate_tier, mandate_unattributed = _connector_mandate_gate(
         requested_connector, action_id, context
     )
     if mandate_unattributed:
@@ -2545,7 +2515,6 @@ def _workflow_execute_connector_action(
                         connector_id=requested_connector,
                         action_id=action_id,
                         tier=mandate_tier or "",
-                        audience_safe=bool(mandate_audience_safe),
                         workspace_id=_workflow_tool_workspace_id(context) or "default",
                         tenant_id=_workflow_tool_tenant_id(context) or "default",
                         run_id=run_id,

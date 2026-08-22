@@ -29,7 +29,6 @@ import {
   Sparkles,
   Square,
   Trash2,
-  Users,
   Wand2,
   X,
   type LucideIcon,
@@ -51,7 +50,6 @@ import {
   stopFleetAgent,
   useFleetAgentChannels,
   useFleetAgentConnectors,
-  useFleetAgentTools,
   useFleetAgentCapabilities,
   useFleetAgentSchedule,
   previewFleetAgentSchedule,
@@ -62,7 +60,6 @@ import {
   type FleetAgent,
   type FleetAgentSkill,
   type FleetChannel,
-  type FleetTool,
   type FleetCapability,
   type FleetScheduleItem,
 } from "./fleet-data";
@@ -137,7 +134,7 @@ export function isChannelConnected(
 // longer a distinct SURFACE: activeTab==="work" renders the exact same
 // observation view as activeTab==="chat" (see the render below), so an old
 // bookmark still works instead of 404ing.
-type TabId = "general" | "work" | "channels" | "connectors" | "hardware" | "model" | "skills" | "memory" | "tools" | "capabilities" | "chat" | "persona" | "context";
+type TabId = "general" | "work" | "channels" | "connectors" | "hardware" | "model" | "skills" | "memory" | "capabilities" | "chat" | "persona" | "context";
 
 // Single source of id/label/icon truth for every one of the remaining
 // sections — Chat is the agent's front door, rendered directly (no tab
@@ -180,16 +177,20 @@ const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
   { id: "model", label: "Model", icon: Sparkles },
   { id: "skills", label: "Skills", icon: BookOpen },
   { id: "channels", label: "Channels", icon: Radio },
-  // "Apps", not "Connectors" — and definitely not "Tools", which is the
-  // genuinely different section two rows down (the built-in capability
-  // toggles). Two different things were called Tools once the creation
-  // sequence labelled its ConnectorsTab step that way; the founder named
-  // the right word: *"it's clearly applications, MCP applications... name
-  // is clearly not tools."* The ID is untouched on purpose — it is a route
-  // segment, in both [tab]/page.tsx VALID_TABS whitelists and in live deep
-  // links; only what a person reads changes.
+  // "Apps", not "Connectors". The founder named the right word: *"it's
+  // clearly applications, MCP applications... name is clearly not tools."*
+  // The ID is untouched on purpose — it is a route segment, in both
+  // [tab]/page.tsx VALID_TABS whitelists and in live deep links; only what a
+  // person reads changes.
+  //
+  // There is no "Tools" row here any more (2026-08-21). It listed every tool
+  // with a per-tool "who may trigger this" control, which is the
+  // tool-authority tier the founder killed outright — see
+  // server_modules/authority_mandate_service.py for his words and for what
+  // enforcement is left. Not hidden, deleted: the tab, its component, the
+  // route id, and the mandate.audience_tools grant it wrote all went
+  // together, so nothing is left to rebuild against.
   { id: "connectors", label: "Apps", icon: Plug },
-  { id: "tools", label: "Tools", icon: Users },
   // feat/agent-context-grant: which PROJECTS this agent may reach. Named
   // "Context" and not "Projects" because the thing being granted is the
   // agent's context layer (tasks + documents), and because an agent no
@@ -229,7 +230,7 @@ const CONFIGURE_GROUPS: { id: string; label: string; tabs: TabId[] }[] = [
   // "context" sits in Reach on purpose — this group is literally "how
   // it's reached, and WHAT IT CAN REACH OUT TO", and the project grant is
   // the largest thing an agent can reach out to.
-  { id: "reach", label: "Reach", tabs: ["channels", "connectors", "tools", "context"] },
+  { id: "reach", label: "Reach", tabs: ["channels", "connectors", "context"] },
   { id: "compute", label: "Compute", tabs: ["hardware"] },
 ];
 const CONFIGURE_TAB_IDS = new Set<TabId>(CONFIGURE_GROUPS.flatMap((g) => g.tabs));
@@ -1045,7 +1046,7 @@ export function FleetAgentDetail({
   // Whether the Configure sheet is open — derived from the URL's own
   // activeTab on every render, same rule as activeTab itself (see the
   // comment above it, ~line 296): no local open/closed state to desync.
-  // Cold-loading /agents/{id}/tools lands here with initialTab="tools"
+  // Cold-loading /agents/{id}/channels lands here with initialTab="channels"
   // already resolved, so this is true on first paint, not after a second
   // click — the sheet opens on the right section immediately.
   const sheetOpen = CONFIGURE_TAB_IDS.has(activeTab);
@@ -1233,12 +1234,14 @@ export function FleetAgentDetail({
           who can reach it (a channel it's wired to), never a per-agent
           "audience" a human grades it with in a form. The Configure >
           General "Purpose" picker that used to write agent.audience
-          (PurposeSection) is deleted the same way, below GeneralTab.
-          fleet_tools.resolve_agent_audience is left alone on the backend
-          (JSONB metadata, not a live security gate — see
-          audience_tool_filter.py's own docstring for the actual,
-          per-CHANNEL-TURN tool-authority mechanism this is not, and never
-          reads agent.audience at all). */}
+          (PurposeSection) is deleted the same way, below GeneralTab. So is
+          the Configure > Tools TAB itself, as of 2026-08-21 — the
+          per-CHANNEL-TURN tool-authority mechanism it wrote grants for no
+          longer exists either (server_modules/authority_mandate_service.py).
+          fleet_tools.resolve_agent_audience is left alone on the backend:
+          `audience` still means WHO MAY TALK TO IT (reachability), which is
+          the one axis that genuinely differs between the two product
+          shapes, and it never gated tools. */}
       {/* Zero is never shown as a row — an unconnected Channels/Connectors
           count is noise, not a fact worth a permanent line in a panel
           that's visible on every tab. Configure > Channels/Connectors is
@@ -1473,14 +1476,18 @@ export function FleetAgentDetail({
             {activeTab === "connectors" && (
               <ConnectorsTab workspaceId={workspaceId} agentId={agentId} agent={agent} />
             )}
-            {activeTab === "tools" && (
-              <ToolsTab workspaceId={workspaceId} agentId={agentId} agent={agent} onChat={() => onChat(agentId)} />
-            )}
             {activeTab === "context" && (
               <ContextTab workspaceId={workspaceId} agentId={agentId} isMaster={isMaster} />
             )}
             {activeTab === "hardware" && (
-              <HardwareTab workspaceId={workspaceId} agentId={agentId} agent={agent} onSaved={onRenamed} />
+              <HardwareTab
+                workspaceId={workspaceId}
+                agentId={agentId}
+                agent={agent}
+                onSaved={onRenamed}
+                reachableChannels={connectedChannelRows.map((c) => c.label)}
+                channelsLoading={channelsLoading}
+              />
             )}
           </div>
         </div>
@@ -3712,178 +3719,6 @@ function Disclosure({
         {label}
       </button>
       {open && <div className="fleet-disclosure-body">{children}</div>}
-    </div>
-  );
-}
-
-// ── Tools ───────────────────────────────────────────────────────────────────
-//
-// 2026-08-14 (CLAUDE.md, founder decision): there is no more per-agent Tools
-// enable/disable checklist. "Agent is going to use whatever is provided to
-// it... agent decides, agent uses" — the same reasoning Claude Code uses for
-// its own terminal. An agent's own tool availability is no longer something
-// an owner switches on this screen at all.
-//
-// What remains here, and is a genuinely different, preserved feature: WHO
-// may trigger an already-available tool when this agent is messaged by
-// someone OUTSIDE the workspace (Authority Mandate, Part 10). That is a
-// security boundary, not a capability checklist, so it keeps its own tab.
-
-function ToolCustomerAccess({
-  tool, busy, onGrant, onRevoke,
-}: { tool: FleetTool; busy: boolean; onGrant: () => void; onRevoke: () => void }) {
-  if (tool.audience_safe) {
-    return (
-      <span
-        className="fleet-badge"
-        style={{ marginLeft: 0 }}
-        title="The platform marks this tool safe for anyone to trigger."
-      >
-        Safe by default
-      </span>
-    );
-  }
-  if (tool.mandate_granted) {
-    return (
-      <button
-        type="button"
-        className="fleet-badge fleet-badge--lock fleet-badge--action"
-        style={{ marginLeft: 0 }}
-        disabled={busy}
-        onClick={onRevoke}
-        title="Customers can trigger this. Click to revoke."
-      >
-        Granted by you
-      </button>
-    );
-  }
-  return (
-    <button
-      type="button"
-      className="fleet-badge fleet-badge--action"
-      style={{ marginLeft: 0 }}
-      disabled={busy}
-      onClick={onGrant}
-      title="Only the workspace owner can trigger this. Click to grant customer access."
-    >
-      Owner only
-    </button>
-  );
-}
-
-function ToolsTab({
-  workspaceId, agentId, agent, onChat,
-}: { workspaceId: string; agentId: string; agent: FleetAgent | null; onChat: () => void }) {
-  const { tools, isMaster, loading, refresh } = useFleetAgentTools(workspaceId, agentId);
-  // Truth Map B1: a handful of tools (Calendar/Task Runner/Email/CRM) are
-  // real but execution_mode="manual" with no direct executor — granting
-  // customer access to one does nothing until the connector named in
-  // requires_connector is actually connected. Cross-referencing the same
-  // connector list the Connectors tab already fetches, so this stays
-  // accurate if a deployment configures Google Workspace OAuth later.
-  const { connectors: toolConnectors, loading: connectorsLoading } = useFleetAgentConnectors(workspaceId, agentId);
-  const [mandateBusy, setMandateBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  async function setMandate(toolId: string, grant: boolean) {
-    setMandateBusy(toolId);
-    setError(null);
-    // mandate.audience_tools is replace-semantics server-side, so reconstruct
-    // the full desired set from what's currently visible on this tab.
-    const nextGranted = new Set(tools.filter((t) => t.mandate_granted).map((t) => t.id));
-    if (grant) nextGranted.add(toolId);
-    else nextGranted.delete(toolId);
-    try {
-      const res = await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
-        method: "PATCH",
-        credentials: "include",
-        headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
-        body: JSON.stringify({ patch: { mandate: { audience_tools: Array.from(nextGranted) } } }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
-      await refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not update customer access for this tool.");
-    } finally {
-      setMandateBusy(null);
-    }
-  }
-
-  if (loading || connectorsLoading) {
-    return <FleetToggleRowsSkeleton rows={6} trailing="button" label="Loading tools" />;
-  }
-
-  const connectorById = new Map(toolConnectors.map((c) => [c.id, c]));
-
-  if (tools.length === 0) {
-    return (
-      <EmptyState
-        icon={Users}
-        title="No tools to grant"
-        body="Ask AI to configure tools for this agent."
-        action="Chat to configure"
-        onAction={onChat}
-      />
-    );
-  }
-
-  return (
-    <div className="fleet-config">
-      {/* Founder feedback (copy discipline pass): this used to open with a
-          2-sentence policy paragraph explaining the audience model before
-          any control appeared — "a professional tool labels, it does not
-          lecture." The badge legend right below already IS the label: every
-          tool row wears one of these three badges, so what "customer" vs
-          "owner" access means is shown at the point of use, not read once
-          and forgotten above the fold. The `hint` tooltip on the Properties
-          panel's "Tools" row (this file, PanelRow) still carries the
-          one-sentence version for whoever hovers it. */}
-      <div
-        className="fleet-subtitle"
-        style={{ marginTop: 0, marginBottom: 12, display: "flex", flexWrap: "wrap", gap: "6px 16px", alignItems: "center" }}
-      >
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-          <span className="fleet-badge" style={{ marginLeft: 0 }}>Safe by default</span> anyone can use it
-        </span>
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-          <span className="fleet-badge fleet-badge--lock" style={{ marginLeft: 0 }}>Granted by you</span> you opened it up
-        </span>
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-          <span className="fleet-badge" style={{ marginLeft: 0 }}>Owner only</span> the default — click to grant
-        </span>
-      </div>
-      {isMaster ? (
-        <p className="fleet-channel-expand-hint" style={{ marginTop: 0 }}>
-          This is the operator agent — it has no customer-facing surface, so there is nothing here to grant.
-        </p>
-      ) : (
-        <p className="fleet-channel-expand-hint" style={{ marginTop: 0 }}>
-          The agent already has every tool below. This only controls whether someone messaging it from OUTSIDE your workspace can trigger it — you keep full access regardless.
-        </p>
-      )}
-      {!isMaster && tools.map((t) => {
-        const requiredConnector = t.requires_connector ? connectorById.get(t.requires_connector) : undefined;
-        const connectorMissing = Boolean(t.requires_connector) && !requiredConnector?.connected;
-        return (
-        <div key={t.id} className="fleet-toggle-row">
-          <div style={{ minWidth: 0 }}>
-            <div className="fleet-toggle-row-label">{t.label}</div>
-            {t.description && <div className="fleet-toggle-row-desc">{t.description}</div>}
-            {connectorMissing && (t.audience_safe || t.mandate_granted) && (
-              <div className="fleet-toggle-row-desc">Connect the required account to actually run this</div>
-            )}
-          </div>
-          <ToolCustomerAccess
-            tool={t}
-            busy={mandateBusy === t.id}
-            onGrant={() => setMandate(t.id, true)}
-            onRevoke={() => setMandate(t.id, false)}
-          />
-        </div>
-        );
-      })}
-      {error && <p className="fleet-channel-expand-error">{error}</p>}
     </div>
   );
 }

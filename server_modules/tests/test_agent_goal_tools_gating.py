@@ -90,10 +90,33 @@ class GoalConnectorMembershipTests(unittest.TestCase):
             goal_tool_names,
             {"goal__create", "goal__list", "goal__get", "goal__update"},
         )
+        # The `audience_safe` manifest flag these four used to assert is
+        # gone (2026-08-21, authority_mandate_service). The replacement fact
+        # is the opposite one and is worth asserting because it inverted:
+        # goal__* is now one of the two families the machine-administration
+        # floor reserves to the workspace owner, so a non-owner tier is
+        # refused at the execution choke point no matter how the tool
+        # reached the model.
+        from server_modules import authority_mandate_service
+
         for descriptor in skills_service._builtin_tool_descriptors():
             if descriptor.connector_id == "goal":
                 with self.subTest(tool_name=descriptor.tool_name):
-                    self.assertTrue(descriptor.audience_safe)
+                    self.assertTrue(
+                        authority_mandate_service.is_owner_only_tool(
+                            tool_name=descriptor.tool_name,
+                            connector_id=descriptor.connector_id,
+                            action_id=descriptor.action_id,
+                        )
+                    )
+                    self.assertFalse(
+                        authority_mandate_service.is_tool_call_allowed(
+                            "audience",
+                            tool_name=descriptor.tool_name,
+                            connector_id=descriptor.connector_id,
+                            action_id=descriptor.action_id,
+                        )
+                    )
 
 
 class GoalBuiltinDirectToolRoutingTests(unittest.TestCase):

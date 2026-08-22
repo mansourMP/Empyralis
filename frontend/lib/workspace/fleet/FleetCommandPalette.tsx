@@ -27,7 +27,6 @@ import {
   Sparkles,
   Sun,
   UserPlus,
-  Wrench,
   type LucideIcon,
 } from "lucide-react";
 
@@ -76,7 +75,10 @@ const AGENT_TABS: { id: string; label: string; icon: LucideIcon }[] = [
   // a palette entry named for a section nobody can find by that name is
   // worse than no entry.
   { id: "connectors", label: "Apps", icon: Plug },
-  { id: "tools", label: "Tools", icon: Wrench },
+  // "tools" is gone the same way, 2026-08-21 — the per-agent Tools tab and
+  // the tool-authority tier behind it were deleted outright
+  // (server_modules/authority_mandate_service.py), so this entry would jump
+  // to a route id that no longer exists.
   { id: "model", label: "Model", icon: Sparkles },
   { id: "memory", label: "Memory", icon: Brain },
 ];

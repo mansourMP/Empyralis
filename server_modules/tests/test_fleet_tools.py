@@ -172,23 +172,23 @@ class FleetGetAgentToolsExcludesCapabilityGatedToolsTests(unittest.TestCase):
         self.assertIn("web__search", ids)
 
 
-class FleetGetAgentToolsMandateStateTests(unittest.TestCase):
-    """Customer access (Part 10 Authority Mandate) surfaced on the Customer
-    Access tab: audience_safe is the platform's own manifest default (never
-    toggleable), mandate_granted reflects this owner's mandate.audience_tools
-    list, keyed by the same canonical enforcement id fleet_get_agent_tools
-    already uses for `id` — not the connector.action dot form."""
+class FleetGetAgentToolsCatalogShapeTests(unittest.TestCase):
+    """fleet_get_agent_tools is a read-only INVENTORY now — no per-tool
+    controls at all.
 
-    def test_audience_safe_and_mandate_granted_reflect_manifest_and_owner_grant(self):
-        bundle = {
-            "install_metadata": {
-                "role": "specialist",
-                "mandate": {"audience_tools": ["fleet__configure_agent"]},
-            },
-        }
+    It used to carry `audience_safe` (the platform's manifest default) and
+    `mandate_granted` (this owner's mandate.audience_tools grant), which the
+    per-agent Tools tab rendered as a three-state "who may trigger this"
+    badge. All of it is deleted (see
+    server_modules/authority_mandate_service.py). These assertions replace
+    the two that proved the badge states, and they guard the opposite thing:
+    that no per-tool authority field comes back, and that the one field with
+    a live consumer survives."""
+
+    def _tools(self, install_metadata):
         with patch(
             "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
-            AsyncMock(return_value=bundle),
+            AsyncMock(return_value={"install_metadata": install_metadata}),
         ):
             result = _run(
                 fleet_tools.fleet_get_agent_tools(
@@ -196,34 +196,34 @@ class FleetGetAgentToolsMandateStateTests(unittest.TestCase):
                 )
             )
         self.assertTrue(result["ok"])
-        by_id = {t["id"]: t for t in result["tools"]}
-        # web__search is audience_safe=True on its own manifest ("Safe by
-        # default") — informational, not something the owner granted.
-        self.assertTrue(by_id["web__search"]["audience_safe"])
-        self.assertFalse(by_id["web__search"]["mandate_granted"])
-        # fleet__configure_agent defaults to owner-only, but this owner
-        # explicitly granted it via mandate.audience_tools, by its canonical
-        # enforcement id — not the "fleet.configure_agent" dot form.
-        self.assertFalse(by_id["fleet__configure_agent"]["audience_safe"])
-        self.assertTrue(by_id["fleet__configure_agent"]["mandate_granted"])
-        # A tool with neither is plain "Owner only".
-        self.assertFalse(by_id["shell__exec"]["audience_safe"])
-        self.assertFalse(by_id["shell__exec"]["mandate_granted"])
+        return {t["id"]: t for t in result["tools"]}
 
-    def test_no_mandate_metadata_defaults_every_non_safe_tool_to_ungranted(self):
-        bundle = {"install_metadata": {"role": "specialist"}}
-        with patch(
-            "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
-            AsyncMock(return_value=bundle),
-        ):
-            result = _run(
-                fleet_tools.fleet_get_agent_tools(
-                    workspace_id="ws-1", tenant_id="tenant-1", agent_id="ainstall-1",
-                )
-            )
-        self.assertTrue(result["ok"])
-        by_id = {t["id"]: t for t in result["tools"]}
-        self.assertFalse(by_id["shell__exec"]["mandate_granted"])
+    def test_no_per_tool_authority_fields_are_emitted(self):
+        by_id = self._tools({"role": "specialist"})
+        self.assertIn("shell__exec", by_id)
+        for tool in by_id.values():
+            for gone in ("audience_safe", "mandate_granted", "enabled"):
+                self.assertNotIn(gone, tool, f"{tool['id']} still carries {gone}")
+
+    def test_a_stale_stored_mandate_changes_nothing(self):
+        """`mandate` metadata is deliberately left on existing installs
+        rather than migrated away, so this endpoint WILL still meet it in
+        production. It must not resurface as a field or change any output."""
+        plain = self._tools({"role": "specialist"})
+        stale = self._tools(
+            {"role": "specialist", "mandate": {"audience_tools": ["fleet__configure_agent"]}}
+        )
+        self.assertEqual(plain, stale)
+
+    def test_requires_connector_survives_because_connector_picker_reads_it(self):
+        """The one field with a live consumer — ConnectorPicker uses it to
+        say what connecting an app actually gives the agent. If this ever
+        goes empty the endpoint has no reason to exist."""
+        by_id = self._tools({"role": "specialist"})
+        self.assertTrue(
+            any(t.get("requires_connector") for t in by_id.values()),
+            "no tool declares requires_connector — ConnectorPicker's panel would be blank",
+        )
 
 
 class FleetScheduleControlTests(unittest.TestCase):

@@ -745,60 +745,34 @@ class FleetConfigureValidationTests(unittest.TestCase):
         )
         self.assertNotIn("Invalid model_config model", str(result.get("error") or ""))
 
-    def _mandate_patch_result(self, mandate_patch, *, existing_mandate=None):
-        """mandate's shape validation runs AFTER the install-bundle lookup
-        (it merges into existing metadata, unlike model_config's up-front
-        checks), so exercising it needs a bundle mock — a nonexistent
-        agent_id short-circuits before ever reaching this code."""
-        bundle = {
-            "id": "agent-x",
-            "install_metadata": {"mandate": dict(existing_mandate or {})},
-        }
-        with (
-            patch(
-                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
-                new=AsyncMock(return_value=bundle),
-            ),
-            patch(
-                "server_modules.agent_registry_repository.update_workspace_agent_install",
-                new=AsyncMock(return_value=bundle),
-            ),
-        ):
-            return _run(
-                fleet_tools.fleet_configure_agent(
-                    actor_id="agent-op-1",
-                    workspace_id="ws-test",
-                    agent_id="agent-x",
-                    patch={"mandate": mandate_patch},
-                )
+    def test_mandate_patch_key_is_rejected_outright(self):
+        """DELETED 2026-08-21, asserted as deleted.
+
+        Five tests used to live here validating `mandate.audience_tools` —
+        the owner-declared allowlist of tools a non-owner could trigger,
+        written by the per-agent Tools tab. The tab, the grant and the tier
+        behind them are gone (see server_modules/authority_mandate_service.py
+        for the founder decision).
+
+        The replacement assertion is the important one, and it is
+        structural: `mandate` is out of _ALLOWED_CONFIGURE_KEYS, so a patch
+        carrying it is refused as an unknown key rather than silently
+        dropped. A silently-dropped patch key is this codebase's own
+        documented "the write path exists and does nothing" failure — and
+        `fleet_configure_agent` is callable BY AN AGENT, so an
+        authority-shaped key it can send and have quietly ignored is worse
+        than one it cannot send at all."""
+        self.assertNotIn("mandate", fleet_tools._ALLOWED_CONFIGURE_KEYS)
+        result = _run(
+            fleet_tools.fleet_configure_agent(
+                actor_id="agent-op-1",
+                workspace_id="ws-test",
+                agent_id="agent-x",
+                patch={"mandate": {"audience_tools": ["custom_api.http_request"]}},
             )
-
-    def test_mandate_audience_tools_accepted_and_applied(self):
-        """The owner-declared mandate allowlist patch (mandate.audience_tools)
-        — the PATCHable contract runs_execution's connector mandate gate
-        reads — is validated, deduped, and applied."""
-        result = self._mandate_patch_result({"audience_tools": ["custom_api.http_request", "slack.post_message"]})
-        self.assertTrue(result["ok"])
-        self.assertIn("mandate", result["applied"])
-
-    def test_mandate_non_object_patch_rejected(self):
-        result = self._mandate_patch_result("not-an-object")
+        )
         self.assertFalse(result["ok"])
-        self.assertEqual(result["error"], "mandate must be an object.")
-
-    def test_mandate_audience_tools_non_list_rejected(self):
-        result = self._mandate_patch_result({"audience_tools": "custom_api.http_request"})
-        self.assertFalse(result["ok"])
-        self.assertIn("mandate.audience_tools must be an array", result["error"])
-
-    def test_mandate_audience_tools_non_string_items_rejected(self):
-        result = self._mandate_patch_result({"audience_tools": ["custom_api.http_request", 42]})
-        self.assertFalse(result["ok"])
-        self.assertIn("mandate.audience_tools must be an array", result["error"])
-
-    def test_mandate_audience_tools_dedupes_and_normalizes(self):
-        result = self._mandate_patch_result({"audience_tools": [" custom_api.http_request ", "custom_api.http_request", ""]})
-        self.assertTrue(result["ok"])
+        self.assertIn("No valid patch keys", result["error"])
 
     def test_gateway_binding_accepted_by_validation(self):
         """BYO-brain Phase 0/3: gateway_binding + runtime pass validation when

@@ -1992,37 +1992,38 @@ class RunsExecutionGraphTests(unittest.TestCase):
 
 
 class ConnectorActionMandateGateTests(unittest.TestCase):
-    """runs_execution._workflow_execute_connector_action historically bypassed
-    skills_service's mandate gate entirely — the second choke point. These
-    tests exercise the gate now applied there directly (not mocked). FAIL-
-    CLOSED (mandate completion follow-up): every other _workflow_execute_
-    connector_action call in this file was updated to pass authority_tier:
-    "owner" explicitly — they test pre-mandate dispatch/duplicate-guard
-    behavior, not the gate, and a real owner-configured/agent-turn-spawned
-    run is what they represent."""
+    """runs_execution._workflow_execute_connector_action's own mandate gate —
+    the second choke point, exercised directly (not mocked).
 
-    def _bundle(self, *, audience_tools=None):
-        return {
-            "id": "install-1",
-            "install_metadata": {
-                "mandate": {"audience_tools": list(audience_tools or [])},
-            },
-        }
+    2026-08-21 — THIS CLASS INVERTED with the rule it tests. It used to prove
+    deny-by-default: a connector/MCP action had no audience_safe manifest, so
+    a non-owner was refused unless the owner had listed it in that agent's
+    mandate.audience_tools. That allowlist and the per-agent bundle fetch
+    this gate did to read it are deleted (see
+    server_modules/authority_mandate_service.py). What is left is the
+    machine-administration floor — the "fleet"/"goal" connector families —
+    so the blocked cases below are pointed at those and the allowed cases at
+    an ordinary connector. FAIL-CLOSED on the TIER is unchanged and is still
+    asserted.
+
+    Note there is no longer a bundle mock in this class: the gate reads no
+    agent record at all now, which also removes a per-connector-call DB round
+    trip that used to happen on every workflow node."""
+
+    _ORDINARY = {"connector": "custom_api", "action_id": "http_request", "url": "https://example.com/hook"}
+    _MACHINE_ADMIN = {"connector": "fleet", "action_id": "schedule_task"}
 
     def test_no_stamped_tier_blocked_fail_closed(self):
-        """Enumerated every producer reaching run_service.create_run's single
-        call site (see the mandate hardening follow-up report) — none leave
-        a run with no derivable tier. A context with no authority_tier
-        anywhere now normalizes to audience, same as skills_service's gate,
-        and blocks a non-audience_safe connector action rather than passing
-        through."""
+        """A context with no authority_tier anywhere normalizes to audience,
+        same as skills_service's gate, and is refused machine administration
+        rather than passing through."""
         with self.assertRaises(RuntimeError) as ctx:
             runs_execution._workflow_execute_connector_action(
                 "run-no-tier",
                 "node-no-tier",
                 {"workspace_id": "default", "agent_id": "agent-1", "metadata": {}},
-                {"connector": "custom_api", "action_id": "http_request", "url": "https://example.com/hook"},
-                current_text="Call API",
+                dict(self._MACHINE_ADMIN),
+                current_text="Schedule it",
             )
         self.assertEqual(str(ctx.exception), authority_mandate_service.MANDATE_BLOCKED_MESSAGE)
 
@@ -2037,49 +2038,19 @@ class ConnectorActionMandateGateTests(unittest.TestCase):
                     "run-no-tier-2",
                     "node-no-tier-2",
                     {"workspace_id": "default", "agent_id": "agent-1", "metadata": {}},
-                    {"connector": "custom_api", "action_id": "http_request", "url": "https://example.com/hook"},
-                    current_text="Call API",
+                    dict(self._MACHINE_ADMIN),
+                    current_text="Schedule it",
                 )
         event_classes = [call.kwargs.get("event_class") for call in ledger_mock.await_args_list]
         self.assertIn(authority_mandate_service.MANDATE_UNATTRIBUTED_EVENT_CLASS, event_classes)
         self.assertIn(authority_mandate_service.MANDATE_BLOCKED_EVENT_CLASS, event_classes)
 
-    def test_audience_tier_blocked_when_not_in_mandate_audience_tools(self):
-        """Connector/MCP actions default NOT audience_safe (fail-safe) — an
-        audience-tier caller is blocked unless the owner explicitly listed
-        this exact tool in the agent's mandate.audience_tools."""
+    def test_audience_tier_reaches_an_ordinary_connector_action(self):
+        """THE INVERSION. This exact call — audience tier, custom_api.
+        http_request, no allowlist anywhere — used to raise. It now runs."""
         with patch(
-            "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
-            new=AsyncMock(return_value=self._bundle(audience_tools=[])),
-        ):
-            with self.assertRaises(RuntimeError) as ctx:
-                runs_execution._workflow_execute_connector_action(
-                    "run-audience-blocked",
-                    "node-audience-blocked",
-                    {
-                        "workspace_id": "default",
-                        "tenant_id": "tenant-1",
-                        "agent_id": "agent-1",
-                        "authority_tier": "audience",
-                        "metadata": {},
-                    },
-                    {"connector": "custom_api", "action_id": "http_request", "url": "https://example.com/hook"},
-                    current_text="Call API",
-                )
-        self.assertEqual(str(ctx.exception), authority_mandate_service.MANDATE_BLOCKED_MESSAGE)
-
-    def test_audience_tier_allowed_when_tool_in_mandate_audience_tools(self):
-        """The owner-declared mandate allowlist makes a connector/MCP action
-        audience-callable -- the ONLY way one becomes audience_safe."""
-        with (
-            patch(
-                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
-                new=AsyncMock(return_value=self._bundle(audience_tools=["custom_api.http_request"])),
-            ),
-            patch(
-                "server_modules.runs_execution.http_json_request",
-                return_value={"status": 200, "json": {"ok": True}, "text": ""},
-            ),
+            "server_modules.runs_execution.http_json_request",
+            return_value={"status": 200, "json": {"ok": True}, "text": ""},
         ):
             result = runs_execution._workflow_execute_connector_action(
                 "run-audience-allowed",
@@ -2091,23 +2062,63 @@ class ConnectorActionMandateGateTests(unittest.TestCase):
                     "authority_tier": "audience",
                     "metadata": {},
                 },
-                {"connector": "custom_api", "action_id": "http_request", "url": "https://example.com/hook"},
+                dict(self._ORDINARY),
                 current_text="Call API",
             )
         self.assertIn("Connector action completed", result["summary"])
 
-    def test_owner_tier_unaffected_by_empty_mandate(self):
-        """Owner unaffected: owner tier bypasses the mandate check entirely,
-        with or without a mandate.audience_tools allowlist."""
-        with (
-            patch(
-                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
-                new=AsyncMock(return_value=self._bundle(audience_tools=[])),
+    def test_audience_tier_blocked_for_machine_administration(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            runs_execution._workflow_execute_connector_action(
+                "run-audience-blocked",
+                "node-audience-blocked",
+                {
+                    "workspace_id": "default",
+                    "tenant_id": "tenant-1",
+                    "agent_id": "agent-1",
+                    "authority_tier": "audience",
+                    "metadata": {},
+                },
+                dict(self._MACHINE_ADMIN),
+                current_text="Schedule it",
+            )
+        self.assertEqual(str(ctx.exception), authority_mandate_service.MANDATE_BLOCKED_MESSAGE)
+
+    def test_a_stale_stored_mandate_cannot_unblock_machine_administration(self):
+        """`mandate` metadata is left on existing installs rather than
+        migrated away. The gate no longer reads the agent record at all, so
+        even an install still carrying the exact grant that used to work must
+        change nothing — asserted with the bundle fetch mocked to return it,
+        which is the closest this can get to the production shape."""
+        with patch(
+            "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+            new=AsyncMock(
+                return_value={
+                    "id": "install-1",
+                    "install_metadata": {"mandate": {"audience_tools": ["fleet.schedule_task"]}},
+                }
             ),
-            patch(
-                "server_modules.runs_execution.http_json_request",
-                return_value={"status": 200, "json": {"ok": True}, "text": ""},
-            ),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                runs_execution._workflow_execute_connector_action(
+                    "run-stale-mandate",
+                    "node-stale-mandate",
+                    {
+                        "workspace_id": "default",
+                        "tenant_id": "tenant-1",
+                        "agent_id": "agent-1",
+                        "authority_tier": "audience",
+                        "metadata": {},
+                    },
+                    dict(self._MACHINE_ADMIN),
+                    current_text="Schedule it",
+                )
+        self.assertEqual(str(ctx.exception), authority_mandate_service.MANDATE_BLOCKED_MESSAGE)
+
+    def test_owner_tier_reaches_an_ordinary_connector_action(self):
+        with patch(
+            "server_modules.runs_execution.http_json_request",
+            return_value={"status": 200, "json": {"ok": True}, "text": ""},
         ):
             result = runs_execution._workflow_execute_connector_action(
                 "run-owner",
@@ -2119,7 +2130,7 @@ class ConnectorActionMandateGateTests(unittest.TestCase):
                     "authority_tier": "owner",
                     "metadata": {},
                 },
-                {"connector": "custom_api", "action_id": "http_request", "url": "https://example.com/hook"},
+                dict(self._ORDINARY),
                 current_text="Call API",
             )
         self.assertIn("Connector action completed", result["summary"])
@@ -2129,23 +2140,19 @@ class ConnectorActionMandateGateTests(unittest.TestCase):
         nested at metadata.agent_turn_request.authority_tier (serialize_
         agent_turn_request's shape) -- the gate must find it there too, not
         only as a direct top-level key."""
-        with patch(
-            "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
-            new=AsyncMock(return_value=self._bundle(audience_tools=[])),
-        ):
-            with self.assertRaises(RuntimeError) as ctx:
-                runs_execution._workflow_execute_connector_action(
-                    "run-nested-tier",
-                    "node-nested-tier",
-                    {
-                        "workspace_id": "default",
-                        "tenant_id": "tenant-1",
-                        "agent_id": "agent-1",
-                        "metadata": {"agent_turn_request": {"authority_tier": "audience"}},
-                    },
-                    {"connector": "custom_api", "action_id": "http_request", "url": "https://example.com/hook"},
-                    current_text="Call API",
-                )
+        with self.assertRaises(RuntimeError) as ctx:
+            runs_execution._workflow_execute_connector_action(
+                "run-nested-tier",
+                "node-nested-tier",
+                {
+                    "workspace_id": "default",
+                    "tenant_id": "tenant-1",
+                    "agent_id": "agent-1",
+                    "metadata": {"agent_turn_request": {"authority_tier": "audience"}},
+                },
+                dict(self._MACHINE_ADMIN),
+                current_text="Schedule it",
+            )
         self.assertEqual(str(ctx.exception), authority_mandate_service.MANDATE_BLOCKED_MESSAGE)
 
 
