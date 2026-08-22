@@ -125,3 +125,52 @@ Steps 1–2 have not started. In particular, no HTTP route string, persisted
 value, protocol/tool name, human confirmation phrase, environment variable,
 database table/column name, migration, historical comment, or archived record
 was renamed.
+
+## Where the rename stands (2026-08-22)
+
+Steps 1–2 of `CODEX-RENAME-PROPOSAL.md`, internal module names only. Seventeen
+of the twenty-four `server_modules/sage_*.py` modules are renamed, in four
+commits, each one verified with a clean contract snapshot and a full Python
+suite whose FAILING SET is byte-identical to the parent commit's — 533
+FAILED/ERROR node ids, zero added, zero removed. Counts alone would not prove
+that; the set does.
+
+| Batch | Domain | Commit |
+|---|---|---|
+| 0 | harness fix + baseline regeneration | `17ca59ed` |
+| 1 | turn runtime | `9ffc2eb8` |
+| 2 | command dispatcher / turn adapter / reply dispatcher | `598f42cf` |
+| 3 | assistant memory | `5ebf54f9` |
+| 4 | profile, skills, services, health, audit, transparency, doctor | `7c31fcf7` |
+
+Nothing observable moved: the 56 `/api/sage-*` route entries, the three
+`sage_service__*` wire tool names, every persisted value (`sage-main`,
+`sage_main_agent`, the memory audit action names), the `WIPE SAGE MEMORY`
+confirmation phrase and every `*SAGE*` environment key are byte-identical to
+the baseline.
+
+**Still carrying the old stem, and why each was left:**
+
+| Module | Reason |
+|---|---|
+| `sage_chat_api.py`, `sage_context_files_api.py` | `test_workspace_storage_accounting.py` holds both as real filesystem paths (`LIVE_HANDLER` / `SHADOWED_TWIN`) to prove which of the twin `POST /api/sage-chat/attachments` registrations wins. Renaming means editing that test in the same commit — mechanical, but not a pure substitution. |
+| `sage_dreaming_pipeline.py` | Named in `test_module_reachability.ALLOWLISTED_ORPHANS`, which asserts the file still exists. Same one-line coupling. |
+| `sage_telegram_hosted_service.py` | Provider-specific hosted-channel surface. The proposal says review these independently rather than sweeping them into the core rename. |
+| `sage_agent_computer_selection_service.py`, `sage_daily_operator_service.py`, `sage_instruction_compiler_service.py` | Straight substitutions, simply not reached. |
+
+Also untouched, deliberately: identifiers such as `handle_sage_chat`,
+`execute_sage_turn`, `dispatch_sage_reply_safe`, `build_sage_memory_context_
+block` and `SAGE_THREAD_ID`. Several share a name with a persisted audit action
+string, so they belong to Step 4's dual-read/dual-write, not to a textual edit.
+Test filenames (`test_sage_*.py`) and the `.md` documentation are the later
+cosmetic batch; the historical comment in
+`migrations/unify_fleet_tool_toggle_ids.sql` stays as written — migration
+history is annotated, never rewritten.
+
+**Frontend verification, stated plainly:** `npm run test:unit` and
+`npx tsc --noEmit` were NOT run. A git worktree has no `node_modules`, and this
+repository's own notes forbid symlinking one under Turbopack. What was proven
+instead is stronger for these commits than a green test run would have been:
+across the whole branch, **zero** changed `.ts`/`.tsx` lines are anything other
+than `//`, `*` or `/*` — every frontend touch is a comment. A batch that
+changes real frontend code must install dependencies in the worktree first.
