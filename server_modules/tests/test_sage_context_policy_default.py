@@ -25,7 +25,7 @@ import unittest
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, patch
 
-from server_modules.sage_turn_adapter import execute_sage_turn
+from server_modules.agent_turn_adapter import execute_sage_turn
 
 
 def _run(coro):

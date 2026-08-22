@@ -661,7 +661,7 @@ class HardStopMessageTests(unittest.TestCase):
 
     def test_sage_command_dispatcher_has_exhaustion_messages(self):
         """The command dispatcher must export error classification messages."""
-        from server_modules.sage_command_dispatcher import (
+        from server_modules.agent_command_dispatcher import (
             SAGE_AI_LIMIT_REPLY,
             SAGE_AI_NEEDS_ATTENTION_REPLY,
             SAGE_RATE_LIMITED_REPLY,
@@ -743,7 +743,7 @@ class ClassifyErrorTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from server_modules.sage_command_dispatcher import classify_error
+        from server_modules.agent_command_dispatcher import classify_error
         cls._classify = staticmethod(classify_error)
 
     def _classify(self, error_text, *, is_platform_credits=True):

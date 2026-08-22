@@ -1,4 +1,4 @@
-"""Tests for sage_command_dispatcher._handle_compact — the manual `/sage
+"""Tests for agent_command_dispatcher._handle_compact — the manual `/sage
 compact` command handler.
 
 2026-07-24 compaction end-to-end fix pass:
@@ -17,7 +17,7 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from server_modules import sage_command_dispatcher
+from server_modules import agent_command_dispatcher
 
 
 def _run(coro):
@@ -78,8 +78,8 @@ class HandleCompactHonestyTests(unittest.TestCase):
             compact_turns_result="A real summary.",
         )
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7] as compact_mock:
-            reply = _run(sage_command_dispatcher._handle_compact("ws-1", "thread-1"))
-        self.assertEqual(reply, sage_command_dispatcher.SAGE_COMPACTED)
+            reply = _run(agent_command_dispatcher._handle_compact("ws-1", "thread-1"))
+        self.assertEqual(reply, agent_command_dispatcher.SAGE_COMPACTED)
         compact_mock.assert_awaited_once()
 
     def test_never_reports_compacted_when_cut_idx_is_zero_even_with_forced_fallback(self):
@@ -94,8 +94,8 @@ class HandleCompactHonestyTests(unittest.TestCase):
             compact_turns_result="unused",
         )
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7] as compact_mock:
-            reply = _run(sage_command_dispatcher._handle_compact("ws-1", "thread-1"))
-        self.assertEqual(reply, sage_command_dispatcher.SAGE_COMPACT_NOT_NEEDED)
+            reply = _run(agent_command_dispatcher._handle_compact("ws-1", "thread-1"))
+        self.assertEqual(reply, agent_command_dispatcher.SAGE_COMPACT_NOT_NEEDED)
         compact_mock.assert_not_awaited()
 
     def test_reports_not_needed_when_compact_turns_itself_produces_no_summary(self):
@@ -108,8 +108,8 @@ class HandleCompactHonestyTests(unittest.TestCase):
             compact_turns_result="",
         )
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7] as compact_mock:
-            reply = _run(sage_command_dispatcher._handle_compact("ws-1", "thread-1"))
-        self.assertEqual(reply, sage_command_dispatcher.SAGE_COMPACT_NOT_NEEDED)
+            reply = _run(agent_command_dispatcher._handle_compact("ws-1", "thread-1"))
+        self.assertEqual(reply, agent_command_dispatcher.SAGE_COMPACT_NOT_NEEDED)
         compact_mock.assert_awaited_once()
 
     def test_should_compact_false_skips_everything(self):
@@ -119,8 +119,8 @@ class HandleCompactHonestyTests(unittest.TestCase):
             compact_turns_result="unused",
         )
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7] as compact_mock:
-            reply = _run(sage_command_dispatcher._handle_compact("ws-1", "thread-1"))
-        self.assertEqual(reply, sage_command_dispatcher.SAGE_COMPACT_NOT_NEEDED)
+            reply = _run(agent_command_dispatcher._handle_compact("ws-1", "thread-1"))
+        self.assertEqual(reply, agent_command_dispatcher.SAGE_COMPACT_NOT_NEEDED)
         compact_mock.assert_not_awaited()
 
     def test_should_compact_receives_provider_and_model(self):
@@ -132,7 +132,7 @@ class HandleCompactHonestyTests(unittest.TestCase):
             compact_turns_result="unused",
         )
         with patches[0], patches[1], patches[2], patches[3], patches[4] as should_compact_mock, patches[5], patches[6], patches[7]:
-            _run(sage_command_dispatcher._handle_compact("ws-1", "thread-1"))
+            _run(agent_command_dispatcher._handle_compact("ws-1", "thread-1"))
         should_compact_mock.assert_called_once()
         call_kwargs = should_compact_mock.call_args.kwargs
         self.assertIn("provider", call_kwargs)

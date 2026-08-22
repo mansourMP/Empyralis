@@ -411,7 +411,7 @@ async def execute_direct_chat_turn_request(
                 _GENERATION_EVENT_SINK.set(_sink)
                 _loop = _asyncio.new_event_loop()
                 _asyncio.set_event_loop(_loop)
-                from server_modules.sage_turn_adapter import execute_sage_turn
+                from server_modules.agent_turn_adapter import execute_sage_turn
                 sage_result = _loop.run_until_complete(execute_sage_turn(
                     workspace_id=workspace_id,
                     message=str(turn_request.message or ''),
@@ -478,7 +478,7 @@ async def execute_direct_chat_turn_request(
             # web-voice variant, not channel voice with a trailing arrow
             # this surface renders as dead text (see classify_error's own
             # is_web docstring).
-            from server_modules.sage_command_dispatcher import classify_error as _classify_stream_error
+            from server_modules.agent_command_dispatcher import classify_error as _classify_stream_error
             _raw_err = str(error_container['error'])
             _classified = _classify_stream_error(_raw_err, raw_error=_raw_err, is_web=True)
             yield {

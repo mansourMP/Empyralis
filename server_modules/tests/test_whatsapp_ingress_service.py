@@ -187,7 +187,7 @@ class WhatsAppIngressServiceTests(unittest.TestCase):
         from server_modules.agent_turn_runtime_contract import SageTurnResult
 
         with patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn",
+            "server_modules.agent_turn_adapter.execute_sage_turn",
             new=AsyncMock(return_value=SageTurnResult(
                 message="I can help with brake pads.",
                 trace_id="trace-wa-e2e-1",

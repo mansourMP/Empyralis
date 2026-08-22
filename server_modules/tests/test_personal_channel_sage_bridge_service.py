@@ -13,8 +13,8 @@ from server_modules.agent_turn_runtime_contract import SageTurnResult
 # NOTE on the mock seam used throughout this file: personal_channel_sage_
 # bridge_service now routes every unified-path turn through
 # _execute_channel_turn_with_envelope, which calls
-# sage_turn_adapter.execute_sage_turn directly — NOT
-# sage_turn_adapter.execute_sage_turn_for_channel, the seam every patch()
+# agent_turn_adapter.execute_sage_turn directly — NOT
+# agent_turn_adapter.execute_sage_turn_for_channel, the seam every patch()
 # below used to target. See _execute_channel_turn_with_envelope's own
 # docstring for why (execute_sage_turn_for_channel is frozen and doesn't yet
 # accept `envelope=`). Every mocked return value below is therefore a
@@ -75,7 +75,7 @@ def _build_whatsapp_reply(**kwargs):
 # `sage_telegram_hosted` (hosted_bot_provisioning_service.py) is what a
 # customer reaches for Telegram now, and it does not route through
 # personal_channel_sage_bridge_service — it has its own dispatcher
-# (sage_reply_dispatcher.dispatch_sage_reply_safe). Every test below is
+# (agent_reply_dispatcher.dispatch_sage_reply_safe). Every test below is
 # actually about the GENERIC personal-gateway/local-bridge reply path
 # (guard_personal_gateway_inbound_message, group-gate, media handling), which
 # any live OpenClaw-transported channel exercises identically — the name
@@ -120,7 +120,7 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
         deleted fallback to the real chokepoint.
         """
         turn_mock = AsyncMock(return_value=SageTurnResult(message="safe reply"))
-        with patch("server_modules.sage_turn_adapter.execute_sage_turn", new=turn_mock):
+        with patch("server_modules.agent_turn_adapter.execute_sage_turn", new=turn_mock):
             result = _build_telegram_reply(
                 workspace_id="workspace-1",
                 gateway_id="gateway-1",
@@ -139,7 +139,7 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
     def test_async_telegram_reply_routes_unified_sage_with_trace(self) -> None:
         async def run_case():
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(
                     return_value=SageTurnResult(
                         message="unified sage reply",
@@ -156,7 +156,7 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
                 )
 
         result = asyncio.run(run_case())
-        self.assertEqual(result["source"], "sage_turn_adapter")
+        self.assertEqual(result["source"], "agent_turn_adapter")
         self.assertEqual(result["trace_id"], "trace-smoke-1")
         self.assertEqual(result["text"], "unified sage reply")
 
@@ -168,7 +168,7 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
         delivery call site treats as sendable)."""
         async def run_case():
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(side_effect=RuntimeError("HTTP 429 rate limit")),
             ):
                 return await personal_channel_sage_bridge_service.build_personal_channel_reply_async(
@@ -192,7 +192,7 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
         classified error string that a DM/channel send site could deliver."""
         async def run_case():
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(side_effect=RuntimeError("provider HTTP 401 unauthorized")),
             ):
                 return await personal_channel_sage_bridge_service.build_discord_personal_reply_async(
@@ -216,7 +216,7 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
         classified error string forwarded for Gateway delivery."""
         async def run_case():
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(side_effect=ConnectionError("timeout unreachable")),
             ):
                 return await personal_channel_sage_bridge_service.build_personal_channel_reply_async(
@@ -238,7 +238,7 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
 class OutboundMediaPropagationTests(unittest.TestCase):
     """build_*_personal_reply's "media" key -- populated by send_image /
     generate_image's auto-attach via SageTurnResult.media (see
-    agent_turn_runtime_contract.py, sage_turn_adapter.py) and forwarded
+    agent_turn_runtime_contract.py, agent_turn_adapter.py) and forwarded
     verbatim through execute_sage_turn_for_channel's dict result. Covers the
     same media-only-reply property test_personal_channels_service_media.py
     covers one layer down (agent_channel_router's dispatch calls) -- this is
@@ -253,7 +253,7 @@ class OutboundMediaPropagationTests(unittest.TestCase):
 
     def test_whatsapp_reply_carries_media_from_the_turn_result(self) -> None:
         with patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn",
+            "server_modules.agent_turn_adapter.execute_sage_turn",
             new=AsyncMock(return_value=SageTurnResult(message="Here's the fox.", media=[self._MEDIA_ITEM])),
         ):
             result = _build_whatsapp_reply(
@@ -272,7 +272,7 @@ class OutboundMediaPropagationTests(unittest.TestCase):
         None the way a genuinely silent turn does -- _build_unified_sage_personal_reply_async
         gates on `reply or media`, not `reply` alone."""
         with patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn",
+            "server_modules.agent_turn_adapter.execute_sage_turn",
             new=AsyncMock(return_value=SageTurnResult(message="", media=[self._MEDIA_ITEM])),
         ):
             result = _build_telegram_reply(
@@ -313,7 +313,7 @@ class OutboundMediaPropagationTests(unittest.TestCase):
         billing someone and passing.
         """
         turn_mock = AsyncMock(return_value=SageTurnResult(message=""))
-        with patch("server_modules.sage_turn_adapter.execute_sage_turn", new=turn_mock):
+        with patch("server_modules.agent_turn_adapter.execute_sage_turn", new=turn_mock):
             result = _build_whatsapp_reply(
                 workspace_id="workspace-1",
                 gateway_id="gateway-1",
@@ -336,7 +336,7 @@ class OutboundMediaPropagationTests(unittest.TestCase):
         above, on Telegram instead of WhatsApp — both go through the one
         builder personal_channels_service actually calls for every inbound."""
         turn_mock = AsyncMock(return_value=SageTurnResult(message=""))
-        with patch("server_modules.sage_turn_adapter.execute_sage_turn", new=turn_mock):
+        with patch("server_modules.agent_turn_adapter.execute_sage_turn", new=turn_mock):
             result = _build_telegram_reply(
                 workspace_id="workspace-1",
                 gateway_id="gateway-1",
@@ -356,7 +356,7 @@ class OutboundMediaPropagationTests(unittest.TestCase):
         case) has no "media" key at all in its raw result -- must not crash,
         must default to []."""
         with patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn",
+            "server_modules.agent_turn_adapter.execute_sage_turn",
             new=AsyncMock(return_value=SageTurnResult(message="just chatting, no attachments")),
         ):
             result = _build_whatsapp_reply(
@@ -396,7 +396,7 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
     execute_sage_turn here instead, where relevant.
 
     These tests exercise the SAME public functions/mock boundary
-    (sage_turn_adapter.execute_sage_turn, via
+    (agent_turn_adapter.execute_sage_turn, via
     personal_channel_sage_bridge_service._execute_channel_turn_with_envelope)
     as the rest of this file, so they do not depend on the sqlite/
     kill-switch/rust-kernel machinery the full gateway-inbound-handler
@@ -406,7 +406,7 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
     def test_owner_message_gets_clean_provenance_no_security_notice(self) -> None:
         with (
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(return_value=SageTurnResult(message="sure thing")),
             ) as turn_mock,
         ):
@@ -440,7 +440,7 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
         never weaken."""
         with (
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(return_value=SageTurnResult(message="who is this?")),
             ) as turn_mock,
         ):
@@ -462,7 +462,7 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
         the SAFE path, never to owner trust."""
         with (
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(return_value=SageTurnResult(message="ok")),
             ) as turn_mock,
         ):
@@ -503,7 +503,7 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
         canonical envelope module's own tests, not re-asserted here)."""
         with (
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(return_value=SageTurnResult(message="sure thing")),
             ) as turn_mock,
         ):
@@ -539,7 +539,7 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
         message-text-is-now-bare-raw-text half of this same regression)."""
         with (
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(return_value=SageTurnResult(message="sure thing")),
             ) as turn_mock,
         ):
@@ -574,7 +574,7 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
         assertions for the owner branch)."""
         with (
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(return_value=SageTurnResult(message="'Posle' means 'later'.")),
             ) as turn_mock,
         ):
@@ -612,7 +612,7 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
         restated explicitly for the new metadata keys."""
         with (
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(return_value=SageTurnResult(message="who is this?")),
             ) as turn_mock,
         ):
@@ -648,7 +648,7 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
         above, for WhatsApp's own entry point instead of Telegram's."""
         with (
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(return_value=SageTurnResult(message="sure thing")),
             ) as turn_mock,
         ):
@@ -682,7 +682,7 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
         assertion is unchanged and now made on `openclaw_telegram`."""
         async def run_case():
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(return_value=SageTurnResult(message="'Posle' means 'later'.")),
             ) as turn_mock:
                 await _build_telegram_reply_async(
@@ -727,7 +727,7 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
             with self.subTest(surface_channel=surface_channel):
                 async def run_case():
                     with patch(
-                        "server_modules.sage_turn_adapter.execute_sage_turn",
+                        "server_modules.agent_turn_adapter.execute_sage_turn",
                         new=AsyncMock(return_value=SageTurnResult(message="sure thing")),
                     ) as turn_mock:
                         await personal_channel_sage_bridge_service.build_personal_channel_reply_async(
@@ -774,7 +774,7 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
             agent_conversation_memory, "_CONVERSATIONS_ROOT", Path(tmpdir)
         ):
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(return_value=SageTurnResult(message="got it")),
             ):
                 asyncio.run(
@@ -790,7 +790,7 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
                     )
                 )
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(return_value=SageTurnResult(message="no idea who you are")),
             ):
                 asyncio.run(
@@ -840,7 +840,7 @@ class OwnerUnifiedMemoryTests(unittest.TestCase):
     you do in my other channels?" hit an empty/unrelated file and the agent
     denied its own actions. These tests exercise the same public function /
     mock boundary as OwnerAwareProvenanceTests above
-    (sage_turn_adapter.execute_sage_turn_for_channel), directly on
+    (agent_turn_adapter.execute_sage_turn_for_channel), directly on
     agent_conversation_memory-backed storage.
     """
 
@@ -857,7 +857,7 @@ class OwnerUnifiedMemoryTests(unittest.TestCase):
             agent_conversation_memory, "_CONVERSATIONS_ROOT", Path(tmpdir)
         ):
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(return_value=SageTurnResult(message="booked your flight for Friday")),
             ):
                 asyncio.run(
@@ -873,7 +873,7 @@ class OwnerUnifiedMemoryTests(unittest.TestCase):
                     )
                 )
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(return_value=SageTurnResult(message="sure, anything else?")),
             ) as turn_mock:
                 asyncio.run(
@@ -906,7 +906,7 @@ class OwnerUnifiedMemoryTests(unittest.TestCase):
             agent_conversation_memory, "_CONVERSATIONS_ROOT", Path(tmpdir)
         ):
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(return_value=SageTurnResult(message="TOP SECRET OWNER PLAN")),
             ):
                 asyncio.run(
@@ -922,7 +922,7 @@ class OwnerUnifiedMemoryTests(unittest.TestCase):
                     )
                 )
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(return_value=SageTurnResult(message="first stranger reply")),
             ):
                 asyncio.run(
@@ -938,7 +938,7 @@ class OwnerUnifiedMemoryTests(unittest.TestCase):
                     )
                 )
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(return_value=SageTurnResult(message="second reply")),
             ) as turn_mock:
                 asyncio.run(
@@ -978,7 +978,7 @@ class OwnerUnifiedMemoryTests(unittest.TestCase):
             agent_conversation_memory, "_CONVERSATIONS_ROOT", Path(tmpdir)
         ):
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(return_value=SageTurnResult(message="got it, Family Group")),
             ):
                 asyncio.run(
@@ -998,7 +998,7 @@ class OwnerUnifiedMemoryTests(unittest.TestCase):
                     )
                 )
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(return_value=SageTurnResult(message="noted, Work Group")),
             ):
                 asyncio.run(
@@ -1078,7 +1078,7 @@ class PersonalChannelLocalBridgeErrorSurfacingTests(unittest.TestCase):
       (b) the failure is still classified, not silently swallowed — the
           same generic reply builder all three channels share
           (build_personal_channel_reply_async) puts it under
-          result["error_text"]. This mocks the same sage_turn_adapter.
+          result["error_text"]. This mocks the same agent_turn_adapter.
           execute_sage_turn_for_channel seam OwnerAwareProvenanceTests above
           already uses to exercise this module without the sqlite/
           kill-switch/rust-kernel machinery live-handler integration needs.
@@ -1141,7 +1141,7 @@ class PersonalChannelLocalBridgeErrorSurfacingTests(unittest.TestCase):
                 ),
                 patch("server_modules.personal_channels_service.security_audit_service.emit_security_audit_event"),
                 patch(
-                    "server_modules.sage_turn_adapter.execute_sage_turn",
+                    "server_modules.agent_turn_adapter.execute_sage_turn",
                     new=AsyncMock(side_effect=exc),
                 ),
             ):
@@ -1192,7 +1192,7 @@ class PersonalChannelLocalBridgeErrorSurfacingTests(unittest.TestCase):
     ) -> None:
         async def run_case():
             with patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(side_effect=exc),
             ):
                 return await personal_channel_sage_bridge_service.build_personal_channel_reply_async(
@@ -1246,7 +1246,7 @@ class PersonalChannelLocalBridgeErrorSurfacingTests(unittest.TestCase):
         # NOTE: the classified text for a platform-credits auth failure is
         # "...needs attention on the platform side...", not the word
         # "authentication" (that wording is reserved for the BYOK variant —
-        # see sage_command_dispatcher.classify_error's is_platform_credits
+        # see agent_command_dispatcher.classify_error's is_platform_credits
         # branch) — this assertion reflects the actual current text rather
         # than the pre-existing test's stale substring.
         self._assert_classified_error_text(

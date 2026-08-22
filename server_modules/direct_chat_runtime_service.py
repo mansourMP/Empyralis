@@ -12,7 +12,7 @@ sends) and confirmed none do:
     (called from agent_turn(), turn_runtime.py:71), which unconditionally
     calls direct_chat_service.execute_direct_chat_turn_request() — the
     "UNIFIED ENTRY" function that routes through
-    sage_turn_adapter.execute_sage_turn() -> handle_sage_chat() (the
+    agent_turn_adapter.execute_sage_turn() -> handle_sage_chat() (the
     kill-switch + mandate path). That function's entire body touches its
     `services: DirectChatExecutionServices` parameter exactly once (for
     chat_stream_key()) — build_direct_operator_reply/build_chat_turn_event_stream

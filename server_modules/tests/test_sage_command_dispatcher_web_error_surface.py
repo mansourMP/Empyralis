@@ -1,4 +1,4 @@
-"""Tests for sage_command_dispatcher.classify_error's is_web branch.
+"""Tests for agent_command_dispatcher.classify_error's is_web branch.
 
 Found live 2026-08-19 while walking a fresh signup: the web "Ask AI" chat
 (direct_chat_service.py's streaming error path) rendered SAGE_NO_PROVIDER_
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import unittest
 
-from server_modules import sage_command_dispatcher as scd
+from server_modules import agent_command_dispatcher as scd
 
 
 class ClassifyErrorIsWebDefaultUnchangedTests(unittest.TestCase):

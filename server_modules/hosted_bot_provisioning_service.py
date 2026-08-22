@@ -666,7 +666,7 @@ async def route_agent_inbound(
     # history/memory scope, distinct from the workspace's sage-main thread.
     thread_id = f"thread_agent_{agent_install_id}"
 
-    from server_modules.sage_reply_dispatcher import dispatch_sage_reply_safe
+    from server_modules.agent_reply_dispatcher import dispatch_sage_reply_safe
 
     delivered = await dispatch_sage_reply_safe(
         transport=transport,

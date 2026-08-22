@@ -223,7 +223,7 @@ async def execute_voice_sage_task(
             trace_id=envelope.trace_id,
         ).as_dict() | {"voice_policy": envelope.as_policy_dict()}
 
-    from server_modules.sage_turn_adapter import execute_sage_turn
+    from server_modules.agent_turn_adapter import execute_sage_turn
 
     await _emit_voice_policy_event(
         envelope=envelope,

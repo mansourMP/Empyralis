@@ -1024,7 +1024,7 @@ def _public_generation_error_reply(
     *,
     is_platform_credits: bool = True,
 ) -> str:
-    from server_modules.sage_command_dispatcher import classify_error
+    from server_modules.agent_command_dispatcher import classify_error
     _ = services
     return classify_error(
         str(llm_error or ""),

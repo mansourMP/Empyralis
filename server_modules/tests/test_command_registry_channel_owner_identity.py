@@ -189,7 +189,7 @@ class ChannelLinkedOwnerReachesTheOwnerCheckTests(unittest.TestCase):
 
 
 class OwnerGatedCommandReachesItsHandlerFromAChannelTests(unittest.TestCase):
-    """The live path: sage_command_dispatcher.dispatch_command -> dispatch().
+    """The live path: agent_command_dispatcher.dispatch_command -> dispatch().
     An owner-gated command must EXECUTE for the channel-linked owner and stay
     silently unrecognized (None) for anyone else."""
 

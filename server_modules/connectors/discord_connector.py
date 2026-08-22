@@ -1241,10 +1241,10 @@ async def _handle_dm_via_gateway(message: Any) -> None:
         # is bound" gate would otherwise skip it entirely. Mirrors
         # wechat_official_service.handle_inbound_callback's identical fix:
         # deterministic, no DB lookup, keyed per (agent-or-sage, sender).
-        from server_modules.sage_command_dispatcher import agent_sender_thread_id
+        from server_modules.agent_command_dispatcher import agent_sender_thread_id
         _thread_id = agent_sender_thread_id("sage", _author_id)
 
-        from server_modules.sage_command_dispatcher import dispatch_command as _dc
+        from server_modules.agent_command_dispatcher import dispatch_command as _dc
         _cmd_reply = await _dc(
             command=_text,
             workspace_id=_workspace_id,
@@ -1256,7 +1256,7 @@ async def _handle_dm_via_gateway(message: Any) -> None:
             _reply = _cmd_reply
         else:
             # ── Sage ingress ──
-            from server_modules.sage_turn_adapter import execute_sage_turn as _est
+            from server_modules.agent_turn_adapter import execute_sage_turn as _est
             _result = await _est(
                 workspace_id=_workspace_id,
                 message=_text,

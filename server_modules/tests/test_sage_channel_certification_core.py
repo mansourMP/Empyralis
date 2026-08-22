@@ -167,7 +167,7 @@ class TelegramPersonalCertification(unittest.TestCase):
     def test_telegram_personal_inbound_context(self):
         """A Telegram personal turn creates correct thread context.
 
-        Patches sage_turn_adapter.execute_sage_turn directly, not
+        Patches agent_turn_adapter.execute_sage_turn directly, not
         execute_sage_turn_for_channel — the bridge now routes through
         _execute_channel_turn_with_envelope, which calls execute_sage_turn
         itself (see that helper's own docstring for why). "gateway_id" and
@@ -176,7 +176,7 @@ class TelegramPersonalCertification(unittest.TestCase):
         execute_sage_turn_for_channel — gateway_id was always accepted-but-
         unused, and remote_jid is threaded as channel_sender_id instead)."""
         with patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn",
+            "server_modules.agent_turn_adapter.execute_sage_turn",
             new=AsyncMock(
                 return_value=SageTurnResult(message="hello from Sage", trace_id="trace-1")
             ),
@@ -191,7 +191,7 @@ class TelegramPersonalCertification(unittest.TestCase):
             )
 
         self.assertEqual(result["text"], "hello from Sage")
-        self.assertEqual(result["source"], "sage_turn_adapter")
+        self.assertEqual(result["source"], "agent_turn_adapter")
         kwargs = execute_mock.call_args.kwargs
         self.assertEqual(kwargs["channel_origin"], _TELEGRAM_CHANNEL_KEY)
         self.assertEqual(kwargs["workspace_id"], "workspace-1")
@@ -302,7 +302,7 @@ class WhatsAppPersonalCertification(unittest.TestCase):
         See test_telegram_personal_inbound_context's docstring above for
         why the patch target and kwarg names changed."""
         with patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn",
+            "server_modules.agent_turn_adapter.execute_sage_turn",
             new=AsyncMock(
                 return_value=SageTurnResult(message="hello from Sage", trace_id="trace-2")
             ),
@@ -317,7 +317,7 @@ class WhatsAppPersonalCertification(unittest.TestCase):
             )
 
         self.assertEqual(result["text"], "hello from Sage")
-        self.assertEqual(result["source"], "sage_turn_adapter")
+        self.assertEqual(result["source"], "agent_turn_adapter")
         kwargs = execute_mock.call_args.kwargs
         self.assertEqual(kwargs["channel_origin"], _WHATSAPP_CHANNEL_KEY)
         self.assertEqual(kwargs["workspace_id"], "workspace-1")
@@ -477,7 +477,7 @@ class SlackCertification(unittest.TestCase):
                 return_value=None,
             ) as append_event,
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn_for_channel",
+                "server_modules.agent_turn_adapter.execute_sage_turn_for_channel",
                 new=AsyncMock(),
             ),
             patch(

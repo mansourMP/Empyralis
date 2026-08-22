@@ -2,8 +2,8 @@
 `tool_capabilities` kwargs that /stop, /model, /tools, /status, /debug read.
 
 Bug: neither live entry point that reaches command_registry.dispatch() /
-process_message() — sage_turn_adapter.execute_sage_turn's own "/" command
-block, and sage_command_dispatcher.dispatch_command (the other live path,
+process_message() — agent_turn_adapter.execute_sage_turn's own "/" command
+block, and agent_command_dispatcher.dispatch_command (the other live path,
 used by hosted Telegram and WeChat official before execute_sage_turn is ever
 reached) — ever built or forwarded these kwargs. All five handlers therefore
 always saw kwargs.get("services") is None (or an empty availability_payload
@@ -20,7 +20,7 @@ each of those two entry points and forwarded through. These tests:
       the degraded stub, dispatched through the real command_registry.
   (c) prove execute_sage_turn wires the same fix through end-to-end, and
       that building it costs nothing on an ordinary (non-"/") message.
-  (d) prove sage_command_dispatcher.dispatch_command — the other live
+  (d) prove agent_command_dispatcher.dispatch_command — the other live
       entry point — has the identical fix, not just execute_sage_turn.
 """
 
@@ -31,7 +31,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from server_modules import command_registry
-from server_modules.sage_turn_adapter import execute_sage_turn
+from server_modules.agent_turn_adapter import execute_sage_turn
 
 
 def _run(coro):
@@ -318,14 +318,14 @@ class ExecuteSageTurnServicesWiringTests(unittest.TestCase):
 
 
 class DispatchCommandServicesWiringTests(unittest.TestCase):
-    """sage_command_dispatcher.dispatch_command is the OTHER live entry
+    """agent_command_dispatcher.dispatch_command is the OTHER live entry
     point every channel routes through before execute_sage_turn (hosted
     Telegram, WeChat official — see that module's own docstring) and had
     the identical gap. Proven directly against it, not just against
     execute_sage_turn."""
 
     def test_status_through_dispatch_command_is_real_not_degraded(self):
-        from server_modules.sage_command_dispatcher import dispatch_command
+        from server_modules.agent_command_dispatcher import dispatch_command
 
         payload = {"ai_ready": False, "tool_capabilities": []}
         with (
@@ -349,7 +349,7 @@ class DispatchCommandServicesWiringTests(unittest.TestCase):
         self.assertIn("deepseek", reply)
 
     def test_stop_through_dispatch_command_is_real_not_degraded(self):
-        from server_modules.sage_command_dispatcher import dispatch_command
+        from server_modules.agent_command_dispatcher import dispatch_command
 
         with patch(
             "server_modules.direct_chat_runtime_exports._active_run_count",
@@ -359,7 +359,7 @@ class DispatchCommandServicesWiringTests(unittest.TestCase):
         self.assertEqual(reply, "No active runs to stop.")
 
     def test_unrelated_command_through_dispatch_command_builds_nothing_expensive(self):
-        from server_modules.sage_command_dispatcher import dispatch_command
+        from server_modules.agent_command_dispatcher import dispatch_command
 
         with patch(
             "server_modules.direct_chat_runtime_exports._resolve_direct_chat_availability"

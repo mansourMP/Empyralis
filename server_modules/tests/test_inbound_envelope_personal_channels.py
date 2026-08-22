@@ -291,7 +291,7 @@ class _EnvelopeEndToEndTestCase(unittest.TestCase):
                 new=AsyncMock(return_value="default"),
             ),
             patch(
-                "server_modules.sage_command_dispatcher.get_active_thread",
+                "server_modules.agent_command_dispatcher.get_active_thread",
                 new=AsyncMock(return_value="test-thread"),
             ),
         ]

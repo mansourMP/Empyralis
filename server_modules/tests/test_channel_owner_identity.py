@@ -402,7 +402,7 @@ class ChannelOriginSurvivesTheTurnAdapterTests(_Base):
 
     async def test_an_openclaw_channel_keeps_its_real_key(self) -> None:
         from server_modules.channel_adapter import normalize_sage_inbound
-        from server_modules.sage_turn_adapter import _channel_origin_for_turn
+        from server_modules.agent_turn_adapter import _channel_origin_for_turn
 
         turn = normalize_sage_inbound(
             workspace_id="ws-owner", message="hi", channel_origin=CHANNEL_KEY,
@@ -414,7 +414,7 @@ class ChannelOriginSurvivesTheTurnAdapterTests(_Base):
         it matches no channel key anywhere — this half of the bug was never
         specific to the new channels."""
         from server_modules.channel_adapter import normalize_sage_inbound
-        from server_modules.sage_turn_adapter import _channel_origin_for_turn
+        from server_modules.agent_turn_adapter import _channel_origin_for_turn
 
         turn = normalize_sage_inbound(
             workspace_id="ws-owner", message="hi", channel_origin="telegram_hosted",
@@ -425,7 +425,7 @@ class ChannelOriginSurvivesTheTurnAdapterTests(_Base):
 
     async def test_every_live_channel_key_survives(self) -> None:
         from server_modules.channel_adapter import normalize_sage_inbound
-        from server_modules.sage_turn_adapter import _channel_origin_for_turn
+        from server_modules.agent_turn_adapter import _channel_origin_for_turn
 
         for channel_key in sorted(personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS):
             with self.subTest(channel_key=channel_key):

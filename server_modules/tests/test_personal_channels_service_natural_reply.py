@@ -134,7 +134,7 @@ class PersonalChannelsServiceNaturalReplyTests(unittest.IsolatedAsyncioTestCase)
                     # through (a normal message is not a command) so the
                     # ordinary reply path this test is about is what executes.
                     patch(
-                        "server_modules.sage_command_dispatcher.dispatch_command",
+                        "server_modules.agent_command_dispatcher.dispatch_command",
                         new=AsyncMock(return_value=None),
                     ),
                     patch(

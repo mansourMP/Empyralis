@@ -724,7 +724,7 @@ def resolve_model_for_capability(
 _SAGE_AI_SETUP_PATH = "/integrations?section=ai-runtime"
 
 # ── User-facing AI-stop messages (imported from the single source of truth) ──
-from server_modules.sage_command_dispatcher import (
+from server_modules.agent_command_dispatcher import (
     SAGE_AI_LIMIT_MESSAGE,
     SAGE_AI_NEEDS_ATTENTION_MESSAGE,
 )
@@ -850,7 +850,7 @@ async def _resolve_cloud_provider(
             )
         # Platform is configured but blocked (credits exhausted, policy, etc.)
         # Always lead with the stable `reason` code (e.g. "cap_reached"), not
-        # just the free-text `message` — sage_command_dispatcher.classify_error
+        # just the free-text `message` — agent_command_dispatcher.classify_error
         # keyword-matches on the raw error string, and message wording is
         # free to change (it already has once, see MAN entitlements copy
         # pass) without classify_error's bucket keywords being updated to
@@ -1061,7 +1061,7 @@ async def _resolve_agent_cloud_provider(
                 reason=f"platform_credits provider '{provider}' is unavailable or missing credentials.",
             )
             # "Heads up: " prefix (this file's established convention — see
-            # _friendly_cli_subscription_error's docstring and sage_command_
+            # _friendly_cli_subscription_error's docstring and agent_command_
             # dispatcher.classify_error's bucket-0 check) marks this as an
             # already-final, specific, platform-voice message so the
             # classifier passes it through untouched instead of keyword-
@@ -5454,7 +5454,7 @@ async def handle_sage_chat(**kwargs: Any) -> dict:
     adding a new branch. It was, twice: the BYO-brain ``local`` and
     ``cli_subscription`` branches each returned their gateway reply directly,
     hundreds of lines above the guard the cloud path runs, and
-    ``sage_turn_adapter.execute_sage_turn`` relays ``result["message"]``
+    ``agent_turn_adapter.execute_sage_turn`` relays ``result["message"]``
     verbatim to WhatsApp/Telegram/Signal/iMessage and the OpenClaw channels.
     Those are the worst two to miss: they are the turns that run on the
     owner's own machine, against their own local model or CLI subscription,
@@ -5552,7 +5552,7 @@ async def _resolve_channel_sender_class(
         #
         # Canonicalizing here rather than changing what the bridge passes:
         # `remote_jid` is also the personal-channel thread key
-        # (sage_turn_adapter's thread resolution, and the per-thread turn
+        # (agent_turn_adapter's thread resolution, and the per-thread turn
         # lock), so repointing it is a separate change with its own blast
         # radius. Fixing the COMPARISON is what this bug is.
         linked_by_channel = list_owner_linked_channel_identities_for_workspace(workspace_id)
@@ -5802,7 +5802,7 @@ async def _handle_sage_chat_unguarded(
     # resolution just above when no header is present (console/unwired
     # channels). See inbound_attribution_recovery.py's module docstring for
     # why this is recovered from text rather than threaded as the live
-    # InboundEnvelope object (sage_turn_adapter.py's handle_sage_chat call
+    # InboundEnvelope object (agent_turn_adapter.py's handle_sage_chat call
     # doesn't forward one, and that file is out of scope for this change).
     # Threaded into _run_sage_action_loop_v3's session_ctx below so
     # memory_write can stamp it on any fact this turn saves.
@@ -7454,7 +7454,7 @@ async def _handle_sage_chat_unguarded(
                         # SQLite-fallback prod for these turns (they never write
                         # there in the first place), and for a master/Sage
                         # channel turn thread_id is frequently a shared, UNSCOPED
-                        # value (e.g. "sage-main" — see sage_turn_adapter's
+                        # value (e.g. "sage-main" — see agent_turn_adapter's
                         # thread resolution) rather than one keyed to this
                         # specific remote_jid/conversation. Falling through to
                         # thread_service.get_thread(thread_id, ...) here would

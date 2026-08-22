@@ -82,7 +82,7 @@ class ResultGenerateRoutesThroughToolCapableEngineTests(unittest.TestCase):
         else:
             mock_kwargs["return_value"] = sage_result or SageTurnResult(message="ok")
         with patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn",
+            "server_modules.agent_turn_adapter.execute_sage_turn",
             new=AsyncMock(**mock_kwargs),
         ) as mock_execute_sage_turn:
             result = runs_execution._execute_orion_dag_node(run_id, context, log_queue, node, state)
@@ -154,7 +154,7 @@ class ResultGenerateRoutesThroughToolCapableEngineTests(unittest.TestCase):
         state = {"plan_text": "Save a note."}
         context = _heartbeat_shaped_context()
         with patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn",
+            "server_modules.agent_turn_adapter.execute_sage_turn",
             new=AsyncMock(return_value=SageTurnResult(message="Saved the note.", tool_calls=[tool_call])),
         ):
             runs_execution._execute_orion_dag_node(
@@ -174,7 +174,7 @@ class ResultGenerateRoutesThroughToolCapableEngineTests(unittest.TestCase):
         state = {"plan_text": "Nothing pending."}
         context = _heartbeat_shaped_context()
         with patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn",
+            "server_modules.agent_turn_adapter.execute_sage_turn",
             new=AsyncMock(return_value=SageTurnResult(message="Nothing needed doing.", tool_calls=[])),
         ):
             runs_execution._execute_orion_dag_node(
@@ -229,7 +229,7 @@ class ResultGenerateThreadsAssignedAgentIdentityTests(unittest.TestCase):
             resolve_kwargs["return_value"] = resolve_specialist_return
         with (
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(return_value=SageTurnResult(message="done")),
             ) as mock_execute_sage_turn,
             patch(
@@ -283,7 +283,7 @@ class ResultGenerateThreadsAssignedAgentIdentityTests(unittest.TestCase):
         """A resolver exception (DB hiccup, unknown install, etc.) must
         never break the turn -- same fail-safe convention as every other
         resolve_specialist_runtime_context call site (direct_chat_service.
-        execute_direct_chat_turn_request, sage_turn_adapter.
+        execute_direct_chat_turn_request, agent_turn_adapter.
         execute_sage_turn_for_channel)."""
         mock_execute_sage_turn, mock_resolve_specialist = self._run_result_generate_with_metadata(
             metadata_overrides={"active_agent_install_id": "agent-unknown"},

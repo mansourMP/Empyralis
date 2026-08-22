@@ -801,7 +801,7 @@ async def _control_command_block_result(
 
 # ── Shared /command dispatcher waist ───────────────────────────────────
 #
-# sage_command_dispatcher.dispatch_command() -> command_registry (/new /main
+# agent_command_dispatcher.dispatch_command() -> command_registry (/new /main
 # /compact /stop /clear /export /model /thinking /help /commands /tools
 # /status /whoami /usage /memory /forget /tasks /agents /skills /config /mcp
 # /plugins /debug /tts /bash — 24 commands) was only reached from
@@ -859,7 +859,7 @@ async def _dispatch_personal_channel_command(
     the standard {"duplicate", "inbound", "outbound"} envelope once the
     command's reply has been durably dispatched.
     """
-    from server_modules.sage_command_dispatcher import dispatch_command as _dispatch_cmd
+    from server_modules.agent_command_dispatcher import dispatch_command as _dispatch_cmd
 
     workspace_id = str(registration.get("workspace_id") or "").strip()
     cmd_reply = await _dispatch_cmd(
@@ -1976,7 +1976,7 @@ async def _handle_dm_policy_blocked(
 #   by its own judgment ... Do NOT build rigid gates."
 #   Ruling B (2026-07-23): no filter may flag-and-withhold a message from
 #   the reasoning model on CONTENT grounds; every message reaches the model
-#   unconditionally (see sage_turn_adapter.py's removed Phase-P gate).
+#   unconditionally (see agent_turn_adapter.py's removed Phase-P gate).
 #
 # The ACTUAL code shipped between those two dates (0fe9ada19 2026-07-18,
 # c8b8fbed0 2026-07-19) added a hard, non-configurable gate to Telegram and

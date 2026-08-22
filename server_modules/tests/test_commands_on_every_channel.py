@@ -1,7 +1,7 @@
 """Regression tests: /commands must execute on EVERY personal channel, not
 just WhatsApp, hosted Telegram, and cloud channels.
 
-THE BUG (fixed alongside this test). sage_command_dispatcher.dispatch_command
+THE BUG (fixed alongside this test). agent_command_dispatcher.dispatch_command
 -> command_registry (24 commands: /new /main /compact /stop /clear /export
 /model /thinking /help /commands /tools /status /whoami /usage /memory
 /forget /tasks /agents /skills /config /mcp /plugins /debug /tts /bash) was
@@ -23,7 +23,7 @@ calling gateway_protocol_service.dispatch_channel_outbound, so a command's
 reply was created but never sent).
 
 These tests assert CALL COUNTS, not just "something happened" — an
-`sage_command_dispatcher.dispatch_command` call satisfied by a mock that
+`agent_command_dispatcher.dispatch_command` call satisfied by a mock that
 never gets its reply dispatched is exactly the pre-fix WhatsApp bug in a new
 outfit. Each test also asserts the ordinary agent-turn reply builder was
 NEVER invoked for command text, proving the command short-circuits a normal
@@ -206,7 +206,7 @@ class LocalBridgeCommandDispatchTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(return_value=dict(_ALLOWED_OWNER_DM_DECISION)),
             ),
             patch(
-                "server_modules.sage_command_dispatcher.dispatch_command",
+                "server_modules.agent_command_dispatcher.dispatch_command",
                 new=dispatch_command_mock,
             ),
             patch(
@@ -344,7 +344,7 @@ class LocalBridgeCommandDispatchTests(unittest.IsolatedAsyncioTestCase):
                 "server_modules.personal_channels_service._enforce_dm_policy",
                 new=AsyncMock(return_value=dict(_ALLOWED_OWNER_DM_DECISION)),
             ),
-            patch("server_modules.sage_command_dispatcher.dispatch_command", new=dispatch_command_mock),
+            patch("server_modules.agent_command_dispatcher.dispatch_command", new=dispatch_command_mock),
             patch(
                 "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
                 new=outbound_dispatch_mock,

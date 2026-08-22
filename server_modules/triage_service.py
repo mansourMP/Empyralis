@@ -9,7 +9,7 @@ identity-to-behavior dispatch built on top of resolve_sender_identity below)
 was removed per founder ruling (2026-07-23): "Every single message goes to
 the reasoning model, absolutely. We are not going to have filters that flag
 a message and don't deliver it. No hardcoded outputs — everything is the
-agent's own reasoning." See server_modules/sage_turn_adapter.py's
+agent's own reasoning." See server_modules/agent_turn_adapter.py's
 execute_sage_turn for the (now unconditional) call path.
 
 resolve_sender_identity itself survives: it is a plain classifier (no

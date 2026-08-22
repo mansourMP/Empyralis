@@ -1604,7 +1604,7 @@ async def agent_turn(
 
     # ── Canonical inbound envelope (docs/design/inbound-envelope-design.md) ──
     # agent_turn() is the generic turn entry for run-start/durable/direct-chat
-    # turns alike; it does NOT itself route through sage_turn_adapter.
+    # turns alike; it does NOT itself route through agent_turn_adapter.
     # execute_sage_turn — the one chokepoint every OTHER channel uses for
     # envelope header injection. Scoped narrowly to the literal console/
     # mobile direct-chat surface this file already names

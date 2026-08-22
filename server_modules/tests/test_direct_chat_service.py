@@ -350,7 +350,7 @@ class DirectChatServiceTests(unittest.TestCase):
             captured.update(kwargs)
             return {"message": "ok", "error": None, "tool_calls": [], "provider": "test", "model": None}
 
-        with patch("server_modules.sage_turn_adapter.execute_sage_turn", new=_fake_execute_sage_turn):
+        with patch("server_modules.agent_turn_adapter.execute_sage_turn", new=_fake_execute_sage_turn):
             events = list(execution["producer"]())
 
         self.assertIn("attachments", captured)

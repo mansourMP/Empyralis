@@ -638,7 +638,7 @@ def hosted_sage_ai_access_state(
             # asserts this by identity precisely because this literal used
             # to drift from platform_event.AI_LIMIT_REACHED_WEB: rewording
             # the shared message (2026-08-19, dropping a "→" this surface
-            # renders as a dead click affordance) fixed sage_command_
+            # renders as a dead click affordance) fixed agent_command_
             # dispatcher's copy and silently left this one behind.
             message = AI_LIMIT_REACHED_WEB.detail
         else:

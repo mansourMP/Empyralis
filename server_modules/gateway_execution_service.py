@@ -29,7 +29,7 @@ from server_modules.gateway_contracts import DEFAULT_TOOL_REQUEST_TIMEOUT_SECOND
 # Pure resource protection, NOT correctness: containers are already
 # per-call isolated (empyralis-gateway/src/shell/docker-sandbox.ts spawns
 # one ephemeral --rm container per invocation), so this is deliberately NOT
-# a serialization gate — see sage_reply_dispatcher._CHANNEL_TURN_LOCKS /
+# a serialization gate — see agent_reply_dispatcher._CHANNEL_TURN_LOCKS /
 # personal_channel_sage_bridge_service's acquire_channel_turn_lock for the
 # actual correctness fix (torn thread history), which is per-THREAD, not
 # per-box, and unrelated to this.
@@ -54,7 +54,7 @@ _GATEWAY_CONCURRENT_TOOL_SEMAPHORE_STALE_SECONDS = 600  # 10 minutes
 
 def _gateway_concurrent_tool_semaphore(gateway_id: str) -> asyncio.Semaphore:
     """Return the per-gateway semaphore, creating it on first use. Same
-    bounded-dict-with-a-cleanup-sweep shape as sage_reply_dispatcher's
+    bounded-dict-with-a-cleanup-sweep shape as agent_reply_dispatcher's
     _CHANNEL_TURN_LOCKS, for the same reason: a long-lived process must
     never grow this dict without bound."""
     key = str(gateway_id or "").strip() or "default"

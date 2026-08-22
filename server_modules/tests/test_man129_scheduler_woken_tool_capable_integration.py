@@ -19,7 +19,7 @@ Everything above that seam runs for real:
 
     runs_execution._execute_orion_dag_node(kind="result_generate")
       -> _execute_orion_result_via_agent_engine
-      -> sage_turn_adapter.execute_sage_turn                    (real)
+      -> agent_turn_adapter.execute_sage_turn                    (real)
       -> agent_turn_runtime_service.handle_sage_chat             (real)
       -> agent_turn_runtime_service._run_sage_action_loop_v3     (real)
       -> direct_chat_generation_service.stream_provider_backed_direct_chat

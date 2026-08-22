@@ -833,13 +833,13 @@ async def handle_inbound_callback(
         # ── FIX: per-customer thread scoping (was thread_id="sage-main" for
         # EVERY distinct customer — see this module's own docstring/the audit
         # for the cross-customer SQL-thread + turn-lock collapse this closes).
-        # Mirrors sage_command_dispatcher.agent_sender_thread_id's per-
+        # Mirrors agent_command_dispatcher.agent_sender_thread_id's per-
         # (agent, sender) keying, the same mechanism a resolved specialist
         # turn already uses on every other channel — deterministic, no DB
         # lookup, and this binding is always agent-scoped (one agent per
         # WeChat/WeCom AppID/CorpID) so agent_install_id is always the right
         # scoping key here.
-        from server_modules.sage_command_dispatcher import agent_sender_thread_id
+        from server_modules.agent_command_dispatcher import agent_sender_thread_id
         _thread_id = agent_sender_thread_id(agent_install_id, mapped["sender_jid"])
 
         # ── Durable per-agent conversation memory (agent_conversation_memory) ──
@@ -866,7 +866,7 @@ async def handle_inbound_callback(
         # is explicit (not a hardcoded skip) so this stays correct if WeChat
         # ever gains a real owner-linkage mechanism.
         if envelope_allows_owner_commands(envelope):
-            from server_modules.sage_command_dispatcher import dispatch_command
+            from server_modules.agent_command_dispatcher import dispatch_command
             cmd_reply = await dispatch_command(
                 command=mapped["text"], workspace_id=workspace_id, thread_id=_thread_id,
                 channel_origin=mapped["channel_origin"], sender_id=mapped["sender_jid"],
@@ -875,7 +875,7 @@ async def handle_inbound_callback(
                 delivered = await transport.send_message(cmd_reply)
                 return {"routed": True, "processed": True, "reply_sent": delivered}
 
-        from server_modules.sage_reply_dispatcher import dispatch_sage_reply_safe
+        from server_modules.agent_reply_dispatcher import dispatch_sage_reply_safe
         delivered = await dispatch_sage_reply_safe(
             transport=transport, workspace_id=workspace_id, message=mapped["text"],
             channel_origin=mapped["channel_origin"], sender_id=mapped["sender_jid"],

@@ -11,7 +11,7 @@ from server_modules.agent_turn_runtime_contract import (
     SageTurnResult,
     normalize_sage_mode,
 )
-from server_modules.sage_turn_adapter import (
+from server_modules.agent_turn_adapter import (
     execute_sage_turn,
     execute_sage_turn_for_channel,
 )
@@ -411,7 +411,7 @@ class SageTurnAdapterThreadKeyingTests(unittest.TestCase):
                 new=AsyncMock(return_value=self._fake_specialist_context(agent_id)),
             ),
             patch(
-                "server_modules.sage_command_dispatcher.get_active_thread",
+                "server_modules.agent_command_dispatcher.get_active_thread",
                 new=AsyncMock(side_effect=AssertionError(
                     "get_active_thread must not be called for a resolved specialist turn"
                 )),
@@ -466,7 +466,7 @@ class SageTurnAdapterThreadKeyingTests(unittest.TestCase):
         "sage-main" and any existing per-channel override."""
         with (
             patch(
-                "server_modules.sage_command_dispatcher.get_active_thread",
+                "server_modules.agent_command_dispatcher.get_active_thread",
                 new=AsyncMock(return_value="sage-main"),
             ) as get_active_mock,
             patch(
@@ -491,7 +491,7 @@ class SageTurnAdapterThreadKeyingTests(unittest.TestCase):
         thread — no regression for an existing conversation."""
         with (
             patch(
-                "server_modules.sage_command_dispatcher.get_active_thread",
+                "server_modules.agent_command_dispatcher.get_active_thread",
                 new=AsyncMock(return_value="thread_prior_conversation_abc123"),
             ),
             patch(

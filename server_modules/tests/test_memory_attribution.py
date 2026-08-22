@@ -15,7 +15,7 @@ Covers the four things the task asked for explicit coverage on:
 Also covers inbound_attribution_recovery.py's header parser directly, since
 it's the new mechanism the rest of this depends on (recovering attribution
 from the rendered envelope header text, because the frozen
-sage_turn_adapter.py chokepoint doesn't forward the InboundEnvelope object
+agent_turn_adapter.py chokepoint doesn't forward the InboundEnvelope object
 itself into handle_sage_chat -- see that module's docstring).
 """
 

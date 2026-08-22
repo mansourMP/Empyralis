@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 import logging as _logging
 _logger = _logging.getLogger(__name__)
 
-from server_modules.sage_command_dispatcher import (  # noqa: E402
+from server_modules.agent_command_dispatcher import (  # noqa: E402
     classify_error,
 )
 from server_modules.error_notification import classify_error_notification  # noqa: E402
@@ -297,9 +297,9 @@ async def _execute_channel_turn_with_envelope(
     envelope: Optional[InboundEnvelope],
 ) -> Dict[str, Any]:
     """Run a personal-channel turn through the real chokepoint
-    (sage_turn_adapter.execute_sage_turn) WITH the canonical InboundEnvelope.
+    (agent_turn_adapter.execute_sage_turn) WITH the canonical InboundEnvelope.
 
-    This duplicates sage_turn_adapter.execute_sage_turn_for_channel's own
+    This duplicates agent_turn_adapter.execute_sage_turn_for_channel's own
     body (specialist_context resolution + the individual-parameter call
     into execute_sage_turn) ONLY because that function — frozen, owned by a
     separate build track — doesn't yet accept `envelope=` and forward it
@@ -312,8 +312,8 @@ async def _execute_channel_turn_with_envelope(
     to execute_sage_turn_for_channel's so that swap is a pure deletion.
     """
     from server_modules.agent_turn_runtime_contract import SAGE_MODE
-    from server_modules.sage_turn_adapter import execute_sage_turn
-    from server_modules.sage_reply_dispatcher import acquire_channel_turn_lock
+    from server_modules.agent_turn_adapter import execute_sage_turn
+    from server_modules.agent_reply_dispatcher import acquire_channel_turn_lock
 
     normalized_agent_id = str(agent_id or "").strip()
     specialist_context = None
@@ -333,7 +333,7 @@ async def _execute_channel_turn_with_envelope(
         #
         # A None specialist means "this turn is the workspace master (Sage)",
         # so every channel turn for every bound agent ran as generic Sage and,
-        # in sage_turn_adapter, fell past the per-(agent, sender) thread branch
+        # in agent_turn_adapter, fell past the per-(agent, sender) thread branch
         # into get_active_thread's "sage-main". Consequences, all observed:
         # the agent answered as Sage rather than as itself, every channel
         # conversation for every agent piled into ONE shared thread row with
@@ -370,7 +370,7 @@ async def _execute_channel_turn_with_envelope(
     # Serialize per (workspace, personal-channel thread) so only ONE turn
     # executes at a time for a given DM/group — the SAME protection
     # dispatch_sage_reply already gives hosted-bot/WeChat-official channels
-    # (sage_reply_dispatcher._CHANNEL_TURN_LOCKS), which personal channels
+    # (agent_reply_dispatcher._CHANNEL_TURN_LOCKS), which personal channels
     # never had: this is the sole chokepoint every personal-channel reply
     # (WhatsApp, Telegram-personal, Discord DMs, local-bridge/OpenClaw)
     # crosses before calling execute_sage_turn, so patching here closes it
@@ -709,7 +709,7 @@ async def _build_unified_sage_personal_reply_async(
         if reply or media:
             return {
                 "text": reply or "",
-                "source": "sage_turn_adapter",
+                "source": "agent_turn_adapter",
                 "trace_id": (result or {}).get("trace_id", ""),
                 "media": media,
                 "raw": dict(result or {}),
@@ -850,7 +850,7 @@ async def build_personal_channel_reply_async(
     # This is the single builder every channel on the transport goes
     # through, and it had no way to say which agent the message was for —
     # so `_build_unified_sage_personal_reply_async` always saw "", skipped
-    # specialist resolution entirely, and sage_turn_adapter fell past its
+    # specialist resolution entirely, and agent_turn_adapter fell past its
     # per-(agent, sender) thread branch into get_active_thread's
     # "sage-main". Measured, not inferred: the caller resolves a real
     # agent_id (that is what `_resolve_local_bridge_agent_id` exists for)

@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import unittest
 
-from server_modules.sage_command_dispatcher import agent_sender_thread_id
+from server_modules.agent_command_dispatcher import agent_sender_thread_id
 
 
 class AgentSenderThreadIdTests(unittest.TestCase):
     """Pure-function coverage for the per-(agent, sender) thread key —
-    see sage_turn_adapter.execute_sage_turn's thread-resolution branch for
+    see agent_turn_adapter.execute_sage_turn's thread-resolution branch for
     where this replaces the legacy get_active_thread lookup for a resolved
     specialist turn."""
 

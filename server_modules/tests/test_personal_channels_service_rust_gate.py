@@ -157,7 +157,7 @@ class PersonalChannelsServiceRustGateTests(unittest.TestCase):
                 # reply path — the one carrying the gate under test — is what
                 # actually executes.
                 patch(
-                    "server_modules.sage_command_dispatcher.dispatch_command",
+                    "server_modules.agent_command_dispatcher.dispatch_command",
                     new=AsyncMock(return_value=None),
                 ),
             ):
@@ -249,7 +249,7 @@ class PersonalChannelsServiceRustGateTests(unittest.TestCase):
                     return_value=_wrong_action_decision("request_gateway_owner_approval"),
                 ),
                 patch(
-                    "server_modules.sage_command_dispatcher.dispatch_command",
+                    "server_modules.agent_command_dispatcher.dispatch_command",
                     new=AsyncMock(return_value="compacted."),
                 ),
                 patch(

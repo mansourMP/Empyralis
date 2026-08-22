@@ -129,7 +129,7 @@ def register_sage_chat_routes(app) -> None:
         try:
             # ── Shared command dispatcher ──
             _msg_text = str(body.message).strip()
-            from server_modules.sage_command_dispatcher import dispatch_command as _dispatch_cmd
+            from server_modules.agent_command_dispatcher import dispatch_command as _dispatch_cmd
             _cmd_reply = await _dispatch_cmd(
                 command=_msg_text,
                 workspace_id=resolved_workspace_id,
@@ -165,12 +165,12 @@ def register_sage_chat_routes(app) -> None:
                 channel_origin="web",
             )
             # Resolve active thread (may be task thread if /new was used)
-            from server_modules.sage_command_dispatcher import get_active_thread as _gat_web
+            from server_modules.agent_command_dispatcher import get_active_thread as _gat_web
             _active_thread_web = await _gat_web(turn.workspace_id, "web")
 
             # ── Canonical inbound envelope (docs/design/inbound-envelope-design.md) ──
             # This endpoint calls handle_sage_chat() directly rather than
-            # routing through sage_turn_adapter.execute_sage_turn — the one
+            # routing through agent_turn_adapter.execute_sage_turn — the one
             # chokepoint that renders the envelope header — so the header is
             # prepended here by hand, using the SAME rendering function
             # execute_sage_turn calls, to stay byte-for-byte consistent with

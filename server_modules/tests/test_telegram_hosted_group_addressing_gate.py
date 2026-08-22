@@ -99,8 +99,8 @@ class ProcessUpdateGroupGateTests(unittest.IsolatedAsyncioTestCase):
                 "text": "does anyone know a good taco place",
             },
         }
-        with patch("server_modules.sage_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)) as cmd_mock, \
-             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=AsyncMock(return_value=True)) as reply_mock:
+        with patch("server_modules.agent_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)) as cmd_mock, \
+             patch("server_modules.agent_reply_dispatcher.dispatch_sage_reply_safe", new=AsyncMock(return_value=True)) as reply_mock:
             handled = await hosted._process_update(update)
         self.assertFalse(handled, "an unaddressed group message must never produce a Sage reply")
         cmd_mock.assert_not_called()
@@ -120,8 +120,8 @@ class ProcessUpdateGroupGateTests(unittest.IsolatedAsyncioTestCase):
                     "entities": [_mention_entity(0, len("@sage_bot"))],
                 },
             }
-            with patch("server_modules.sage_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)), \
-                 patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=AsyncMock(return_value=True)) as reply_mock:
+            with patch("server_modules.agent_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)), \
+                 patch("server_modules.agent_reply_dispatcher.dispatch_sage_reply_safe", new=AsyncMock(return_value=True)) as reply_mock:
                 handled = await hosted._process_update(update)
         self.assertTrue(handled)
         reply_mock.assert_awaited_once()
@@ -138,8 +138,8 @@ class ProcessUpdateGroupGateTests(unittest.IsolatedAsyncioTestCase):
                 "text": "remind me to call mom",
             },
         }
-        with patch("server_modules.sage_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)), \
-             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=AsyncMock(return_value=True)) as reply_mock:
+        with patch("server_modules.agent_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)), \
+             patch("server_modules.agent_reply_dispatcher.dispatch_sage_reply_safe", new=AsyncMock(return_value=True)) as reply_mock:
             handled = await hosted._process_update(update)
         self.assertTrue(handled)
         reply_mock.assert_awaited_once()
@@ -181,8 +181,8 @@ class TelegramWebhookRouteGroupGateTests(unittest.TestCase):
         with patch.object(hosted, "is_configured", return_value=True), \
              patch.object(hosted, "is_webhook_secret_configured", return_value=True), \
              patch.object(hosted, "verify_webhook_signature", return_value=True), \
-             patch("server_modules.sage_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)) as cmd_mock, \
-             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=AsyncMock(return_value=True)) as reply_mock:
+             patch("server_modules.agent_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)) as cmd_mock, \
+             patch("server_modules.agent_reply_dispatcher.dispatch_sage_reply_safe", new=AsyncMock(return_value=True)) as reply_mock:
             resp = self.client.post(
                 "/sage/telegram-hosted/webhook",
                 json=body,
@@ -207,8 +207,8 @@ class TelegramWebhookRouteGroupGateTests(unittest.TestCase):
         with patch.object(hosted, "is_configured", return_value=True), \
              patch.object(hosted, "is_webhook_secret_configured", return_value=True), \
              patch.object(hosted, "verify_webhook_signature", return_value=True), \
-             patch("server_modules.sage_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)), \
-             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=AsyncMock(return_value=True)) as reply_mock:
+             patch("server_modules.agent_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)), \
+             patch("server_modules.agent_reply_dispatcher.dispatch_sage_reply_safe", new=AsyncMock(return_value=True)) as reply_mock:
             resp = self.client.post(
                 "/sage/telegram-hosted/webhook",
                 json=body,
@@ -236,7 +236,7 @@ class ByoRouteAgentInboundGroupGateTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(prov.bindings, "get_channel_binding_by_agent_unscoped", new=AsyncMock(return_value=_binding())), \
              patch.object(prov, "resolve_bot_token", return_value="bot-token-123"), \
              patch.object(prov, "get_me", new=AsyncMock(return_value={"id": "bot-numeric-id", "username": "parts_pro_bot"})), \
-             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=AsyncMock(return_value=True)) as dispatch_mock:
+             patch("server_modules.agent_reply_dispatcher.dispatch_sage_reply_safe", new=AsyncMock(return_value=True)) as dispatch_mock:
             result = await prov.route_agent_inbound(
                 agent_install_id="agent-1",
                 chat_id="-100999",
@@ -258,7 +258,7 @@ class ByoRouteAgentInboundGroupGateTests(unittest.IsolatedAsyncioTestCase):
              patch.object(prov, "get_me", new=AsyncMock(return_value={"id": "bot-numeric-id", "username": "parts_pro_bot"})), \
              patch("server_modules.specialist_runtime_context.resolve_specialist_runtime_context", new=AsyncMock(return_value=None)), \
              patch("server_modules.agent_registry_repository.get_workspace_agent_install_bundle", new=AsyncMock(return_value={"metadata": {}})), \
-             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=AsyncMock(return_value=True)) as dispatch_mock:
+             patch("server_modules.agent_reply_dispatcher.dispatch_sage_reply_safe", new=AsyncMock(return_value=True)) as dispatch_mock:
             result = await prov.route_agent_inbound(
                 agent_install_id="agent-1",
                 chat_id="-100999",
@@ -277,7 +277,7 @@ class ByoRouteAgentInboundGroupGateTests(unittest.IsolatedAsyncioTestCase):
              patch.object(prov, "get_me", new=AsyncMock(return_value={"id": "bot-numeric-id", "username": "parts_pro_bot"})), \
              patch("server_modules.specialist_runtime_context.resolve_specialist_runtime_context", new=AsyncMock(return_value=None)), \
              patch("server_modules.agent_registry_repository.get_workspace_agent_install_bundle", new=AsyncMock(return_value={"metadata": {}})), \
-             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=AsyncMock(return_value=True)) as dispatch_mock:
+             patch("server_modules.agent_reply_dispatcher.dispatch_sage_reply_safe", new=AsyncMock(return_value=True)) as dispatch_mock:
             result = await prov.route_agent_inbound(
                 agent_install_id="agent-1",
                 chat_id="-100999",
@@ -296,7 +296,7 @@ class ByoRouteAgentInboundGroupGateTests(unittest.IsolatedAsyncioTestCase):
              patch.object(prov, "get_me", new=AsyncMock(return_value={"id": "bot-numeric-id", "username": "parts_pro_bot"})) as get_me_mock, \
              patch("server_modules.specialist_runtime_context.resolve_specialist_runtime_context", new=AsyncMock(return_value=None)), \
              patch("server_modules.agent_registry_repository.get_workspace_agent_install_bundle", new=AsyncMock(return_value={"metadata": {}})), \
-             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=AsyncMock(return_value=True)) as dispatch_mock:
+             patch("server_modules.agent_reply_dispatcher.dispatch_sage_reply_safe", new=AsyncMock(return_value=True)) as dispatch_mock:
             result = await prov.route_agent_inbound(
                 agent_install_id="agent-1",
                 chat_id="555444",
@@ -318,7 +318,7 @@ class ByoRouteAgentInboundGroupGateTests(unittest.IsolatedAsyncioTestCase):
              patch.object(prov, "get_me", new=AsyncMock(return_value={"id": "bot-numeric-id", "username": "parts_pro_bot"})) as get_me_mock, \
              patch("server_modules.specialist_runtime_context.resolve_specialist_runtime_context", new=AsyncMock(return_value=None)), \
              patch("server_modules.agent_registry_repository.get_workspace_agent_install_bundle", new=AsyncMock(return_value={"metadata": {}})), \
-             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=AsyncMock(return_value=True)):
+             patch("server_modules.agent_reply_dispatcher.dispatch_sage_reply_safe", new=AsyncMock(return_value=True)):
             for _ in range(3):
                 await prov.route_agent_inbound(
                     agent_install_id="agent-1",
@@ -340,7 +340,7 @@ class ByoRouteAgentInboundGroupGateTests(unittest.IsolatedAsyncioTestCase):
              patch.object(prov, "get_me", new=AsyncMock(side_effect=RuntimeError("network down"))), \
              patch("server_modules.specialist_runtime_context.resolve_specialist_runtime_context", new=AsyncMock(return_value=None)), \
              patch("server_modules.agent_registry_repository.get_workspace_agent_install_bundle", new=AsyncMock(return_value={"metadata": {}})), \
-             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=AsyncMock(return_value=True)) as dispatch_mock:
+             patch("server_modules.agent_reply_dispatcher.dispatch_sage_reply_safe", new=AsyncMock(return_value=True)) as dispatch_mock:
             result = await prov.route_agent_inbound(
                 agent_install_id="agent-1",
                 chat_id="-100999",

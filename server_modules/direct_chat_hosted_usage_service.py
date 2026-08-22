@@ -198,7 +198,7 @@ def reserve_direct_chat_hosted_usage_best_effort(
                 # The canonical constant, not a hand-retyped copy — this was
                 # the THIRD independent hardcoded copy of the same sentence
                 # found 2026-08-19 (alongside entitlements_service.py and
-                # sage_command_dispatcher.py's own SAGE_AI_LIMIT_MESSAGE),
+                # agent_command_dispatcher.py's own SAGE_AI_LIMIT_MESSAGE),
                 # which is exactly what test_credit_exhaustion_message_is_
                 # present's own comment warns a hand-typed copy causes: this
                 # one kept the pre-rewording "Open AI & Setup →" text (a

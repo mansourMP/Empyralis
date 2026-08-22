@@ -13,7 +13,7 @@ branches returned hundreds of lines before reaching it:
       ├─ action loop                           guard -> return
       └─ cloud fallthrough                     guard -> return
 
-`sage_turn_adapter.execute_sage_turn` relays `result["message"]` verbatim and
+`agent_turn_adapter.execute_sage_turn` relays `result["message"]` verbatim and
 `personal_channels_service` hands that straight to WhatsApp, Telegram, Signal,
 iMessage and the OpenClaw-transported channels, so both branches reached a real
 recipient with secrets, RED / private-memory markers and internal tool markup
@@ -61,7 +61,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from server_modules import agent_turn_runtime_service
-from server_modules import sage_turn_adapter
+from server_modules import agent_turn_adapter
 from server_modules import thread_service
 from server_modules.specialist_runtime_context import SpecialistRuntimeContext
 
@@ -105,7 +105,7 @@ class _CapturedTurns:
 def _drive_gateway_brain_turn(*, mode: str, runtime: str, reply: str):
     """Drive a BYO-brain turn through the SAME call a channel relay makes.
 
-    `sage_turn_adapter.execute_sage_turn` is the single ingress every channel
+    `agent_turn_adapter.execute_sage_turn` is the single ingress every channel
     uses, and `SageTurnResult.message` is the exact string
     `personal_channels_service` hands to WhatsApp/Telegram/Signal/iMessage —
     so asserting on it is asserting on what a recipient receives, not on an
@@ -154,7 +154,7 @@ def _drive_gateway_brain_turn(*, mode: str, runtime: str, reply: str):
         ),
         patch.object(thread_service.control_plane_repository, "upsert_agent_turn", new=captured.upsert),
     ):
-        result = _run(sage_turn_adapter.execute_sage_turn(
+        result = _run(agent_turn_adapter.execute_sage_turn(
             workspace_id="ws-1",
             message=USER_MESSAGE,
             specialist_context=spec,

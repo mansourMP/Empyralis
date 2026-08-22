@@ -71,8 +71,8 @@ class TelegramWebhookSenderIdentityTests(unittest.TestCase):
         with patch.object(hosted, "is_configured", return_value=True), \
              patch.object(hosted, "is_webhook_secret_configured", return_value=True), \
              patch.object(hosted, "verify_webhook_signature", return_value=True), \
-             patch("server_modules.sage_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)), \
-             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch_reply):
+             patch("server_modules.agent_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)), \
+             patch("server_modules.agent_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch_reply):
             resp = self.client.post(
                 "/sage/telegram-hosted/webhook",
                 json=body,
@@ -93,7 +93,7 @@ class TelegramWebhookSenderIdentityTests(unittest.TestCase):
         with patch.object(hosted, "is_configured", return_value=True), \
              patch.object(hosted, "is_webhook_secret_configured", return_value=True), \
              patch.object(hosted, "verify_webhook_signature", return_value=True), \
-             patch("server_modules.sage_command_dispatcher.dispatch_command", new=_fake_dispatch_command), \
+             patch("server_modules.agent_command_dispatcher.dispatch_command", new=_fake_dispatch_command), \
              patch.object(hosted, "send_message_safe", new=AsyncMock(return_value=True)):
             resp = self.client.post(
                 "/sage/telegram-hosted/webhook",
@@ -113,8 +113,8 @@ class TelegramWebhookSenderIdentityTests(unittest.TestCase):
         with patch.object(hosted, "is_configured", return_value=True), \
              patch.object(hosted, "is_webhook_secret_configured", return_value=True), \
              patch.object(hosted, "verify_webhook_signature", return_value=True), \
-             patch("server_modules.sage_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)), \
-             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch_reply):
+             patch("server_modules.agent_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)), \
+             patch("server_modules.agent_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch_reply):
             self.client.post(
                 "/sage/telegram-hosted/webhook",
                 json=_telegram_message_update(update_id=3, chat_id=-100555, chat_type="group", from_id=111, text="hi", first_name="Alice", addressed=True),

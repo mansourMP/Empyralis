@@ -1663,8 +1663,8 @@ async def discord_webhook(request: Request):
             _message_type = str(parsed.get("message_type") or "").strip().lower()
             if _message_type == "direct_message":
                 try:
-                    from server_modules.sage_command_dispatcher import dispatch_command
-                    from server_modules.sage_turn_adapter import execute_sage_turn
+                    from server_modules.agent_command_dispatcher import dispatch_command
+                    from server_modules.agent_turn_adapter import execute_sage_turn
 
                     _dm_user_id = str(parsed.get("user_id") or "").strip()
                     _dm_text = str(parsed.get("text") or "").strip()
@@ -1683,7 +1683,7 @@ async def discord_webhook(request: Request):
                         # unreachable forever, and a dormant path carrying a
                         # live-looking bug is exactly the kind of thing that
                         # bites the moment it does start firing.
-                        from server_modules.sage_command_dispatcher import agent_sender_thread_id
+                        from server_modules.agent_command_dispatcher import agent_sender_thread_id
                         _dm_thread_id = agent_sender_thread_id("sage", _dm_user_id)
                         _dm_envelope = InboundEnvelope(
                             platform="discord_personal",

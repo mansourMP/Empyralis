@@ -113,7 +113,7 @@ class PersonalChannelsServiceMediaTests(unittest.IsolatedAsyncioTestCase):
             # The shared slash-command waist runs first and must fall through
             # so the ordinary reply path is what executes.
             patch(
-                "server_modules.sage_command_dispatcher.dispatch_command",
+                "server_modules.agent_command_dispatcher.dispatch_command",
                 new=AsyncMock(return_value=None),
             ),
             patch(

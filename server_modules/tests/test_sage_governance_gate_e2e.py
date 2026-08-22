@@ -306,7 +306,7 @@ class TelegramHostedE2ETests(unittest.TestCase):
             patch("server_modules.agent_turn_runtime_service.agent_trace_service.start_trace",
                   new=AsyncMock(return_value={"trace_id": "mock-trace-1"})),
         ):
-            from server_modules.sage_turn_adapter import execute_sage_turn
+            from server_modules.agent_turn_adapter import execute_sage_turn
 
             result = _run(execute_sage_turn(
                 workspace_id="ws-1",
@@ -352,7 +352,7 @@ class TelegramHostedE2ETests(unittest.TestCase):
             patch("server_modules.agent_turn_runtime_service.agent_trace_service.start_trace",
                   new=AsyncMock(return_value={"trace_id": "mock-trace-2"})),
         ):
-            from server_modules.sage_turn_adapter import execute_sage_turn
+            from server_modules.agent_turn_adapter import execute_sage_turn
 
             result = _run(execute_sage_turn(
                 workspace_id="ws-1",
@@ -367,7 +367,7 @@ class TelegramHostedE2ETests(unittest.TestCase):
 
     def test_empty_message_raises_value_error(self):
         """Empty message raises ValueError before reaching the LLM."""
-        from server_modules.sage_turn_adapter import execute_sage_turn
+        from server_modules.agent_turn_adapter import execute_sage_turn
 
         with self.assertRaises(ValueError) as ctx:
             _run(execute_sage_turn(
@@ -379,7 +379,7 @@ class TelegramHostedE2ETests(unittest.TestCase):
 
     def test_empty_workspace_raises_value_error(self):
         """Empty workspace_id raises ValueError."""
-        from server_modules.sage_turn_adapter import execute_sage_turn
+        from server_modules.agent_turn_adapter import execute_sage_turn
 
         with self.assertRaises(ValueError) as ctx:
             _run(execute_sage_turn(

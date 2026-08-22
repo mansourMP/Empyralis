@@ -10,7 +10,7 @@
     silently swallowed) -- Step 2 of "Mentions + identity for platform AND
     external agents"
 (g) empyralis_chat (MAN-205): routes through the real turn chokepoint
-    (sage_turn_adapter.execute_sage_turn), validates agent_id against the
+    (agent_turn_adapter.execute_sage_turn), validates agent_id against the
     caller's own workspace before touching it, never falls back to a
     synthesized/legacy-Sage reply, and surfaces real errors/timeouts honestly
 (h) The other three MAN-205 tools -- empyralis_get_agent_conversations,
@@ -408,7 +408,7 @@ class MCPChatToolTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(return_value="fake-specialist-context"),
             ) as spec_mock, \
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(return_value=turn_result),
             ) as turn_mock:
             result = await mcp_server.empyralis_chat(
@@ -448,7 +448,7 @@ class MCPChatToolTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(return_value=None),
             ) as bundle_mock, \
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(),
             ) as turn_mock:
             result = await mcp_server.empyralis_chat(
@@ -480,7 +480,7 @@ class MCPChatToolTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(return_value=None),
             ), \
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(return_value=turn_result),
             ):
             result = await mcp_server.empyralis_chat(message="hi", agent_id="", ctx=_FakeChatCtx())
@@ -507,7 +507,7 @@ class MCPChatToolTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(return_value=None),
             ), \
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(side_effect=RuntimeError("no AI provider configured")),
             ):
             result = await mcp_server.empyralis_chat(message="hi", agent_id="ainstall_x", ctx=_FakeChatCtx())
@@ -537,7 +537,7 @@ class MCPChatToolTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(return_value=None),
             ), \
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=_never_returns,
             ):
             result = await mcp_server.empyralis_chat(message="hi", agent_id="ainstall_slow", ctx=_FakeChatCtx())

@@ -6384,7 +6384,7 @@ def execute_single_direct_tool_call(
             # agent_turn_runtime_service.handle_sage_chat (see
             # inbound_attribution_recovery.build_attribution) -- the turn's
             # WHO/WHERE, best-effort recovered since the frozen
-            # sage_turn_adapter chokepoint doesn't forward the canonical
+            # agent_turn_adapter chokepoint doesn't forward the canonical
             # InboundEnvelope object itself. None for any caller that
             # doesn't set it (unchanged behavior).
             source=session_metadata.get("envelope") if isinstance(session_metadata.get("envelope"), dict) else None,

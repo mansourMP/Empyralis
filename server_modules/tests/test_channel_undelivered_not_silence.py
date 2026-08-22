@@ -35,7 +35,7 @@ them. This is not outgoing first-party channel work.
 WHICH ENGINE. None. The defect and the fix both live strictly DOWNSTREAM of
 turn execution: every test here stubs the turn at
 personal_channel_sage_bridge_service.build_personal_channel_reply_async or at
-sage_turn_adapter.execute_sage_turn, so _resolve_turn_engine_id is never
+agent_turn_adapter.execute_sage_turn, so _resolve_turn_engine_id is never
 called and the legacy/SDK engine split cannot silently decide the result.
 
 WHAT MUST NOT REGRESS. Suppression is unchanged for a stranger: every code in
@@ -320,7 +320,7 @@ class _LocalBridgeSeamHarness:
 
 
 async def _ok_reply(**_kw) -> dict:
-    return {"text": "Here's your calendar.", "source": "sage_turn_adapter"}
+    return {"text": "Here's your calendar.", "source": "agent_turn_adapter"}
 
 
 async def _failed_reply(**_kw) -> dict:
@@ -401,7 +401,7 @@ class SecondMessageMidTurnIsNotLostTests(unittest.IsolatedAsyncioTestCase):
         async def _slow_ok(**_kw):
             first_started.set()
             await release_first.wait()
-            return {"text": "Here's your calendar.", "source": "sage_turn_adapter"}
+            return {"text": "Here's your calendar.", "source": "agent_turn_adapter"}
 
         task_one = asyncio.create_task(harness.deliver("msg-a", reply_builder=_slow_ok))
         await first_started.wait()

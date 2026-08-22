@@ -678,11 +678,11 @@ class DiscordDmGatewayHandlerTests(unittest.IsolatedAsyncioTestCase):
                 return_value="ws-1",
             ),
             patch(
-                "server_modules.sage_command_dispatcher.dispatch_command",
+                "server_modules.agent_command_dispatcher.dispatch_command",
                 new=AsyncMock(return_value=None),
             ),
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(return_value=sage_result),
             ) as mock_turn,
             patch(
@@ -725,11 +725,11 @@ class DiscordDmGatewayHandlerTests(unittest.IsolatedAsyncioTestCase):
                 return_value="ws-1",
             ),
             patch(
-                "server_modules.sage_command_dispatcher.dispatch_command",
+                "server_modules.agent_command_dispatcher.dispatch_command",
                 new=AsyncMock(return_value=None),
             ),
             patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
+                "server_modules.agent_turn_adapter.execute_sage_turn",
                 new=AsyncMock(return_value=sage_result),
             ) as mock_turn,
             patch(

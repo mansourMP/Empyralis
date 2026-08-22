@@ -208,10 +208,10 @@ async def execute_sage_turn(
     if not resolved_thread_id and resolved_channel_origin:
         _spec_agent_id = str(getattr(specialist_context, "agent_install_id", "") or "").strip()
         if _spec_agent_id:
-            from server_modules.sage_command_dispatcher import agent_sender_thread_id as _astid
+            from server_modules.agent_command_dispatcher import agent_sender_thread_id as _astid
             resolved_thread_id = _astid(_spec_agent_id, resolved_sender_id)
         else:
-            from server_modules.sage_command_dispatcher import get_active_thread as _gat
+            from server_modules.agent_command_dispatcher import get_active_thread as _gat
             resolved_thread_id = await _gat(resolved_workspace_id, resolved_channel_origin)
     if not resolved_thread_id:
         resolved_thread_id = "sage-main"

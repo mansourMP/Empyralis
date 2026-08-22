@@ -426,11 +426,11 @@ async def route_inbound_channel_message(
             if not _room_or_sender:
                 _room_or_sender = str(actor_id or "").strip() or str(session_key or "").strip()
             if _room_or_sender:
-                from server_modules.sage_command_dispatcher import agent_sender_thread_id
+                from server_modules.agent_command_dispatcher import agent_sender_thread_id
                 resolved_thread_id = agent_sender_thread_id(_thread_agent_token, _room_or_sender)
 
         try:
-            from server_modules.sage_turn_adapter import execute_sage_turn
+            from server_modules.agent_turn_adapter import execute_sage_turn
 
             sage_result = await execute_sage_turn(
                 workspace_id=resolved_workspace_id,

@@ -91,7 +91,7 @@
  *                 own default, "Cloud only", was accepted). Configure >
  *                 Hardware covers every other placement afterward.
  *   purpose /   -- "internal_assistant" / "owner", the codebase's own
- *   audience       existing safe default (sage_command_dispatcher.py's own
+ *   audience       existing safe default (agent_command_dispatcher.py's own
  *                 documented reasoning: "the safer, less-blaming
  *                 assumption"). Flagged, not quietly accepted: grepping
  *                 this frontend tree found ZERO post-creation controls
