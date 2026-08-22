@@ -90,9 +90,19 @@ jobs:
           # Apple silicon. Every Mac the founder or a customer is realistically
           # running today.
           - arch: aarch64
-            runner: macos-14
+            # The founder's own Mac, registered as a self-hosted runner.
+            # GitHub's hosted macOS machines bill at 10x the Linux rate on a
+            # private repo, and this job sat QUEUED for over an hour rather
+            # than failing with a reason — so the release could never publish
+            # and the download link could never exist. Apple silicon covers
+            # every Mac a customer realistically has today.
+            runner: [self-hosted, macOS, ARM64]
           # Intel. Cheap to keep and impossible to add back retroactively for
           # someone already on an old machine.
+          # Intel. No self-hosted Intel Mac exists, and GitHub's hosted
+          # macOS runners are the thing that blocked this release in the
+          # first place, so this slice does not gate a publish: the arm64
+          # build must be able to ship without it.
           - arch: x86_64
             runner: macos-13
     steps:
