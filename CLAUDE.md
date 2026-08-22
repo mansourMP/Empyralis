@@ -538,6 +538,107 @@ The lesson from both: **a component that moves focus programmatically owns
 the obligation to also clear it.** Grep for `.focus()` calls with no
 matching reset before assuming a visual bug is a CSS problem.
 
+## The Agents surface is CARDS, and the picker column is deleted (2026-08-22)
+
+**The workspace `/agents` was a scrolling picker column beside a pane whose
+whole content was the sentence "Pick an agent to watch it work." It is gone —
+layout, component and both of its pure modules — and the content area shows
+the agents themselves.** Founder, looking at it live with 19 agents: *"it acts
+like something like telegram still but it shouldn't look like that… maybe just
+like as we show this project we would show also the agents as well."*
+
+Two independent reasons, either alone sufficient. The column existed to sit
+beside a CHAT, and chat left the platform entirely. And the rail already says
+"Agents", so a pick-list in the content area beside it was a SECOND picker —
+the one arrangement "the rail is where you pick" rules out. Note this does NOT
+reverse 2026-08-20's own correction (a picker MAY live in the content area);
+it reverses the case where the rail is already offering the same pick.
+
+```
+DELETED   agents/layout.tsx · AgentConversationList.tsx
+          agents-conversation-list.ts · agents-split-pane.ts (+ both tests)
+          the dead half of the .fleet-agents-conversation-* / .fleet-agents-
+          detail-pane / <=768px one-pane-at-a-time CSS
+KEPT      .fleet-conversation-row* and -list-rows — a PROJECT's own /agents
+          tab still renders them. Check both consumers before trimming more.
+```
+
+**The agent's own routed page is untouched and now renders full width, exactly
+as its project-scoped twin at `.../projects/{pid}/agents/{id}/{tab}` already
+did** — that route has never had a layout, so this is a configuration already
+proven in production, not a new one.
+
+**A CARD FACE IS TWO FACTS AND REFUSES A THIRD**, decided by
+`agent-card-face.ts` (pure + tested, the house pattern):
+
+```
+SLOT 1  state   stopped · blocked · working · idle
+SLOT 2  reach   the task it is on > tasks waiting > where it answers > NEITHER
+```
+
+What it replaces is `activity_preview`, a LIFECYCLE verb: "Created" is true of
+every agent that has ever existed, so a column of it distinguishes nothing —
+which is exactly what the founder was looking at.
+
+**THE TWO SLOTS MAY DISAGREE, AND THAT IS THE POINT.** A healthy agent nothing
+can reach reads `Ready` + `No channel or tasks yet`, because both are true: its
+brain works and nothing will ever ask it anything. Slot 2 carries the amber
+attention treatment there — it is the half a person can act on. Collapsing them
+would have to lie about one, the same law this file states for delivery
+outcomes and invite mail.
+
+**Nothing is fabricated and nothing new is fetched.** Tasks come from
+`useFleetWorkspaceTasks` (one workspace-wide call PrimaryRail/Inbox/My work
+already share the cache of); the channel is the existing `agent.channel` string
+parsed by the existing `parseAgentChannelField` + `CHANNEL_LABELS`; the status
+is `deriveAgentStatus`, PASSED IN rather than recomputed, so a brain-blocked
+agent never reads green here while reading "Needs sign-in" on its own page.
+
+**`current_run_id` IS NOT THE WORKING SIGNAL, and a card built on it can never
+say "Working" about anything.** It is truthful but de-facto always null: it is
+only populated from a `runtime_profiles.machine_id` heartbeat, and nothing in
+the fleet UI ever points an agent at a machine-bound profile
+(gateway-box-picker.tsx says so out loud). The signal that actually occurs is
+an assigned task sitting `in_progress`; the runtime's own flag is still
+honoured when set. **"Working" now has ONE definition, in that module** —
+`PrimaryRail`'s footer pulse used to count `current_run_id` alone and read
+"0 working" permanently, so once the cards counted tasks the rail and the grid
+said different things about the same fleet on the same screen. The rail reuses
+the module. Its own comment already claimed it derived "the exact same status
+tones the Agents table itself derives from"; that claim is true again.
+
+**SORT IS BY ATTENTION RANK, THEN NAME — never recency.** Recency is a CHAT
+LIST's ordering and it is what the deleted surface used; it answers "who did I
+last talk to", a question about a product that no longer exists here. Rank is
+blocked > working > unfinished setup > stopped > healthy, alphabetical within,
+so a card's position is stable and nothing moves because a timestamp ticked.
+
+**`.fleet-content--wide` on this page is load-bearing, not taste.** Measured
+before it was added: 18 cards in a single 310px column, centred, ~600px of dead
+space either side — the exact screen this file records the founder rejecting on
+the old workspace home. `.fleet-content` is a flex ITEM, so its
+`margin-inline:auto` is a pair of CROSS-AXIS auto margins, which disable
+stretch; the box then sizes shrink-to-fit and a `repeat(auto-fill, …)` grid
+inside cannot compute a column count against an indefinite inline size, so it
+collapses to one and compounds the narrowing. fleet-theme.css's own comment on
+that modifier already spelled this out. **Any future auto-fill grid on a
+`.fleet-content` page needs `--wide`, or it will do this again.**
+
+Guarded by `frontend/lib/workspace/fleet/agent-card-face.test.ts` (in
+`npm run test:unit`): behaviour, plus structural assertions a behavioural test
+cannot see — the four deleted files staying deleted, the grid actually being
+wired, no accent in its CSS, no focus ring, and no composer of any kind.
+Comments are stripped before the CSS scans, or the test's own header trips its
+own tripwire. All proven red-before-green.
+
+**Still open, reported not fixed.** A card gives a keyboard user no focus
+indicator beyond the hover treatment it shares (the founder's own no-focus-ring
+decision; the ring is not coming back). Search matches only what a face SHOWS,
+so an agent whose reach line is a task does not match its own channel name —
+deliberate, since the alternative is survivors with no visible reason to be
+there. And a PROJECT's `/agents` tab is still a bare hairline row list of
+names, now visibly inconsistent with this grid; unifying it is its own change.
+
 ## Rail spaces: the rail is where you pick (2026-08-16)
 
 **Founder's rule, verbatim intent: "the rail is where you pick; the content

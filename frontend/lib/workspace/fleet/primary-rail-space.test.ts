@@ -205,7 +205,7 @@ assert(
 // component must import THIS module and derive the space from the live
 // pathname — a hand-inlined copy of the regex would pass every assertion
 // above while drifting freely.
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 const railSource = readFileSync(new URL("./PrimaryRail.tsx", import.meta.url), "utf8");
 assert(
   railSource.includes('from "./primary-rail-space"'),
@@ -275,54 +275,35 @@ assert(
 assert(!/workspace-agents/.test(railSource), "PrimaryRail no longer references a workspace-agents rail space");
 assert(!/workspaceAgentsSpaceLinks/.test(railSource), "PrimaryRail no longer renders a workspace-agents pick-list");
 
-// The picker lives in the content area instead: agents/layout.tsx renders
-// AgentConversationList beside the routed agent page, gated on the exact
-// same planAgentCountShape rule every other count-decided shape here uses
-// — never a second, hand-rolled re-check of the count.
-const agentsLayoutSource = readFileSync(
-  new URL("../../../app/(account)/w/[workspaceId]/agents/layout.tsx", import.meta.url),
-  "utf8",
-);
-assert(
-  agentsLayoutSource.includes('from "@/lib/workspace/fleet/agent-count-shape"') &&
-    /planAgentCountShape\s*\(/.test(agentsLayoutSource),
-  "agents/layout.tsx gates the list pane via planAgentCountShape, not a second rule",
-);
-assert(
-  agentsLayoutSource.includes('from "@/lib/workspace/fleet/AgentConversationList"') &&
-    /<AgentConversationList\b/.test(agentsLayoutSource),
-  "agents/layout.tsx actually renders AgentConversationList — built, and wired",
-);
-// The shell class moved OUT of this file into agents-split-pane.ts on
-// 2026-08-21 (it is now conditional — one pane at a time below 768px), so
-// the assertion follows it to its producer rather than being weakened. Both
-// halves are checked: the layout asks that module, and that module still
-// answers with the shared master-detail shell.
-assert(
-  agentsLayoutSource.includes('from "@/lib/workspace/fleet/agents-split-pane"') &&
-    /agentsSplitClassName\s*\(/.test(agentsLayoutSource),
-  "agents/layout.tsx takes its split-shell class from agents-split-pane.ts",
-);
-const agentsSplitPaneSource = readFileSync(new URL("./agents-split-pane.ts", import.meta.url), "utf8");
-assert(agentsSplitPaneSource.length > 500, "CANARY: agents-split-pane.ts was actually read");
-assert(
-  /fleet-content--split/.test(agentsSplitPaneSource),
-  "the list+detail split reuses the same master-detail shell class Inbox/Work/Memory already use",
-);
-
-// The actual "only one surface may be the picker" guard: the bare index
-// must show the quiet prompt, never a second list of its own, once the
-// layout's pane is showing — reusing fleet-theme.css's
-// .fleet-project-agents-placeholder (named for the deleted space it was
-// written for; the CLASS is a generic quiet-prompt shape and stays) rather
-// than a second CSS rule for an identical shape.
+// The picker lives in the content area instead — and as of fix/agents-surface
+// it is the AGENTS THEMSELVES, as cards, rather than a persistent column
+// beside a pane. That column was deleted for two independent reasons, either
+// of which alone would be enough: it existed to sit beside a CHAT (which left
+// the platform entirely), and with the rail already offering "Agents" it was a
+// SECOND picker in the content area — the one arrangement this whole file
+// exists to forbid. So the invariant this section guards is unchanged; only
+// the shape that satisfies it moved.
+//
+// The stronger, more specific guards for the new surface (the deleted files
+// staying deleted, the grid actually being wired, no accent, no focus ring)
+// live in agent-card-face.test.ts, beside the module they belong to. What is
+// asserted HERE is only the part that is about RAIL SPACES.
 const agentsPageSource = readFileSync(
   new URL("../../../app/(account)/w/[workspaceId]/agents/page.tsx", import.meta.url),
   "utf8",
 );
+assert(agentsPageSource.length > 500, "CANARY: the workspace Agents page source was actually read");
 assert(
-  /fleet-project-agents-placeholder/.test(agentsPageSource),
-  "the workspace Agents index renders the quiet placeholder, not a grid/board/list of its own",
+  !existsSync(new URL("../../../app/(account)/w/[workspaceId]/agents/layout.tsx", import.meta.url)),
+  "no agents layout re-wraps the agent's own page in a second picker column",
+);
+assert(
+  agentsPageSource.includes('from "@/lib/workspace/fleet/AgentCards"'),
+  "the workspace Agents index shows the agents in the content area — not a prompt to pick from a list that is elsewhere",
+);
+assert(
+  !/Pick an agent to watch it work/.test(agentsPageSource),
+  "…and no longer prompts a pick, which only ever made sense beside the deleted column",
 );
 assert(
   !/from ["']@\/lib\/workspace\/fleet\/(AgentsBoard|AgentsGroupedList|AgentViewOptions)["']/.test(agentsPageSource),
