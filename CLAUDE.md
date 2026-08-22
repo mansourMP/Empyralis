@@ -3774,6 +3774,120 @@ ONLY on the desktop path: a systemd unit at `/etc/systemd/system` is one the
 service user cannot write, so changing every VPS box's expected unit contents
 would make the fleet report drift it can never repair.
 
+## DOCKER CHOOSES HOW A COMMAND RUNS, NEVER WHETHER (2026-08-22)
+
+**Founder's ruling, and it deletes a wall rather than moving it: *"Docker is
+not something that is going to degrade what we do. It's just something that
+is fundamentally going to be safer... not like 'this is impossible to run
+here' or 'because you don't have Docker I don't have any permission to run
+it'. I don't want to hear any of those things from my agent."*** And on how
+to say it: *"we should be honest with the customer... most people already
+know what Docker is."*
+
+```
+Docker ready       ─▶ sandbox      the command runs in a throwaway container
+Docker NOT ready   ─▶ host         the same command runs on the computer
+                                   itself, AND IT WORKS. the default, not a
+                                   degradation, not an error, not a prompt
+full_access opt-in ─▶ full_access  UNCHANGED deliberate escalation
+```
+
+**It was a wall at FOUR layers and the agent hit all four, which is why a
+one-file fix would have changed nothing:**
+
+```
+1 desktop-permissions.ts   shell_sandbox "restricted" without Docker
+2 capability_readiness     so shell.execute reported blocked every heartbeat
+3 gateway_execution_service so dispatch refused: gateway_capability_not_ready
+4 shell/runtime.ts          so the executor threw "requires Docker ... neither
+                            is available on this Gateway"
+```
+
+Layer 1 is the only one that was changed: `shell_sandbox` is now granted
+unconditionally (the `EMPYRALIS_AGENT_COMPUTER_PERMISSION_SHELL_SANDBOX` env
+override is still the one real off switch, and still works). 2 and 3 fall
+away on their own because they read layer 1. Layer 4 now returns a way to
+run instead of throwing. `shellSandboxDockerReady` /
+`setShellFullAccessLocallyEnabled` and their setters are DELETED — do not
+reintroduce a flag there to "protect" a Docker-less box.
+
+**`host` IS NOT `full_access`, and fusing them was the one genuinely
+dangerous shortcut available.** They share an implementation (`runOnHost`)
+and differ in what they CLAIM. full_access keeps its unchanged two-part
+opt-in — the box's own `EMPYRALIS_GATEWAY_SHELL_FULL_ACCESS_ENABLED` plus a
+server-asserted per-call authorization — and its own cloud-side policy
+semantics (filesystem scope `/`). A Docker-less box runs as `host`, which
+asserts neither. Reusing the full_access token would have claimed an
+authorization nobody granted and made a real escalation unreadable in every
+log, trace and tool result.
+
+**STATE THE CONSEQUENCE, do not soften it: an agent attached to a computer
+without Docker now runs its commands on that whole computer.** What still
+constrains it is `shell/command-policy.ts` — the hard-blocked command list
+and the protected paths (vault, `~/.ssh`, `~/.gnupg`, `/etc/empyralis`, the
+agent's own state dir) — checked in EVERY mode, BEFORE the isolation
+decision, and not bypassable by any mode or caller. Host runs still start in
+the agent's own scoped workspace directory. Verified by running it: on a
+Docker-less runtime `rm -rf /` and `cat ~/.ssh/id_rsa` are both still
+refused.
+
+**THE HONESTY LIVES IN THE LABEL, NOT IN A GATE.** Three statements,
+pinned byte-for-byte on both sides of a genuine cross-language duplicate
+(`empyralis-gateway/src/shell/execution-isolation.ts` and
+`frontend/lib/workspace/fleet/box-capability-state.ts` are different npm
+packages and cannot import each other; the frontend test pins the literals):
+
+```
+sandbox      "Commands run isolated in a container on this computer."
+host         "Commands run directly on this computer, because Docker isn't running here."
+full_access  "Commands run directly on this computer, which has full access turned on."
+unknown      NOTHING IS RENDERED
+```
+
+Neither is an error and neither is a warning — **do not give either one an
+alert tone, an icon, or a "fix this" button**, or the wall goes back into the
+customer's head after being taken out of the code. `unknown` is a REAL fourth
+answer (an older gateway build that has never reported Docker): "runs on the
+whole computer" and "haven't found out yet" are different facts, so the
+unknown case renders no sentence at all. Same law this file already states
+for delivery outcomes and invite mail.
+
+**`warning` stays EXCLUSIVE to full_access** in the tool result. A `host` run
+is the ordinary state of a computer without Docker; flagging it every time
+would be the alarm the ruling removes.
+
+**The bounded, cooldown-gated, single-flighted Docker autostart is
+UNCHANGED and still runs first** — a box whose Docker was merely asleep still
+gets a container. Its outcome detail now lands in the internal `reason` of a
+host run that succeeded, instead of in a thrown refusal.
+
+**ZERO backend changes were needed, and `gateway_reason_messages.py` was
+deliberately LEFT ALONE.** No Python gate on Docker exists in the dispatch
+path (grepped). Its *"Docker isn't running on this machine. Start Docker
+Desktop, then retry."* is now unreachable for a rebuilt gateway — but it
+stays CORRECT for every already-deployed box, which still gates on Docker
+until it is rebuilt. Deleting it would take an accurate diagnosis away from
+the live fleet. Revisit only once no old gateway build is in service.
+
+**Every test that proved the wall was INVERTED, never weakened or deleted**,
+so they are now what fails if it comes back. Proven red-before-green against
+a reverted tree: 15 fail there, all pass here. Gateway 830/830 (baseline
+822/822).
+
+**A harness trap this cost real time, and it will bite the next person:**
+`capability-router-shell-sandbox.test.ts`'s `makeShellRuntime()` did not
+inject `dockerAutostart`. That was harmless while an ordinary invoke was
+refused at the permission layer; now it reaches the executor, so the default
+`ensureDockerReady()` spawned a real `open -a Docker` on the machine running
+the suite and 10x'd the whole gateway suite's runtime. **Any test that can
+reach the sandbox path must inject `dockerAutostart`**, the guard
+`shell-runtime.test.ts`'s `baseConfig()` already had.
+
+**Still open, reported not fixed:** the Hardware tab's isolation line and
+`GatewayBoxPicker` use two separate `useWorkspaceGateways` instances, so the
+line can render (correctly, from loaded data) while the picker beside it
+still says "Loading your paired computers…". Cosmetic, not a wrong fact.
+
 ## Testing the UI
 
 **Seed your own data. Never ask for the founder's account, and never copy secrets.**
