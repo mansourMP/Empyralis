@@ -117,34 +117,40 @@ def collect_mcp_tools() -> list[str]:
     return sorted(str(name) for name in tools if str(name).strip())
 
 
-async def _schema_rows() -> list[str]:
+async def _schema_snapshot() -> dict[str, Any]:
     try:
         import asyncpg
-    except ImportError as exc:  # pragma: no cover - environment failure
-        raise RuntimeError("asyncpg is required for the live schema snapshot") from exc
+    except ImportError:
+        return {"state": "unknown", "reason": "asyncpg_unavailable"}
 
     # Importing server is intentional: runtime_config loads the repository's
     # dotenv/config conventions before we resolve DATABASE_URL.  asyncpg's
     # None DSN retains the local libpq defaults used by this checkout.
     import server  # noqa: F401
 
-    conn = await asyncpg.connect(os.getenv("DATABASE_URL") or None)
     try:
-        records = await conn.fetch(
-            """
-            SELECT table_schema, table_name, column_name
-            FROM information_schema.columns
-            WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
-            ORDER BY table_schema, table_name, ordinal_position
-            """
-        )
-    finally:
-        await conn.close()
-    return [f"{row['table_schema']}.{row['table_name']}.{row['column_name']}" for row in records]
+        conn = await asyncpg.connect(os.getenv("DATABASE_URL") or None, timeout=5)
+        try:
+            records = await conn.fetch(
+                """
+                SELECT table_schema, table_name, column_name
+                FROM information_schema.columns
+                WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+                ORDER BY table_schema, table_name, ordinal_position
+                """
+            )
+        finally:
+            await conn.close()
+    except Exception as exc:
+        return {"state": "unknown", "reason": type(exc).__name__}
+    return {
+        "state": "known",
+        "entries": [f"{row['table_schema']}.{row['table_name']}.{row['column_name']}" for row in records],
+    }
 
 
-def collect_schema() -> list[str]:
-    return asyncio.run(_schema_rows())
+def collect_schema() -> dict[str, Any]:
+    return asyncio.run(_schema_snapshot())
 
 
 def _literal_strings(tree: ast.AST) -> Iterable[tuple[str, int]]:
@@ -386,10 +392,27 @@ def main() -> int:
         sys.stdout.write(serialized)
     if args.compare:
         expected = json.loads(args.compare.read_text(encoding="utf-8"))
+        current_schema = snapshot.get("database_schema", {})
+        expected_schema = expected.get("database_schema", {})
+        if current_schema.get("state") != "known":
+            sys.stderr.write(
+                "contract snapshot unknown: database schema could not be read; "
+                f"reason={current_schema.get('reason', 'unknown')}\n"
+            )
+            return 2
+        if expected_schema.get("state") != "known":
+            sys.stderr.write("contract snapshot unknown: comparison baseline has no known database schema\n")
+            return 2
         differences = _diff(expected, snapshot)
         if differences:
             sys.stderr.write("contract snapshot changed:\n" + "\n".join(differences) + "\n")
             return 1
+    elif snapshot.get("database_schema", {}).get("state") != "known":
+        sys.stderr.write(
+            "contract snapshot unknown: database schema could not be read; "
+            f"reason={snapshot['database_schema'].get('reason', 'unknown')}\n"
+        )
+        return 2
     return 0
 
 

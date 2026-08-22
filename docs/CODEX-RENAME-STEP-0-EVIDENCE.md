@@ -27,8 +27,9 @@ No database writes were performed.
 
 ## Determinism check
 
-Command:
+Command (the comparison baseline must use an explicitly reachable database):
 
+    DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/empyralis \
     venv/bin/python scripts/rename_contract_snapshot.py \
       --output /tmp/rename-contract-repeat.json \
       --compare docs/rename-contract-baseline.json
@@ -63,6 +64,24 @@ temporary directory. Output:
 
 No production route, tool, CSS class, database value, or application source
 was changed by the demo.
+
+## Database unknown state
+
+The database section has three meaningful states: `known`, `unknown`, and a
+known snapshot whose entries differ from the baseline. An unreachable database
+is recorded as `{"state": "unknown", "reason": "..."}`; it is never encoded as
+an empty schema. A comparison with an unknown current or baseline schema exits
+with code 2 and says `contract snapshot unknown`, so it cannot claim the
+contract is intact.
+
+Example verification command:
+
+    DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:1/does_not_exist \
+    venv/bin/python scripts/rename_contract_snapshot.py \
+      --output /tmp/rename-contract-unknown.json
+
+Observed result: exit 2, `state: unknown`, reason `ConnectionRefusedError`.
+Do not use an unknown snapshot as a rename baseline.
 
 ## Step 0 boundary
 
