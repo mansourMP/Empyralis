@@ -164,44 +164,125 @@ test("hard-protected filesystem paths are rejected in full_access mode too", asy
   await assert.rejects(runtime.handleCapabilityInvoke(frame), /permanently protected/);
 });
 
-// ── Sandbox mode without Docker: absent, not silently degraded ──
-// Docker readiness is injected here (not read from the real machine) so this
-// test is deterministic regardless of whether Docker Desktop happens to be
-// running on the box executing the suite — see the real, non-mocked Docker
-// integration test further below for proof against an actual daemon.
+// ── INVERTED 2026-08-22: no Docker means HOST, not "I can't" ──────────
+// Four tests used to live here asserting that sandbox mode without a ready
+// Docker daemon threw "requires Docker ... or an explicitly enabled and
+// authorized full_access mode — neither is available", and treating that
+// dead end as the safe outcome. The founder's ruling reverses it: "Docker is
+// not something that is going to degrade what we do... not like 'this is
+// impossible to run here' or 'because you don't have Docker I don't have any
+// permission to run it'. I don't want to hear any of those things from my
+// agent."
+//
+// They are turned around rather than deleted, so this file is now what fails
+// if the wall comes back. Docker readiness is injected (never read from the
+// machine running the suite) so these are deterministic; the real, non-mocked
+// Docker integration test further below covers an actual daemon.
 
-test("sandbox mode without a ready Docker daemon fails closed with a clear error, no unsandboxed fallback", async () => {
+test("no Docker: the command actually RUNS, on the host, and returns real output", async () => {
   const runtime = new GatewayShellRuntime(baseConfig({ dockerReadyCheck: async () => false }));
-  const frame = makeInvokeFrame("shell.execute", { command: "echo hello" });
-  await assert.rejects(runtime.handleCapabilityInvoke(frame), /requires Docker.*or an explicitly enabled and authorized full_access/);
+  const frame = makeInvokeFrame("shell.execute", { command: "echo hello-from-host" });
+  const result = await runtime.handleCapabilityInvoke(frame);
+  assert.equal(result.exit_code, 0);
+  assert.equal(result.stdout, "hello-from-host");
+  assert.equal(result.timed_out, false);
 });
 
-// Docker-down is one failure; WHY full_access isn't covering for it is a
-// second, distinct fact the box operator needs to act on — these two tests
-// pin the error message to each of the two independent reasons
-// resolveExecutionMode can give for staying in sandbox, so a customer never
-// hits a bare "neither is available" with no idea which of the two
-// full_access keys (the local box flag, or the server-side authorization)
-// is the one missing.
-test("Docker-down error names the LOCAL flag as the reason when full_access isn't enabled on this box at all", async () => {
-  const runtime = new GatewayShellRuntime(baseConfig({ dockerReadyCheck: async () => false, fullAccessLocallyEnabled: false }));
-  const frame = makeInvokeFrame("shell.execute", { command: "echo hello" }, SAGE_AUTHORIZED_POLICY);
-  await assert.rejects(runtime.handleCapabilityInvoke(frame), /full_access is not active because: full_access is not enabled locally on this box/);
+test("no Docker: the run is labelled `host`, with the plain statement, and is NOT dressed up as full_access", async () => {
+  const runtime = new GatewayShellRuntime(baseConfig({ dockerReadyCheck: async () => false }));
+  const frame = makeInvokeFrame("shell.execute", { command: "echo hi" });
+  const result = await runtime.handleCapabilityInvoke(frame);
+  assert.equal(result.execution_mode, "host");
+  assert.equal(result.isolation, "host");
+  assert.equal(result.isolation_statement, "Commands run directly on this computer, because Docker isn't running here.");
+  // A host run must never claim the full_access authorization nobody granted:
+  // that token is what the control plane's own policy vocabulary keys on, and
+  // fusing the two would make a real escalation unreadable in every log.
+  assert.notEqual(result.execution_mode, "full_access");
+  // No alarm: this is the ordinary state of a computer without Docker, not an
+  // error and not a warning banner. `warning` stays exclusive to full_access.
+  assert.equal(result.warning, undefined);
 });
 
-test("Docker-down error names the SERVER authorization as the reason when the local flag is on but the server didn't authorize this call", async () => {
-  const runtime = new GatewayShellRuntime(baseConfig({ dockerReadyCheck: async () => false, fullAccessLocallyEnabled: true }));
-  const frame = makeInvokeFrame("shell.execute", { command: "echo hello" }); // no SAGE_AUTHORIZED_POLICY
-  await assert.rejects(runtime.handleCapabilityInvoke(frame), /full_access is not active because: server did not authorize full_access for this call/);
+test("no Docker: the statement names no shell command, no install step, and no permission language", async () => {
+  const runtime = new GatewayShellRuntime(baseConfig({ dockerReadyCheck: async () => false }));
+  const frame = makeInvokeFrame("shell.execute", { command: "echo hi" });
+  const result = await runtime.handleCapabilityInvoke(frame);
+  const statement = String(result.isolation_statement);
+  for (const forbidden of ["docker run", "brew ", "apt", "systemctl", "open -a", "install", "permission", "cannot", "can't run", "unable"]) {
+    assert.ok(
+      !statement.toLowerCase().includes(forbidden),
+      `isolation_statement must not contain ${JSON.stringify(forbidden)}: ${statement}`,
+    );
+  }
 });
 
-// ── Docker autostart: sandbox mode gets ONE lever before giving up. These
-// pin GatewayShellRuntime's own wiring of docker-autostart.ts's outcomes
-// into the thrown message — docker-autostart.test.ts covers the module's
-// internal behavior (platform branching, cooldown, single-flight) against
-// an injected command runner. Nothing here ever spawns a real process. ──
+test("Docker ready: the same call is labelled `sandbox`, so the two states are distinguishable from the result alone", async () => {
+  // Only the LABELLING is asserted here — actually spawning a container is
+  // the real-Docker integration test's job. resolveExecution() is the single
+  // decider both paths go through (shell/execution-isolation.ts).
+  const { resolveExecution } = await import("../shell/execution-isolation");
+  const sandboxed = resolveExecution("sandbox", true);
+  assert.equal(sandboxed.mode, "sandbox");
+  assert.equal(sandboxed.isolation, "sandbox");
+  assert.equal(sandboxed.statement, "Commands run isolated in a container on this computer.");
+  const host = resolveExecution("sandbox", false);
+  assert.notEqual(sandboxed.statement, host.statement);
+});
 
-test("Docker not ready: an autostart attempt is made, and a successful start moves past the availability gate", async () => {
+test("filesystem.read_write without Docker also works, on the host, labelled honestly", async () => {
+  const runtime = new GatewayShellRuntime(baseConfig({ dockerReadyCheck: async () => false }));
+  const write = await runtime.handleCapabilityInvoke(
+    makeInvokeFrame("filesystem.read_write", { path: "no-docker.txt", mode: "write", content: "written anyway" }),
+  );
+  assert.equal(write.execution_mode, "host");
+  assert.equal(write.warning, undefined);
+  const read = await runtime.handleCapabilityInvoke(
+    makeInvokeFrame("filesystem.read_write", { path: "no-docker.txt", mode: "read" }),
+  );
+  assert.equal(read.content, "written anyway");
+  assert.equal(read.execution_mode, "host");
+});
+
+test("no Docker does NOT bypass command policy — the hard-blocked list still refuses", async () => {
+  // The one thing that must NOT have widened. Without a container there is no
+  // second boundary left, so command-policy.ts is the whole of it.
+  const runtime = new GatewayShellRuntime(baseConfig({ dockerReadyCheck: async () => false }));
+  await assert.rejects(
+    runtime.handleCapabilityInvoke(makeInvokeFrame("shell.execute", { command: "rm -rf /" })),
+    /permanently blocked/,
+  );
+  await assert.rejects(
+    runtime.handleCapabilityInvoke(
+      makeInvokeFrame("filesystem.read_write", { path: "/etc/empyralis/config.json", mode: "read" }),
+    ),
+    /permanently protected/,
+  );
+});
+
+// ── Docker autostart: still tried before concluding this box has no sandbox.
+// These pin GatewayShellRuntime's own wiring of docker-autostart.ts's
+// outcomes. What changed is where the outcome LANDS: it used to be the thrown
+// refusal message, and is now the internal `reason` on a host run that
+// succeeded. docker-autostart.test.ts covers the module's internal behavior
+// (platform branching, cooldown, single-flight) against an injected command
+// runner. Nothing here ever spawns a real process. ──
+
+test("Docker not ready: an autostart attempt is still made, exactly once, before falling back to the host", async () => {
+  let autostartCalls = 0;
+  const runtime = new GatewayShellRuntime(baseConfig({
+    dockerReadyCheck: async () => false,
+    dockerAutostart: async () => {
+      autostartCalls += 1;
+      return { kind: "not_installed" };
+    },
+  }));
+  const result = await runtime.handleCapabilityInvoke(makeInvokeFrame("shell.execute", { command: "echo hi" }));
+  assert.equal(autostartCalls, 1, "the bounded autostart attempt must not be skipped just because host execution is available");
+  assert.equal(result.execution_mode, "host");
+});
+
+test("Docker not ready but autostart SUCCEEDS: the call goes back to the sandbox path, not the host", async () => {
   let autostartCalls = 0;
   const runtime = new GatewayShellRuntime(baseConfig({
     dockerReadyCheck: async () => false,
@@ -212,58 +293,30 @@ test("Docker not ready: an autostart attempt is made, and a successful start mov
   }));
   const frame = makeInvokeFrame("shell.execute", { command: "echo recovered" });
   try {
-    await runtime.handleCapabilityInvoke(frame);
-  } catch (error) {
-    // This runtime's stateDir has no real Docker guaranteed to be present
-    // OR running on the machine executing this suite — whatever happens
-    // downstream of the availability gate (a real `docker run` spawn) is
-    // out of scope here. What this test pins is that the gate itself did
-    // NOT refuse the call once autostart reported "started".
-    assert.doesNotMatch(
-      String((error as Error).message),
-      /requires Docker.*or an explicitly enabled and authorized full_access/,
-    );
+    const result = await runtime.handleCapabilityInvoke(frame);
+    // A real `docker run` may or may not succeed on the machine executing
+    // this suite; what this pins is that a box whose Docker was merely
+    // asleep gets a CONTAINER, never quietly downgraded to a host run.
+    assert.equal(result.execution_mode, "sandbox");
+  } catch {
+    // Downstream `docker run` failure is out of scope — the decision above
+    // it is what this test owns.
   }
   assert.equal(autostartCalls, 1);
 });
 
-test("Docker not installed: the refusal says there is nothing to start, and names no start command", async () => {
-  const runtime = new GatewayShellRuntime(baseConfig({
-    dockerReadyCheck: async () => false,
-    dockerAutostart: async () => ({ kind: "not_installed" }),
-  }));
-  const frame = makeInvokeFrame("shell.execute", { command: "echo hello" });
-  await assert.rejects(
-    runtime.handleCapabilityInvoke(frame),
-    /Docker is not installed on this computer, so there is nothing to start/,
-  );
-});
-
-test("Docker installed but the start command failed: the refusal carries the real failure detail", async () => {
-  const runtime = new GatewayShellRuntime(baseConfig({
-    dockerReadyCheck: async () => false,
-    dockerAutostart: async () => ({
-      kind: "start_command_failed",
-      detail: "Unable to find application named \"Docker\"",
-    }),
-  }));
-  const frame = makeInvokeFrame("shell.execute", { command: "echo hello" });
-  await assert.rejects(
-    runtime.handleCapabilityInvoke(frame),
-    /could not be started automatically \(Unable to find application named "Docker"\)/,
-  );
-});
-
-test("Docker installed and asked to start, but not ready in time: the refusal says it may still be starting, distinct from not_installed and start_command_failed", async () => {
-  const runtime = new GatewayShellRuntime(baseConfig({
-    dockerReadyCheck: async () => false,
-    dockerAutostart: async () => ({ kind: "start_timed_out" }),
-  }));
-  const frame = makeInvokeFrame("shell.execute", { command: "echo hello" });
-  await assert.rejects(
-    runtime.handleCapabilityInvoke(frame),
-    /was asked to start and may still be starting up.*Wait a bit and try again/,
-  );
+test("the autostart outcome detail survives as the internal reason, so a host run is still diagnosable", async () => {
+  const { resolveExecution } = await import("../shell/execution-isolation");
+  const notInstalled = resolveExecution("sandbox", false, "Docker is not installed on this computer, so there is nothing to start.");
+  assert.match(notInstalled.reason, /Docker is not installed on this computer, so there is nothing to start/);
+  const startFailed = resolveExecution("sandbox", false, 'Docker could not be started automatically (Unable to find application named "Docker")');
+  assert.match(startFailed.reason, /could not be started automatically \(Unable to find application named "Docker"\)/);
+  const timedOut = resolveExecution("sandbox", false, "Docker was asked to start and may still be starting up. Wait a bit and try again.");
+  assert.match(timedOut.reason, /was asked to start and may still be starting up.*Wait a bit and try again/);
+  // ...and it stays OUT of the customer-facing statement, which is one plain
+  // fact rather than a diagnosis to act on.
+  assert.equal(notInstalled.statement, timedOut.statement);
+  assert.ok(!notInstalled.statement.includes("not installed"));
 });
 
 test("Docker autostart is never consulted when full_access mode is authorized — Docker's state is irrelevant to that path", async () => {

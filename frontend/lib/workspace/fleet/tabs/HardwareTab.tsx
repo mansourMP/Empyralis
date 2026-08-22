@@ -9,11 +9,19 @@ import { getErrorMessage } from "@/lib/ui/api-error";
 import type { FleetAgent } from "../fleet-data";
 import {
   GatewayBoxPicker,
+  gatewayId as readGatewayId,
+  gatewaysOfKind,
   hardwarePlacementIsBrainBound,
   resolveHardwarePlacement,
   useWorkspaceGateways,
+  type FleetGateway,
   type HardwarePlacementTone,
 } from "../gateway-box-picker";
+import {
+  dockerStatusFromGatewayPayload,
+  executionIsolationStatement,
+  planExecutionIsolation,
+} from "../box-capability-state";
 
 // Collapsed from a 4-way (none/gateway/vps/all) to the honest 3-way set,
 // 2026-07-15 — founder ruling: once an agent has hardware, a paired computer
@@ -39,6 +47,29 @@ const ACCESS_OPTIONS: { value: string; label: string; body: string }[] = [
 function normalizeAccess(raw: string | undefined | null): string {
   const value = (raw || "none").toLowerCase();
   return value === "all" ? "gateway" : value;
+}
+
+/**
+ * The ONE box whose isolation we can honestly describe, or null.
+ *
+ * An explicit pick is the box. With no pick, the picker's own contract is
+ * "whichever of these is online" — so a statement is only truthful when the
+ * candidate list holds exactly one box. With several, we genuinely do not
+ * know which one a command will land on, and "unknown" must render nothing
+ * rather than pick a box and describe it. Same discipline as the
+ * channelsLoading guard below: two different facts, never one sentence.
+ */
+function resolveIsolationSubject(
+  access: string,
+  preferredGateway: string,
+  gateways: FleetGateway[],
+): FleetGateway | null {
+  const candidates = gatewaysOfKind(gateways, access === "vps" ? "vps" : "gateway");
+  const picked = String(preferredGateway || "").trim();
+  if (picked) {
+    return candidates.find((g) => readGatewayId(g) === picked) ?? null;
+  }
+  return candidates.length === 1 ? candidates[0] : null;
 }
 
 function dotClass(tone: HardwarePlacementTone): string {
@@ -119,6 +150,25 @@ export function HardwareTab({
   // react to a control that doesn't actually govern brain placement.
   const placement = resolveHardwarePlacement(access, preferredGateway, gateways, agent?.model_config);
   const brainBound = hardwarePlacementIsBrainBound(agent?.model_config);
+
+  // Which isolation this agent's commands actually run under on the computer
+  // it is attached to. Rendered as ONE plain sentence, never a warning and
+  // never a control — see box-capability-state.ts's planExecutionIsolation
+  // for the rule and the founder's ruling behind it. `null` at any step means
+  // we do not know yet, and nothing is rendered: "runs on the whole computer"
+  // and "haven't found out yet" are different facts, the same reason the
+  // channel-reach note below waits for channelsLoading.
+  const isolationSubject = access === "none" ? null : resolveIsolationSubject(access, preferredGateway, gateways);
+  const isolationStatement =
+    !isolationSubject || gatewaysLoading
+      ? null
+      : executionIsolationStatement(
+          planExecutionIsolation({
+            dockerStatus: dockerStatusFromGatewayPayload(isolationSubject),
+            runtimeAccessMode: isolationSubject.runtime_access_mode,
+            shellFullAccessLocallyEnabled: isolationSubject.shell_full_access_locally_enabled,
+          }),
+        );
 
   async function persist(nextAccess: string, nextGateway: string) {
     setSaving(true);
@@ -268,6 +318,20 @@ export function HardwareTab({
               disabled={saving}
               onChange={selectGateway}
             />
+          )}
+          {/* HOW commands run on the attached computer. Docker's presence
+              decides this — it is not something the owner picks, and its
+              absence is not an error to fix: a computer without Docker runs
+              the same work directly and it WORKS. Founder, 2026-08-22:
+              "Docker is not something that is going to degrade what we
+              do... I don't want to hear any of those things from my agent."
+              So this is a plain note in the same quiet style as the
+              channel-reach sentence above — deliberately NOT an alert tone,
+              NOT a banner, and with no button beside it. */}
+          {isolationStatement && (
+            <p className="fleet-hw-note" style={{ marginTop: 10 }}>
+              {isolationStatement}
+            </p>
           )}
           <div style={{ marginTop: 12, minHeight: 20 }}>
             {saving && <span className="fleet-channel-expand-hint" style={{ margin: 0 }}>Saving…</span>}

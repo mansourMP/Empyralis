@@ -6,73 +6,71 @@ import {
   capabilityPermissionReady,
   capabilityPermissionStatus,
   desktopPermissionForCapability,
-  setShellFullAccessLocallyEnabled,
-  setShellSandboxDockerReady,
 } from "../runtime/desktop-permissions";
+
+// ── INVERTED 2026-08-22 ─────────────────────────────────────────────────
+// Every test below used to assert the OPPOSITE: that shell_sandbox stayed
+// "restricted" until either a confirmed-ready Docker daemon or the box
+// operator's own full_access opt-in unlocked it. That is the behaviour the
+// founder rejected — it made Docker's absence mean "I have no permission to
+// run this" at the very first of four layers, so the control plane never
+// dispatched and the agent told the customer it could not act.
+//
+// These assertions were not weakened or deleted; they were turned around, so
+// this file is now what FAILS if a Docker gate is reintroduced here. Docker
+// decides HOW a command runs (shell/execution-isolation.ts), never whether.
+// The two module-level flags those tests drove (setShellSandboxDockerReady /
+// setShellFullAccessLocallyEnabled) no longer exist, which is why this file
+// imports neither.
+//
+// Coverage that must NOT be lost, and is kept below: the explicit env
+// override is still the one real way to turn shell access off on a box, and
+// an unmapped capability is still not_applicable rather than swept into this
+// permission.
 
 test("shell.execute and filesystem.read_write map to the shell_sandbox permission", () => {
   assert.equal(desktopPermissionForCapability("shell.execute"), "shell_sandbox");
   assert.equal(desktopPermissionForCapability("filesystem.read_write"), "shell_sandbox");
 });
 
-test("shell_sandbox has no granted-by-default fallback — restricted until Docker is confirmed ready", () => {
-  setShellSandboxDockerReady(false);
-  const status = capabilityPermissionStatus("shell.execute", {});
-  assert.equal(status.state, "restricted");
-  assert.equal(capabilityPermissionReady("shell.execute", {}), false);
-  assert.throws(() => assertCapabilityPermissionReady("shell.execute", {}), /blocked\/local_permission_denied/);
-});
-
-test("shell_sandbox is granted once Docker is confirmed ready", () => {
-  setShellSandboxDockerReady(true);
+test("shell_sandbox is granted with no Docker flag involved at all — there is no readiness gate left to fail", () => {
   const status = capabilityPermissionStatus("shell.execute", {});
   assert.equal(status.state, "granted");
   assert.equal(capabilityPermissionReady("shell.execute", {}), true);
   assert.doesNotThrow(() => assertCapabilityPermissionReady("shell.execute", {}));
-  setShellSandboxDockerReady(false); // restore default for any other tests sharing this process
 });
 
-test("an explicit env override wins over the live Docker-readiness flag either direction", () => {
-  setShellSandboxDockerReady(true);
+test("filesystem.read_write is granted on the same terms", () => {
+  assert.equal(capabilityPermissionStatus("filesystem.read_write", {}).state, "granted");
+  assert.equal(capabilityPermissionReady("filesystem.read_write", {}), true);
+  assert.doesNotThrow(() => assertCapabilityPermissionReady("filesystem.read_write", {}));
+});
+
+test("the module exports no Docker/full-access permission setter any more", async () => {
+  // Structural, because a behavioural test cannot see a flag come back: a
+  // reintroduced setter would compile, pass every assertion above (it would
+  // default to "Docker ready" or be unused), and only bite a real customer
+  // whose Docker is down. If either name returns, this fails loudly and the
+  // author has to come read the comment at the top of this file.
+  const mod: Record<string, unknown> = await import("../runtime/desktop-permissions");
+  assert.equal(mod.setShellSandboxDockerReady, undefined);
+  assert.equal(mod.setShellFullAccessLocallyEnabled, undefined);
+});
+
+test("an explicit env override still wins in both directions — this is the one real off switch", () => {
   assert.equal(
     capabilityPermissionStatus("shell.execute", { EMPYRALIS_AGENT_COMPUTER_PERMISSION_SHELL_SANDBOX: "denied" }).state,
     "denied",
   );
-  setShellSandboxDockerReady(false);
+  assert.equal(capabilityPermissionReady("shell.execute", { EMPYRALIS_AGENT_COMPUTER_PERMISSION_SHELL_SANDBOX: "denied" }), false);
+  assert.throws(
+    () => assertCapabilityPermissionReady("shell.execute", { EMPYRALIS_AGENT_COMPUTER_PERMISSION_SHELL_SANDBOX: "denied" }),
+    /blocked\/local_permission_denied/,
+  );
   assert.equal(
     capabilityPermissionStatus("shell.execute", { EMPYRALIS_AGENT_COMPUTER_PERMISSION_SHELL_SANDBOX: "granted" }).state,
     "granted",
   );
-});
-
-test("shell_sandbox is granted when the box operator's full_access opt-in is on, even with no Docker at all", () => {
-  // Platform-provisioned VPS hardware (see cloud-vps-setup-panel.tsx /
-  // ssh-server-connect-panel.tsx, which request full_access at pairing
-  // time): nothing to protect, Docker is friction with no safety payoff.
-  // resolveExecutionMode() in shell/runtime.ts has always been able to run
-  // these calls directly on the host via runOnHost() once server-side
-  // authorization is present — this permission gate must not dead-end that
-  // path before a call ever reaches it.
-  setShellSandboxDockerReady(false);
-  setShellFullAccessLocallyEnabled(true);
-  const status = capabilityPermissionStatus("shell.execute", {});
-  assert.equal(status.state, "granted");
-  assert.equal(capabilityPermissionReady("filesystem.read_write", {}), true);
-  assert.doesNotThrow(() => assertCapabilityPermissionReady("shell.execute", {}));
-  setShellFullAccessLocallyEnabled(false); // restore default for any other tests sharing this process
-});
-
-test("shell_sandbox stays restricted when neither Docker nor local full_access opt-in is ready", () => {
-  setShellSandboxDockerReady(false);
-  setShellFullAccessLocallyEnabled(false);
-  assert.equal(capabilityPermissionStatus("shell.execute", {}).state, "restricted");
-});
-
-test("Docker readiness alone is still sufficient — the full_access opt-in is additive, not a replacement", () => {
-  setShellSandboxDockerReady(true);
-  setShellFullAccessLocallyEnabled(false);
-  assert.equal(capabilityPermissionStatus("shell.execute", {}).state, "granted");
-  setShellSandboxDockerReady(false); // restore default for any other tests sharing this process
 });
 
 test("a capability with no permission mapping is not_applicable, not gated by shell_sandbox", () => {

@@ -8,6 +8,7 @@ import { collectPassiveInventorySnapshot } from "../health/service-inventory";
 import { checkFilesystemPathPolicy, checkShellCommandPolicy } from "./command-policy";
 import { buildDockerRunArgs, DEFAULT_SANDBOX_IMAGE, DOCKER_WORKSPACE_PATH, spawnDockerRun } from "./docker-sandbox";
 import { describeDockerAutostartOutcome, ensureDockerReady, type DockerAutostartOutcome } from "./docker-autostart";
+import { resolveExecution, type ResolvedExecution } from "./execution-isolation";
 import {
   buildBatchDriverScript,
   computeBatchTimeoutSeconds,
@@ -53,9 +54,9 @@ export interface GatewayShellRuntimeConfig {
    * start Docker — Docker Desktop on macOS, the docker service on Linux —
    * bounded, cooldown-gated, and single-flighted with every other caller in
    * this process (including the heartbeat's own background attempt in
-   * cloud/ws-client.ts). Never falls back to unsandboxed host execution;
-   * see resolveExecutionMode/runOnHost for why full_access is a completely
-   * separate, separately-authorized path.
+   * cloud/ws-client.ts). When it loses, the call now runs on the host in
+   * `host` mode rather than failing — see execution-isolation.ts, and note
+   * that `host` is NOT the separately-authorized `full_access` escalation.
    */
   dockerAutostart?: () => Promise<DockerAutostartOutcome>;
 }
@@ -97,12 +98,20 @@ export interface ExecutionModeDecision {
 }
 
 /**
- * Resolves sandbox (default, the floor) vs. full_access (opt-in) for a
- * single call. full_access requires BOTH the local box opt-in AND a
- * server-asserted authorization on the frame — the calling agent cannot
- * request escalation via its own tool-call arguments, only the resolved
- * server-side policy (set only for Sage, after the owner's setup-warning
- * acknowledgement) can assert it.
+ * Resolves the AUTHORIZATION question only: has the owner deliberately put
+ * this box into full_access, or not. It does NOT look at Docker and does
+ * not decide isolation — resolveRun()/execution-isolation.ts does that,
+ * from this answer plus live sandbox availability.
+ *
+ * full_access still requires BOTH the local box opt-in AND a server-asserted
+ * authorization on the frame — the calling agent cannot request escalation
+ * via its own tool-call arguments, only the resolved server-side policy can
+ * assert it. That two-part opt-in is UNCHANGED by the 2026-08-22 "Docker is
+ * not a wall" work: a Docker-less box runs in `host` mode, which grants no
+ * full_access policy and claims no authorization it was never given.
+ *
+ * "sandbox" returned here therefore means "not authorized to escalate",
+ * never "a container is definitely available".
  */
 export function resolveExecutionMode(
   payload: GatewayToolInvokePayload,
@@ -124,28 +133,6 @@ export function resolveExecutionMode(
   return { mode: "full_access", reason: "owner-enabled single-agent box, authorized by the cloud control plane" };
 }
 
-/** Builds the "neither mode is usable" error for shell.execute /
- *  filesystem.read_write when sandbox mode was selected and Docker isn't
- *  ready. `decision.reason` already carries the specific reason full_access
- *  isn't active for this call — resolveExecutionMode never returns
- *  "sandbox" without setting one (either "not enabled locally on this box"
- *  or "server did not authorize full_access for this call"). Folding that
- *  in turns a dead end ("neither is available", no hint which of
- *  full_access's two required keys is missing) into an actionable message,
- *  without any change to how the two keys are resolved. */
-function unavailableExecutionModeMessage(
-  capabilityId: string,
-  decision: ExecutionModeDecision,
-  dockerDetail?: string,
-): string {
-  const dockerClause = dockerDetail ?? "Docker is not ready here.";
-  return (
-    `${capabilityId} requires Docker (sandbox mode) or an explicitly enabled and authorized ` +
-    `full_access mode — neither is available on this Gateway right now. ${dockerClause} ` +
-    `and full_access is not active because: ${decision.reason}.`
-  );
-}
-
 async function isDockerReady(): Promise<boolean> {
   const snapshot = await collectPassiveInventorySnapshot({});
   return snapshot.capability_readiness.service_statuses.docker === "ready";
@@ -162,12 +149,15 @@ export class GatewayShellRuntime {
 
   /**
    * Is Docker usable for this call — and if not, was starting it able to
-   * fix that. Never throws; never falls back to unsandboxed execution. The
-   * founder's own framing is the reason this exists: "while a user is
-   * running this thing they won't have any agents to keep everything
-   * fixed" — so before refusing sandbox mode entirely, the gateway gets one
-   * bounded, self-contained attempt to fix the one thing that's actually
-   * broken.
+   * fix that. Never throws. The founder's own framing is the reason this
+   * exists: "while a user is running this thing they won't have any agents
+   * to keep everything fixed" — so before concluding this box has no
+   * sandbox, the gateway gets one bounded, self-contained attempt to fix
+   * the one thing that's actually broken.
+   *
+   * What CHANGED on 2026-08-22 is only what happens when it loses: the
+   * answer used to be a thrown dead end, and is now a host run that is
+   * labelled as one (resolveRun below). This function is unchanged.
    */
   private async ensureDockerAvailable(): Promise<{ ready: true } | { ready: false; detail: string }> {
     if (await this.dockerReadyCheck()) {
@@ -178,6 +168,28 @@ export class GatewayShellRuntime {
       return { ready: true };
     }
     return { ready: false, detail: describeDockerAutostartOutcome(outcome) };
+  }
+
+  /**
+   * Turns the AUTHORIZATION decision (resolveExecutionMode, which never
+   * looks at Docker) plus live sandbox availability into the one thing the
+   * executors below branch on. This is the seam the founder's 2026-08-22
+   * ruling changed: it used to be able to end in a thrown "neither mode is
+   * available" dead end, and now it always returns a way to run.
+   *
+   * The bounded, cooldown-gated, single-flighted Docker autostart attempt
+   * still happens first and is unchanged — trying to start the sandbox
+   * before concluding it is absent is correct, and a box whose Docker was
+   * merely asleep still gets a container rather than a host run.
+   */
+  private async resolveRun(decision: ExecutionModeDecision): Promise<ResolvedExecution> {
+    if (decision.mode === "full_access") {
+      return resolveExecution("full_access", false);
+    }
+    const availability = await this.ensureDockerAvailable();
+    return availability.ready
+      ? resolveExecution("sandbox", true)
+      : resolveExecution("sandbox", false, availability.detail);
   }
 
   requestedCapabilities(): string[] {
@@ -246,11 +258,9 @@ export class GatewayShellRuntime {
       throw new Error(policyBlock.message);
     }
 
-    if (decision.mode === "sandbox") {
-      const availability = await this.ensureDockerAvailable();
-      if (!availability.ready) {
-        throw new Error(unavailableExecutionModeMessage(SHELL_EXECUTE_CAPABILITY, decision, availability.detail));
-      }
+    const execution = await this.resolveRun(decision);
+
+    if (execution.mode === "sandbox") {
       const containerName = `empyralis-shell-${crypto.randomUUID()}`;
       const args = buildDockerRunArgs({
         image: this.config.dockerImage || DEFAULT_SANDBOX_IMAGE,
@@ -271,6 +281,8 @@ export class GatewayShellRuntime {
         stderr: result.stderr.trim(),
         timed_out: result.timedOut,
         execution_mode: "sandbox",
+        isolation: execution.isolation,
+        isolation_statement: execution.statement,
         sandbox: {
           mode: "docker",
           workspace_kind: "ephemeral_container",
@@ -281,9 +293,10 @@ export class GatewayShellRuntime {
       };
     }
 
-    // full_access mode: runs directly on the host. Still passed the same
-    // hard command/path policy check above — that check is never bypassed
-    // in any mode.
+    // host / full_access: runs directly on the machine. Still passed the
+    // same hard command/path policy check above — that check is never
+    // bypassed in any mode, and it is what keeps the vault, ~/.ssh and the
+    // catastrophic-command list out of reach on a Docker-less box.
     const result = await runOnHost(command, workspaceHostPath, timeoutSeconds);
     return {
       command,
@@ -291,9 +304,20 @@ export class GatewayShellRuntime {
       stdout: result.stdout.trim(),
       stderr: result.stderr.trim(),
       timed_out: result.timedOut,
-      execution_mode: "full_access",
-      warning:
-        "This command ran with FULL HOST ACCESS, not sandboxed — this agent can affect the entire machine, not just a scoped workspace.",
+      execution_mode: execution.mode,
+      isolation: execution.isolation,
+      isolation_statement: execution.statement,
+      // `warning` stays EXCLUSIVE to full_access: that is a deliberate
+      // escalation the owner turned on, and it is worth flagging every
+      // time. A `host` run is the ordinary state of a computer without
+      // Docker, so it gets the neutral statement above and no alarm —
+      // the founder's own framing: two true statements, not an error.
+      ...(execution.mode === "full_access"
+        ? {
+            warning:
+              "This command ran with FULL HOST ACCESS, not sandboxed — this agent can affect the entire machine, not just a scoped workspace.",
+          }
+        : {}),
     };
   }
 
@@ -364,11 +388,8 @@ export class GatewayShellRuntime {
     });
 
     try {
-      if (decision.mode === "sandbox") {
-        const availability = await this.ensureDockerAvailable();
-        if (!availability.ready) {
-          throw new Error(unavailableExecutionModeMessage(SHELL_EXECUTE_CAPABILITY, decision, availability.detail));
-        }
+      const execution = await this.resolveRun(decision);
+      if (execution.mode === "sandbox") {
         const containerDir = `${DOCKER_WORKSPACE_PATH}/.empyralis-batch/${batchId}`;
         const driverScript = buildBatchDriverScript(specs, { stopOnFailure, batchDirPath: containerDir });
         await fs.writeFile(path.join(hostDir, "driver.sh"), driverScript, "utf8");
@@ -396,6 +417,8 @@ export class GatewayShellRuntime {
         return {
           commands: results,
           execution_mode: "sandbox",
+          isolation: execution.isolation,
+          isolation_statement: execution.statement,
           stop_on_failure: stopOnFailure,
           stopped_early: stoppedEarly,
           batch_timed_out: batchTimedOut,
@@ -413,7 +436,7 @@ export class GatewayShellRuntime {
         };
       }
 
-      // full_access mode: same driver script, run directly on the host.
+      // host / full_access: same driver script, run directly on the machine.
       const driverScript = buildBatchDriverScript(specs, { stopOnFailure, batchDirPath: hostDir });
       const driverPath = path.join(hostDir, "driver.sh");
       await fs.writeFile(driverPath, driverScript, "utf8");
@@ -427,13 +450,20 @@ export class GatewayShellRuntime {
       });
       return {
         commands: results,
-        execution_mode: "full_access",
+        execution_mode: execution.mode,
+        isolation: execution.isolation,
+        isolation_statement: execution.statement,
         stop_on_failure: stopOnFailure,
         stopped_early: stoppedEarly,
         batch_timed_out: batchTimedOut,
         batch_timeout_seconds: batchTimeoutSeconds,
-        warning:
-          "This batch ran with FULL HOST ACCESS, not sandboxed — this agent can affect the entire machine, not just a scoped workspace.",
+        // See executeShell above: `warning` is full_access-only on purpose.
+        ...(execution.mode === "full_access"
+          ? {
+              warning:
+                "This batch ran with FULL HOST ACCESS, not sandboxed — this agent can affect the entire machine, not just a scoped workspace.",
+            }
+          : {}),
       };
     } finally {
       watchdog.stop();
@@ -478,11 +508,9 @@ export class GatewayShellRuntime {
       throw new Error(policyBlock.message);
     }
 
-    if (decision.mode === "sandbox") {
-      const availability = await this.ensureDockerAvailable();
-      if (!availability.ready) {
-        throw new Error(unavailableExecutionModeMessage(FILESYSTEM_READ_WRITE_CAPABILITY, decision, availability.detail));
-      }
+    const execution = await this.resolveRun(decision);
+
+    if (execution.mode === "sandbox") {
       const containerName = `empyralis-fs-${crypto.randomUUID()}`;
       const innerArgs = filesystemInnerArgs(mode, relativePath);
       const args = buildDockerRunArgs({
@@ -507,20 +535,31 @@ export class GatewayShellRuntime {
         mode,
         content: mode === "read" ? result.stdout : undefined,
         execution_mode: "sandbox",
+        isolation: execution.isolation,
+        isolation_statement: execution.statement,
         sandbox: { mode: "docker", workspace_kind: "ephemeral_container", container_name: containerName },
       };
     }
 
-    // full_access mode: direct host filesystem I/O, still policy-checked above.
+    // host / full_access: direct filesystem I/O on the machine, still
+    // policy-checked above — checkFilesystemPathPolicy is the only thing
+    // between this branch and the credential vault, and it runs in every
+    // mode before this decision is consulted.
     const targetPath = absoluteTargetForPolicy;
+    const fullAccessWarning =
+      execution.mode === "full_access"
+        ? { warning: "This file was reached with FULL HOST ACCESS, not a sandboxed workspace mount." }
+        : {};
     if (mode === "read") {
       const fileContent = await fs.readFile(targetPath, "utf8");
       return {
         path: relativePath,
         mode,
         content: fileContent,
-        execution_mode: "full_access",
-        warning: "This file was read with FULL HOST ACCESS, not a sandboxed workspace mount.",
+        execution_mode: execution.mode,
+        isolation: execution.isolation,
+        isolation_statement: execution.statement,
+        ...fullAccessWarning,
       };
     }
     await fs.mkdir(path.dirname(targetPath), { recursive: true });
@@ -532,8 +571,10 @@ export class GatewayShellRuntime {
     return {
       path: relativePath,
       mode,
-      execution_mode: "full_access",
-      warning: "This file was written with FULL HOST ACCESS, not a sandboxed workspace mount.",
+      execution_mode: execution.mode,
+      isolation: execution.isolation,
+      isolation_statement: execution.statement,
+      ...fullAccessWarning,
     };
   }
 }

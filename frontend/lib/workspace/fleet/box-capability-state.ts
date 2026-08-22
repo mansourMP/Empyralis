@@ -204,3 +204,140 @@ export function channelTransportSummary(state: ChannelTransportState): { headlin
       return { headline: "Could not check whether channels are ready.", hasSetupAction: false };
   }
 }
+
+// ── WHICH ISOLATION IS ACTUALLY IN EFFECT ON THIS COMPUTER ────────────────
+//
+// Founder's ruling, 2026-08-22: "Docker is not something that is going to
+// degrade what we do. It's just something that is fundamentally going to be
+// safer... not like 'this is impossible to run here' or 'because you don't
+// have Docker I don't have any permission to run it'." And on saying so:
+// "we should be honest with the customer... most people already know what
+// Docker is."
+//
+// So Docker's presence chooses the isolation LEVEL, and the product states
+// which one is in effect. It is not a prerequisite the owner has to satisfy,
+// not a mode they must pick before anything runs, and not a gate. The
+// honesty lives in the LABEL.
+//
+// TWO TRUE STATEMENTS, NEITHER AN ERROR AND NEITHER A WARNING. Do not render
+// either of these with a warning tone, an alert icon, or a "fix this"
+// affordance — that would put the wall back in the customer's head after it
+// was taken out of the code.
+//
+// The strings below are a deliberate, pinned MIRROR of
+// empyralis-gateway/src/shell/execution-isolation.ts's SANDBOX_STATEMENT /
+// HOST_STATEMENT / FULL_ACCESS_STATEMENT — a genuine cross-language
+// duplicate, the same shape (and the same justification) as the channel-map
+// duplicate CLAUDE.md already documents between the gateway and the backend.
+// The gateway reports what actually happened on each call; this page has to
+// say what WILL happen before any call is made, and cannot import
+// TypeScript that ships in a different package. box-capability-state.test.ts
+// pins them so a change on one side is visible on the other.
+
+export type ExecutionIsolation = "sandbox" | "host" | "full_access" | "unknown";
+
+export const ISOLATION_SANDBOX_STATEMENT = "Commands run isolated in a container on this computer.";
+export const ISOLATION_HOST_STATEMENT =
+  "Commands run directly on this computer, because Docker isn't running here.";
+export const ISOLATION_FULL_ACCESS_STATEMENT =
+  "Commands run directly on this computer, which has full access turned on.";
+
+export interface ExecutionIsolationFacts {
+  /** The `docker` probe status, from service_readiness.docker.status or the
+   *  raw service_inventory item. */
+  dockerStatus: ProbeStatus;
+  /** The SERVER's half of the full_access opt-in — what this box was
+   *  authorized for at pairing time (gateway_registry_service's
+   *  runtime_access_mode). */
+  runtimeAccessMode?: string | null;
+  /** The BOX's own half, reported live on every heartbeat. `null`/`undefined`
+   *  means this gateway has not reported it (an older build) — which is
+   *  "don't know", never "false". */
+  shellFullAccessLocallyEnabled?: boolean | null;
+}
+
+/**
+ * First match wins, top to bottom — same shape as planChannelTransportState
+ * above and channel-doors.ts's planDoors().
+ *
+ *   1. full_access authorized server-side AND enabled on the box  -> full_access
+ *      (BOTH halves, because that is the actual two-part opt-in the gateway
+ *       enforces; one half alone changes nothing about what runs, so claiming
+ *       it here would be a label describing a state the box is not in)
+ *   2. full_access authorized but the box half is UNREPORTED      -> unknown
+ *      (an older gateway build: we genuinely cannot tell which of two very
+ *       different things this computer will do, and guessing either way is
+ *       the dishonesty this module exists to prevent)
+ *   3. Docker confirmed ready                                      -> sandbox
+ *   4. Docker confirmed NOT ready (offline/degraded/blocked/missing) -> host
+ *   5. Docker unprobed or unconfirmed                              -> unknown
+ *
+ * Note step 4 folds "absent" and "not_working" together ON PURPOSE, which is
+ * the one place this module deliberately collapses two of
+ * planSandboxCapabilityState's states: they lead to different ADMIN actions
+ * (install it vs. start it) but to the identical fact about what happens to
+ * a command right now, and this function answers only that question.
+ */
+export function planExecutionIsolation(facts: ExecutionIsolationFacts): ExecutionIsolation {
+  const authorizedFullAccess = String(facts.runtimeAccessMode || "").trim().toLowerCase() === "full_access";
+  if (authorizedFullAccess) {
+    if (facts.shellFullAccessLocallyEnabled === true) {
+      return "full_access";
+    }
+    if (facts.shellFullAccessLocallyEnabled !== false) {
+      return "unknown";
+    }
+    // Explicitly false: the box will NOT run full access, so what actually
+    // happens is decided by Docker exactly as it is for any other computer.
+  }
+  const sandboxState = planSandboxCapabilityState(facts.dockerStatus);
+  if (sandboxState === "working") {
+    return "sandbox";
+  }
+  if (sandboxState === "unknown") {
+    return "unknown";
+  }
+  return "host";
+}
+
+/** The one sentence to render, or null when there is nothing true to say
+ *  yet. `null` is a REAL answer and must render NOTHING — "this computer
+ *  runs commands on the host" and "I have not found out yet" are different
+ *  facts, and the second one has no sentence. */
+export function executionIsolationStatement(isolation: ExecutionIsolation): string | null {
+  switch (isolation) {
+    case "sandbox":
+      return ISOLATION_SANDBOX_STATEMENT;
+    case "host":
+      return ISOLATION_HOST_STATEMENT;
+    case "full_access":
+      return ISOLATION_FULL_ACCESS_STATEMENT;
+    case "unknown":
+    default:
+      return null;
+  }
+}
+
+/** Pulls the `docker` status out of whichever shape a caller has. Prefers
+ *  the backend's already-distilled service_readiness (gateway_registry_
+ *  service._hardware_execution_readiness_summary) and falls back to the raw
+ *  service_inventory list, so this works against an older payload too.
+ *  Returns undefined — "not reported" — rather than guessing. */
+export function dockerStatusFromGatewayPayload(payload: {
+  service_readiness?: { docker?: { status?: string | null } | null } | null;
+  metadata?: { service_inventory?: { id?: string; status?: string }[] } | null;
+} | null | undefined): ProbeStatus {
+  const distilled = String(payload?.service_readiness?.docker?.status || "").trim().toLowerCase();
+  if (distilled && distilled !== "unknown") {
+    return distilled as ProbeStatus;
+  }
+  const inventory = payload?.metadata?.service_inventory;
+  if (Array.isArray(inventory)) {
+    const item = inventory.find((entry) => String(entry?.id || "").trim() === "docker");
+    const raw = String(item?.status || "").trim().toLowerCase();
+    if (raw) {
+      return raw as ProbeStatus;
+    }
+  }
+  return distilled ? (distilled as ProbeStatus) : undefined;
+}

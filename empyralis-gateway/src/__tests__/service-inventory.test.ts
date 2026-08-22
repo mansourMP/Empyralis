@@ -60,13 +60,22 @@ test("passive service inventory detects services without enabling execution", as
     assert.equal(item.execution_enabled, false);
   }
   assert.deepEqual(snapshot.capability_readiness.requested, ["shell.execute", "screenshot.capture"]);
-  // shell.execute is gated on the shell_sandbox permission, which is only
-  // granted when Docker reads ready — this mock reports Docker offline, so
-  // shell.execute is correctly blocked here; screenshot.capture is unrelated
-  // (screen_recording permission) and stays ready.
-  assert.deepEqual(snapshot.capability_readiness.ready, ["screenshot.capture"]);
-  assert.deepEqual(snapshot.capability_readiness.blocked, ["shell.execute"]);
-  assert.equal(snapshot.capability_readiness.permission_states["shell.execute"].state, "restricted");
+  // INVERTED 2026-08-22. This mock reports Docker OFFLINE, and shell.execute
+  // used to be blocked/"restricted" because of it. It is now ready: Docker
+  // decides whether the command runs in a container or on the machine itself
+  // (shell/execution-isolation.ts), never whether it runs at all — and this
+  // very array is what the control plane's dispatch check reads
+  // (gateway_execution_service.gateway_registration_execution_readiness), so
+  // reporting "blocked" here is what used to refuse a Docker-less box one
+  // layer above the executor that could have run it.
+  //
+  // The Docker status itself is still reported honestly, unchanged, in
+  // service_statuses below — asserted here so "we stopped gating on it" can
+  // never quietly become "we stopped reporting it".
+  assert.deepEqual(snapshot.capability_readiness.ready, ["shell.execute", "screenshot.capture"]);
+  assert.deepEqual(snapshot.capability_readiness.blocked, []);
+  assert.equal(snapshot.capability_readiness.permission_states["shell.execute"].state, "granted");
+  assert.equal(snapshot.capability_readiness.service_statuses.docker, "offline");
   assert.equal(snapshot.capability_readiness.service_statuses.postgres, "ready");
   // Not passed in this call's options — must default to false, never
   // silently coerced to true. See the two dedicated tests below for the

@@ -53,7 +53,7 @@ import { classifyGatewayLaunchUpdatability } from "./update/gateway-launch-updat
 import { ensureGatewayLaunchRepair } from "./update/gateway-launch-repair";
 import { GatewayDoctorRuntime, type GatewayDoctorCheckResult, type GatewayDoctorRunResult } from "./health/gateway-doctor";
 import { collectPassiveInventorySnapshot } from "./health/service-inventory";
-import { setCliSetupLocallyEnabled, setShellFullAccessLocallyEnabled } from "./runtime/desktop-permissions";
+import { setCliSetupLocallyEnabled } from "./runtime/desktop-permissions";
 
 const GATEWAY_VERSION = "0.1.0";
 
@@ -587,12 +587,14 @@ async function main(): Promise<void> {
   // computation below, because the cloud rejects a channel.inbound for any
   // channel this gateway never advertised.
   setOpenClawTransportEnabled(Boolean(openclawBridgeToken));
-  // Same "static local policy choice, set once before the first
-  // supportedCapabilities() computation" shape as cliSetupLocallyEnabled
-  // just above — see desktop-permissions.ts's shellFullAccessLocallyEnabled
-  // doc comment for why this now also unlocks shell_sandbox advertisement,
-  // not just execution mode.
-  setShellFullAccessLocallyEnabled(config.shellFullAccessLocallyEnabled);
+  // config.shellFullAccessLocallyEnabled is NOT set as a permission flag any
+  // more — shell_sandbox no longer needs unlocking, because a box without
+  // Docker now runs on the host instead of refusing (shell/execution-
+  // isolation.ts). The value is still read from the environment, still
+  // threaded into GatewayShellRuntime (where it remains one half of the
+  // unchanged full_access two-part opt-in), and still reported to the cloud
+  // on every heartbeat as capability_readiness.shell_full_access_locally_
+  // enabled so the Hardware surface can be honest about it.
   const cliSetupRuntime = new GatewayCliSetupRuntime();
   // `triggerShutdown` is reassigned below, once `cleanup`/`identity`/`journal`
   // exist, to the real SIGINT/SIGTERM shutdown path — self-update needs to
