@@ -35,17 +35,23 @@ FLEET_TOOL_PREFIX = "fleet_"
 # _UNGATED_JUDGMENT_TOOL_NAMES, both unconditional, + actual connector
 # bindings), never a stored per-tool switch. "connectors" stays — it is a
 # genuine "did the owner connect a real third-party account" gate, not a
-# checklist. "mandate" also stays — WHO (owner vs. an external audience) may
-# trigger an already-available tool is a security boundary this change does
-# not touch.
+# checklist.
+#
+# 2026-08-21: "mandate" is gone too, and for the same reason one level up.
+# It held `audience_tools` — a per-agent allowlist of tools a non-owner was
+# permitted to trigger, written by a per-agent Tools tab. Both are deleted;
+# there is no tool-capability tier any more, only a fixed
+# machine-administration floor named in authority_mandate_service. A stored
+# `mandate` on an existing install is now inert data: nothing reads it, and
+# it is left in place rather than migrated away (removing it would be a
+# destructive rewrite of every agent's metadata for no behavioural gain).
 _ALLOWED_CONFIGURE_KEYS = {
     "connectors", "channel_bindings",
     "subagents_enabled", "hardware_access", "model_config", "display_name",
     "purpose_preset", "instructions", "context_policy",
-    "preferred_gateway_id", "telegram_first_contact_reply", "mandate",
+    "preferred_gateway_id", "telegram_first_contact_reply",
     "capability_config", "audience", "skills",
 }
-_MAX_MANDATE_AUDIENCE_TOOLS = 200
 _MAX_INSTRUCTIONS_CHARS = 8000
 # MAN-310 skills-delivery: install_metadata.skills — a workspace owner's own
 # reusable-procedure library for THIS specialist, one level down from the
@@ -1396,22 +1402,24 @@ async def fleet_get_agent_tools(
     tenant_id: str = "default",
     agent_id: str,
 ) -> Dict[str, Any]:
-    """Return this agent's Customer Access catalog.
+    """Return this agent's tool catalog — a read-only inventory, no controls.
 
-    2026-08-14 (CLAUDE.md, founder decision): there is no more per-tool
-    enable/disable checklist — every tool listed here is already available
-    to the agent itself (core tools, _UNGATED_JUDGMENT_TOOL_NAMES, and
-    anything backed by a real connector binding or resolved capability; see
-    sage_agent_runtime_service._resolve_specialist_toolset). What remains
-    genuinely configurable per tool is WHO may trigger it: an external
-    audience (a customer messaging this agent over a channel) sees only
-    audience_safe tools plus whatever the owner has explicitly granted via
-    mandate.audience_tools — the owner always has full access regardless.
-    That WHO boundary (Authority Mandate, Part 10) is a preserved security
-    control, distinct from the removed WHAT-is-switchable checklist.
+    2026-08-14: there is no per-tool enable/disable checklist — every tool
+    listed here is already available to the agent itself (core tools,
+    _UNGATED_JUDGMENT_TOOL_NAMES, and anything backed by a real connector
+    binding or resolved capability; see
+    sage_agent_runtime_service._resolve_specialist_toolset).
+
+    2026-08-21: there is no per-tool WHO-may-trigger control either. The
+    audience tool tier and its `mandate.audience_tools` grant are deleted
+    (see authority_mandate_service), and with them the per-agent Tools tab
+    that was this endpoint's original consumer. What still reads it is
+    ConnectorPicker (frontend), which uses `requires_connector` to answer
+    "what does connecting this app actually give the agent" — a DERIVED
+    fact, and the reason this endpoint is kept rather than deleted with the
+    tab.
     """
     from server_modules import agent_registry_repository as repo
-    from server_modules import authority_mandate_service
     from server_modules import skill_registry
     from server_modules import skills_service
 
@@ -1427,15 +1435,11 @@ async def fleet_get_agent_tools(
 
     bundle_dict = dict(bundle)
     is_master = resolve_agent_role(bundle_dict) == OPERATOR_ROLE
-    meta = bundle_dict.get("install_metadata") or bundle_dict.get("metadata") or {}
-    mandate_audience_tools = (meta.get("mandate") or {}).get("audience_tools") or []
-
     definitions = skill_registry.list_skill_definitions(workspace_id=workspace_id, include_disabled=True)
     tools: List[Dict[str, Any]] = []
     for d in definitions:
         # `id` is the canonical enforcement tool name (not skill_registry's
-        # own hyphenated id) so this list — and the mandate PATCH the
-        # frontend sends back using this same `id` — matches what
+        # own hyphenated id) so this list matches what
         # _specialist_tool_allowed() actually checks. See
         # skill_registry.enforcement_tool_name.
         enforcement_id = skill_registry.enforcement_tool_name(d.id)
@@ -1455,21 +1459,11 @@ async def fleet_get_agent_tools(
             "label": d.label,
             "description": d.description or "",
             "action_class": d.action_class,
-            # Customer access (Authority Mandate, Part 10): audience_safe is
-            # the platform's own manifest default (informational, can't be
-            # toggled off); mandate_granted is this owner's explicit
-            # audience_tools grant (see the "mandate" patch branch in
-            # fleet_configure_agent — same enforcement_id, checked
-            # case-insensitively).
-            "audience_safe": bool(descriptor.audience_safe) if descriptor is not None else False,
-            "mandate_granted": authority_mandate_service.is_audience_tool_allowed(
-                mandate_audience_tools, enforcement_id
-            ),
             # Truth Map B1: email-access/calendar-access/task-runner/crm-notes
             # are execution_mode="manual" with no direct executor — the real
             # executor only exists behind a bound Google Workspace connector.
-            # Informational: granting customer access to one of these does
-            # nothing until that connector is actually connected.
+            # This is the field ConnectorPicker reads to say what a given app
+            # actually unlocks.
             "requires_connector": _CONNECTOR_REQUIRED_TOOLS.get(enforcement_id),
         })
 
@@ -2011,35 +2005,6 @@ async def fleet_configure_agent(
             if value is not None and not isinstance(value, str):
                 return {"ok": False, "error": "preferred_gateway_id must be a gateway id string."}
             meta["preferred_gateway_id"] = str(value or "").strip()
-        if "mandate" in clean_patch:
-            # The owner-declared mandate: which tools this agent's
-            # audience-tier callers (end-customers over a channel) may
-            # trigger, on top of whatever the tool catalog already marks
-            # audience_safe. Two id spaces share this one list: connector/MCP
-            # actions ("{connector_id}.{action_id}", no catalog-level
-            # audience_safe flag at all — fail-safe until listed here) and
-            # local/builtin tools by their literal canonical enforcement id
-            # (e.g. "memory_write" — what the Tools tab's Customer access
-            # control writes; see fleet_get_agent_tools' mandate_granted and
-            # skills_service._authority_mandate_gate, which checks both
-            # spaces). Consulted by both the skills_service and
-            # runs_execution mandate gates.
-            mandate_patch = clean_patch["mandate"]
-            if not isinstance(mandate_patch, dict):
-                return {"ok": False, "error": "mandate must be an object."}
-            next_mandate = dict(meta.get("mandate") or {})
-            if "audience_tools" in mandate_patch:
-                raw_tools = mandate_patch["audience_tools"]
-                if not isinstance(raw_tools, list) or not all(isinstance(t, str) for t in raw_tools):
-                    return {"ok": False, "error": "mandate.audience_tools must be an array of tool id strings."}
-                clean_tools = sorted({t.strip() for t in raw_tools if t.strip()})
-                if len(clean_tools) > _MAX_MANDATE_AUDIENCE_TOOLS:
-                    return {
-                        "ok": False,
-                        "error": f"mandate.audience_tools may list at most {_MAX_MANDATE_AUDIENCE_TOOLS} tools.",
-                    }
-                next_mandate["audience_tools"] = clean_tools
-            meta["mandate"] = next_mandate
         if "context_policy" in clean_patch:
             cp = clean_patch["context_policy"]
             if not isinstance(cp, dict):

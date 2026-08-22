@@ -4321,7 +4321,7 @@ class SubagentSpawnToolVisibilityTests(unittest.TestCase):
             "_resolve_direct_chat_availability",
             return_value={},
         ):
-            tools, _caps, _availability, _blocked = sage_agent_runtime_service._direct_tool_bundle(
+            tools, _caps, _availability = sage_agent_runtime_service._direct_tool_bundle(
                 workspace_id="ws-test",
                 provider="openai",
                 sender_class="owner",
@@ -4349,7 +4349,7 @@ class SubagentSpawnToolVisibilityTests(unittest.TestCase):
             "_resolve_direct_chat_availability",
             return_value={},
         ):
-            tools, _caps, _availability, _blocked = sage_agent_runtime_service._direct_tool_bundle(
+            tools, _caps, _availability = sage_agent_runtime_service._direct_tool_bundle(
                 workspace_id="ws-test", provider="openai", sender_class="owner", specialist_toolset=None,
             )
         names = [str(t.get("name") or "") for t in tools]
@@ -4365,7 +4365,7 @@ class SubagentSpawnToolVisibilityTests(unittest.TestCase):
             "_resolve_direct_chat_availability",
             return_value={},
         ):
-            tools, _caps, _availability, _blocked = sage_agent_runtime_service._direct_tool_bundle(
+            tools, _caps, _availability = sage_agent_runtime_service._direct_tool_bundle(
                 workspace_id="ws-test",
                 provider="openai",
                 sender_class="owner",
@@ -4425,7 +4425,7 @@ class ProjectTaskToolTier1VisibilityTests(unittest.TestCase):
             "_resolve_direct_chat_availability",
             return_value={},
         ):
-            tools, _caps, _availability, _blocked = sage_agent_runtime_service._direct_tool_bundle(
+            tools, _caps, _availability = sage_agent_runtime_service._direct_tool_bundle(
                 workspace_id="ws-test",
                 provider="openai",
                 sender_class="owner",
@@ -4462,7 +4462,7 @@ class ProjectTaskToolTier1VisibilityTests(unittest.TestCase):
             sage_agent_runtime_service.direct_chat_runtime_exports,
             "_resolve_direct_chat_availability", return_value={},
         ):
-            tools, _caps, _availability, _blocked = sage_agent_runtime_service._direct_tool_bundle(
+            tools, _caps, _availability = sage_agent_runtime_service._direct_tool_bundle(
                 workspace_id="ws-test", provider="openai", sender_class="owner",
                 specialist_toolset=self._toolset(project_id="proj-1"),
             )

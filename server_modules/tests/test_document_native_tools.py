@@ -173,17 +173,14 @@ def _call(
     *,
     pool: _QueuedFakePool,
     agent_id: str = "agent-1",
-    authority_tier: str = "owner",
+    authority_tier: str | None = "owner",
 ):
-    """authority_tier defaults to "owner" because document__* tools are
-    deliberately NOT audience_safe (see the ToolDescriptor comment block in
-    skills_service.py's _builtin_tool_descriptors -- a project's documents
-    are free-text team knowledge, same "conservative default" CLAUDE.md
-    states for personal/self-chat threads). _authority_mandate_gate is a
-    real, independent choke point ahead of the connector_id == "document"
-    dispatch this file otherwise exercises -- every test below needs an
-    owner-tier session to reach that dispatch at all, exactly as production
-    would require for a non-audience-safe tool."""
+    """authority_tier defaults to "owner" only to keep these fixtures the
+    shape production builds. Since 2026-08-21 it makes no difference to
+    document__*: the audience tool tier is gone (authority_mandate_service),
+    and document tools are ordinary work tools that any tier may call. The
+    class below asserts exactly that, so the default here is convention, not
+    a precondition."""
     # Every document__* dispatch resolves the caller's project via
     # project_tasks_service.agent_project_id (same resolver project_task__*
     # uses -- see skills_service.py's connector_id == "document" dispatch's
@@ -204,10 +201,13 @@ def _call(
             tool_call={"name": tool_name, "arguments": arguments},
             workspace_id="ws-1",
             thread_id="thread-1",
+            # authority_tier=None omits the KEY entirely (an unattributed
+            # caller), which is a genuinely different input from any tier
+            # string — _authority_mandate_gate branches on key presence.
             session_ctx={
                 "agent_install_id": agent_id,
                 "tenant_id": "tenant-1",
-                "authority_tier": authority_tier,
+                **({} if authority_tier is None else {"authority_tier": authority_tier}),
             },
             callbacks=_callbacks(),
         )
@@ -416,36 +416,33 @@ class WriteCreateOnlyTests(unittest.TestCase):
             _call("document__write", {"title": "   "}, pool=pool)
 
 
-class DocumentToolAudienceSafetyTests(unittest.TestCase):
-    """document__* is deliberately NOT audience_safe (see the ToolDescriptor
-    comment block in skills_service.py's _builtin_tool_descriptors) --
-    project documents are free-text team knowledge, same conservative
-    default CLAUDE.md states for personal/self-chat threads. This is the
-    independent _authority_mandate_gate choke point every other test in this
-    file works around by passing authority_tier="owner"; here it's the
-    thing under test."""
+class DocumentToolAudienceTierRemovedTests(unittest.TestCase):
+    """PROOF THAT NO ORPHANED TOOL-TIER ENFORCEMENT REMAINS on this path.
 
-    def test_audience_tier_session_is_blocked_before_reaching_the_repository(self):
-        pool = _QueuedFakePool(fetchrow_results=[{"project_id": "proj-1"}])
-        with self.assertRaises(RuntimeError) as ctx:
-            _call("document__list", {}, pool=pool, authority_tier="audience")
-        self.assertIn("workspace owner", str(ctx.exception))
-        # Blocked at the mandate gate -- agent_project_id never even ran.
-        self.assertEqual(len(pool.fetchrow_calls), 0)
+    Until 2026-08-21 document__* was deliberately NOT audience_safe, and an
+    audience-tier session was refused at _authority_mandate_gate before
+    reaching the repository at all. The founder deleted that tier outright
+    (see server_modules/authority_mandate_service.py). These two tests are
+    the previous two, INVERTED rather than deleted — they are what fails if
+    a tool-capability tier is ever quietly reintroduced on this surface.
 
-    def test_missing_authority_tier_fails_closed_as_audience(self):
-        """No 'authority_tier' key at all (an unattributed caller) must be
-        treated as the LEAST privileged tier, not silently allowed --
-        _authority_mandate_gate's own "FAIL-CLOSED" contract."""
+    What is asserted instead of "blocked" is the strongest available
+    positive: the call reaches the repository (pool.fetchrow_calls is
+    non-empty), which a gate ahead of the dispatch could not allow."""
+
+    def test_audience_tier_session_reaches_the_repository(self):
         pool = _QueuedFakePool(fetchrow_results=[{"project_id": "proj-1"}])
-        with self.assertRaises(RuntimeError):
-            skills_service.execute_single_direct_tool_call(
-                tool_call={"name": "document__list", "arguments": {}},
-                workspace_id="ws-1",
-                thread_id="thread-1",
-                session_ctx={"agent_install_id": "agent-1", "tenant_id": "tenant-1"},
-                callbacks=_callbacks(),
-            )
+        _call("document__list", {}, pool=pool, authority_tier="audience")
+        self.assertGreater(len(pool.fetchrow_calls), 0)
+
+    def test_missing_authority_tier_also_reaches_the_repository(self):
+        """An unattributed caller (no "authority_tier" key at all) still
+        normalizes to the audience tier — that fail-closed default is kept —
+        but the audience tier no longer costs an ordinary work tool. It costs
+        only the machine-administration family, which document__* is not."""
+        pool = _QueuedFakePool(fetchrow_results=[{"project_id": "proj-1"}])
+        _call("document__list", {}, pool=pool, authority_tier=None)
+        self.assertGreater(len(pool.fetchrow_calls), 0)
 
 
 class DocumentToolTier1VisibilityTests(unittest.TestCase):
@@ -463,7 +460,6 @@ class DocumentToolTier1VisibilityTests(unittest.TestCase):
             "connectors": set(),  # "document" never bound -- no path to bind it
             "tools": set(),
             "raw_tool_toggles": {},
-            "mandate_audience_tools": [],
             "capability_providers": frozenset(),
             "agent_install_id": "agent-pixel",
             "subagents_enabled": False,
@@ -486,7 +482,7 @@ class DocumentToolTier1VisibilityTests(unittest.TestCase):
             "_resolve_direct_chat_availability",
             return_value={},
         ):
-            tools, _caps, _availability, _blocked = sage_agent_runtime_service._direct_tool_bundle(
+            tools, _caps, _availability = sage_agent_runtime_service._direct_tool_bundle(
                 workspace_id="ws-test",
                 provider="openai",
                 sender_class="owner",
@@ -522,7 +518,7 @@ class DocumentToolTier1VisibilityTests(unittest.TestCase):
             sage_agent_runtime_service.direct_chat_runtime_exports,
             "_resolve_direct_chat_availability", return_value={},
         ):
-            tools, _caps, _availability, _blocked = sage_agent_runtime_service._direct_tool_bundle(
+            tools, _caps, _availability = sage_agent_runtime_service._direct_tool_bundle(
                 workspace_id="ws-test", provider="openai", sender_class="owner",
                 specialist_toolset=self._toolset(project_id="proj-1"),
             )

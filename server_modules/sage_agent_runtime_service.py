@@ -2919,7 +2919,6 @@ async def _resolve_specialist_toolset(
     # _UNGATED_JUDGMENT_TOOL_NAMES' own comment. Never subtracted from.
     tools: set[str] = set(_UNGATED_JUDGMENT_TOOL_NAMES)
     raw_toggles: dict[str, bool] = {}
-    mandate_audience_tools: list[str] = []
     capability_providers: frozenset[str] = frozenset()
     # Fail-safe default, same "deny-more, never allow-more" convention as the
     # rest of this function: a lookup error must never silently grant a
@@ -3016,10 +3015,6 @@ async def _resolve_specialist_toolset(
         for _req_id, _req_connector in _fleet_tools_subagents._CONNECTOR_REQUIRED_TOOLS.items():
             if _req_connector in connectors:
                 tools.add(_req_id)
-        # The owner-declared mandate (fleet_tools "mandate" patch key) — read
-        # from the SAME bundle fetch so this costs no extra round-trip.
-        # Threaded onto session_ctx below so the mandate gate can consult it
-        # without a fetch of its own.
         meta = bundle.get("install_metadata") if isinstance(bundle, dict) and isinstance(bundle.get("install_metadata"), dict) else (bundle.get("metadata") if isinstance(bundle, dict) else None)
         # MAN-310 skills-delivery: this specialist's ENABLED skills, read
         # from the SAME bundle fetch (no extra round-trip), scoped to
@@ -3037,10 +3032,6 @@ async def _resolve_specialist_toolset(
                 "specialist toolset: skills resolution failed for %s — no skills this turn", aid, exc_info=True
             )
             skills = []
-        mandate = meta.get("mandate") if isinstance(meta, dict) and isinstance(meta.get("mandate"), dict) else {}
-        raw_audience_tools = mandate.get("audience_tools")
-        if isinstance(raw_audience_tools, list):
-            mandate_audience_tools = [str(t) for t in raw_audience_tools]
         # Capability-gated tools (image_generation today; video_generation
         # once live — see agent_capability_service.py): which of these
         # resolve to a working provider for THIS agent right now. Consulted
@@ -3072,7 +3063,6 @@ async def _resolve_specialist_toolset(
         "connectors": connectors,
         "tools": tools,
         "raw_tool_toggles": raw_toggles,
-        "mandate_audience_tools": mandate_audience_tools,
         "capability_providers": capability_providers,
         # MAN-310 skills-delivery: forwarded to claude_agent_sdk_bridge.
         # run_claude_agent_sdk_turn's own `skills=` parameter at the
@@ -3317,7 +3307,7 @@ def _filter_registry_for_specialist(registry: Any, toolset: dict[str, Any], *, w
     return kept
 
 
-def _direct_tool_bundle(*, workspace_id: str, provider: str, sender_class: str = "owner", specialist_toolset: dict[str, Any] | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], str]:
+def _direct_tool_bundle(*, workspace_id: str, provider: str, sender_class: str = "owner", specialist_toolset: dict[str, Any] | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     try:
         tool_capabilities = direct_chat_runtime_exports.resolve_workspace_tool_capabilities(workspace_id)
     except Exception:
@@ -3495,18 +3485,18 @@ def _direct_tool_bundle(*, workspace_id: str, provider: str, sender_class: str =
     else:
         print(f"[TOOL_FILTER] tool_count_after={len(tools)} (online — no stripping)", flush=True)
 
-    # ── Phase UB: manifest-driven audience tool filter ──
-    _sender_class = str(sender_class or "owner").strip().lower()
-    _blocked_notes = ""
-    if _sender_class != "owner":
-        from server_modules.audience_tool_filter import filter_tools_for_audience, blocked_tool_notes
-        _before_audience = len(tools)
-        _pre_filter = list(tools)  # snapshot before filtering for notes
-        tools = filter_tools_for_audience(tools)
-        _blocked_notes = blocked_tool_notes(_pre_filter, tools)
-        print(f"[TOOL_FILTER] audience_filter sender_class={_sender_class!r} before={_before_audience} after={len(tools)}", flush=True)
-
-    return _dedupe_tools(tools), tool_capabilities, availability, _blocked_notes
+    # 2026-08-21: the audience tool filter that used to run here is GONE.
+    # It read each tool's `audience_safe` manifest flag and stripped every
+    # unflagged one from a non-owner's tool list mid-turn. Founder decision —
+    # see authority_mandate_service's docstring. `sender_class` is still a
+    # parameter of this function and still reaches the turn (it derives the
+    # authority tier, and it is real provenance the prompt carries), it just
+    # no longer decides WHAT the agent may do. The one remaining
+    # tier-sensitive rule is the machine-administration floor, enforced at
+    # the execution choke point (skills_service._authority_mandate_gate)
+    # rather than by hiding tools — a boundary that exists only in the tool
+    # list is not a boundary.
+    return _dedupe_tools(tools), tool_capabilities, availability
 
 
 def _plan_sage_direct_tool_calls(
@@ -4129,7 +4119,7 @@ async def _run_sage_action_loop_v3(
         _specialist_toolset = await _resolve_specialist_toolset(
             workspace_id=workspace_id, tenant_id=tenant_id, agent_install_id=_acting_install_id,
         )
-    tools, tool_capabilities, availability, blocked_notes = _direct_tool_bundle(
+    tools, tool_capabilities, availability = _direct_tool_bundle(
         workspace_id=workspace_id, provider=provider, sender_class=sender_class,
         specialist_toolset=_specialist_toolset,
     )
@@ -4247,19 +4237,13 @@ async def _run_sage_action_loop_v3(
         "client_request_id": _credit_key,
         # Mandate: the tool-execution choke point (skills_service.py's
         # execute_single_direct_tool_call{,_async}) reads this to decide
-        # whether a non-audience_safe tool call is in-mandate. Derived from
-        # the SAME sender_class this function already uses for tool
-        # visibility filtering (_direct_tool_bundle above) — owner sessions
-        # (no channel_origin) get "owner", channel sessions get whatever
+        # whether a MACHINE-ADMINISTRATION tool call (fleet__*, goal__*,
+        # empyralis_configure_agent) is in-mandate — the one and only thing
+        # the tier still decides since 2026-08-21. Owner sessions (no
+        # channel_origin) get "owner"; channel sessions get whatever
         # triage_service.resolve_sender_identity() resolved ("owner" stays
         # owner; "audience"/"unknown" both collapse to "audience").
         "authority_tier": authority_mandate_service.derive_tier_from_sender_class(sender_class),
-        # The owner-declared mandate allowlist (fleet_tools "mandate" patch)
-        # for THIS specialist, if any — consulted by the same gate alongside
-        # the ToolDescriptor manifest's audience_safe flag. Empty for Sage
-        # (no specialist toolset resolved) and for specialists with no
-        # mandate configured.
-        "mandate_audience_tools": list((_specialist_toolset or {}).get("mandate_audience_tools") or []),
         "metadata": {
             "source": "sage_chat",
             "surface": "sage",
@@ -5505,8 +5489,10 @@ async def _resolve_channel_sender_class(
     classification for a channel turn. Pulled out as its own top-level
     function so it has a unit-testable home (same rationale as
     _resolve_turn_engine_id's own docstring), and because it is the one
-    place CLAUDE.md itself flags: getting it wrong turns a lockout into a
-    stranger holding shell and hardware tools.
+    place CLAUDE.md itself flags. Since 2026-08-21 it no longer decides
+    which tools exist on a turn (see authority_mandate_service) — it decides
+    the machine-administration floor, the memory-write attribution stamp,
+    and the turn's recorded principal.
 
     AUTHORITATIVE SOURCE: personal_channels_repository, never workspace.
     identity_links. That table is genuinely readable now (control_plane_
@@ -5516,8 +5502,8 @@ async def _resolve_channel_sender_class(
     so it was never a second, populated answer to "is this sender the
     owner"; it was a second CODE PATH that always resolved empty and
     silently won by default, downgrading every real, linked owner to
-    "audience" (serve-only tools, no shell/hardware/fleet/memory_write/
-    connector_write) on every channel message. personal_channels_
+    "audience" (at the time: serve-only tools, no shell/hardware/fleet/
+    memory_write/connector_write) on every channel message. personal_channels_
     repository's linked_jid/linked_user_id/linked_identity columns are the
     ACTUAL data a real pairing/login event populates, and it is already
     what _is_owner_message (personal_channels_service.py) trusts for the
@@ -5555,11 +5541,14 @@ async def _resolve_channel_sender_class(
         # transport is the CONVERSATION id ("telegram:1932934047") while the
         # stored identity is the bare sender ("1932934047"). So a sender the
         # DM gate had just recognised as the owner arrived here as a
-        # stranger, and this function fell through to "audience" — which
-        # strips EVERY tool (see _direct_tool_bundle's audience filter), so
-        # the agent could not run a shell command for its own owner and said
-        # so. Observed live 2026-08-15, on a turn whose own envelope header
-        # already read "your owner".
+        # stranger, and this function fell through to "audience" — which at
+        # the time stripped EVERY tool, so the agent could not run a shell
+        # command for its own owner and said so. Observed live 2026-08-15,
+        # on a turn whose own envelope header already read "your owner".
+        # (That tool-stripping filter is gone as of 2026-08-21 — an
+        # "audience" misclassification now costs only the
+        # machine-administration family — but this canonicalization is still
+        # the correct comparison and stays.)
         #
         # Canonicalizing here rather than changing what the bridge passes:
         # `remote_jid` is also the personal-channel thread key
@@ -6382,12 +6371,6 @@ async def _handle_sage_chat_unguarded(
     # applied in BOTH branches below, like the rule above it.
     _deep_link_rule = _deep_link_guidance()
 
-    # ── Phase U2: audience behavioral instructions ──
-    _audience_instructions = ""
-    if _sender_class != "owner":
-        from server_modules.audience_tool_filter import audience_behavior_instructions
-        _audience_instructions = audience_behavior_instructions()
-
     if _spec is not None:
         # Phase 4: specialist identity replaces the Sage kernel/guardrails. Keep
         # the operational context (attachments, MCP inventory) and the memory
@@ -6527,7 +6510,7 @@ async def _handle_sage_chat_unguarded(
         _spec_context_layer_block = (
             f"\n\n## {context_layer_index}" if context_layer_index else ""
         )
-        _specialist_system_prompt = f"{_spec_persona}{_spec_scope_rule}{_spec_autonomy_rule}{_spec_intro_rule}{_spec_honesty_rule}{_spec_capability_manifest_block}{_channel_action_honesty_rule}{_destructive_action_awareness_rule}{_deep_link_rule}{_spec_memory_block}{_spec_context_layer_block}{_audience_instructions}{attachment_context}{mcp_tool_inventory}"
+        _specialist_system_prompt = f"{_spec_persona}{_spec_scope_rule}{_spec_autonomy_rule}{_spec_intro_rule}{_spec_honesty_rule}{_spec_capability_manifest_block}{_channel_action_honesty_rule}{_destructive_action_awareness_rule}{_deep_link_rule}{_spec_memory_block}{_spec_context_layer_block}{attachment_context}{mcp_tool_inventory}"
         envelope = _build_prompt_envelope(
             workspace_id=normalized_workspace_id,
             message=normalized_message,
@@ -6543,7 +6526,7 @@ async def _handle_sage_chat_unguarded(
             # this pass. Computing the index and then only handing it to
             # specialists would be the same "built and never wired" defect
             # one level down.
-            system_prompt=f"{instruction_bundle.system_prompt.rstrip()}{_audience_instructions}{sage_surface_guardrails}{_channel_action_honesty_rule}{_destructive_action_awareness_rule}{_deep_link_rule}" + (f"\n\n## {context_layer_index}" if context_layer_index else "") + f"{attachment_context}{mcp_tool_inventory}",
+            system_prompt=f"{instruction_bundle.system_prompt.rstrip()}{sage_surface_guardrails}{_channel_action_honesty_rule}{_destructive_action_awareness_rule}{_deep_link_rule}" + (f"\n\n## {context_layer_index}" if context_layer_index else "") + f"{attachment_context}{mcp_tool_inventory}",
         )
 
     # ── BYO-brain Phase 2: on-box local model turn ─────────────────────────
