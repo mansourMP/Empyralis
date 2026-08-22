@@ -234,7 +234,17 @@ jobs:
           # update came from us. Generated with `cargo tauri signer generate`;
           # the PUBLIC half is in src-tauri/tauri.conf.json.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Explicitly empty, NOT `${{ secrets.… }}`. The key is generated
+          # without a passphrase on purpose (a passphrase stored in GitHub
+          # Secrets beside the key it protects adds no security and is one
+          # more thing to lose). But an ABSENT password makes the signer try
+          # to prompt for one, and with no TTY — which is every CI runner,
+          # hosted or self-hosted — that fails as
+          # "incorrect updater private key password: Device not configured
+          # (os error 6)", after a full 14-minute compile has already
+          # succeeded. Verified by hand: the same build with an explicit
+          # empty password exits 0 and writes a valid signature.
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_API_KEY: ${{ env.APPLE_API_KEY }}
           APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
