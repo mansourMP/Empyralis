@@ -53,8 +53,8 @@ export type AgentCreatePlacementOption = {
 export const AGENT_CREATE_PLACEMENTS: readonly AgentCreatePlacementOption[] = [
   {
     id: "cloud",
-    label: "Cloud only",
-    body: "Runs on Empyralis. Nothing to set up.",
+    label: "Cloud",
+    body: "Runs on Empyralis. Works on tasks and documents right away.",
   },
   {
     id: "vps",

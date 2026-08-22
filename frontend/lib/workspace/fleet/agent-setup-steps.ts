@@ -263,7 +263,7 @@ export function planAgentSetupSteps(input: AgentSetupInput): AgentSetupStep[] {
       id: "hardware",
       tab: "hardware",
       label: "Give it a computer",
-      hint: "Cloud only right now",
+      hint: "Runs in the cloud",
       primary: steps.length === 0,
     });
   } else if (input.hardwareAccess && !input.hardwareBound) {

@@ -24,7 +24,7 @@ import {
 // component (see normalizeAccess below, and fleet_tools.py server-side), so
 // this array doesn't need an "all" branch to stay backward compatible.
 const ACCESS_OPTIONS: { value: string; label: string; body: string }[] = [
-  { value: "none", label: "Cloud only", body: "No computer access — runs entirely in the cloud." },
+  { value: "none", label: "Cloud", body: "Runs on Empyralis. Works on tasks and documents; add a computer only for shell and files." },
   { value: "gateway", label: "Paired computer", body: "Shell, filesystem, and browser — everything on a computer you've paired." },
   { value: "vps", label: "Cloud VPS", body: "Shell, filesystem, and browser — everything on a cloud computer Empyralis provisions for you." },
 ];
