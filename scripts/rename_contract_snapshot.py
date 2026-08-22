@@ -32,6 +32,14 @@ from typing import Any, Iterable
 ROOT = Path(__file__).resolve().parents[1]
 FRONTEND_ROOT = ROOT / "frontend"
 BUILD_ROOT = FRONTEND_ROOT / ".next"
+# This scanner must never appear in its own snapshot. It scans `scripts/`,
+# so any edit to it — including the env read a few lines below that fixes the
+# empty-DATABASE_URL false positive — registers as a contract change and makes
+# the verifier fail on its own maintenance. A tool that reports a change every
+# time you improve it is one people stop trusting, which defeats the point of
+# having it.
+SELF_PATH_PART = "rename_contract_snapshot.py"
+
 EXCLUDED_PARTS = {
     ".git", ".claude", ".codex", "node_modules", "__pycache__", ".next",
     "dist", "build", "vendor", "venv", ".venv", ".venv-v2", "site-packages",
@@ -73,6 +81,8 @@ def _source_files(root: Path = ROOT) -> Iterable[Path]:
                 if name not in EXCLUDED_PARTS and not name.startswith(".next")
             )
             for filename in sorted(filenames):
+                if filename == SELF_PATH_PART:
+                    continue
                 path = Path(directory) / filename
                 if path.suffix in SOURCE_SUFFIXES:
                     yield path
@@ -127,6 +137,26 @@ async def _schema_snapshot() -> dict[str, Any]:
     # dotenv/config conventions before we resolve DATABASE_URL.  asyncpg's
     # None DSN retains the local libpq defaults used by this checkout.
     import server  # noqa: F401
+
+    # An EMPTY DATABASE_URL is this repo's own idiom for "run without a
+    # database" (CLAUDE.md documents `DATABASE_URL= venv/bin/python -m pytest`
+    # as the standard invocation). It must resolve to UNKNOWN, not to a
+    # connection.
+    #
+    # Before this, `os.getenv(...) or None` turned the empty string into None,
+    # which asyncpg reads as "use libpq defaults" — so it connected to
+    # whatever local database happened to exist, compared THAT schema against
+    # a baseline captured elsewhere, and reported thousands of changes that
+    # never happened. Unset behaved differently only because `import server`
+    # populates DATABASE_URL from dotenv first, and dotenv does not override a
+    # variable that is already set. Same tool, two invocations, opposite
+    # answers, and the failing one is the command this repo tells people to
+    # use.
+    #
+    # A verifier that cries wolf is one people learn to ignore, and this is
+    # the verifier the whole rename depends on.
+    if os.environ.get("DATABASE_URL", None) == "":
+        return {"state": "unknown", "reason": "database_url_empty"}
 
     try:
         conn = await asyncpg.connect(os.getenv("DATABASE_URL") or None, timeout=5)
