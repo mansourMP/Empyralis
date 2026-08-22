@@ -5743,14 +5743,29 @@ survive and deserve their own tickets, not MAN-198's framing:
 `update_task_status`/`add_task_label`/`remove_task_label` still pass no actor
 display name.
 
-**Still open on this surface, flagged not fixed.** `empyralis_message_agent`
-is advertised and *always* returns `ok: false` by design — a dead control on
-the model's tool list, and the product-law violation is the advertisement,
-not the missing backend. `empyralis_assign_channel_bot` takes a plaintext
-BotFather/Discord token as a tool ARGUMENT, so the secret travels through
-model context and into transcripts — MAN-207 recommends dropping it and that
-recommendation still stands (its cross-workspace IDOR, MAN-206, IS fixed:
-both provisioning services now call `agent_install_in_scope`). The OAuth
+**CORRECTED 2026-08-22 — the two tools this paragraph called open are BOTH
+GONE, and reading it as present truth cost a real dispatch.** Verified
+against `mcp_server.py`, not against this file: `empyralis_message_agent`
+has zero occurrences, and `empyralis_assign_channel_bot` survives only in
+two comments describing its removal, under a header that now reads "NO
+CREDENTIAL EVER ENTERS THIS SURFACE". Its cross-workspace IDOR (MAN-206) was
+fixed separately — both provisioning services call `agent_install_in_scope`
+— and the plaintext-token half was solved by deleting the tool rather than
+by fixing its argument.
+
+The failure worth keeping: an agent (me) read the paragraph below, filed a
+task against a tool that does not exist, and put it on the founder's real
+board. That is this file's own "a ticket's status can lag its own fix" rule,
+pointed at this file instead of at Linear. **Before treating an MCP claim
+here as current, grep `mcp_server.py` — it is one command and the registry
+is the only thing that decides what a model can call.**
+
+~~`empyralis_message_agent` is advertised and *always* returns `ok: false`
+by design. `empyralis_assign_channel_bot` takes a plaintext BotFather/
+Discord token as a tool ARGUMENT.~~ Both dead; kept struck through so the
+next reader sees that they were removed rather than that nobody looked.
+
+Still genuinely open on this surface: the OAuth
 path mints no `external_agent_id` at all, so every write from a Connector
 session is attributed to the `external_mcp_client` fallback.
 `list_workspace_mcp_api_keys` drops `external_agent_id`/`display_name`/
