@@ -1257,7 +1257,7 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             # Capability-gated (agent_capability_service.py): this tool only
             # reaches a specialist's toolset when image_generation resolves
             # to a working provider for THAT agent — see
-            # sage_agent_runtime_service._resolve_specialist_toolset /
+            # agent_turn_runtime_service._resolve_specialist_toolset /
             # _specialist_tool_allowed, which check this id against
             # resolved_capability_ids(). capability_id also feeds
             # capability_registry's risk/approval metadata as it does for
@@ -1632,7 +1632,7 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
         # -- "the owned-context layer for a team, with execution attached,"
         # CLAUDE.md). Same shape as project_task__* immediately above:
         # connector_id="document" is granted by PROJECT MEMBERSHIP, not a
-        # connector binding (see sage_agent_runtime_service.py's
+        # connector binding (see agent_turn_runtime_service.py's
         # _PROJECT_SCOPED_CONNECTOR_IDS), every action below is scoped to the
         # CALLING agent's own project (resolved server-side from session
         # identity via project_tasks_service.agent_project_id -- the same
@@ -1752,7 +1752,7 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
         # project_task's). Same shape as project_task__*/document__*
         # immediately above: connector_id="goal" is granted by PROJECT
         # MEMBERSHIP, not a connector binding (see
-        # sage_agent_runtime_service.py's _PROJECT_SCOPED_CONNECTOR_IDS),
+        # agent_turn_runtime_service.py's _PROJECT_SCOPED_CONNECTOR_IDS),
         # and every action is scoped to the CALLING agent's own project
         # (resolved server-side via project_tasks_service.agent_project_id,
         # the same resolver project_task__*/document__* use). goal__* is one
@@ -5536,7 +5536,7 @@ async def execute_single_direct_tool_call_async(
             #
             # Deliberately NOT a hard fail-closed gate on empty identity,
             # unlike commit 8cc8d69dd's skill_invoke-routed memory
-            # executors: verified (sage_agent_runtime_service.py's
+            # executors: verified (agent_turn_runtime_service.py's
             # _run_sage_action_loop_v3, 3 call sites, all commented "empty
             # for Sage") that the owner-facing agent's OWN turn — the
             # primary, highest-volume caller of this exact connector when a
@@ -5874,7 +5874,7 @@ def _resolve_session_user_id(session_metadata: Any) -> str:
 
     `session_metadata` is the whole `session_ctx` dict (every call site in
     this module does `session_metadata = session_ctx`), and production does
-    NOT put `user_id` at its top level — `sage_agent_runtime_service`'s turn
+    NOT put `user_id` at its top level — `agent_turn_runtime_service`'s turn
     builder nests it:
 
         session_ctx = {
@@ -6032,7 +6032,7 @@ def execute_single_direct_tool_call(
         from server_modules import agent_capability_service
 
         # Empty agent_id == master/Sage's own turn (same convention as
-        # sage_agent_runtime_service._acting_install_id) — resolved against
+        # agent_turn_runtime_service._acting_install_id) — resolved against
         # Sage's own capability_config, not silently shared with specialists.
         capability_agent_id = str(session_metadata.get("agent_id") or "").strip()
         resolution = callbacks.run_async_tool_call(
@@ -6381,7 +6381,7 @@ def execute_single_direct_tool_call(
             reason="memory_write",
             run_id=str(session_metadata.get("run_id") or session_metadata.get("request_id") or "").strip() or None,
             # Attribution seam: session_metadata["envelope"] is stamped by
-            # sage_agent_runtime_service.handle_sage_chat (see
+            # agent_turn_runtime_service.handle_sage_chat (see
             # inbound_attribution_recovery.build_attribution) -- the turn's
             # WHO/WHERE, best-effort recovered since the frozen
             # sage_turn_adapter chokepoint doesn't forward the canonical
@@ -6740,7 +6740,7 @@ def execute_single_direct_tool_call(
             per-channel link builder is the "channels is ONE system" rule
             broken). deep_link_service returns no url at all when the
             deployment has not declared its public origin, so a link is never
-            invented. See _deep_link_guidance() in sage_agent_runtime_service
+            invented. See _deep_link_guidance() in agent_turn_runtime_service
             for the instruction that tells the model to pass it on."""
             from server_modules import deep_link_service as _deep_links
 
@@ -7699,7 +7699,7 @@ def execute_single_direct_tool_call(
             or ""
         ).strip()
         # Defense in depth: the tool is only ever added to the tool list when
-        # sage_agent_runtime_service._direct_tool_bundle already resolved
+        # agent_turn_runtime_service._direct_tool_bundle already resolved
         # subagents_enabled=True for this specialist (a stale/cached tool
         # list is the only way this branch could otherwise be reached with
         # the flag off) -- re-check here rather than trust the caller.

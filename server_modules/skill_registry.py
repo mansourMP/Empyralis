@@ -327,7 +327,7 @@ _ADAPTER_EXECUTORS: dict[str, SkillExecutor] = {}
 # Each bundled skill from /skills/ wraps built-in tools from skills_service.py.
 # When invoked, the executor dispatches to the underlying tool handler(s)
 # and returns structured output compatible with the agent loop's tool result
-# format (sage_agent_runtime_service.py).  Skills without tool equivalents
+# format (agent_turn_runtime_service.py).  Skills without tool equivalents
 # inject their SKILL.md prompt content into the agent context.
 
 _BUNDLED_SKILL_DISPATCH: dict[str, str] = {
@@ -341,7 +341,7 @@ _BUNDLED_SKILL_DISPATCH: dict[str, str] = {
 
 # ── Canonical enforcement id map ────────────────────────────────────────
 # skill_registry ids are hyphenated display ids; _specialist_tool_allowed()
-# (sage_agent_runtime_service.py) keys tool gating by the literal LLM
+# (agent_turn_runtime_service.py) keys tool gating by the literal LLM
 # tool-call name instead. The two id spaces are otherwise disconnected — a
 # mandate grant stored under the display id would never match what
 # enforcement checks. This maps every built-in skill that has a real,

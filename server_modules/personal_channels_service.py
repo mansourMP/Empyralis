@@ -1438,7 +1438,7 @@ def _channel_owner_linked_id(*, channel_key: str, state: Optional[Dict[str, Any]
     reads for the turn's own tool-authority decision) — nothing wrote it and
     nothing read it. Wiring the read here rather than inventing a parallel
     store keeps ONE answer to "who is the owner on this channel", which is
-    the property sage_agent_runtime_service._resolve_channel_sender_class's
+    the property agent_turn_runtime_service._resolve_channel_sender_class's
     docstring is emphatic about not splitting in two.
 
     Deliberately NOT the dm_policy allowlist: "may message this agent" and

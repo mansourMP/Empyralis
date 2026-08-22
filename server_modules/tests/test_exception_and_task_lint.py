@@ -178,7 +178,7 @@ BARE_EXCEPT_PASS_BASELINE_FILES: frozenset[str] = frozenset({
     "server_modules/runtime_policy.py",
     "server_modules/runtime_route_registration_service.py",
     "server_modules/safe_mode_service.py",
-    "server_modules/sage_agent_runtime_service.py",
+    "server_modules/agent_turn_runtime_service.py",
     "server_modules/sage_chat_api.py",
     "server_modules/sage_command_dispatcher.py",
     "server_modules/sage_proof_log_service.py",
@@ -218,7 +218,7 @@ UNASSIGNED_FIRE_AND_FORGET_BASELINE_FILES: frozenset[str] = frozenset({
     # is NOT here: its one fire-and-forget task (C2) is fixed in this same
     # wave (module-level task set + done-callback, see
     # _ensure_agent_channel_binding_enabled). server_modules/
-    # sage_agent_runtime_service.py was removed from this baseline (MAN-266):
+    # agent_turn_runtime_service.py was removed from this baseline (MAN-266):
     # its one violation, _schedule_post_turn_auto_compaction's
     # asyncio.ensure_future(...) at (what was) line 4151 with the returned
     # Task discarded, was the confirmed root cause of the recurring

@@ -14,7 +14,7 @@ convention: a DOUBLE underscore namespaces a connector from its action
 
 So any registered tool whose name contained `__` and was at least 20 characters
 long was rewritten to `[redacted-secret]` — 17 of 72 at the time of the fix —
-including inside `sage_agent_runtime_service._build_prompt_envelope`, whose
+including inside `agent_turn_runtime_service._build_prompt_envelope`, whose
 output IS the system prompt handed to the model on every Sage/specialist turn.
 An agent cannot call a tool whose name it never sees, and nothing anywhere
 raised: it presented as the model declining to assign a task, update a task,

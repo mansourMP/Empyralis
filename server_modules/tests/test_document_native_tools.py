@@ -41,7 +41,7 @@ from unittest.mock import patch
 
 from server_modules import direct_chat_operator_binding_service
 from server_modules import direct_tool_execution_service
-from server_modules import sage_agent_runtime_service
+from server_modules import agent_turn_runtime_service
 from server_modules import skills_service
 
 
@@ -456,7 +456,7 @@ class DocumentToolTier1VisibilityTests(unittest.TestCase):
 
     def _toolset(self, *, project_id: str) -> dict:
         return {
-            "core": sage_agent_runtime_service._core_direct_tool_names(),
+            "core": agent_turn_runtime_service._core_direct_tool_names(),
             "connectors": set(),  # "document" never bound -- no path to bind it
             "tools": set(),
             "raw_tool_toggles": {},
@@ -474,15 +474,15 @@ class DocumentToolTier1VisibilityTests(unittest.TestCase):
 
     def _tool_names(self, *, specialist_toolset) -> list[str]:
         with patch.object(
-            sage_agent_runtime_service.direct_chat_runtime_exports,
+            agent_turn_runtime_service.direct_chat_runtime_exports,
             "resolve_workspace_tool_capabilities",
             return_value=[],
         ), patch.object(
-            sage_agent_runtime_service.direct_chat_runtime_exports,
+            agent_turn_runtime_service.direct_chat_runtime_exports,
             "_resolve_direct_chat_availability",
             return_value={},
         ):
-            tools, _caps, _availability = sage_agent_runtime_service._direct_tool_bundle(
+            tools, _caps, _availability = agent_turn_runtime_service._direct_tool_bundle(
                 workspace_id="ws-test",
                 provider="openai",
                 sender_class="owner",
@@ -512,13 +512,13 @@ class DocumentToolTier1VisibilityTests(unittest.TestCase):
     def test_document_edit_tool_schema_is_well_formed(self):
         names_and_tools = {}
         with patch.object(
-            sage_agent_runtime_service.direct_chat_runtime_exports,
+            agent_turn_runtime_service.direct_chat_runtime_exports,
             "resolve_workspace_tool_capabilities", return_value=[],
         ), patch.object(
-            sage_agent_runtime_service.direct_chat_runtime_exports,
+            agent_turn_runtime_service.direct_chat_runtime_exports,
             "_resolve_direct_chat_availability", return_value={},
         ):
-            tools, _caps, _availability = sage_agent_runtime_service._direct_tool_bundle(
+            tools, _caps, _availability = agent_turn_runtime_service._direct_tool_bundle(
                 workspace_id="ws-test", provider="openai", sender_class="owner",
                 specialist_toolset=self._toolset(project_id="proj-1"),
             )

@@ -20,8 +20,8 @@ Everything above that seam runs for real:
     runs_execution._execute_orion_dag_node(kind="result_generate")
       -> _execute_orion_result_via_agent_engine
       -> sage_turn_adapter.execute_sage_turn                    (real)
-      -> sage_agent_runtime_service.handle_sage_chat             (real)
-      -> sage_agent_runtime_service._run_sage_action_loop_v3     (real)
+      -> agent_turn_runtime_service.handle_sage_chat             (real)
+      -> agent_turn_runtime_service._run_sage_action_loop_v3     (real)
       -> direct_chat_generation_service.stream_provider_backed_direct_chat
                                                                   (MOCKED)
 
@@ -64,24 +64,24 @@ def _enter_handle_sage_chat_fixtures(stack: ExitStack, *, stream_events) -> dict
     Returns the mocks callers actually need to assert on, by name (not
     position) -- entered onto the caller's own ExitStack so cleanup is
     automatic and ordering-independent."""
-    stack.enter_context(patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile", return_value={"profile": {}}))
-    stack.enter_context(patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}))
-    stack.enter_context(patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""))
-    stack.enter_context(patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})))
-    stack.enter_context(patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]))
-    stack.enter_context(patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider", return_value=("openai", {"api_key": "test-key"})))
-    mock_generate = stack.enter_context(patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback"))
-    stack.enter_context(patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]))
-    stack.enter_context(patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability", return_value={"runtime_ok": False}))
+    stack.enter_context(patch("server_modules.agent_turn_runtime_service.sage_profile_service.list_sage_profile", return_value={"profile": {}}))
+    stack.enter_context(patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files", return_value={}))
+    stack.enter_context(patch("server_modules.agent_turn_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""))
+    stack.enter_context(patch("server_modules.agent_turn_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})))
+    stack.enter_context(patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]))
+    stack.enter_context(patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider", return_value=("openai", {"api_key": "test-key"})))
+    mock_generate = stack.enter_context(patch("server_modules.agent_turn_runtime_service.generate_chat_reply_with_provider_fallback"))
+    stack.enter_context(patch("server_modules.agent_turn_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]))
+    stack.enter_context(patch("server_modules.agent_turn_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability", return_value={"runtime_ok": False}))
     mock_stream = stack.enter_context(
         patch(
-            "server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
+            "server_modules.agent_turn_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
             return_value=iter(stream_events),
         )
     )
-    stack.enter_context(patch("server_modules.sage_agent_runtime_service.persist_interaction"))
-    stack.enter_context(patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()))
-    stack.enter_context(patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"))
+    stack.enter_context(patch("server_modules.agent_turn_runtime_service.persist_interaction"))
+    stack.enter_context(patch("server_modules.agent_turn_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()))
+    stack.enter_context(patch("server_modules.agent_turn_runtime_service.security_audit_service.emit_security_audit_event"))
     return {"stream": mock_stream, "generate": mock_generate}
 
 

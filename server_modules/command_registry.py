@@ -157,7 +157,7 @@ def _channel_linked_owner_ids(workspace_id: str, channel_origin: str) -> set[str
     nothing anywhere saying why.
 
     This is the same authoritative source, reached the same way, that
-    sage_agent_runtime_service._resolve_channel_sender_class already uses
+    agent_turn_runtime_service._resolve_channel_sender_class already uses
     for the turn's owner/audience tool-authority decision, and that
     personal_channels_service._is_owner_message already trusts for the
     DM-policy gate that runs BEFORE this command is ever dispatched. So a
@@ -509,7 +509,7 @@ class _SlashCommandServices:
     resurrect dead-code assumptions and do work nothing here needs.
 
     Backed by the SAME production-wired functions
-    `sage_agent_runtime_service._direct_tool_bundle` already calls on every
+    `agent_turn_runtime_service._direct_tool_bundle` already calls on every
     ordinary (non-command) Sage turn to build that turn's own tool
     availability payload
     (`direct_chat_runtime_exports._active_run_count` /
@@ -920,7 +920,7 @@ async def _handle_model(
 
     # ── Persist ────────────────────────────────────────────────────────
     try:
-        from server_modules.sage_agent_runtime_service import (
+        from server_modules.agent_turn_runtime_service import (
             set_persisted_model_preference,
         )
         await set_persisted_model_preference(workspace_id, resolved)
@@ -947,7 +947,7 @@ async def _handle_thinking(
     # sage_ai_reasoning_effort metadata this used to write. That old field
     # was inert: nothing but /config's own display ever read it back, so a
     # value set here never reached an actual reply turn (see
-    # sage_agent_runtime_service.py's handle_sage_chat / _run_sage_action_
+    # agent_turn_runtime_service.py's handle_sage_chat / _run_sage_action_
     # loop_v3, which now consult model_config.reasoning_effort instead).
     #
     # Targets whichever agent is acting THIS turn: the resolved specialist

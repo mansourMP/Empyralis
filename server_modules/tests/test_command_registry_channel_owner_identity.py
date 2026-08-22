@@ -24,7 +24,7 @@ anywhere saying why.
 The authoritative store for "which sender id is the owner on which channel"
 is personal_channels_repository (linked_jid / linked_user_id /
 linked_identity, written only from a genuine owner login/pairing event).
-sage_agent_runtime_service._resolve_channel_sender_class already uses it for
+agent_turn_runtime_service._resolve_channel_sender_class already uses it for
 tool authority and personal_channels_service._is_owner_message already uses
 it for the DM gate that runs BEFORE this command is dispatched — so a sender
 the DM gate just recognised as the owner must not be a stranger here.

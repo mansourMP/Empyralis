@@ -322,7 +322,7 @@ class OwnerIdentityReachesTheAuthorityChainTests(_Base):
     """The link is only worth anything if the turn's own tool-authority
     decision sees it. That decision reads a THIRD function
     (personal_channels_repository.list_owner_linked_channel_identities_for_workspace,
-    via sage_agent_runtime_service._resolve_channel_sender_class), so prove
+    via agent_turn_runtime_service._resolve_channel_sender_class), so prove
     the write lands where that function looks rather than assuming it."""
 
     async def test_the_workspace_owner_lookup_sees_the_link(self) -> None:
@@ -341,11 +341,11 @@ class OwnerIdentityReachesTheAuthorityChainTests(_Base):
         through to "audience" — which strips EVERY tool, so the agent
         refused its own owner a shell command on a turn whose envelope
         header already said "your owner". Observed live 2026-08-15."""
-        from server_modules import sage_agent_runtime_service
+        from server_modules import agent_turn_runtime_service
 
         self._link()
         self.assertEqual(
-            await sage_agent_runtime_service._resolve_channel_sender_class(
+            await agent_turn_runtime_service._resolve_channel_sender_class(
                 channel_origin=CHANNEL_KEY,
                 sender_id=f"telegram:{OWNER_SENDER_ID}",
                 workspace_id="ws-owner",
@@ -353,7 +353,7 @@ class OwnerIdentityReachesTheAuthorityChainTests(_Base):
             "owner",
         )
         self.assertEqual(
-            await sage_agent_runtime_service._resolve_channel_sender_class(
+            await agent_turn_runtime_service._resolve_channel_sender_class(
                 channel_origin=CHANNEL_KEY,
                 sender_id=f"telegram:{STRANGER_SENDER_ID}",
                 workspace_id="ws-owner",

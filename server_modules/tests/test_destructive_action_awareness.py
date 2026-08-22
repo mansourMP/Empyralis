@@ -8,7 +8,7 @@ commands: a string matcher sees `rm -rf ~/Documents` identically whether the
 person means "don't touch my files" or "I have these files, I don't want
 them — delete them all". What differs is intent, and intent lives in the
 conversation, not in the command string. So the fix is a short paragraph of
-guidance in `sage_agent_runtime_service._destructive_action_awareness_
+guidance in `agent_turn_runtime_service._destructive_action_awareness_
 guidance`, injected into the system prompt for BOTH the master (Sage) and
 specialist prompt-assembly branches — never a gate, an approval state, or a
 refusal list (CLAUDE.md's "No approval system" law, and
@@ -40,12 +40,12 @@ from __future__ import annotations
 import inspect
 import unittest
 
-from server_modules import sage_agent_runtime_service, secret_redaction_service
+from server_modules import agent_turn_runtime_service, secret_redaction_service
 
 
 class DestructiveActionGuidanceContentTests(unittest.TestCase):
     def setUp(self):
-        self.text = sage_agent_runtime_service._destructive_action_awareness_guidance()
+        self.text = agent_turn_runtime_service._destructive_action_awareness_guidance()
 
     def test_states_execution_mode_and_reversibility_stakes(self):
         lowered = self.text.lower()
@@ -106,7 +106,7 @@ class DestructiveActionGuidanceRedactionSurvivalTests(unittest.TestCase):
     worse than no paragraph at all — it reads as complete and isn't."""
 
     def test_guidance_survives_redact_text_unchanged(self):
-        text = sage_agent_runtime_service._destructive_action_awareness_guidance()
+        text = agent_turn_runtime_service._destructive_action_awareness_guidance()
         self.assertEqual(secret_redaction_service.redact_text(text), text)
 
     def test_guidance_survives_redaction_inside_a_full_prompt_envelope(self):
@@ -116,13 +116,13 @@ class DestructiveActionGuidanceRedactionSurvivalTests(unittest.TestCase):
         # representative envelope the way both real branches do (surrounding
         # prose immediately before/after, no blank buffer) and confirm nothing
         # is dropped from the guidance block once redacted in that context.
-        guidance = sage_agent_runtime_service._destructive_action_awareness_guidance()
+        guidance = agent_turn_runtime_service._destructive_action_awareness_guidance()
         surrounding_prompt = (
             "You are a specialist agent with real tool access."
             + guidance
             + "\n\n## Your memory\nNo memory recorded yet."
         )
-        envelope = sage_agent_runtime_service._build_prompt_envelope(
+        envelope = agent_turn_runtime_service._build_prompt_envelope(
             workspace_id="ws-1",
             message="hello",
             system_prompt=surrounding_prompt,
@@ -137,15 +137,15 @@ class DestructiveActionGuidanceWiringTests(unittest.TestCase):
     has silently dropped a rule from one branch before in this file."""
 
     def test_module_defines_the_guidance_function(self):
-        self.assertTrue(hasattr(sage_agent_runtime_service, "_destructive_action_awareness_guidance"))
-        self.assertTrue(callable(sage_agent_runtime_service._destructive_action_awareness_guidance))
+        self.assertTrue(hasattr(agent_turn_runtime_service, "_destructive_action_awareness_guidance"))
+        self.assertTrue(callable(agent_turn_runtime_service._destructive_action_awareness_guidance))
 
     def test_both_prompt_assembly_branches_reference_the_guidance(self):
         # The prompt-assembly code (both branches) lives in
         # _handle_sage_chat_unguarded, NOT _run_sage_action_loop_v3 — that
         # is the action-loop/tool-execution engine _handle_sage_chat_
         # unguarded calls afterward with the already-built system prompt.
-        source = inspect.getsource(sage_agent_runtime_service._handle_sage_chat_unguarded)
+        source = inspect.getsource(agent_turn_runtime_service._handle_sage_chat_unguarded)
         # The specialist branch's f-string.
         self.assertIn(
             "_specialist_system_prompt = f\"{_spec_persona}",
@@ -165,7 +165,7 @@ class DestructiveActionGuidanceWiringTests(unittest.TestCase):
         self.assertIn("_destructive_action_awareness_rule", master_line)
 
     def test_rule_variable_is_assigned_from_the_module_function(self):
-        source = inspect.getsource(sage_agent_runtime_service._handle_sage_chat_unguarded)
+        source = inspect.getsource(agent_turn_runtime_service._handle_sage_chat_unguarded)
         self.assertIn(
             "_destructive_action_awareness_rule = _destructive_action_awareness_guidance()",
             source,

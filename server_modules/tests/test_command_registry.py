@@ -178,7 +178,7 @@ class HandleThinkingPersistsPerAgentTests(unittest.TestCase):
     value set here never reached an actual reply turn. It now persists to
     the ACTING agent's own model_config.reasoning_effort, the same
     per-agent field the Fleet Model tab's picker reads/writes and that
-    sage_agent_runtime_service.py's handle_sage_chat / _run_sage_action_
+    agent_turn_runtime_service.py's handle_sage_chat / _run_sage_action_
     loop_v3 actually consult for the completion."""
 
     @staticmethod

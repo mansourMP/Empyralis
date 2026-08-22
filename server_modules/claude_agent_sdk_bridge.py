@@ -4,7 +4,7 @@ Empyralis stops maintaining its own agent harness (compaction, subagents,
 skills, tool loop) and instead runs the Claude Agent SDK underneath its own
 UI, as a second engine alongside the existing one. The existing runtime
 (direct_chat_generation_service.stream_provider_backed_direct_chat, driven
-from server_modules/sage_agent_runtime_service.py's _collect_stream_events)
+from server_modules/agent_turn_runtime_service.py's _collect_stream_events)
 stays in place, unmodified, and keeps serving the cheap platform-credit
 tier. This module is purely additive: nothing outside the explicit
 per-turn engine flag at that seam ever imports or calls it, so a deployment
@@ -576,7 +576,7 @@ _CLOUD_ROUTED_PROVIDER_ENV_BUILDERS: Dict[str, Any] = {
 # portable OAuth/session token for it outside the Gateway rail (see
 # OPENAI_CODEX_OAUTH_SOURCES / "codex_token_vault" / `_default_vault_credential_
 # present("openai-codex", ...)`), so `direct_chat_credentials(workspace_id,
-# "openai-codex")` can return a real credential dict, and `sage_agent_runtime_
+# "openai-codex")` can return a real credential dict, and `agent_turn_runtime_
 # service._resolve_agent_cloud_provider`'s `mode == "byok_api"` branch has no
 # provider denylist — any provider string whose credentials pass
 # `supports_direct_message_native_chat` is accepted, and that function
@@ -952,7 +952,7 @@ def _humanize_tool_progress(tool_name: str) -> str:
     # direct_chat_generation_service._humanize_tool_progress is a plain
     # module-level function (no DI needed) — imported lazily here to avoid
     # importing that (large) module's own heavy import chain at THIS
-    # module's import time, since sage_agent_runtime_service.py imports
+    # module's import time, since agent_turn_runtime_service.py imports
     # this module unconditionally regardless of whether the flag is ever
     # set.
     from server_modules import direct_chat_generation_service
@@ -1056,7 +1056,7 @@ def translate_sdk_message(
 ) -> List[Dict[str, Any]]:
     """Translate ONE claude_agent_sdk message object into zero or more of
     Empyralis's event dicts — the exact {"type": "tool_progress" | "final"
-    | "trace", ...} shapes sage_agent_runtime_service._collect_sage_
+    | "trace", ...} shapes agent_turn_runtime_service._collect_sage_
     operator_loop_v3_events() already parses (only "tool.started",
     "tool.result", "search.query", "trace.failed" and "plan.item.updated"
     are consumed under "trace" — see that function).
@@ -1353,7 +1353,7 @@ def translate_sdk_message(
                 # already be correct by the time it reaches here). This is
                 # the ONE place tool_honesty_guard's fabrication-after-
                 # failure check reads its "did a tool actually fail this
-                # turn" signal from (via sage_agent_runtime_service's
+                # turn" signal from (via agent_turn_runtime_service's
                 # tool.result -> tool_calls collector), so it must be right
                 # even if a future producer of a ToolResultBlock sets
                 # is_error incompletely — the SDK's own is_error flag only
@@ -1403,7 +1403,7 @@ def translate_sdk_message(
             # API-error prose — and it would land here as `reply`, i.e. as
             # the customer's answer, on a turn that demonstrably failed.
             # Dropping it lets the runtime's own honest failure wording
-            # stand instead (sage_agent_runtime_service._run_sage_action_
+            # stand instead (agent_turn_runtime_service._run_sage_action_
             # loop_v3 substitutes TOOLS_LIMITED_NO_REPLY when a turn has an
             # empty reply and a blocked entry, which the trace.failed
             # emitted above guarantees). Narrow on purpose: it needs BOTH a
@@ -1414,7 +1414,7 @@ def translate_sdk_message(
         payload: Dict[str, Any] = {"reply": reply}
         # session_id is a required (non-Optional) field on every real
         # ResultMessage the SDK yields — carried through here so the caller
-        # (sage_agent_runtime_service._run_sage_action_loop_v3) can persist
+        # (agent_turn_runtime_service._run_sage_action_loop_v3) can persist
         # it against Empyralis's own thread identity and resume THIS
         # conversation on a later turn instead of re-folding full history
         # (see run_claude_agent_sdk_turn's resume_session_id parameter).
@@ -2003,7 +2003,7 @@ async def run_claude_agent_sdk_turn(
     anthropic_api_key: str = "",
     anthropic_base_url: str = "",
     # MAN-310 Phase 2: a claude_agent_sdk session id previously captured for
-    # THIS conversation (see sage_agent_runtime_service._sdk_engine_session_
+    # THIS conversation (see agent_turn_runtime_service._sdk_engine_session_
     # lookup, which is also what verifies it's still safe to resume before
     # ever passing it here — this function trusts its caller on that). When
     # set, this turn resumes that session (ClaudeAgentOptions.resume) and
@@ -2039,8 +2039,8 @@ async def run_claude_agent_sdk_turn(
 ) -> List[Dict[str, Any]]:
     """Drive one turn through claude_agent_sdk, translating every yielded
     message into Empyralis's event dicts. Returns the SAME list[dict] shape
-    sage_agent_runtime_service._collect_sage_operator_loop_v3_events already
-    parses — this is the function server_modules/sage_agent_runtime_
+    agent_turn_runtime_service._collect_sage_operator_loop_v3_events already
+    parses — this is the function server_modules/agent_turn_runtime_
     service.py's _collect_stream_events calls when a turn's engine_options
     select ENGINE_ID.
 
@@ -2436,7 +2436,7 @@ async def run_claude_agent_sdk_turn(
 
 
 def collect_events_via_claude_agent_sdk(**kwargs: Any) -> List[Dict[str, Any]]:
-    """Sync wrapper for run_claude_agent_sdk_turn — sage_agent_runtime_
+    """Sync wrapper for run_claude_agent_sdk_turn — agent_turn_runtime_
     service.py's _collect_stream_events is itself a plain sync function
     (run inside asyncio.to_thread by its caller, _run_sage_action_loop_v3),
     so it needs a blocking entry point, exactly like the legacy branch's

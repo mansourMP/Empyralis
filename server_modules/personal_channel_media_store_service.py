@@ -25,11 +25,11 @@ then:
      ``workspace_context.workspace_attachments_dir(workspace_id)`` under a
      globally-unique, agent-namespaced filename, and returns an
      ``{filename, safe_filename, content_type}`` dict in the exact shape
-     ``sage_agent_runtime_service._load_attachment_context`` /
+     ``agent_turn_runtime_service._load_attachment_context`` /
      ``execute_sage_turn(attachments=...)`` already expects — this lets the
      model see the attachment through the SAME, already-audited pipeline
      used by the web-chat attachment upload flow, with zero changes to
-     ``sage_agent_runtime_service.py``.
+     ``agent_turn_runtime_service.py``.
   3. For kind in {"voice", "audio"}: returns the fetched bytes to the
      caller (personal_channels_service), which runs them through
      ``personal_channel_transcription_service`` and splices the transcript

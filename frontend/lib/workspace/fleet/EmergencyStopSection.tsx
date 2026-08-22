@@ -8,7 +8,7 @@ import { timeAgo } from "@/lib/workspace/fleet/fleet-presentation";
 
 /** Workspace-wide emergency stop — kill_switch_gate's workspace:{id} key.
  *  Blocks every agent's turns immediately (checked before any LLM call, see
- *  sage_agent_runtime_service._run_sage_action_loop_v3). A confirm step
+ *  agent_turn_runtime_service._run_sage_action_loop_v3). A confirm step
  *  guards the action itself; a real error path guards against silently
  *  believing it worked. Extracted from settings/page.tsx (was
  *  StopAllAgentsSection) unchanged when Settings moved to a grouped rail —

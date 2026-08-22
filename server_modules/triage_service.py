@@ -14,7 +14,7 @@ execute_sage_turn for the (now unconditional) call path.
 
 resolve_sender_identity itself survives: it is a plain classifier (no
 blocking, no reply substitution) consumed elsewhere for tool-visibility and
-authority-tier decisions — e.g. sage_agent_runtime_service.py's per-turn
+authority-tier decisions — e.g. agent_turn_runtime_service.py's per-turn
 sender_class resolution and personal_channels_service.py's owner-self-chat
 detection. Those are output/permission concerns (which tools an already-
 in-scope turn may use), not input gating, and are outside this ruling.

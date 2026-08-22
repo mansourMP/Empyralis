@@ -24,7 +24,7 @@ from server_modules import connection_catalog_service
 from server_modules import openclaw_channel_registry
 from server_modules import personal_channel_sage_bridge_service
 from server_modules import personal_channels_repository
-from server_modules.sage_agent_runtime_contract import SageTurnResult
+from server_modules.agent_turn_runtime_contract import SageTurnResult
 
 
 # RETARGETED 2026-08-15. The two "*_inbound_context" tests below drove

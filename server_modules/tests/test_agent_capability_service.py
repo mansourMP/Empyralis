@@ -1,6 +1,6 @@
 """agent_capability_service — per-agent media-capability resolution.
 
-Covers the resolver's contract (mirrors sage_agent_runtime_service.
+Covers the resolver's contract (mirrors agent_turn_runtime_service.
 _resolve_agent_cloud_provider one level down — capability instead of "the"
 chat model):
   1. Default (no capability_config at all) resolves platform_credits and is

@@ -2,8 +2,8 @@
 
 Why this module exists
 ----------------------
-Every test that drove ``sage_agent_runtime_service.handle_sage_chat`` used to
-patch ``sage_agent_runtime_service.generate_chat_reply_with_provider_fallback``
+Every test that drove ``agent_turn_runtime_service.handle_sage_chat`` used to
+patch ``agent_turn_runtime_service.generate_chat_reply_with_provider_fallback``
 and believe it was covered. It was not: that function is no longer on the
 turn's live path. The turn runs
 
@@ -20,7 +20,7 @@ turn's live path. The turn runs
 correction pass. So one Sage turn makes up to THREE provider calls, and the
 old patch guarded none of them. The non-streaming name survives only on
 fallback paths
-(``sage_agent_runtime_service`` lines 4104 / 5885 / 6573), which is why the
+(``agent_turn_runtime_service`` lines 4104 / 5885 / 6573), which is why the
 mock looked like it worked: it was a real mock on a real function that the
 ordinary turn simply never reaches. Exactly the failure mode CLAUDE.md names
 -- "a mock protects a seam, not a path".

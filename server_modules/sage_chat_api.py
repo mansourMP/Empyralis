@@ -9,12 +9,12 @@ from fastapi import Depends, File, HTTPException, Query, UploadFile
 from server_modules import activity_ledger_service, sage_proof_log_service, security_audit_service
 from server_modules import upload_content_policy, workspace_storage_service
 from server_modules.auth import enforce_workspace_access, workspace_tenant_id
-from server_modules.sage_agent_runtime_contract import (
+from server_modules.agent_turn_runtime_contract import (
     SAGE_MODE,
     normalize_sage_mode,
     normalize_sage_surface,
 )
-from server_modules.sage_agent_runtime_service import handle_sage_chat
+from server_modules.agent_turn_runtime_service import handle_sage_chat
 from server_modules.channel_adapter import normalize_sage_inbound, filter_outbound_reply
 from server_modules.inbound_envelope import (
     InboundEnvelope,

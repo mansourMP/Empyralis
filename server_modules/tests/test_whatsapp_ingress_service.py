@@ -184,7 +184,7 @@ class WhatsAppIngressServiceTests(unittest.TestCase):
             },
         )
 
-        from server_modules.sage_agent_runtime_contract import SageTurnResult
+        from server_modules.agent_turn_runtime_contract import SageTurnResult
 
         with patch(
             "server_modules.sage_turn_adapter.execute_sage_turn",

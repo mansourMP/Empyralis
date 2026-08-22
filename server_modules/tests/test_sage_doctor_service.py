@@ -66,7 +66,7 @@ class TestSageDoctorService:
                 return_value=[{"id": "mcp-1"}],
             ),
             patch(
-                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                "server_modules.agent_turn_runtime_service._resolve_cloud_provider",
                 return_value=("deepseek", {"api_key": "test"}),
             ),
             patch(
@@ -137,7 +137,7 @@ class TestSageDoctorService:
                 return_value=[],
             ),
             patch(
-                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                "server_modules.agent_turn_runtime_service._resolve_cloud_provider",
                 side_effect=RuntimeError("No cloud provider is configured for Sage."),
             ),
             patch(
@@ -209,7 +209,7 @@ class TestSageDoctorService:
                 return_value=[{"id": "mcp-1"}],
             ),
             patch(
-                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                "server_modules.agent_turn_runtime_service._resolve_cloud_provider",
                 return_value=("deepseek", {"api_key": "test"}),
             ),
             patch(
@@ -275,7 +275,7 @@ class TestSageDoctorService:
                 return_value=[],
             ),
             patch(
-                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                "server_modules.agent_turn_runtime_service._resolve_cloud_provider",
                 side_effect=RuntimeError("No cloud provider is configured for Sage."),
             ),
             patch(
@@ -355,7 +355,7 @@ class TestSageDoctorService:
                 return_value=[],
             ),
             patch(
-                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                "server_modules.agent_turn_runtime_service._resolve_cloud_provider",
                 side_effect=RuntimeError("No cloud provider is configured for Sage."),
             ),
             patch(

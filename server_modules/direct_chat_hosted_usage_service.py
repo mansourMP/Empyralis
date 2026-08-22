@@ -670,7 +670,7 @@ def persist_direct_chat_hosted_usage_best_effort(
         # path -- it fires on every normal live chat turn that goes through
         # _run_sage_action_loop_v3 -> stream_provider_backed_direct_chat's
         # success/error/loop-detected completion handlers (see
-        # sage_agent_runtime_service.py's `_turn_credit_idempotency_key`
+        # agent_turn_runtime_service.py's `_turn_credit_idempotency_key`
         # docstring for the two-path map). It used to call
         # billing_service.debit_workspace_credit_balance_for_hosted_usage,
         # which only draws down credit_balance_usd once a workspace's
@@ -682,14 +682,14 @@ def persist_direct_chat_hosted_usage_best_effort(
         # ground-truth cost was faithfully metered (the ledger writes above)
         # but credit_balance_usd never moved, so the Billing page showed $0
         # usage despite real accruing LLM cost. The OTHER debit path (the
-        # "cloud fallthrough" block in sage_agent_runtime_service.handle_
+        # "cloud fallthrough" block in agent_turn_runtime_service.handle_
         # sage_chat) already calls the correct, MAN-74-reconnected per-turn
         # primitive -- but that block is only reached when the action loop
         # returns None, which real turns essentially never do (handle_sage_
         # chat returns immediately after a non-None action_result). Switching
         # this call site to the SAME real primitive, with the SAME shared
         # request_id (computed above via _session_request_id, which reads
-        # exactly the turn_credit_idempotency_key sage_agent_runtime_service
+        # exactly the turn_credit_idempotency_key agent_turn_runtime_service
         # threads into session_ctx), makes the primary path actually debit
         # while preserving idempotency/no-double-charge against the fallback
         # path via the shared credit_transactions ledger dedup.

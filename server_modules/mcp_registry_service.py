@@ -316,7 +316,7 @@ def save_mcp_server_registry(payload: Dict[str, Any]) -> Dict[str, Any]:
 # Making the key itself account-aware is the real fix, but it ripples into
 # mcp_skill_id()/mcp_tool_name() (which embed server_id into every skill id
 # and model-facing tool name), the tool-listing/approval UI, and the
-# specialist/primary tool-injection paths in sage_agent_runtime_service.py —
+# specialist/primary tool-injection paths in agent_turn_runtime_service.py —
 # too invasive to land safely in one pass without a migration. The
 # containment below is the smallest correct fix instead: refuse the upsert
 # loudly (McpServerCredentialCollisionError) instead of silently swapping
@@ -1696,7 +1696,7 @@ def list_workspace_mcp_direct_tool_payloads(workspace_id: str) -> List[Dict[str,
     tools.
 
     Consumed by server_modules/tool_registry_service.build_registry_entries()
-    as its 4th source (see the call site in sage_agent_runtime_service.py's
+    as its 4th source (see the call site in agent_turn_runtime_service.py's
     _direct_tool_bundle(), which injects this list into the availability
     payload under the "mcp_tools" key rather than adding a new parameter to
     build_registry_entries() — see the comment there for why). Each payload

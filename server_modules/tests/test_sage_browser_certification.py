@@ -8,7 +8,7 @@ Covers:
 - Browser action transparency and trace events
 - Intent detection (web search vs browser automation)
 
-Key module under test: sage_agent_runtime_service.py
+Key module under test: agent_turn_runtime_service.py
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 from server_modules import (
     direct_chat_tool_catalog_service,
-    sage_agent_runtime_service,
+    agent_turn_runtime_service,
 )
 
 
@@ -44,12 +44,12 @@ class SageWebSearchIndependenceTests(unittest.TestCase):
     def test_web_search_triggers_action_loop_when_offline(self):
         """_message_might_need_sage_action_loop returns True for web search queries."""
         self.assertTrue(
-            sage_agent_runtime_service._message_might_need_sage_action_loop(
+            agent_turn_runtime_service._message_might_need_sage_action_loop(
                 "search the web for OpenClaw browser docs"
             )
         )
         self.assertTrue(
-            sage_agent_runtime_service._message_might_need_sage_action_loop(
+            agent_turn_runtime_service._message_might_need_sage_action_loop(
                 "look up the latest news about Empyralis"
             )
         )
@@ -63,30 +63,30 @@ class SageWebSearchIndependenceTests(unittest.TestCase):
         }
         with (
             patch(
-                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities",
+                "server_modules.agent_turn_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities",
                 return_value=[],
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
+                "server_modules.agent_turn_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
                 return_value=availability,
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._build_direct_chat_tools",
+                "server_modules.agent_turn_runtime_service.direct_chat_runtime_exports._build_direct_chat_tools",
                 return_value=[{"name": "browser__navigate", "description": "Navigate browser"}],
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._build_local_direct_chat_tools",
+                "server_modules.agent_turn_runtime_service.direct_chat_runtime_exports._build_local_direct_chat_tools",
                 return_value=[],
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._build_builtin_direct_chat_tools",
+                "server_modules.agent_turn_runtime_service.direct_chat_runtime_exports._build_builtin_direct_chat_tools",
                 return_value=[
                     {"name": "web__search", "description": "Search the web"},
                     {"name": "web__fetch", "description": "Fetch a URL"},
                 ],
             ),
         ):
-            tools, _caps, _avail = sage_agent_runtime_service._direct_tool_bundle(
+            tools, _caps, _avail = agent_turn_runtime_service._direct_tool_bundle(
                 workspace_id="ws-1", provider="openai",
             )
 
@@ -118,36 +118,36 @@ class SageWebSearchIndependenceTests(unittest.TestCase):
             "local_gateway_online": False,
         }
         with (
-            patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile",
+            patch("server_modules.agent_turn_runtime_service.sage_profile_service.list_sage_profile",
                   return_value={"profile": {}}),
-            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files",
+            patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files",
                   return_value={}),
-            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block",
+            patch("server_modules.agent_turn_runtime_service.sage_memory_service.build_sage_memory_context_block",
                   return_value=""),
-            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot",
+            patch("server_modules.agent_turn_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot",
                   new=AsyncMock(return_value={})),
-            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
-            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+            patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider",
                   return_value=("openai", {"api_key": "test-key"})),
-            patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback"),
+            patch("server_modules.agent_turn_runtime_service.generate_chat_reply_with_provider_fallback"),
             patch(
-                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities",
+                "server_modules.agent_turn_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities",
                 return_value=[],
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
+                "server_modules.agent_turn_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
                 return_value=availability,
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
+                "server_modules.agent_turn_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
                 return_value=iter(stream_events),
             ) as mock_stream,
-            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
-            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event",
+            patch("server_modules.agent_turn_runtime_service.persist_interaction"),
+            patch("server_modules.agent_turn_runtime_service.activity_ledger_service.append_activity_event",
                   new=AsyncMock()),
-            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+            patch("server_modules.agent_turn_runtime_service.security_audit_service.emit_security_audit_event"),
         ):
-            result = _run(sage_agent_runtime_service.handle_sage_chat(
+            result = _run(agent_turn_runtime_service.handle_sage_chat(
                 workspace_id="ws-1",
                 message="search the web for Empyralis docs",
             ))
@@ -170,7 +170,7 @@ class SageBrowserBlockingTests(unittest.TestCase):
             "runtime_ok": False,
             "local_gateway_online": False,
         }
-        result = sage_agent_runtime_service._blocked_agent_computer_tool_for_message(
+        result = agent_turn_runtime_service._blocked_agent_computer_tool_for_message(
             "Open https://example.com", availability,
         )
         self.assertIsNotNone(result)
@@ -185,7 +185,7 @@ class SageBrowserBlockingTests(unittest.TestCase):
             "local_gateway_online": False,
             "selected_gateway_id": "gw-1",
         }
-        result = sage_agent_runtime_service._blocked_agent_computer_tool_for_message(
+        result = agent_turn_runtime_service._blocked_agent_computer_tool_for_message(
             "Open https://example.com", availability,
         )
         self.assertIsNotNone(result)
@@ -199,7 +199,7 @@ class SageBrowserBlockingTests(unittest.TestCase):
             "local_gateway_online": False,
         }
         for msg in ("run command: ls -la", "take a screenshot", "read file /tmp/test"):
-            result = sage_agent_runtime_service._blocked_agent_computer_tool_for_message(
+            result = agent_turn_runtime_service._blocked_agent_computer_tool_for_message(
                 msg, availability,
             )
             self.assertIsNotNone(result, f"Expected blocked for: {msg}")
@@ -211,7 +211,7 @@ class SageBrowserBlockingTests(unittest.TestCase):
             "runtime_ok": True,
             "local_gateway_online": True,
         }
-        result = sage_agent_runtime_service._blocked_agent_computer_tool_for_message(
+        result = agent_turn_runtime_service._blocked_agent_computer_tool_for_message(
             "Open https://example.com", availability,
         )
         self.assertIsNone(result)
@@ -221,7 +221,7 @@ class SageBrowserBlockingTests(unittest.TestCase):
         availability = {
             "verified_user_device_gateway": {"gateway_id": "gw-1"},
         }
-        result = sage_agent_runtime_service._blocked_agent_computer_tool_for_message(
+        result = agent_turn_runtime_service._blocked_agent_computer_tool_for_message(
             "Open https://example.com", availability,
         )
         self.assertIsNone(result)
@@ -235,7 +235,7 @@ class SageBrowserBlockingTests(unittest.TestCase):
                 },
             },
         }
-        result = sage_agent_runtime_service._blocked_agent_computer_tool_for_message(
+        result = agent_turn_runtime_service._blocked_agent_computer_tool_for_message(
             "Open https://example.com", availability,
         )
         self.assertIsNone(result)
@@ -260,36 +260,36 @@ class SageBrowserOnlineFlowTests(unittest.TestCase):
             {"type": "final", "payload": {"reply": "Done navigating.", "actions": [], "error": ""}},
         ]
         with (
-            patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile",
+            patch("server_modules.agent_turn_runtime_service.sage_profile_service.list_sage_profile",
                   return_value={"profile": {}}),
-            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files",
+            patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files",
                   return_value={}),
-            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block",
+            patch("server_modules.agent_turn_runtime_service.sage_memory_service.build_sage_memory_context_block",
                   return_value=""),
-            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot",
+            patch("server_modules.agent_turn_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot",
                   new=AsyncMock(return_value={})),
-            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
-            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+            patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider",
                   return_value=("openai", {"api_key": "test-key"})),
-            patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback"),
+            patch("server_modules.agent_turn_runtime_service.generate_chat_reply_with_provider_fallback"),
             patch(
-                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities",
+                "server_modules.agent_turn_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities",
                 return_value=[],
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
+                "server_modules.agent_turn_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
                 return_value={"runtime_ok": True, "local_gateway_online": True},
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
+                "server_modules.agent_turn_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
                 return_value=iter(stream_events),
             ) as mock_stream,
-            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
-            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event",
+            patch("server_modules.agent_turn_runtime_service.persist_interaction"),
+            patch("server_modules.agent_turn_runtime_service.activity_ledger_service.append_activity_event",
                   new=AsyncMock()),
-            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+            patch("server_modules.agent_turn_runtime_service.security_audit_service.emit_security_audit_event"),
         ):
-            result = _run(sage_agent_runtime_service.handle_sage_chat(
+            result = _run(agent_turn_runtime_service.handle_sage_chat(
                 workspace_id="ws-1",
                 message="open https://example.com in the browser",
             ))
@@ -315,36 +315,36 @@ class SageBrowserOnlineFlowTests(unittest.TestCase):
             {"type": "final", "payload": {"reply": "Done.", "actions": [], "error": ""}},
         ]
         with (
-            patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile",
+            patch("server_modules.agent_turn_runtime_service.sage_profile_service.list_sage_profile",
                   return_value={"profile": {}}),
-            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files",
+            patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files",
                   return_value={}),
-            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block",
+            patch("server_modules.agent_turn_runtime_service.sage_memory_service.build_sage_memory_context_block",
                   return_value=""),
-            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot",
+            patch("server_modules.agent_turn_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot",
                   new=AsyncMock(return_value={})),
-            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
-            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+            patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider",
                   return_value=("openai", {"api_key": "test-key"})),
-            patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback"),
+            patch("server_modules.agent_turn_runtime_service.generate_chat_reply_with_provider_fallback"),
             patch(
-                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities",
+                "server_modules.agent_turn_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities",
                 return_value=[],
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
+                "server_modules.agent_turn_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
                 return_value={"runtime_ok": True, "local_gateway_online": True},
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
+                "server_modules.agent_turn_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
                 return_value=iter(stream_events),
             ),
-            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
-            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event",
+            patch("server_modules.agent_turn_runtime_service.persist_interaction"),
+            patch("server_modules.agent_turn_runtime_service.activity_ledger_service.append_activity_event",
                   new=AsyncMock()),
-            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+            patch("server_modules.agent_turn_runtime_service.security_audit_service.emit_security_audit_event"),
         ):
-            result = _run(sage_agent_runtime_service.handle_sage_chat(
+            result = _run(agent_turn_runtime_service.handle_sage_chat(
                 workspace_id="ws-1",
                 message="open https://example.com in the browser",
             ))
@@ -392,36 +392,36 @@ class SageBrowserOnlineFlowTests(unittest.TestCase):
             {"type": "final", "payload": {"reply": "Extracted DOM.", "actions": [], "error": ""}},
         ]
         with (
-            patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile",
+            patch("server_modules.agent_turn_runtime_service.sage_profile_service.list_sage_profile",
                   return_value={"profile": {}}),
-            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files",
+            patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files",
                   return_value={}),
-            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block",
+            patch("server_modules.agent_turn_runtime_service.sage_memory_service.build_sage_memory_context_block",
                   return_value=""),
-            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot",
+            patch("server_modules.agent_turn_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot",
                   new=AsyncMock(return_value={})),
-            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
-            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+            patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider",
                   return_value=("openai", {"api_key": "test-key"})),
-            patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback"),
+            patch("server_modules.agent_turn_runtime_service.generate_chat_reply_with_provider_fallback"),
             patch(
-                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities",
+                "server_modules.agent_turn_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities",
                 return_value=[],
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
+                "server_modules.agent_turn_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
                 return_value={"runtime_ok": True, "local_gateway_online": True},
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
+                "server_modules.agent_turn_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
                 return_value=iter(stream_events),
             ),
-            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
-            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event",
+            patch("server_modules.agent_turn_runtime_service.persist_interaction"),
+            patch("server_modules.agent_turn_runtime_service.activity_ledger_service.append_activity_event",
                   new=AsyncMock()),
-            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+            patch("server_modules.agent_turn_runtime_service.security_audit_service.emit_security_audit_event"),
         ):
-            result = _run(sage_agent_runtime_service.handle_sage_chat(
+            result = _run(agent_turn_runtime_service.handle_sage_chat(
                 workspace_id="ws-1",
                 message="take a screenshot of the page",
             ))
@@ -442,19 +442,19 @@ class SageBrowserToolFilteringTests(unittest.TestCase):
     def test_web_tools_not_agent_computer(self):
         """web__search and web__fetch are NOT agent-computer tools."""
         self.assertFalse(
-            sage_agent_runtime_service._tool_requires_agent_computer("web__search")
+            agent_turn_runtime_service._tool_requires_agent_computer("web__search")
         )
         self.assertFalse(
-            sage_agent_runtime_service._tool_requires_agent_computer("web__fetch")
+            agent_turn_runtime_service._tool_requires_agent_computer("web__fetch")
         )
 
     def test_browser_tools_are_agent_computer(self):
         """browser__ tools ARE agent-computer tools."""
         self.assertTrue(
-            sage_agent_runtime_service._tool_requires_agent_computer("browser__navigate")
+            agent_turn_runtime_service._tool_requires_agent_computer("browser__navigate")
         )
         self.assertTrue(
-            sage_agent_runtime_service._tool_requires_agent_computer("browser__extract_dom")
+            agent_turn_runtime_service._tool_requires_agent_computer("browser__extract_dom")
         )
 
     def test_agent_computer_tool_prefixes(self):
@@ -463,13 +463,13 @@ class SageBrowserToolFilteringTests(unittest.TestCase):
         for prefix in prefixes:
             with self.subTest(prefix=prefix):
                 self.assertTrue(
-                    sage_agent_runtime_service._tool_requires_agent_computer(f"{prefix}test")
+                    agent_turn_runtime_service._tool_requires_agent_computer(f"{prefix}test")
                 )
 
     def test_hardware_action_is_agent_computer(self):
         """hardware__action is an agent-computer tool."""
         self.assertTrue(
-            sage_agent_runtime_service._tool_requires_agent_computer("hardware__action")
+            agent_turn_runtime_service._tool_requires_agent_computer("hardware__action")
         )
 
 
@@ -540,49 +540,49 @@ class SageBrowserStatusTests(unittest.TestCase):
 
     def test_offline_when_all_flags_false(self):
         """No gateway flags, no verified gateway, no capability truth → not_selected."""
-        status = sage_agent_runtime_service._sage_agent_computer_browser_status(
+        status = agent_turn_runtime_service._sage_agent_computer_browser_status(
             {"runtime_ok": False, "local_gateway_online": False}
         )
         self.assertIn(status, ("not_selected", "offline"))
 
     def test_offline_when_gateway_selected_but_offline(self):
         """selected_gateway_id with no online flags → offline."""
-        status = sage_agent_runtime_service._sage_agent_computer_browser_status(
+        status = agent_turn_runtime_service._sage_agent_computer_browser_status(
             {"runtime_ok": False, "local_gateway_online": False, "selected_gateway_id": "gw-1"}
         )
         self.assertEqual(status, "offline")
 
     def test_online_when_runtime_ok_and_gateway_online(self):
         """runtime_ok=True + local_gateway_online=True → online."""
-        status = sage_agent_runtime_service._sage_agent_computer_browser_status(
+        status = agent_turn_runtime_service._sage_agent_computer_browser_status(
             {"runtime_ok": True, "local_gateway_online": True}
         )
         self.assertEqual(status, "online")
 
     def test_online_when_verified_gateway(self):
         """verified_user_device_gateway present → online."""
-        status = sage_agent_runtime_service._sage_agent_computer_browser_status(
+        status = agent_turn_runtime_service._sage_agent_computer_browser_status(
             {"verified_user_device_gateway": {"gateway_id": "gw-1"}}
         )
         self.assertEqual(status, "online")
 
     def test_online_when_capability_truth_local_tools(self):
         """capability_truth.my_computer.local_tools_available True → online."""
-        status = sage_agent_runtime_service._sage_agent_computer_browser_status(
+        status = agent_turn_runtime_service._sage_agent_computer_browser_status(
             {"capability_truth": {"my_computer": {"local_tools_available": True}}}
         )
         self.assertEqual(status, "online")
 
     def test_online_when_runtime_ok_and_worker_online(self):
         """runtime_ok=True + local_worker_online=True → online."""
-        status = sage_agent_runtime_service._sage_agent_computer_browser_status(
+        status = agent_turn_runtime_service._sage_agent_computer_browser_status(
             {"runtime_ok": True, "local_worker_online": True}
         )
         self.assertEqual(status, "online")
 
     def test_disconnected_state_is_offline(self):
         """runtime_state='disconnected' → offline."""
-        status = sage_agent_runtime_service._sage_agent_computer_browser_status(
+        status = agent_turn_runtime_service._sage_agent_computer_browser_status(
             {"runtime_state": "disconnected"}
         )
         self.assertEqual(status, "offline")

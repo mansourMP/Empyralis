@@ -117,7 +117,7 @@ class SageTransparencyEmissionTests(unittest.TestCase):
         """blocked_tools is populated by SEVERAL structurally different
         producers, and every real one today is a failure or bookkeeping
         anomaly, never a genuine tool-capability policy decision. The
-        entry shape below is the REAL shape sage_agent_runtime_service.
+        entry shape below is the REAL shape agent_turn_runtime_service.
         _collect_sage_operator_loop_v3_events actually appends for a
         provider/SDK trace.failed event — not an invented one. Before this
         fix, ANY non-empty blocked_tools (including this one) emitted

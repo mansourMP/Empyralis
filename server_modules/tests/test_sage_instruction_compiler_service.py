@@ -362,12 +362,12 @@ class SageInstructionCompilerServiceTests(unittest.TestCase):
         self.assertIn("Connected apps and MCP tools are your hands", bundle_sdk.system_prompt)
 
     def test_render_capability_manifest_text_threads_the_same_flag(self) -> None:
-        """The specialist path (sage_agent_runtime_service.py) calls this
+        """The specialist path (agent_turn_runtime_service.py) calls this
         public entry point directly rather than build_sage_instruction_
         bundle — proves it takes and honors the same parameter. Manifest
         items here use the already-built shape (build_model_capability_
         manifest's own "tool"/"when_to_use" keys), matching what
-        sage_agent_runtime_service.py's specialist branch actually passes."""
+        agent_turn_runtime_service.py's specialist branch actually passes."""
         manifest = [
             {"tool": "slack__post_message", "label": "Post to Slack", "when_to_use": "Send a message.", "type": "tool"},
             {"tool": "skill_invoke", "label": "acme-quote-builder", "when_to_use": "Builds a quote.", "type": "skill", "source": "workspace"},

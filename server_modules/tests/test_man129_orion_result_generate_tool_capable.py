@@ -30,7 +30,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from server_modules import runs_execution
-from server_modules.sage_agent_runtime_contract import SageTurnResult
+from server_modules.agent_turn_runtime_contract import SageTurnResult
 from server_modules.specialist_runtime_context import SpecialistRuntimeContext
 
 

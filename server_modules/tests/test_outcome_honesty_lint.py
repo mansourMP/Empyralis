@@ -322,7 +322,7 @@ BASELINE_FILES: frozenset[str] = frozenset({
     "server_modules/routes_personal_channels.py",
     "server_modules/run_service.py",
     "server_modules/run_state_repository.py",
-    "server_modules/sage_agent_runtime_service.py",
+    "server_modules/agent_turn_runtime_service.py",
     "server_modules/sage_telegram_hosted_service.py",
     "server_modules/wechat_official_service.py",
 })  # 14 files, 40 sites at time of seeding
@@ -379,7 +379,7 @@ def test_no_new_files_with_collapsed_except_blocks() -> None:
         "acceptance failing). That single pattern, repeated per call site, "
         "is the fix -- not a function to import.\n"
         "  If instead this is 2+ REAL writes whose outcomes are both worth "
-        "knowing (see sage_agent_runtime_service.py's record_assistant_turn "
+        "knowing (see agent_turn_runtime_service.py's record_assistant_turn "
         "+ record_user_turn, in this file's own baseline), give the except "
         "a way to distinguish them (separate except clauses, or a branch "
         "inside one). Only once neither applies -- a self-contained nested "

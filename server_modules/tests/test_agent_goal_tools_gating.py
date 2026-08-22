@@ -1,5 +1,5 @@
 """feat/agent-goals: no-DB unit coverage for the goal__* tool-gating story --
-goal__* is a THIRD member of sage_agent_runtime_service._PROJECT_SCOPED_
+goal__* is a THIRD member of agent_turn_runtime_service._PROJECT_SCOPED_
 CONNECTOR_IDS (project_task__*, document__* were the first two), granted by
 PROJECT MEMBERSHIP rather than a connector binding. These tests prove the
 same three properties test_phase4b_specialist_tool_threading.py already
@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import unittest
 
-from server_modules import sage_agent_runtime_service as sage
+from server_modules import agent_turn_runtime_service as sage
 
 
 class GoalConnectorMembershipTests(unittest.TestCase):

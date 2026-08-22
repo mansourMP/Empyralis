@@ -3516,7 +3516,7 @@ def _workspace_record_from_row(row: Any) -> Optional[Dict[str, Any]]:
     # links's Postgres branch does `UPDATE workspaces SET identity_links =
     # $2::jsonb ...`) that get_workspace_by_id's own SELECT never named —
     # every caller of this record (command_registry._is_sender_owner,
-    # sage_agent_runtime_service.py's sender-class resolution,
+    # agent_turn_runtime_service.py's sender-class resolution,
     # routes_workspaces.py's identity-links settings endpoints) read
     # .get("identity_links"), always got None, and treated that identically
     # to "no channel is linked". The data was real and persisted; only the
@@ -7398,7 +7398,7 @@ async def debit_workspace_credit_balance_for_hosted_usage_atomic(
 # workspace. This reconnect deliberately does NOT start writing to that
 # ledger: doing so would also start feeding
 # entitlements_service.hosted_sage_ai_access_state's pre-existing,
-# separately-tested "cap_reached" HARD STOP (sage_agent_runtime_service.
+# separately-tested "cap_reached" HARD STOP (agent_turn_runtime_service.
 # _resolve_cloud_provider raises when the platform's cost cap is
 # exhausted) — a real risk of blocking a live turn that this task
 # explicitly rules out ("never refuse").

@@ -27,7 +27,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from server_modules import openclaw_channel_registry, personal_channel_sage_bridge_service
-from server_modules.sage_agent_runtime_contract import SageTurnResult
+from server_modules.agent_turn_runtime_contract import SageTurnResult
 
 # RETARGETED 2026-08-15 from build_whatsapp_personal_reply_async, deleted that
 # day: it hardcoded `whatsapp_personal`, a key the OpenClaw cutover removed and

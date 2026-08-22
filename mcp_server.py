@@ -801,7 +801,7 @@ if empyralist_mcp is not None:
                     surface="chat",
                     # channel_origin is routing/audit metadata only (never
                     # reaches the prompt). channel_sender_id is deliberately
-                    # left unset: sage_agent_runtime_service.py defaults
+                    # left unset: agent_turn_runtime_service.py defaults
                     # sender_class to "owner" for web/API sessions exactly
                     # when no per-message sender id is given -- setting one
                     # here would downgrade this call to "audience" tool

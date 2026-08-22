@@ -303,7 +303,7 @@ def _continuous_work_budget_allows_more(
     model: Optional[str],
 ) -> bool:
     """The actual ceiling on continuous work: the SAME token-budget primitives
-    the proactive preflight already uses (sage_agent_runtime_service.py's
+    the proactive preflight already uses (agent_turn_runtime_service.py's
     B2 pre-flight check, ~line 4956-5049 — estimate_tokens against
     effective_compaction_threshold/resolve_context_window — BUG 5's
     per-model formula, not a flat COMPACTION_RESERVE_TOKENS add-then-
@@ -313,7 +313,7 @@ def _continuous_work_budget_allows_more(
     under the model's real context window, the loop stops extending past
     max_iterations exactly as if the plan were finished — the model never
     gets a call that's likely to overflow anyway, and the existing
-    reactive-overflow-retry path (sage_agent_runtime_service.py
+    reactive-overflow-retry path (agent_turn_runtime_service.py
     ~line 5089-5233) remains the backstop for whatever this estimate
     misses on the call that does go out.
     """
@@ -338,7 +338,7 @@ def _continuous_work_budget_allows_more(
 # #1 and #2) ──────────────────────────────────────────────────────────────
 # compaction_service.py implements real, LLM-summarized compaction
 # (proactive preflight + reactive overflow retry + memory-flush-before-
-# compact), but until this it only ran inside sage_agent_runtime_service.py's
+# compact), but until this it only ran inside agent_turn_runtime_service.py's
 # handle_sage_chat FALLBACK branch — reached only when the primary tool loop
 # (_run_sage_action_loop_v3 -> stream_provider_backed_direct_chat, right
 # here) returns nothing. This is the primary path itself: nearly every real
@@ -375,7 +375,7 @@ def _compact_conversation_messages_in_place(
 
     Reuses compaction_service's existing machinery verbatim — find_cut_point
     for the recent/older split, compact_turns for the actual LLM
-    summarization call (same prompt, same call shape sage_agent_runtime_
+    summarization call (same prompt, same call shape agent_turn_runtime_
     service.py's fallback branch already uses), build_context_from_
     compaction to reassemble. No second summarizer.
 
@@ -467,7 +467,7 @@ def _compact_conversation_messages_in_place(
                 workspace_id=workspace_id,
                 # direct_chat has no tenant_id concept anywhere in this file
                 # (grepped — zero hits) — "default" matches the same
-                # single-tenant convention sage_agent_runtime_service.py
+                # single-tenant convention agent_turn_runtime_service.py
                 # falls back to (`effective_tenant_id = normalized_tenant_id
                 # or "default"`). Only used for compact_turns' best-effort
                 # summary persistence, wrapped in its own try/except, so a
@@ -1409,7 +1409,7 @@ def stream_provider_backed_direct_chat(
     # session_ctx["agent_turn_request"] varies by caller: it's the canonical
     # AgentTurnRequest dataclass from some callers, serialize_agent_turn_
     # request()'s dict form from others (bind_agent_turn_request_meta,
-    # build_agent_turn_session_context), and sage_agent_runtime_service.py's
+    # build_agent_turn_session_context), and agent_turn_runtime_service.py's
     # _run_sage_action_loop_v3 builds its own hand-rolled dict equivalent
     # with the same top-level shape. resolve_agent_turn_request() is the one
     # normalizer every other consumer of this key already goes through —
@@ -1419,7 +1419,7 @@ def stream_provider_backed_direct_chat(
     # dataclass (attribute-access) shape; this boundary is what makes that
     # true instead of merely assumed — a bare dict reaching it raised
     # AttributeError on att.metadata, the same class of bug _load_attachment_
-    # context had (sage_agent_runtime_service.py).
+    # context had (agent_turn_runtime_service.py).
     attachment_context = ""
     _attachments: list = []
     if isinstance(session_ctx, dict):
@@ -3091,7 +3091,7 @@ def stream_provider_backed_direct_chat(
                 # budget within this single provider call). If the error
                 # shape matches a context-overflow (compaction_service.
                 # is_context_overflow_error — same keyword-shape detection
-                # sage_agent_runtime_service.py's existing reactive path
+                # agent_turn_runtime_service.py's existing reactive path
                 # uses), compact once and retry THIS iteration instead of
                 # failing the whole turn. current_prompt/final_reply were
                 # never appended to conversation_messages for this failed

@@ -159,7 +159,7 @@ def classify_error(
 
 def _build_setup_hint(workspace_id: str) -> str:
     """Build the "AI & Setup" link suffix for error messages."""
-    from server_modules.sage_agent_runtime_service import _SAGE_AI_SETUP_PATH
+    from server_modules.agent_turn_runtime_service import _SAGE_AI_SETUP_PATH
 
     _ws_id = str(workspace_id or "").strip()
     _setup_path = f"/w/{_ws_id}{_SAGE_AI_SETUP_PATH}" if _ws_id else _SAGE_AI_SETUP_PATH

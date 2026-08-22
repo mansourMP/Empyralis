@@ -1414,7 +1414,7 @@ class GenerateImageCapabilityResolutionTests(unittest.TestCase):
 
     def test_sage_own_turn_resolves_with_empty_agent_id_not_specialist_bleed(self):
         """No agent_id in session_ctx == Sage's own turn (matches
-        sage_agent_runtime_service._acting_install_id's convention) — must
+        agent_turn_runtime_service._acting_install_id's convention) — must
         resolve against Sage's OWN capability_config via the master-install
         path, never a specialist's."""
         resolution = agent_capability_service.CapabilityResolution(

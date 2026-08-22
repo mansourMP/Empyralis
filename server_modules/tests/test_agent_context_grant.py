@@ -43,7 +43,7 @@ from unittest.mock import patch
 from server_modules import agent_context_grant_service as grants
 from server_modules import direct_chat_operator_binding_service
 from server_modules import direct_tool_execution_service
-from server_modules import sage_agent_runtime_service
+from server_modules import agent_turn_runtime_service
 from server_modules import skills_service
 
 _SERVER_MODULES = pathlib.Path(__file__).resolve().parents[1]
@@ -498,19 +498,19 @@ class ToolVisibilityFollowsTheGrantTests(unittest.TestCase):
         toolset = self._toolset(project_ids=[OWN_PROJECT], project_id=OWN_PROJECT)
         for name in ("project_task__list", "document__read", "goal__list"):
             with self.subTest(name=name):
-                self.assertTrue(sage_agent_runtime_service._specialist_tool_allowed(name, toolset))
+                self.assertTrue(agent_turn_runtime_service._specialist_tool_allowed(name, toolset))
 
     def test_an_ungranted_agent_is_offered_none_of_them(self):
         toolset = self._toolset(project_ids=[])
         for name in ("project_task__list", "document__read", "goal__list"):
             with self.subTest(name=name):
-                self.assertFalse(sage_agent_runtime_service._specialist_tool_allowed(name, toolset))
+                self.assertFalse(agent_turn_runtime_service._specialist_tool_allowed(name, toolset))
 
     def test_read_tools_survive_a_grant_with_no_single_write_target(self):
         """Reach, not the write target, is what visibility asks -- an agent
         granted two projects still gets its read tools."""
         toolset = self._toolset(project_ids=["proj-a", "proj-b"], project_id="")
-        self.assertTrue(sage_agent_runtime_service._specialist_tool_allowed("document__read", toolset))
+        self.assertTrue(agent_turn_runtime_service._specialist_tool_allowed("document__read", toolset))
 
 
 class TheModelCannotWidenItsOwnGrantTests(unittest.TestCase):

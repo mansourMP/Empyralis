@@ -42,7 +42,7 @@ from server_modules import channel_adapter, channel_lane_contract_service, inbou
 from server_modules import openclaw_channel_registry, personal_channels_service, platform_event
 from server_modules import sage_reply_dispatcher as srd
 from server_modules import personal_channel_sage_bridge_service as bridge
-from server_modules.sage_agent_runtime_contract import SageTurnResult
+from server_modules.agent_turn_runtime_contract import SageTurnResult
 
 
 # ─── 1. platform_event registry ─────────────────────────────────────────

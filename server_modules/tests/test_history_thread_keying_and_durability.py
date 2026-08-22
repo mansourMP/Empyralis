@@ -44,7 +44,7 @@ from server_modules.inbound_envelope import (
     InboundEnvelope,
     SurfaceKind,
 )
-from server_modules.sage_agent_runtime_contract import SageTurnResult
+from server_modules.agent_turn_runtime_contract import SageTurnResult
 from server_modules.sage_command_dispatcher import agent_sender_thread_id
 
 

@@ -886,7 +886,7 @@ def retry_failed_delegation_runs(
 # from the 3 HTTP endpoints (delegate_run_children / auto_delegate_run_children /
 # retry_failed_delegation_runs) -- all of which require an EXISTING orchestrator
 # run as the parent (_orchestrator_parent's lookup_run_snapshot + role check).
-# A live chat turn (sage_agent_runtime_service._direct_tool_bundle's
+# A live chat turn (agent_turn_runtime_service._direct_tool_bundle's
 # subagent__spawn tool) is not backed by any such run: direct chat is a
 # separate, stateless tool-call loop with no run_id of its own (confirmed --
 # runs_execution.py's own "no pre-loaded specialist toolset the way the live
@@ -910,7 +910,7 @@ def retry_failed_delegation_runs(
 MAX_SUBAGENTS_PER_TASK = 5
 # Session-context keys. session_ctx is threaded BY REFERENCE through an
 # entire chat turn's tool-call loop already (see
-# sage_agent_runtime_service.py's pending_outbound_media accumulator for the
+# agent_turn_runtime_service.py's pending_outbound_media accumulator for the
 # established precedent) -- "task" here is scoped to that one turn's
 # tool-calling loop, the only bounded unit of work that exists structurally
 # on the direct-chat surface. Counting is lifetime/per-task, NOT concurrency:
@@ -972,7 +972,7 @@ def spawn_subagent_from_chat_turn(
     subagent_depth_error: type[Exception] | None = None,
     subagent_depth_metadata_key: str | None = None,
 ) -> dict[str, Any]:
-    """Bridge for subagent__spawn (sage_agent_runtime_service._direct_tool_bundle).
+    """Bridge for subagent__spawn (agent_turn_runtime_service._direct_tool_bundle).
 
     Synthesizes a parent snapshot for the CURRENT CHAT TURN (there is no real
     parent run to look up), then drives the real engine exactly the way

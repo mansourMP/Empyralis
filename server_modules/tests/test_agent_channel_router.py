@@ -9,7 +9,7 @@ from server_modules import (
     safe_mode_service,
 )
 from server_modules.agent_manifest import AgentManifest
-from server_modules.sage_agent_runtime_contract import SageTurnResult
+from server_modules.agent_turn_runtime_contract import SageTurnResult
 
 
 def _deployed_agent_row(

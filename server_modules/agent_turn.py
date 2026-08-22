@@ -771,7 +771,7 @@ def sage_chat_attachment_dict_from_turn_attachment(attachment: TurnAttachment) -
     ``AgentTurnRequest.attachments`` (``List[TurnAttachment]``) and the
     Sage-native pipeline's ``attachments: list[dict]`` (``handle_sage_chat``,
     ``NormalizedSageTurn``, ``_load_attachment_context`` in
-    sage_agent_runtime_service.py, and channel wrappers) are two distinct,
+    agent_turn_runtime_service.py, and channel wrappers) are two distinct,
     internally-consistent type contracts. Call this at the boundary where
     the former hands off into the latter — never pass a bare
     ``TurnAttachment`` across that boundary; every consumer downstream of

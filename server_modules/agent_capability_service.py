@@ -17,7 +17,7 @@ This module is the shared resolver: for a given agent, which capabilities
 WORKING provider right now, under which mode (platform_credits or byok_api —
 cli_subscription/local don't apply to flat-API-key media providers), and with
 which credentials. Mirrors the shape of
-sage_agent_runtime_service._resolve_agent_cloud_provider (same
+agent_turn_runtime_service._resolve_agent_cloud_provider (same
 "(provider, credentials, billing_mode)" contract, same "no silent fallback"
 rule) one level down: capability instead of "the" chat model.
 
@@ -118,7 +118,7 @@ CAPABILITY_LABELS: Dict[str, str] = {
 }
 
 # Media capabilities that currently gate an LLM-callable tool's presence in a
-# specialist's toolset (see sage_agent_runtime_service._resolve_specialist_toolset
+# specialist's toolset (see agent_turn_runtime_service._resolve_specialist_toolset
 # / _specialist_tool_allowed). Kept as its own constant (rather than reusing
 # ALL_CAPABILITIES) so a future non-tool capability (e.g. a passive pipeline
 # modality) doesn't accidentally get pulled into tool-visibility gating.
@@ -436,7 +436,7 @@ async def resolve_agent_capability_provider_by_id(
     already-loaded install bundle) — fetches the bundle, extracts
     capability_config/capability_secrets, and resolves. Empty agent_id means
     Sage's own turn (master install), matching the _acting_install_id
-    convention used throughout sage_agent_runtime_service.py. Never raises —
+    convention used throughout agent_turn_runtime_service.py. Never raises —
     a lookup failure resolves to unavailable (fail closed), consistent with
     every other "never break a turn" pattern in this codebase."""
     cap = canonical_capability(capability)

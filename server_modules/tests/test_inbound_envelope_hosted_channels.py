@@ -703,7 +703,7 @@ class ConsoleDirectChatEnvelopeTests(unittest.TestCase):
     def test_console_envelope_reaches_execute_sage_turn(self) -> None:
         from server_modules import agent_turn, direct_chat_service
         from server_modules.inbound_envelope import InboundEnvelope, EnvelopeSender, SurfaceKind
-        from server_modules.sage_agent_runtime_contract import SageTurnResult
+        from server_modules.agent_turn_runtime_contract import SageTurnResult
 
         console_envelope = InboundEnvelope(
             platform="console",
@@ -761,7 +761,7 @@ class ConsoleDirectChatEnvelopeTests(unittest.TestCase):
         non-console/mobile or non-sync agent_turn() path) must reach
         execute_sage_turn with envelope=None — unchanged legacy behavior."""
         from server_modules import agent_turn, direct_chat_service
-        from server_modules.sage_agent_runtime_contract import SageTurnResult
+        from server_modules.agent_turn_runtime_contract import SageTurnResult
 
         turn_request = agent_turn.AgentTurnRequest(
             tenant_id="tenant-1",

@@ -14,7 +14,7 @@ without the whole runtime module's fixtures.
 """
 import unittest
 
-from server_modules.sage_agent_runtime_service import (
+from server_modules.agent_turn_runtime_service import (
     clamp_cli_reasoning_effort,
     _NATIVE_CLI_REASONING_EFFORTS_BY_RUNTIME,
     _VALID_CLI_REASONING_EFFORTS_BY_RUNTIME,

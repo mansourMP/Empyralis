@@ -317,7 +317,7 @@ def _persist_direct_chat_interaction(request: ConversationMemoryPersistRequest) 
          engine's caller chain (direct_chat_generation_service ->
          direct_chat_memory_facade_service) ever sets. The production
          default engine reaches this function through
-         sage_agent_runtime_service's own two `persist_interaction(...)`
+         agent_turn_runtime_service's own two `persist_interaction(...)`
          call sites, whose metadata is `{trace_id, source, channel_origin}`
          -- neither flag, so EVERY branch was skipped and this function was
          a no-op on the engine that actually runs.

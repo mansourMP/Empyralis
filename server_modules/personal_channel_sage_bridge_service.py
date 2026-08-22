@@ -311,7 +311,7 @@ async def _execute_channel_turn_with_envelope(
     directly — the parameter mapping below is deliberately kept identical
     to execute_sage_turn_for_channel's so that swap is a pure deletion.
     """
-    from server_modules.sage_agent_runtime_contract import SAGE_MODE
+    from server_modules.agent_turn_runtime_contract import SAGE_MODE
     from server_modules.sage_turn_adapter import execute_sage_turn
     from server_modules.sage_reply_dispatcher import acquire_channel_turn_lock
 
@@ -608,7 +608,7 @@ async def _build_unified_sage_personal_reply_async(
         # existing empty-reply skip path fires (no outbound, no dispatch).
         reply = filter_outbound_reply(str((result or {}).get("message") or "").strip())
         # Outbound attachments queued by send_image / generate_image's
-        # auto-attach this turn (see sage_agent_runtime_service.py's
+        # auto-attach this turn (see agent_turn_runtime_service.py's
         # session_ctx["pending_outbound_media"] and SageTurnResult.media).
         # Threaded through even on an otherwise-empty reply — a media-only
         # turn ("send me that photo back") must not be treated as silence.

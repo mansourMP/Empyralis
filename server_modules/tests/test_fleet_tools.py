@@ -100,7 +100,7 @@ class ScheduleTaskAuthorityTierTests(unittest.TestCase):
 
 class FleetGetAgentToolsCanonicalIdTests(unittest.TestCase):
     """fleet_get_agent_tools must expose the same tool id enforcement checks
-    (sage_agent_runtime_service._specialist_tool_allowed) use, not
+    (agent_turn_runtime_service._specialist_tool_allowed) use, not
     skill_registry's own hyphenated display id — otherwise a mandate
     (Customer Access) grant PATCH would operate on an id nothing enforces.
     See skill_registry.enforcement_tool_name.
@@ -151,7 +151,7 @@ class FleetGetAgentToolsExcludesCapabilityGatedToolsTests(unittest.TestCase):
     """generate_image (capability_id="image_generation") must NOT appear in
     the Tools tab's toggle list — its toggle would have zero runtime effect
     now that _specialist_tool_allowed decides it solely via capability
-    resolution (see sage_agent_runtime_service.py), and a toggle with no
+    resolution (see agent_turn_runtime_service.py), and a toggle with no
     effect is exactly the "lying toggle" facade this file's own comments
     already guard against for core tools. It lives on the Capabilities tab
     instead (fleet_get_agent_capabilities)."""
@@ -419,7 +419,7 @@ class ResolveHardwareStatusCloudHonestyTests(unittest.TestCase):
     count on the agents list — a dead BYOK key or exhausted platform
     entitlement still showed a green "Ready" dot. These tests pin the
     honest replacement: ready only when the SAME provider-resolution logic
-    the runtime uses at turn time (sage_agent_runtime_service's
+    the runtime uses at turn time (agent_turn_runtime_service's
     _resolve_agent_cloud_provider / _resolve_cloud_provider) would actually
     resolve a usable credential.
     """
@@ -438,7 +438,7 @@ class ResolveHardwareStatusCloudHonestyTests(unittest.TestCase):
         is what "ready" means here, not any agent-specific credential."""
         inst = self._cloud_inst({"mode": "platform_credits"})
         with patch(
-            "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+            "server_modules.agent_turn_runtime_service._resolve_cloud_provider",
             new=AsyncMock(return_value=("deepseek", {"api_key": "sk-live"})),
         ):
             status, last_hb, run_id, reason = _run(
@@ -454,7 +454,7 @@ class ResolveHardwareStatusCloudHonestyTests(unittest.TestCase):
         actually produce a turn used to still show "online"."""
         inst = self._cloud_inst({"mode": "platform_credits"})
         with patch(
-            "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+            "server_modules.agent_turn_runtime_service._resolve_cloud_provider",
             new=AsyncMock(side_effect=RuntimeError("Platform AI credits are exhausted.")),
         ):
             status, last_hb, run_id, reason = _run(
@@ -471,7 +471,7 @@ class ResolveHardwareStatusCloudHonestyTests(unittest.TestCase):
         fall into the "unrecognized mode" bucket."""
         inst = self._cloud_inst({})
         with patch(
-            "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+            "server_modules.agent_turn_runtime_service._resolve_cloud_provider",
             new=AsyncMock(return_value=("deepseek", {"api_key": "sk-live"})),
         ):
             status, _last_hb, _run_id, reason = _run(
@@ -491,7 +491,7 @@ class ResolveHardwareStatusCloudHonestyTests(unittest.TestCase):
         )
         with (
             patch(
-                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                "server_modules.agent_turn_runtime_service._resolve_cloud_provider",
                 new=exploding_workspace_default,
             ),
             patch(
@@ -606,7 +606,7 @@ class ResolveHardwareStatusCloudHonestyTests(unittest.TestCase):
         always-online lie."""
         inst = self._cloud_inst({"mode": "platform_credits"})
         with patch(
-            "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+            "server_modules.agent_turn_runtime_service._resolve_cloud_provider",
             new=AsyncMock(side_effect=RuntimeError("boom")),
         ):
             status, _last_hb, _run_id, reason = _run(
@@ -667,7 +667,7 @@ class ResolveCloudAgentReadinessCacheTests(unittest.TestCase):
         cache: dict = {}
         resolver = AsyncMock(return_value=("deepseek", {"api_key": "sk-live"}))
         with patch(
-            "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+            "server_modules.agent_turn_runtime_service._resolve_cloud_provider",
             new=resolver,
         ):
             for i in range(5):
@@ -1513,7 +1513,7 @@ class FleetListAgentsHardwareStatusIntegrationTests(unittest.TestCase):
                 return_value=False,
             ),
             patch(
-                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                "server_modules.agent_turn_runtime_service._resolve_cloud_provider",
                 new=AsyncMock(return_value=("deepseek", {"api_key": "sk-live"})),
             ),
         ):

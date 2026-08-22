@@ -151,7 +151,7 @@ class McpRegistrySourceTests(_McpRegistryFixtureMixin, unittest.TestCase):
 
         # Feeds tool_registry_service.build_registry_entries() as source #4
         # via availability_payload["mcp_tools"] (see the call-site comment in
-        # sage_agent_runtime_service.py's _direct_tool_bundle()).
+        # agent_turn_runtime_service.py's _direct_tool_bundle()).
         entries = tool_registry_service.build_registry_entries([], {"mcp_tools": payloads})
         entry_names = {e.tool_name for e in entries}
         self.assertIn("mcp__notion-work__search_pages", entry_names)

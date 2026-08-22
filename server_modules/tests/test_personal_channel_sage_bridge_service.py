@@ -8,7 +8,7 @@ from server_modules import channel_lane_contract_service, openclaw_channel_regis
 from server_modules import personal_channel_sage_bridge_service
 from server_modules import personal_channels_service, personal_channels_repository, platform_event
 from server_modules.inbound_envelope import SurfaceKind
-from server_modules.sage_agent_runtime_contract import SageTurnResult
+from server_modules.agent_turn_runtime_contract import SageTurnResult
 
 # NOTE on the mock seam used throughout this file: personal_channel_sage_
 # bridge_service now routes every unified-path turn through
@@ -238,7 +238,7 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
 class OutboundMediaPropagationTests(unittest.TestCase):
     """build_*_personal_reply's "media" key -- populated by send_image /
     generate_image's auto-attach via SageTurnResult.media (see
-    sage_agent_runtime_contract.py, sage_turn_adapter.py) and forwarded
+    agent_turn_runtime_contract.py, sage_turn_adapter.py) and forwarded
     verbatim through execute_sage_turn_for_channel's dict result. Covers the
     same media-only-reply property test_personal_channels_service_media.py
     covers one layer down (agent_channel_router's dispatch calls) -- this is

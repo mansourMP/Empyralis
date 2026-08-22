@@ -874,7 +874,7 @@ export function AgentChat({
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // claude_agent_sdk-engine turns only — see handle_sage_chat's own
-  // "context_usage" key (sage_agent_runtime_service.py). null until (and
+  // "context_usage" key (agent_turn_runtime_service.py). null until (and
   // unless) a turn on this engine actually completes; the rail shows a
   // plain "not available" note rather than a fake chart until then, and
   // keeps showing the LAST turn's usage rather than resetting to null on

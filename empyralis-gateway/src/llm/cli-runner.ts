@@ -88,7 +88,7 @@ function defaultFailureClassFor(kind: CliFailureKind): CliFailureClass {
  *  richer taxonomy above for retry/recovery decisions; `kind` and its four
  *  values are unchanged from before this module had retries, since
  *  runtime.ts's cliErrorMessage() (and the platform-voice string matching it
- *  feeds, server_modules/sage_agent_runtime_service.py's
+ *  feeds, server_modules/agent_turn_runtime_service.py's
  *  _friendly_cli_subscription_error) key off exactly those four buckets. */
 export class CliRunError extends Error {
   readonly kind: CliFailureKind;
@@ -114,7 +114,7 @@ export interface CliRunParams {
   model?: string;
   /** Reasoning-effort override, ALREADY CLAMPED into this runtime's own
    *  native vocabulary by the control plane before it gets here — see
-   *  sage_agent_runtime_service.clamp_cli_reasoning_effort. The customer now
+   *  agent_turn_runtime_service.clamp_cli_reasoning_effort. The customer now
    *  picks from ONE shared ladder regardless of which subscription is bound
    *  (founder's rule, 2026-08-20), so a level THIS CLI's flag cannot accept
    *  is an ordinary occurrence upstream and is resolved there; what reaches
@@ -269,7 +269,7 @@ function binaryFor(runtime: CliSubscriptionRuntime, env: NodeJS.ProcessEnv): str
  *  since it has no dedicated CLI flag for this on the `exec` subcommand;
  *  Grok Build takes `--reasoning-effort`/`--effort <level>` directly (its own
  *  canonical vocabulary is none/minimal/low/medium/high/xhigh/max — see
- *  sage_agent_runtime_service.py's _VALID_CLI_REASONING_EFFORTS_BY_RUNTIME).
+ *  agent_turn_runtime_service.py's _VALID_CLI_REASONING_EFFORTS_BY_RUNTIME).
  *  Cursor CLI's documented flag reference has no reasoning-effort control at
  *  all, so params.reasoningEffort is never appended for it — an unset value
  *  everywhere means "let the CLI use its own configured default", same
@@ -810,7 +810,7 @@ const CURSOR_AUTH_MARKERS = [
  *  no-parsable-result fallback below is this runtime's PRIMARY failure path,
  *  not a rare edge case. No token-usage fields are documented for either
  *  output format, so usage is always {0, 0} here — a genuinely unknown
- *  count, not a fabricated real zero (see sage_agent_runtime_service.py's
+ *  count, not a fabricated real zero (see agent_turn_runtime_service.py's
  *  tokens_known handling downstream, which already exists for exactly this
  *  cli_subscription case). */
 function parseCursorOutput(outcome: RawSpawnOutcome): CliRunResult {

@@ -3,7 +3,7 @@ channel AND on the way to disk.
 
 THE BUG THIS LOCKS DOWN
 -----------------------
-`sage_agent_runtime_service.handle_sage_chat` applied
+`agent_turn_runtime_service.handle_sage_chat` applied
 `_guard_sage_visible_reply` once, near the end of a ~2,300-line function. Two
 branches returned hundreds of lines before reaching it:
 
@@ -60,7 +60,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from server_modules import sage_agent_runtime_service
+from server_modules import agent_turn_runtime_service
 from server_modules import sage_turn_adapter
 from server_modules import thread_service
 from server_modules.specialist_runtime_context import SpecialistRuntimeContext
@@ -137,14 +137,14 @@ def _drive_gateway_brain_turn(*, mode: str, runtime: str, reply: str):
     # importlib.reload() parts of server_modules, so a dotted-path patch can
     # bind a different module object than the code under test is holding.
     with (
-        patch.object(sage_agent_runtime_service.sage_profile_service, "list_sage_profile", return_value={"profile": {}}),
-        patch.object(sage_agent_runtime_service.workspace_context, "read_workspace_context_files", return_value={}),
-        patch.object(sage_agent_runtime_service.sage_heartbeat_service, "build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
-        patch.object(sage_agent_runtime_service, "list_skill_definitions", return_value=[]),
-        patch.object(sage_agent_runtime_service, "_resolve_cloud_provider", new=AsyncMock(return_value=("deepseek", {"api_key": "sk-workspace-default"}))),
-        patch.object(sage_agent_runtime_service, dispatch_attr, new=mock_dispatch),
-        patch.object(sage_agent_runtime_service, "persist_interaction"),
-        patch.object(sage_agent_runtime_service.activity_ledger_service, "append_activity_event", new=AsyncMock()),
+        patch.object(agent_turn_runtime_service.sage_profile_service, "list_sage_profile", return_value={"profile": {}}),
+        patch.object(agent_turn_runtime_service.workspace_context, "read_workspace_context_files", return_value={}),
+        patch.object(agent_turn_runtime_service.sage_heartbeat_service, "build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+        patch.object(agent_turn_runtime_service, "list_skill_definitions", return_value=[]),
+        patch.object(agent_turn_runtime_service, "_resolve_cloud_provider", new=AsyncMock(return_value=("deepseek", {"api_key": "sk-workspace-default"}))),
+        patch.object(agent_turn_runtime_service, dispatch_attr, new=mock_dispatch),
+        patch.object(agent_turn_runtime_service, "persist_interaction"),
+        patch.object(agent_turn_runtime_service.activity_ledger_service, "append_activity_event", new=AsyncMock()),
         # The Rust kernel binary is not built in test environments; its
         # decision is not what this test is about.
         patch.object(
@@ -282,8 +282,8 @@ class VisibleGuardIdempotenceTests(unittest.TestCase):
             "",
         ):
             with self.subTest(sample=sample[:32]):
-                once, _ = sage_agent_runtime_service._guard_sage_visible_reply(sample)
-                twice, _ = sage_agent_runtime_service._guard_sage_visible_reply(once)
+                once, _ = agent_turn_runtime_service._guard_sage_visible_reply(sample)
+                twice, _ = agent_turn_runtime_service._guard_sage_visible_reply(once)
                 self.assertEqual(once, twice)
 
 
@@ -296,7 +296,7 @@ class StructuralGuardSeamTests(unittest.TestCase):
 
     @staticmethod
     def _module_tree() -> ast.Module:
-        path = Path(sage_agent_runtime_service.__file__)
+        path = Path(agent_turn_runtime_service.__file__)
         return ast.parse(path.read_text())
 
     @staticmethod
@@ -349,10 +349,10 @@ class StructuralGuardSeamTests(unittest.TestCase):
     }
 
     def test_no_other_module_reaches_the_unguarded_body(self):
-        root = Path(sage_agent_runtime_service.__file__).parent
+        root = Path(agent_turn_runtime_service.__file__).parent
         offenders = []
         for path in root.rglob("*.py"):
-            if path.name in {"sage_agent_runtime_service.py", Path(__file__).name}:
+            if path.name in {"agent_turn_runtime_service.py", Path(__file__).name}:
                 continue
             if path.name in self._STRUCTURAL_INSPECTION_ONLY_FILES:
                 continue

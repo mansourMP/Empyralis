@@ -6,7 +6,7 @@ turn, and `sage_turn_adapter.execute_sage_turn()` (also frozen, the single
 chokepoint every channel routes through) accepts it and renders it into a
 one-line header prepended to the message
 (`inbound_envelope.render_envelope_header`) — but that chokepoint's call into
-`sage_agent_runtime_service.handle_sage_chat()` does NOT forward the envelope
+`agent_turn_runtime_service.handle_sage_chat()` does NOT forward the envelope
 object itself (verified by reading `sage_turn_adapter.py`'s `handle_sage_chat(...)`
 call: no `envelope=` kwarg). Since `sage_turn_adapter.py` is out of scope for
 this change, the envelope object cannot be threaded through as a Python

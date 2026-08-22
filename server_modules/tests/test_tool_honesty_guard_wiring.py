@@ -11,7 +11,7 @@ called once inside a large function is a guard the next branch will skip"
 Both live "final reply" pipelines call the guard exactly once, at their own
 narrow waist, never per-branch:
 
-  * sage_agent_runtime_service._handle_sage_chat_unguarded (reached ONLY via
+  * agent_turn_runtime_service._handle_sage_chat_unguarded (reached ONLY via
     the handle_sage_chat wrapper -- see test_unguarded_reply_paths.py's own
     StructuralGuardSeamTests, which already proves that seam) calls
     tool_honesty_guard.apply_tool_honesty_guard on action_result["message"]
@@ -40,7 +40,7 @@ import unittest
 from pathlib import Path
 
 from server_modules import direct_chat_generation_service
-from server_modules import sage_agent_runtime_service
+from server_modules import agent_turn_runtime_service
 
 
 def _module_tree(module) -> ast.Module:
@@ -73,7 +73,7 @@ def _call_sites(tree: ast.Module, *, attr_owner: str, attr_name: str) -> list[in
 
 class SageActionLoopGuardWiringTests(unittest.TestCase):
     def test_apply_tool_honesty_guard_has_exactly_one_call_site(self) -> None:
-        tree = _module_tree(sage_agent_runtime_service)
+        tree = _module_tree(agent_turn_runtime_service)
         sites = _call_sites(tree, attr_owner="tool_honesty_guard", attr_name="apply_tool_honesty_guard")
         self.assertEqual(len(sites), 1, f"expected exactly one call site, found {sites}")
 
@@ -83,7 +83,7 @@ class SageActionLoopGuardWiringTests(unittest.TestCase):
         that seam independently) -- so a call site inside this function's body
         is reachable from every real caller, present and future, without this
         test having to re-derive that reachability proof itself."""
-        tree = _module_tree(sage_agent_runtime_service)
+        tree = _module_tree(agent_turn_runtime_service)
         body = _find_func(tree, "_handle_sage_chat_unguarded")
         body_lines = range(body.lineno, (body.end_lineno or body.lineno) + 1)
         sites = _call_sites(tree, attr_owner="tool_honesty_guard", attr_name="apply_tool_honesty_guard")

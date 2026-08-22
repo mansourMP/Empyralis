@@ -243,7 +243,7 @@ class ExecuteSageTurnServicesWiringTests(unittest.TestCase):
         payload = {"ai_ready": True, "tool_capabilities": []}
         sage_chat = AsyncMock(side_effect=AssertionError("must not reach the model for a command-only message"))
         with (
-            patch("server_modules.sage_agent_runtime_service.handle_sage_chat", new=sage_chat),
+            patch("server_modules.agent_turn_runtime_service.handle_sage_chat", new=sage_chat),
             patch(
                 "server_modules.direct_chat_runtime_exports._resolve_direct_chat_availability",
                 return_value=payload,
@@ -280,7 +280,7 @@ class ExecuteSageTurnServicesWiringTests(unittest.TestCase):
             "model": "gpt-4o",
         })
         with (
-            patch("server_modules.sage_agent_runtime_service.handle_sage_chat", new=sage_chat),
+            patch("server_modules.agent_turn_runtime_service.handle_sage_chat", new=sage_chat),
             patch(
                 "server_modules.direct_chat_runtime_exports._resolve_direct_chat_availability"
             ) as mock_avail,
@@ -303,7 +303,7 @@ class ExecuteSageTurnServicesWiringTests(unittest.TestCase):
         /tools lookup just because SOME command ran."""
         sage_chat = AsyncMock(side_effect=AssertionError("must not reach the model for a command-only message"))
         with (
-            patch("server_modules.sage_agent_runtime_service.handle_sage_chat", new=sage_chat),
+            patch("server_modules.agent_turn_runtime_service.handle_sage_chat", new=sage_chat),
             patch(
                 "server_modules.direct_chat_runtime_exports._resolve_direct_chat_availability"
             ) as mock_avail,

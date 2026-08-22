@@ -9,7 +9,7 @@ Two things are exercised end-to-end against REAL objects, not stand-ins:
      spikes/man-310-claude-agent-sdk/inspect_event_shapes.py, which
      introspects the same package and confirms these constructor shapes).
   2. The events translate_sdk_message() produces are then fed through
-     sage_agent_runtime_service._collect_sage_operator_loop_v3_events — the
+     agent_turn_runtime_service._collect_sage_operator_loop_v3_events — the
      REAL, unmodified consumer this bridge exists to satisfy — proving the
      translation is not just shape-plausible but actually parses correctly
      end to end.
@@ -37,7 +37,7 @@ from claude_agent_sdk import types as sdk_types
 from server_modules import agent_trace_service
 from server_modules import claude_agent_sdk_bridge
 from server_modules import openai_compat_adapter
-from server_modules import sage_agent_runtime_service
+from server_modules import agent_turn_runtime_service
 
 
 def _trace_context() -> agent_trace_service.TraceContext:
@@ -430,7 +430,7 @@ class NeverForwardAsAnthropicCredentialTests(unittest.TestCase):
     provider_profiles.py persists a real OAuth/session token for it
     (OPENAI_CODEX_OAUTH_SOURCES / "codex_token_vault" /
     _default_vault_credential_present("openai-codex", ...)) that
-    sage_agent_runtime_service._resolve_agent_cloud_provider's mode=="byok_api"
+    agent_turn_runtime_service._resolve_agent_cloud_provider's mode=="byok_api"
     branch will happily resolve and hand to this module — that branch has no
     provider denylist, and direct_chat_provider_service.
     supports_direct_message_native_chat("openai-codex", credentials) returns
@@ -1035,7 +1035,7 @@ class TranslateUserMessageToolResultTests(unittest.TestCase):
 
     def test_tool_result_status_classification_agrees_with_collector(self):
         # tool_result_status.classify_tool_result is the SAME structural
-        # verdict sage_agent_runtime_service._collect_sage_operator_loop_v3_
+        # verdict agent_turn_runtime_service._collect_sage_operator_loop_v3_
         # events uses to bucket a tool call as "completed" vs "failed" --
         # this pins that the "ok"/"failed" tokens this module emits land on
         # the correct side of that classifier (see
@@ -1302,7 +1302,7 @@ class ResultMessageErrorCodeTruthfulnessTests(unittest.TestCase):
             num_turns=1, session_id="sess-1", result=None, api_error_status=500,
         )
         events = self._translate(message)
-        collected = sage_agent_runtime_service._collect_sage_operator_loop_v3_events(events)
+        collected = agent_turn_runtime_service._collect_sage_operator_loop_v3_events(events)
 
         names = [entry.get("name") for entry in collected["blocked_tools"]]
         self.assertNotIn("success", names)
@@ -1471,7 +1471,7 @@ class SyntheticAssistantMessageTests(unittest.TestCase):
 
         final_event = next(e for e in events if e["type"] == "final")
         self.assertEqual(final_event["payload"]["reply"], "")
-        collected = sage_agent_runtime_service._collect_sage_operator_loop_v3_events(events)
+        collected = agent_turn_runtime_service._collect_sage_operator_loop_v3_events(events)
         self.assertEqual(collected["final_payload"]["reply"], "")
         self.assertEqual(collected["tool_calls"], [])
         self.assertTrue(collected["blocked_tools"])
@@ -1581,7 +1581,7 @@ class RunTurnCostAttributionWiringTests(unittest.TestCase):
 
     def test_final_payload_carries_session_id_for_later_resume(self):
         # MAN-310 Phase 2: every real ResultMessage carries a session_id
-        # (required, non-Optional field) — this is how sage_agent_runtime_
+        # (required, non-Optional field) — this is how agent_turn_runtime_
         # service._run_sage_action_loop_v3 learns what to persist for the
         # NEXT turn's resume (see _sdk_engine_session_persist).
         state = claude_agent_sdk_bridge.TranslationState()
@@ -1617,7 +1617,7 @@ class EndToEndTranslationThroughRealCollectorTests(unittest.TestCase):
     """The strongest proof this bridge does its job: run a full synthetic
     turn (tool call -> tool result -> text -> end of turn) through
     translate_sdk_message, then feed the RESULT into
-    sage_agent_runtime_service._collect_sage_operator_loop_v3_events --
+    agent_turn_runtime_service._collect_sage_operator_loop_v3_events --
     the exact, unmodified function _run_sage_action_loop_v3 calls on
     whatever _collect_stream_events returns, on EITHER engine."""
 
@@ -1658,7 +1658,7 @@ class EndToEndTranslationThroughRealCollectorTests(unittest.TestCase):
         )
         all_events += claude_agent_sdk_bridge.translate_sdk_message(result, state=state, trace_context=trace_context)
 
-        collected = sage_agent_runtime_service._collect_sage_operator_loop_v3_events(all_events)
+        collected = agent_turn_runtime_service._collect_sage_operator_loop_v3_events(all_events)
 
         self.assertEqual(collected["final_payload"]["reply"], "Here is what I found.")
         self.assertEqual(len(collected["tool_calls"]), 1)
@@ -1700,7 +1700,7 @@ class EndToEndTranslationThroughRealCollectorTests(unittest.TestCase):
         )
         all_events += claude_agent_sdk_bridge.translate_sdk_message(result, state=state, trace_context=trace_context)
 
-        collected = sage_agent_runtime_service._collect_sage_operator_loop_v3_events(all_events)
+        collected = agent_turn_runtime_service._collect_sage_operator_loop_v3_events(all_events)
         tool_call = collected["tool_calls"][0]
         self.assertEqual(tool_call["status"], "failed")
         self.assertEqual(tool_call["error"], "command not found")
@@ -2919,7 +2919,7 @@ class TranslateForeignToolTests(unittest.TestCase):
 
 class ForeignToolThroughRealCollectorAndHonestyGuardTests(unittest.TestCase):
     """The end-to-end proof, through the two REAL, unmodified consumers:
-    sage_agent_runtime_service._collect_sage_operator_loop_v3_events (which
+    agent_turn_runtime_service._collect_sage_operator_loop_v3_events (which
     builds the customer-visible work ledger) and tool_honesty_guard (which
     checks a reply's claims against that ledger)."""
 
@@ -2947,7 +2947,7 @@ class ForeignToolThroughRealCollectorAndHonestyGuardTests(unittest.TestCase):
             ),
             state=state, trace_context=trace_context,
         )
-        return sage_agent_runtime_service._collect_sage_operator_loop_v3_events(events)
+        return agent_turn_runtime_service._collect_sage_operator_loop_v3_events(events)
 
     def test_foreign_tool_never_enters_the_work_ledger(self):
         collected = self._run_turn_events(
@@ -3229,37 +3229,37 @@ class TurnEngineSelectionFlagOffTests(unittest.TestCase):
 
     def test_none_resolves_to_legacy(self):
         self.assertNotEqual(
-            sage_agent_runtime_service._resolve_turn_engine_id(None),
+            agent_turn_runtime_service._resolve_turn_engine_id(None),
             claude_agent_sdk_bridge.ENGINE_ID,
         )
 
     def test_empty_dict_resolves_to_legacy(self):
         self.assertNotEqual(
-            sage_agent_runtime_service._resolve_turn_engine_id({}),
+            agent_turn_runtime_service._resolve_turn_engine_id({}),
             claude_agent_sdk_bridge.ENGINE_ID,
         )
 
     def test_non_dict_resolves_to_legacy(self):
         self.assertNotEqual(
-            sage_agent_runtime_service._resolve_turn_engine_id("claude_agent_sdk"),  # type: ignore[arg-type]
+            agent_turn_runtime_service._resolve_turn_engine_id("claude_agent_sdk"),  # type: ignore[arg-type]
             claude_agent_sdk_bridge.ENGINE_ID,
         )
 
     def test_other_engine_value_resolves_to_legacy(self):
         self.assertNotEqual(
-            sage_agent_runtime_service._resolve_turn_engine_id({"engine": "legacy"}),
+            agent_turn_runtime_service._resolve_turn_engine_id({"engine": "legacy"}),
             claude_agent_sdk_bridge.ENGINE_ID,
         )
 
     def test_explicit_sdk_engine_is_selected(self):
         self.assertEqual(
-            sage_agent_runtime_service._resolve_turn_engine_id({"engine": "claude_agent_sdk"}),
+            agent_turn_runtime_service._resolve_turn_engine_id({"engine": "claude_agent_sdk"}),
             claude_agent_sdk_bridge.ENGINE_ID,
         )
 
     def test_engine_value_is_case_insensitive(self):
         self.assertEqual(
-            sage_agent_runtime_service._resolve_turn_engine_id({"engine": "Claude_Agent_SDK"}),
+            agent_turn_runtime_service._resolve_turn_engine_id({"engine": "Claude_Agent_SDK"}),
             claude_agent_sdk_bridge.ENGINE_ID,
         )
 
@@ -3273,29 +3273,29 @@ class NormalizeRequestedEngineTests(unittest.TestCase):
     directly, without needing to drive the full handle_sage_chat call."""
 
     def test_unset_normalizes_to_empty(self):
-        self.assertEqual(sage_agent_runtime_service._normalize_requested_engine(""), "")
+        self.assertEqual(agent_turn_runtime_service._normalize_requested_engine(""), "")
 
     def test_unrecognized_value_normalizes_to_empty(self):
         self.assertEqual(
-            sage_agent_runtime_service._normalize_requested_engine("some_other_value"), "",
+            agent_turn_runtime_service._normalize_requested_engine("some_other_value"), "",
         )
 
     def test_legacy_passes_through(self):
         # The core MAN-312 fix: a persisted "legacy" must survive this
         # normalization step, not collapse to "" alongside "unset".
         self.assertEqual(
-            sage_agent_runtime_service._normalize_requested_engine("legacy"), "legacy",
+            agent_turn_runtime_service._normalize_requested_engine("legacy"), "legacy",
         )
 
     def test_sdk_engine_id_passes_through(self):
         self.assertEqual(
-            sage_agent_runtime_service._normalize_requested_engine(claude_agent_sdk_bridge.ENGINE_ID),
+            agent_turn_runtime_service._normalize_requested_engine(claude_agent_sdk_bridge.ENGINE_ID),
             claude_agent_sdk_bridge.ENGINE_ID,
         )
 
     def test_case_and_whitespace_insensitive(self):
         self.assertEqual(
-            sage_agent_runtime_service._normalize_requested_engine("  Legacy  "), "legacy",
+            agent_turn_runtime_service._normalize_requested_engine("  Legacy  "), "legacy",
         )
 
 
@@ -3309,11 +3309,11 @@ class StoredLegacyEngineForcesLegacyPathTests(unittest.TestCase):
     engine_options)."""
 
     def test_normalized_legacy_resolves_off_sdk_via_engine_options(self):
-        requested_engine = sage_agent_runtime_service._normalize_requested_engine("legacy")
+        requested_engine = agent_turn_runtime_service._normalize_requested_engine("legacy")
         engine_options = {"engine": requested_engine} if requested_engine else None
         self.assertEqual(engine_options, {"engine": "legacy"})
         self.assertNotEqual(
-            sage_agent_runtime_service._resolve_turn_engine_id(engine_options),
+            agent_turn_runtime_service._resolve_turn_engine_id(engine_options),
             claude_agent_sdk_bridge.ENGINE_ID,
         )
 
@@ -3322,7 +3322,7 @@ class StoredLegacyEngineForcesLegacyPathTests(unittest.TestCase):
         # produce engine_options=None (not an explicit dict) — the
         # "no explicit choice" outcome _resolve_turn_engine_id's own
         # production default (SDK) depends on staying reachable.
-        requested_engine = sage_agent_runtime_service._normalize_requested_engine("")
+        requested_engine = agent_turn_runtime_service._normalize_requested_engine("")
         engine_options = {"engine": requested_engine} if requested_engine else None
         self.assertIsNone(engine_options)
 
@@ -3339,22 +3339,22 @@ class ForceLegacyEngineKillSwitchTests(unittest.TestCase):
     def test_unset_is_disabled(self):
         self._clear()
         self.addCleanup(self._clear)
-        self.assertFalse(sage_agent_runtime_service._force_legacy_engine_enabled())
+        self.assertFalse(agent_turn_runtime_service._force_legacy_engine_enabled())
 
     def test_zero_is_disabled(self):
         self.addCleanup(self._clear)
         with patch.dict(os.environ, {"EMPYRALIS_FORCE_LEGACY_ENGINE": "0"}):
-            self.assertFalse(sage_agent_runtime_service._force_legacy_engine_enabled())
+            self.assertFalse(agent_turn_runtime_service._force_legacy_engine_enabled())
 
     def test_one_is_enabled(self):
         self.addCleanup(self._clear)
         with patch.dict(os.environ, {"EMPYRALIS_FORCE_LEGACY_ENGINE": "1"}):
-            self.assertTrue(sage_agent_runtime_service._force_legacy_engine_enabled())
+            self.assertTrue(agent_turn_runtime_service._force_legacy_engine_enabled())
 
     def test_true_is_enabled_case_insensitive(self):
         self.addCleanup(self._clear)
         with patch.dict(os.environ, {"EMPYRALIS_FORCE_LEGACY_ENGINE": "True"}):
-            self.assertTrue(sage_agent_runtime_service._force_legacy_engine_enabled())
+            self.assertTrue(agent_turn_runtime_service._force_legacy_engine_enabled())
 
     def test_kill_switch_overrides_explicit_sdk_request(self):
         # The whole point of a global kill-switch: it must win even over an
@@ -3364,7 +3364,7 @@ class ForceLegacyEngineKillSwitchTests(unittest.TestCase):
         self.addCleanup(self._clear)
         with patch.dict(os.environ, {"EMPYRALIS_FORCE_LEGACY_ENGINE": "1"}):
             self.assertNotEqual(
-                sage_agent_runtime_service._resolve_turn_engine_id(
+                agent_turn_runtime_service._resolve_turn_engine_id(
                     {"engine": "claude_agent_sdk"},
                 ),
                 claude_agent_sdk_bridge.ENGINE_ID,
@@ -3378,7 +3378,7 @@ class ForceLegacyEngineKillSwitchTests(unittest.TestCase):
         self._clear()
         self.addCleanup(self._clear)
         self.assertEqual(
-            sage_agent_runtime_service._resolve_turn_engine_id({"engine": "claude_agent_sdk"}),
+            agent_turn_runtime_service._resolve_turn_engine_id({"engine": "claude_agent_sdk"}),
             claude_agent_sdk_bridge.ENGINE_ID,
         )
 
@@ -3568,7 +3568,7 @@ class TranslateMetaToolCallTests(unittest.TestCase):
 class MetaToolThroughRealCollectorAndHonestyGuardTests(unittest.TestCase):
     """The same end-to-end proof ForeignToolThroughRealCollectorAndHonesty
     GuardTests gives the foreign-tool guard, for the meta-tool allowlist: a
-    recognized Skill/Agent call must reach sage_agent_runtime_service._
+    recognized Skill/Agent call must reach agent_turn_runtime_service._
     collect_sage_operator_loop_v3_events WITHOUT landing in tool_calls
     (tool_honesty_guard's own input) or blocked_tools."""
 
@@ -3588,7 +3588,7 @@ class MetaToolThroughRealCollectorAndHonestyGuardTests(unittest.TestCase):
         )
         events.append({"type": "final", "payload": {"reply": "Here's your answer."}})
 
-        collected = sage_agent_runtime_service._collect_sage_operator_loop_v3_events(events)
+        collected = agent_turn_runtime_service._collect_sage_operator_loop_v3_events(events)
         self.assertEqual(collected["tool_calls"], [])
         self.assertEqual(collected["blocked_tools"], [])
         self.assertEqual(len(collected["meta_tool_calls"]), 1)
@@ -3609,7 +3609,7 @@ class MetaToolThroughRealCollectorAndHonestyGuardTests(unittest.TestCase):
             model="claude-sonnet-4-5",
         )
         events = claude_agent_sdk_bridge.translate_sdk_message(started, state=state, trace_context=trace_context)
-        collected = sage_agent_runtime_service._collect_sage_operator_loop_v3_events(events)
+        collected = agent_turn_runtime_service._collect_sage_operator_loop_v3_events(events)
         # The guard's own signature varies across this codebase's call
         # sites; this only needs proof that an empty tool_calls list from a
         # meta-tool-only turn is not itself flagged as dishonest scaffolding

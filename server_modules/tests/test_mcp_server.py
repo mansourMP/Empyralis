@@ -392,7 +392,7 @@ class MCPChatToolTests(unittest.IsolatedAsyncioTestCase):
         """A valid agent_id in the caller's own workspace: the turn is run
         through the real chokepoint and the real reply comes back, tagged
         with the actual agent that answered (not a literal "(sage)")."""
-        from server_modules.sage_agent_runtime_contract import SageTurnResult
+        from server_modules.agent_turn_runtime_contract import SageTurnResult
 
         bundle = {"id": "ainstall_nova", "label": "Nova", "workspace_id": "ws-chat-A"}
         turn_result = SageTurnResult(message="Hello from Nova", provider="anthropic", model="claude")

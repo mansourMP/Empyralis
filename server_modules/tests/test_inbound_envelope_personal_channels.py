@@ -334,7 +334,7 @@ class EnvelopeHeaderReachesHandleSageChatTests(_EnvelopeEndToEndTestCase):
         """(c) the rendered header actually lands at the START of the
         message handed to handle_sage_chat."""
         with patch(
-            "server_modules.sage_agent_runtime_service.handle_sage_chat",
+            "server_modules.agent_turn_runtime_service.handle_sage_chat",
             new=AsyncMock(return_value={"message": "sure thing"}),
         ) as handle_mock:
             result = _run(
@@ -364,7 +364,7 @@ class EnvelopeHeaderReachesHandleSageChatTests(_EnvelopeEndToEndTestCase):
     def test_group_message_header_states_group_and_not_owner(self) -> None:
         __doc__ = _NON_OWNER_BRANCH_REGRESSION  # noqa: F841
         with patch(
-            "server_modules.sage_agent_runtime_service.handle_sage_chat",
+            "server_modules.agent_turn_runtime_service.handle_sage_chat",
             new=AsyncMock(return_value={"message": "'Posle' means 'later'."}),
         ) as handle_mock:
             result = _run(
@@ -404,7 +404,7 @@ class EnvelopeCommandGateTests(_EnvelopeEndToEndTestCase):
                 "server_modules.command_registry.dispatch", new=AsyncMock()
             ) as dispatch_mock,
             patch(
-                "server_modules.sage_agent_runtime_service.handle_sage_chat",
+                "server_modules.agent_turn_runtime_service.handle_sage_chat",
                 new=AsyncMock(return_value={"message": "noted"}),
             ) as handle_mock,
         ):

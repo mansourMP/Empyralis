@@ -38,7 +38,7 @@ from server_modules import (
     # No longer called directly here (the old keyword-matched MCP bridge that
     # called skill_registry.execute_skill was removed — see the note above
     # _run_sage_action_loop_v3's route_decision block). Kept imported: some
-    # tests reach it via sage_agent_runtime_service.skill_registry (module
+    # tests reach it via agent_turn_runtime_service.skill_registry (module
     # attribute access), and skill_registry.execute_skill remains the real,
     # live executor for the goal-based /skills mcp:server:tool slash command.
     skill_registry,
@@ -82,7 +82,7 @@ from server_modules.agent_policy_context import (
     AgentTier,
     resolve_agent_tier,
 )
-from server_modules.sage_agent_runtime_contract import (
+from server_modules.agent_turn_runtime_contract import (
     SAGE_MODE,
     normalize_sage_mode,
     normalize_sage_surface,
@@ -1114,7 +1114,7 @@ async def _resolve_agent_cloud_provider(
         # function, so that import silently shadowed the module-level names
         # for this entire function — including the platform_credits branch
         # above, which references them too (§29) — and defeated
-        # `patch("server_modules.sage_agent_runtime_service.
+        # `patch("server_modules.agent_turn_runtime_service.
         # direct_chat_credentials", ...)` in tests, which patches the
         # module-level binding this file's OTHER call sites (e.g.
         # _resolve_cloud_provider) already rely on being patchable that way.

@@ -11,7 +11,7 @@ and the two branches were not symmetric about money:
                       -> billing_service.debit_workspace_credits_for_turn      DEBITS
     sdk     -> claude_agent_sdk_bridge.collect_events_via_claude_agent_sdk     (no debit anywhere)
 
-The only OTHER debit in sage_agent_runtime_service lived in the cloud
+The only OTHER debit in agent_turn_runtime_service lived in the cloud
 fallthrough (text-only) block, which a normal turn never reaches — the
 action-loop branch returns first. So every ordinary turn on the production
 default engine recorded a usage_event (real tokens, real cost, shown to the
@@ -45,14 +45,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from claude_agent_sdk import types as sdk_types
 
 from server_modules import claude_agent_sdk_bridge
-from server_modules import sage_agent_runtime_service
+from server_modules import agent_turn_runtime_service
 from server_modules.tests.test_claude_agent_sdk_bridge import _fake_claude_sdk_client
 
 
-SAGE_RUNTIME_SOURCE = Path(sage_agent_runtime_service.__file__)
+SAGE_RUNTIME_SOURCE = Path(agent_turn_runtime_service.__file__)
 
 # The shared seam. Both metering and debiting live here and nowhere else in
-# sage_agent_runtime_service.
+# agent_turn_runtime_service.
 SHARED_SEAM = "_meter_and_debit_turn"
 DEBIT_PRIMITIVE = "debit_workspace_credits_for_turn_atomic"
 METER_PRIMITIVE = "record_usage_from_context"
@@ -136,11 +136,11 @@ class _TurnHarness:
                 new=legacy_stream,
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback",
+                "server_modules.agent_turn_runtime_service.generate_chat_reply_with_provider_fallback",
                 return_value=("Reply", legacy_usage or {}, "deepseek", ""),
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile",
+                "server_modules.agent_turn_runtime_service.sage_profile_service.list_sage_profile",
                 return_value={
                     "profile": {
                         "user_name": "",
@@ -152,31 +152,31 @@ class _TurnHarness:
                 },
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files",
+                "server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files",
                 return_value={},
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.sage_memory_service."
+                "server_modules.agent_turn_runtime_service.sage_memory_service."
                 "build_sage_memory_context_block",
                 return_value="",
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.sage_heartbeat_service."
+                "server_modules.agent_turn_runtime_service.sage_heartbeat_service."
                 "build_sage_heartbeat_snapshot",
                 new=AsyncMock(return_value={}),
             ),
-            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
             patch(
-                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                "server_modules.agent_turn_runtime_service._resolve_cloud_provider",
                 return_value=("deepseek", {"api_key": "test-key"}),
             ),
-            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
+            patch("server_modules.agent_turn_runtime_service.persist_interaction"),
             patch(
-                "server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event",
+                "server_modules.agent_turn_runtime_service.activity_ledger_service.append_activity_event",
                 new=AsyncMock(),
             ),
             patch(
-                "server_modules.sage_agent_runtime_service.security_audit_service."
+                "server_modules.agent_turn_runtime_service.security_audit_service."
                 "emit_security_audit_event"
             ),
         ]
@@ -191,7 +191,7 @@ class _TurnHarness:
         if not real_bridge:
             patches.append(
                 patch(
-                    "server_modules.sage_agent_runtime_service.claude_agent_sdk_bridge."
+                    "server_modules.agent_turn_runtime_service.claude_agent_sdk_bridge."
                     "collect_events_via_claude_agent_sdk",
                     return_value=sdk_events if sdk_events is not None else _sdk_events(),
                 )
@@ -210,7 +210,7 @@ class _TurnHarness:
             for p in patches:
                 stack.enter_context(p)
             result = _run(
-                sage_agent_runtime_service.handle_sage_chat(
+                agent_turn_runtime_service.handle_sage_chat(
                     engine_options={"engine": engine},
                     **chat_kwargs,
                 )
@@ -244,17 +244,17 @@ class DefaultEngineCreditDebitTests(unittest.TestCase):
             os.environ.pop("PYTEST_CURRENT_TEST", None)
             os.environ.pop("EMPYRALIS_FORCE_LEGACY_ENGINE", None)
             self.assertEqual(
-                sage_agent_runtime_service._resolve_turn_engine_id(None),
+                agent_turn_runtime_service._resolve_turn_engine_id(None),
                 claude_agent_sdk_bridge.ENGINE_ID,
             )
             self.assertEqual(
-                sage_agent_runtime_service._resolve_turn_engine_id({}),
+                agent_turn_runtime_service._resolve_turn_engine_id({}),
                 claude_agent_sdk_bridge.ENGINE_ID,
             )
         # And under pytest, with no explicit choice, it is NOT the SDK —
         # the reason a naive test passes vacuously.
         self.assertNotEqual(
-            sage_agent_runtime_service._resolve_turn_engine_id({}),
+            agent_turn_runtime_service._resolve_turn_engine_id({}),
             claude_agent_sdk_bridge.ENGINE_ID,
         )
 
@@ -512,7 +512,7 @@ def _sdk_events_with_model_usage(
     served the turn (claude_agent_sdk_bridge.translate_sdk_message's
     ResultMessage branch copies this through unmodified). ``canonical_model
     =None`` omits ``model_usage`` entirely (the "older CLI"/no-report case
-    the fallback-to-``usage`` branch in sage_agent_runtime_service handles)."""
+    the fallback-to-``usage`` branch in agent_turn_runtime_service handles)."""
     payload: dict = {
         "reply": reply,
         "session_id": "sdk-session-1",
@@ -548,7 +548,7 @@ class ServedVsRequestedModelBillingTests(unittest.TestCase):
 
     def _run_with_requested_and_served(self, *, requested_model: str, served_model: str | None, request_id: str):
         with patch(
-            "server_modules.sage_agent_runtime_service.resolve_requested_model",
+            "server_modules.agent_turn_runtime_service.resolve_requested_model",
             return_value=requested_model,
         ):
             return self.harness.run(
@@ -637,22 +637,22 @@ class ServedVsRequestedModelBillingTests(unittest.TestCase):
 
 class ResolveServedModelFromUsageTests(unittest.TestCase):
     """Unit coverage for the pure resolver
-    sage_agent_runtime_service._resolve_served_model_from_usage — the
+    agent_turn_runtime_service._resolve_served_model_from_usage — the
     function _meter_and_debit_turn's caller uses to turn the SDK's raw
     ``model_usage`` dict into a served-model answer (or an honest
     "unknown")."""
 
     def test_single_entry_returns_its_canonical_model(self):
         self.assertEqual(
-            sage_agent_runtime_service._resolve_served_model_from_usage(
+            agent_turn_runtime_service._resolve_served_model_from_usage(
                 "deepseek-v4-pro", {"deepseek-v4-pro": {"canonicalModel": "deepseek-v4-flash"}},
             ),
             "deepseek-v4-flash",
         )
 
     def test_no_usage_data_returns_none(self):
-        self.assertIsNone(sage_agent_runtime_service._resolve_served_model_from_usage("deepseek-v4-pro", None))
-        self.assertIsNone(sage_agent_runtime_service._resolve_served_model_from_usage("deepseek-v4-pro", {}))
+        self.assertIsNone(agent_turn_runtime_service._resolve_served_model_from_usage("deepseek-v4-pro", None))
+        self.assertIsNone(agent_turn_runtime_service._resolve_served_model_from_usage("deepseek-v4-pro", {}))
 
     def test_agreeing_multi_entry_usage_returns_the_shared_model(self):
         usage = {
@@ -660,7 +660,7 @@ class ResolveServedModelFromUsageTests(unittest.TestCase):
             "deepseek-v4-pro-alt-key": {"canonicalModel": "deepseek-v4-flash"},
         }
         self.assertEqual(
-            sage_agent_runtime_service._resolve_served_model_from_usage("deepseek-v4-pro", usage),
+            agent_turn_runtime_service._resolve_served_model_from_usage("deepseek-v4-pro", usage),
             "deepseek-v4-flash",
         )
 
@@ -669,11 +669,11 @@ class ResolveServedModelFromUsageTests(unittest.TestCase):
             "a": {"canonicalModel": "deepseek-v4-flash"},
             "b": {"canonicalModel": "deepseek-v4-pro"},
         }
-        self.assertIsNone(sage_agent_runtime_service._resolve_served_model_from_usage("deepseek-v4-pro", usage))
+        self.assertIsNone(agent_turn_runtime_service._resolve_served_model_from_usage("deepseek-v4-pro", usage))
 
     def test_missing_canonical_model_field_returns_none(self):
         self.assertIsNone(
-            sage_agent_runtime_service._resolve_served_model_from_usage(
+            agent_turn_runtime_service._resolve_served_model_from_usage(
                 "deepseek-v4-pro", {"deepseek-v4-pro": {"inputTokens": 100}},
             ),
         )
@@ -838,11 +838,11 @@ def _byok_agent_patches():
     are reading — mocking the resolver would mock the thing under test."""
     return [
         patch(
-            "server_modules.sage_agent_runtime_service.direct_chat_credentials",
+            "server_modules.agent_turn_runtime_service.direct_chat_credentials",
             return_value={"api_key": "customers-own-key"},
         ),
         patch(
-            "server_modules.sage_agent_runtime_service.supports_direct_message_native_chat",
+            "server_modules.agent_turn_runtime_service.supports_direct_message_native_chat",
             return_value=True,
         ),
     ]
@@ -1016,7 +1016,7 @@ class MeterAndDebitSeamByokTests(unittest.TestCase):
             ),
         ):
             outcome = _run(
-                sage_agent_runtime_service._meter_and_debit_turn(
+                agent_turn_runtime_service._meter_and_debit_turn(
                     workspace_id=workspace_record["workspace_id"],
                     tenant_id=workspace_record["tenant_id"],
                     credit_idempotency_key="seam-1",
@@ -1070,7 +1070,7 @@ class ResolveTurnPayerModeUnitTests(unittest.TestCase):
     independently of any turn."""
 
     def _resolve(self, workspace_record, agent_mode=""):
-        return sage_agent_runtime_service._resolve_turn_payer_mode(workspace_record, agent_mode)
+        return agent_turn_runtime_service._resolve_turn_payer_mode(workspace_record, agent_mode)
 
     def test_agent_byok_beats_a_plain_workspace(self):
         self.assertEqual(self._resolve(_PLAIN_WORKSPACE, "byok_api"), "byok_api")

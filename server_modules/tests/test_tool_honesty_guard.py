@@ -273,7 +273,7 @@ class RealValeTranscriptEndToEndTests(unittest.TestCase):
     )
 
     def _real_tool_trace(self) -> list[dict]:
-        """Runs the actual claude_agent_sdk_bridge + sage_agent_runtime_
+        """Runs the actual claude_agent_sdk_bridge + agent_turn_runtime_
         service pipeline the SDK engine (the production default per
         CLAUDE.md) uses to build a turn's tool_trace, with the SDK's own
         is_error left False on a structured-failure result — reproducing
@@ -282,7 +282,7 @@ class RealValeTranscriptEndToEndTests(unittest.TestCase):
         classifies the result before the SDK ever sees it; translate_sdk_
         message independently re-classifies as a second line of defense)."""
         from claude_agent_sdk import types as sdk_types
-        from server_modules import agent_trace_service, claude_agent_sdk_bridge, sage_agent_runtime_service
+        from server_modules import agent_trace_service, claude_agent_sdk_bridge, agent_turn_runtime_service
 
         trace_context = agent_trace_service.TraceContext(
             trace_id="trace-vale-1",
@@ -311,7 +311,7 @@ class RealValeTranscriptEndToEndTests(unittest.TestCase):
             ),
             state=state, trace_context=trace_context,
         )
-        collected = sage_agent_runtime_service._collect_sage_operator_loop_v3_events(events)
+        collected = agent_turn_runtime_service._collect_sage_operator_loop_v3_events(events)
         return collected["tool_calls"]
 
     def test_real_pipeline_marks_the_offline_tool_call_failed(self) -> None:
@@ -939,7 +939,7 @@ class NarratesToolCallAfterSuccessTests(unittest.TestCase):
     def test_apply_tool_honesty_guard_async_never_calls_regenerate_fn(self) -> None:
         """Same guarantee on Sage's pipeline (apply_tool_honesty_guard,
         async), whose regenerate_fn re-runs a FULL action loop with tools
-        LIVE (_sage_action_loop_regenerate in sage_agent_runtime_service.py)
+        LIVE (_sage_action_loop_regenerate in agent_turn_runtime_service.py)
         — the one call site where an actual re-invocation of a real,
         side-effecting tool would be possible if this direction ever
         reached it. It must not."""

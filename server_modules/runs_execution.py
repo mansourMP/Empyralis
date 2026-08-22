@@ -5556,7 +5556,7 @@ def _execute_orion_result_via_agent_engine(
     direct_chat_service.py / turn_runtime.py at all, so console/web chat and
     every channel are unaffected.
     """
-    from server_modules.sage_agent_runtime_contract import SAGE_MODE
+    from server_modules.agent_turn_runtime_contract import SAGE_MODE
     from server_modules.sage_turn_adapter import execute_sage_turn
 
     workspace_id = _workflow_tool_workspace_id(context)

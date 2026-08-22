@@ -216,7 +216,7 @@ PROVIDER_UNREACHABLE = PlatformEvent(
 # the product blaming a screen ("Tools") for a failure that was actually an
 # invalid stored model. The 2026-08-14 classification fix (this file's own
 # history — see the removed _classify_sage_no_reply_outcome in
-# sage_agent_runtime_service.py) had already made the allowlist backing it
+# agent_turn_runtime_service.py) had already made the allowlist backing it
 # EMPTY, so it could never actually fire in practice; removing it outright
 # is the same fix finished, not a new one — there is no more per-agent
 # Tools enable/disable surface for this message to plausibly point at, so
@@ -228,7 +228,7 @@ PROVIDER_UNREACHABLE = PlatformEvent(
 #
 # Sibling to GENERIC_ERROR for a turn that ran and produced no reply for a
 # reason the runtime cannot positively name. Before this existed,
-# sage_agent_runtime_service._run_sage_action_loop_v3 treated ANY non-empty
+# agent_turn_runtime_service._run_sage_action_loop_v3 treated ANY non-empty
 # `blocked_tools` entry as proof the cause was disabled tools — but
 # blocked_tools is also where claude_agent_sdk_bridge (the production-
 # default engine, provider-general — DeepSeek's Anthropic-compatible
@@ -492,7 +492,7 @@ AI_SCOPE_MISSING = PlatformEvent(
 # Claude Code / Codex subscription, executing on their own paired Gateway.
 # Every distinct failure mode gets its own honest event here rather than one
 # blanket string — callers compose the final platform-voice line as
-# f"Heads up: {event.channel_text}" (sage_agent_runtime_service.
+# f"Heads up: {event.channel_text}" (agent_turn_runtime_service.
 # _friendly_cli_subscription_error). No fallback to platform credits ever.
 # ═══════════════════════════════════════════════════════════════════════════
 

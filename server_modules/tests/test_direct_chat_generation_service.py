@@ -192,7 +192,7 @@ class DirectChatGenerationServiceTests(unittest.TestCase):
         self.assertIn("uname -a && sw_vers", events[-1]["payload"]["reply"])
 
     def test_stream_provider_backed_direct_chat_reads_attachments_from_hand_rolled_session_ctx(self) -> None:
-        # Regression test. sage_agent_runtime_service.py's
+        # Regression test. agent_turn_runtime_service.py's
         # _run_sage_action_loop_v3 builds session_ctx["agent_turn_request"]
         # as a hand-rolled dict using the Sage-native SageChatAttachment
         # shape ({file_id, filename, safe_filename, content_type, size,

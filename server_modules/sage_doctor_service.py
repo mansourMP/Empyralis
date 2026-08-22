@@ -286,7 +286,7 @@ class SageDoctorService:
 
     @staticmethod
     def _check_model_provider_credentials(workspace_id: str, tenant_id: str, user_id: str = "") -> Dict[str, str]:
-        import server_modules.sage_agent_runtime_service as sage_runtime
+        import server_modules.agent_turn_runtime_service as sage_runtime
 
         spec = _spec_by_id("model_provider_credentials")
         try:

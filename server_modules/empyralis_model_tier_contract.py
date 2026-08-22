@@ -58,7 +58,7 @@ MODEL_TIER_CONTRACTS: Dict[str, EmpyralisModelTierContract] = {
         # So every "light" tier turn had been silently served by
         # deepseek-v4-flash for three weeks while the request wire carried
         # the dead name — exactly the substitution
-        # sage_agent_runtime_service._resolve_served_model_from_usage now
+        # agent_turn_runtime_service._resolve_served_model_from_usage now
         # detects and bills correctly, but there is no reason to keep
         # SENDING a retired id when the real one is known. "pro"/"max"
         # below already point at the current name; this completes that

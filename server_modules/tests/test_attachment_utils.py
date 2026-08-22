@@ -7,7 +7,7 @@ leftover debug print() calls — evidence the ambiguity had been hit and
 worked around before, rather than fixed). A bare dict reaching
 build_attachment_context raised AttributeError the moment it touched
 att.metadata (a plain dict has no such attribute) — the same class of bug
-_load_attachment_context had in sage_agent_runtime_service.py. The fix
+_load_attachment_context had in agent_turn_runtime_service.py. The fix
 settles the contract: both functions now require List[TurnAttachment]
 unambiguously; conversion happens once, at the caller boundary
 (direct_chat_generation_service.py's resolve_agent_turn_request call — see

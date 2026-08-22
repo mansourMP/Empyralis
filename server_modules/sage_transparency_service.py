@@ -136,7 +136,7 @@ def emit_sage_turn_transparency_events(
     # structurally impossible would be dead code pretending to be caution.
     # Every non-empty blocked_tools is unconditionally "turn_failed" —
     # never blames the customer's tool settings, matching the identical
-    # collapse in sage_agent_runtime_service.py's chat-reply substitution
+    # collapse in agent_turn_runtime_service.py's chat-reply substitution
     # (SAGE_TURN_NO_REPLY_UNKNOWN), so the Work-tab/Inbox event and the
     # chat reply can never disagree about what happened.
     blocked_tools = _safe_list(sage_result.get("blocked_tools"))

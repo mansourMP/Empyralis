@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 from server_modules import direct_chat_operator_binding_service
-from server_modules import sage_agent_runtime_service
+from server_modules import agent_turn_runtime_service
 from server_modules.tests.support_live_llm_stubs import ChatStreamStub, patched_provider_calls
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -244,7 +244,7 @@ class OperatorChatTests(unittest.TestCase):
         # direct_chat_runtime_service.build_direct_operator_reply /
         # collect_direct_operator_reply (the real implementation this file's
         # whole DI-rebuild scaffolding above ultimately calls into) now does
-        # a lazy in-function import of sage_agent_runtime_service.
+        # a lazy in-function import of agent_turn_runtime_service.
         # _resolve_cloud_provider ("ONE AI ROAD, NO FALLBACK" -- see that
         # function's own docstring) and hard-compares its result against
         # requested_provider before ever reaching anything these tests
@@ -256,9 +256,9 @@ class OperatorChatTests(unittest.TestCase):
         # almost all of them request "openai", so that's the default here.
         # Tests that need a different resolved provider (or want to exercise
         # the mismatch/"provider unavailable" path itself) override this
-        # with their own @patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider", ...).
+        # with their own @patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider", ...).
         self._resolve_cloud_provider_patch = patch.object(
-            sage_agent_runtime_service,
+            agent_turn_runtime_service,
             "_resolve_cloud_provider",
             new=AsyncMock(return_value=("openai", {})),
         )
@@ -698,7 +698,7 @@ class OperatorChatTests(unittest.TestCase):
     # needs its own _resolve_cloud_provider override -- setUp's class-wide
     # default ("openai") would otherwise make requested == effective and
     # never exercise the override-tracking path this test is named for.
-    @patch.object(sage_agent_runtime_service, "_resolve_cloud_provider", new=AsyncMock(return_value=("codex_cli", {"provider": "codex_cli"})))
+    @patch.object(agent_turn_runtime_service, "_resolve_cloud_provider", new=AsyncMock(return_value=("codex_cli", {"provider": "codex_cli"})))
     @patch(
         "operator_chat_under_test.generate_chat_reply_with_provider_fallback",
         return_value=("Hello.", {"provider": "codex_cli", "model": "gpt-5.4"}, "codex_cli", ""),

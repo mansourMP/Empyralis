@@ -68,7 +68,7 @@ SAGE_RETRIEVED_MEMORY_CHAR_LIMIT = 3_000
 SAGE_PROFILE_CONTEXT_CHAR_LIMIT = 1_500
 SAGE_HEARTBEAT_CONTEXT_CHAR_LIMIT = 900
 # docs/design/context-engineering-plan.md item 10: the specialist branch
-# (sage_agent_runtime_service.py) has no compiler budget of its own at all —
+# (agent_turn_runtime_service.py) has no compiler budget of its own at all —
 # unlike the master path, nothing there ever clipped the assembled prompt
 # against SAGE_SYSTEM_CONTEXT_CHAR_BUDGET_DEFAULT. Give the specialist's
 # newly-added capability manifest (previously omitted entirely) an explicit
@@ -117,12 +117,12 @@ MEMORY_MANIFEST_LIMIT = 60
 MODEL_HIDDEN_LEGACY_TOOLS = {"memory_update"}
 # Tools with a real, native function schema on this turn's `tools=` payload
 # (see tool_registry_service.ALWAYS_ON_TOOL_NAMES and
-# sage_agent_runtime_service._direct_tool_bundle's unconditional fleet__*
+# agent_turn_runtime_service._direct_tool_bundle's unconditional fleet__*
 # addition on the master path) need no prose re-description in the manifest
 # text below — the model already has their full name/description/parameters
 # from the real schema. A specialist's capability_manifest never contains
 # fleet__* tools by the time it reaches this module (filtered upstream via
-# _specialist_tool_allowed, sage_agent_runtime_service.py's specialist
+# _specialist_tool_allowed, agent_turn_runtime_service.py's specialist
 # branch), so treating any "fleet__"-prefixed tool_id as native is accurate
 # for whichever caller (master or specialist) passed the manifest in.
 _NATIVE_SCHEMA_TOOL_NAMES = frozenset(tool_registry_service.ALWAYS_ON_TOOL_NAMES)
@@ -543,7 +543,7 @@ def render_capability_manifest_text(
 ) -> str:
     """Public entry point for the "## Callable Tools" manifest text, for
     callers outside this module. Added for docs/design/context-engineering-
-    plan.md item 10: sage_agent_runtime_service's specialist branch used to
+    plan.md item 10: agent_turn_runtime_service's specialist branch used to
     omit the capability manifest entirely (audit-system-prompt-doctrine.md
     §2b, §4.1&5) — it now calls this with a capability_manifest already
     filtered down to what that specific specialist install can call (see
