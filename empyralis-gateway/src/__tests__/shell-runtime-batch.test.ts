@@ -84,17 +84,36 @@ test("commands and command together are rejected as ambiguous, not silently reso
   await assert.rejects(runtime.handleCapabilityInvoke(frame), /received both `command` and `commands`/);
 });
 
-test("sandbox mode without a ready Docker daemon fails closed for a batch too, and leaves no scratch directory behind", async () => {
+// INVERTED 2026-08-22: this used to assert the batch path FAILED CLOSED
+// without Docker ("requires Docker ... or an explicitly enabled and
+// authorized full_access"). A batch is just shell.execute with a `commands`
+// array, so it inherits the same ruling as the single-command path: Docker
+// chooses the isolation, not whether the work happens. The scratch-directory
+// cleanup half of the original test is KEPT and still asserted — that was
+// always a separate, still-correct fact about the `finally` block.
+test("a batch without a ready Docker daemon RUNS on the host, labelled honestly, and leaves no scratch directory behind", async () => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "empyralis-shell-batch-nodocker-"));
   const runtime = new GatewayShellRuntime(baseConfig({ stateDir, dockerReadyCheck: async () => false }));
   const frame = makeInvokeFrame("shell.execute", { commands: ["echo one", "echo two"] });
-  await assert.rejects(runtime.handleCapabilityInvoke(frame), /requires Docker.*or an explicitly enabled and authorized full_access/);
+  const result = await runtime.handleCapabilityInvoke(frame);
+
+  assert.equal(result.execution_mode, "host");
+  assert.equal(result.isolation, "host");
+  assert.equal(result.isolation_statement, "Commands run directly on this computer, because Docker isn't running here.");
+  assert.equal(result.warning, undefined, "a host batch is the ordinary state of a Docker-less box, not an alarm");
+  const commands = result.commands as CmdResult[];
+  assert.equal(commands.length, 2);
+  assert.equal(commands[0].ran, true);
+  assert.equal(commands[0].exit_code, 0);
+  assert.equal(commands[0].stdout.trim(), "one");
+  assert.equal(commands[1].stdout.trim(), "two");
+
   // The batch scratch directory is created (to write cmd_*.sh files) before
   // Docker availability is even checked — cleanup in the `finally` must
-  // still remove it on this failure path, not just on success.
+  // still remove it on EVERY path, success included.
   const mountsRoot = path.join(stateDir, "mounts", "default", "ws-batch-1", ".empyralis-batch");
   const leftover = fs.existsSync(mountsRoot) ? fs.readdirSync(mountsRoot) : [];
-  assert.deepEqual(leftover, [], "expected no leftover batch scratch directories after a Docker-unavailable refusal");
+  assert.deepEqual(leftover, [], "expected no leftover batch scratch directories");
 });
 
 test("an empty commands array is rejected before touching Docker", async () => {

@@ -16,7 +16,6 @@ import {
   setLlmRuntimeCursorReady,
   setLlmRuntimeGrokBuildReady,
   setLlmRuntimeOllamaReady,
-  setShellSandboxDockerReady,
   type CapabilityPermissionStatus,
 } from "../runtime/desktop-permissions";
 import { execFileWithTimeout } from "../shell/exec-file-with-timeout";
@@ -1207,11 +1206,12 @@ export async function collectPassiveInventorySnapshot(
     ...(openclawItem ? [openclawItem] : []),
     ...(openclawChannelPluginsItem ? [openclawChannelPluginsItem] : []),
   ];
-  // Feed the just-computed Docker probe result into the shell_sandbox
-  // permission gate (runtime/desktop-permissions.ts) — same probe, no
-  // separate check, no extra race between this and capability readiness.
-  const dockerItem = serviceInventory.find((item) => item.id === "docker");
-  setShellSandboxDockerReady(dockerItem?.status === "ready");
+  // Docker's probe result is REPORTED (serviceStatuses below carries it as
+  // service_statuses.docker, which is what the Hardware surface reads to say
+  // which isolation is in effect) but no longer GATES anything: it used to
+  // feed a shell_sandbox permission flag in runtime/desktop-permissions.ts,
+  // which made a Docker-less box unable to run a shell command at all. See
+  // that file's shell_sandbox branch and shell/execution-isolation.ts.
   // Same pattern for the on-box LLM capability: the just-computed Ollama probe
   // gates the llm_runtime permission, so llm.generate only reports ready when a
   // local Ollama endpoint is actually reachable (BYO-brain Phase 2).

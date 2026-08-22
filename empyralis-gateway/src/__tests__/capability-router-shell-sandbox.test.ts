@@ -7,7 +7,6 @@ import path from "path";
 import { GatewayCapabilityRouter } from "../supervisor/capability-router";
 import { GatewayShellRuntime } from "../shell/runtime";
 import { PersonalChannelRuntimeRegistry } from "../channels/personal-runtime";
-import { setShellSandboxDockerReady } from "../runtime/desktop-permissions";
 import { buildFastPassiveInventorySnapshot } from "../health/service-inventory";
 import { buildRuntimeMetadata } from "../runtime/runtime-metadata";
 import type { GatewayRequestEnvelope, GatewayToolInterruptPayload, GatewayToolInvokePayload } from "../protocol/types";
@@ -16,7 +15,15 @@ function makeShellRuntime(): GatewayShellRuntime {
   return new GatewayShellRuntime({
     stateDir: fs.mkdtempSync(path.join(os.tmpdir(), "empyralis-router-shell-test-")),
     fullAccessLocallyEnabled: true,
-    dockerReadyCheck: async () => false, // irrelevant here: full_access + sage authorization below skips Docker
+    dockerReadyCheck: async () => false,
+    // MUST be injected, and this is not belt-and-braces: since 2026-08-22 an
+    // ordinary (non-full_access) invoke is no longer refused at the permission
+    // layer, so it now reaches the executor and consults Docker autostart for
+    // real. The default is ensureDockerReady(), which spawns `open -a Docker`
+    // / `systemctl start docker` on the machine running this suite and then
+    // waits for it — 10x'd the whole gateway suite's runtime before this was
+    // added. Same guard shell-runtime.test.ts's baseConfig() already had.
+    dockerAutostart: async () => ({ kind: "not_installed" }),
   });
 }
 
@@ -27,7 +34,6 @@ function makeShellRuntime(): GatewayShellRuntime {
 // permission-gating behavior itself has its own dedicated test at the bottom
 // and in desktop-permissions-shell-sandbox.test.ts.
 test.beforeEach(() => {
-  setShellSandboxDockerReady(true);
 });
 
 const SAGE_AUTHORIZED_POLICY = {
@@ -118,96 +124,108 @@ test("supportedCapabilities() advertises shell_sandbox capabilities regardless o
   // this test covers.
   const router = new GatewayCapabilityRouter(undefined, new PersonalChannelRuntimeRegistry(), undefined, makeShellRuntime());
 
-  setShellSandboxDockerReady(false);
-  const withoutDocker = router.supportedCapabilities();
-  assert.ok(withoutDocker.includes("shell.execute"));
-  assert.ok(withoutDocker.includes("filesystem.read_write"));
-
-  setShellSandboxDockerReady(true);
-  const withDocker = router.supportedCapabilities();
-  assert.ok(withDocker.includes("shell.execute"));
-  assert.ok(withDocker.includes("filesystem.read_write"));
-
-  setShellSandboxDockerReady(false); // restore default for any other tests sharing this process
+  const advertised = router.supportedCapabilities();
+  assert.ok(advertised.includes("shell.execute"));
+  assert.ok(advertised.includes("filesystem.read_write"));
 });
 
-test("shell.execute invocation is still blocked while Docker is not ready, even though it's advertised", async () => {
-  // Companion to the advertisement test above: proves advertising the
-  // capability unconditionally did NOT quietly widen what's actually
-  // runnable. The gate moved entirely to invoke time (assertCapabilityPermissionReady
-  // inside handleToolInvoke), not away.
-  setShellSandboxDockerReady(false);
+// INVERTED 2026-08-22. This test used to assert that shell.execute was
+// REFUSED at invoke time whenever Docker was not ready ("blocked/
+// local_permission_denied"), and called that the safe half of advertising
+// the capability unconditionally. That refusal is exactly what the founder
+// rejected: a Docker-less computer could never run a command at all, so the
+// agent reported it had no permission to act. Docker now chooses the
+// isolation (container vs. the machine itself, see shell/execution-
+// isolation.ts); it no longer chooses whether anything runs.
+test("shell.execute invocation is NOT blocked by the permission layer — Docker readiness is not a gate here", async () => {
   const router = new GatewayCapabilityRouter(undefined, new PersonalChannelRuntimeRegistry(), undefined, makeShellRuntime());
-  await assert.rejects(
-    router.handleToolInvoke({
-      kind: "request",
-      id: "req-blocked-1",
-      type: "tool.invoke",
-      ts: new Date().toISOString(),
-      payload: {
-        capability_id: "shell.execute",
-        arguments: { command: "echo should-not-run" },
-        run_id: "run-blocked-1",
-        trace_id: "trace-1",
-        workspace_id: "ws-1",
-        // Deliberately NOT the SAGE_AUTHORIZED_POLICY used elsewhere in this
-        // file — full_access is a separate escalation path; this proves the
-        // ordinary/default sandbox path is blocked while Docker isn't ready.
-      },
-    } as GatewayRequestEnvelope<GatewayToolInvokePayload>),
-    /blocked\/local_permission_denied/,
-  );
-  setShellSandboxDockerReady(true);
+  const result = await router.handleToolInvoke({
+    kind: "request",
+    id: "req-unblocked-1",
+    type: "tool.invoke",
+    ts: new Date().toISOString(),
+    payload: {
+      capability_id: "shell.execute",
+      arguments: { command: "echo ran" },
+      run_id: "run-unblocked-1",
+      trace_id: "trace-1",
+      workspace_id: "ws-1",
+      // Deliberately NOT the SAGE_AUTHORIZED_POLICY used elsewhere in this
+      // file: this is the ORDINARY, unescalated path, which is precisely the
+      // one that used to dead-end. Reaching the executor here must not be
+      // read as full_access — that escalation's two-part opt-in is unchanged.
+    },
+  } as GatewayRequestEnvelope<GatewayToolInvokePayload>);
+  assert.ok(result, "the invoke must reach the shell executor rather than being refused by the permission layer");
 });
 
-test("the real startup pipeline (router -> buildRuntimeMetadata -> passive inventory) reports shell.execute readiness instead of omitting it", () => {
-  // This is the gap the isolated heartbeat-service-inventory.test.ts case
-  // (line ~25) does NOT cover: that test hand-writes
-  // `requestedCapabilities: ["shell.execute"]` and a hand-written
-  // capability_readiness object, which only proves the downstream mapping
-  // (capabilityPermissionStatus -> permission_states) is correct GIVEN the
-  // right input. It says nothing about whether the real gateway ever
-  // produces that input.
-  //
-  // This test instead wires the actual production call chain end to end,
-  // with nothing hand-supplied except the Docker-readiness flag itself:
+// The env override remains the one real way to turn shell access off on a
+// box, and it must still refuse at invoke time — otherwise removing the
+// Docker gate would have removed the only off switch with it.
+test("an explicit env restriction still blocks the invoke", async () => {
+  const previous = process.env.EMPYRALIS_AGENT_COMPUTER_PERMISSION_SHELL_SANDBOX;
+  process.env.EMPYRALIS_AGENT_COMPUTER_PERMISSION_SHELL_SANDBOX = "denied";
+  try {
+    const router = new GatewayCapabilityRouter(undefined, new PersonalChannelRuntimeRegistry(), undefined, makeShellRuntime());
+    await assert.rejects(
+      router.handleToolInvoke({
+        kind: "request",
+        id: "req-denied-1",
+        type: "tool.invoke",
+        ts: new Date().toISOString(),
+        payload: {
+          capability_id: "shell.execute",
+          arguments: { command: "echo should-not-run" },
+          run_id: "run-denied-1",
+          trace_id: "trace-1",
+          workspace_id: "ws-1",
+        },
+      } as GatewayRequestEnvelope<GatewayToolInvokePayload>),
+      /blocked\/local_permission_denied/,
+    );
+  } finally {
+    if (previous === undefined) {
+      delete process.env.EMPYRALIS_AGENT_COMPUTER_PERMISSION_SHELL_SANDBOX;
+    } else {
+      process.env.EMPYRALIS_AGENT_COMPUTER_PERMISSION_SHELL_SANDBOX = previous;
+    }
+  }
+});
+
+test("the real startup pipeline (router -> buildRuntimeMetadata -> passive inventory) reports shell.execute READY, not blocked", () => {
+  // This wires the actual production call chain end to end, with nothing
+  // hand-supplied:
   //   GatewayCapabilityRouter.supportedCapabilities()          (supervisor/capability-router.ts)
   //     -> buildRuntimeMetadata(version, capabilities)          (runtime/runtime-metadata.ts, called from index.ts)
   //       -> buildFastPassiveInventorySnapshot({ requestedCapabilities }) (health/service-inventory.ts, called from cloud/ws-client.ts every heartbeat)
-  //         -> capability_readiness.requested / .blocked / .permission_states
+  //         -> capability_readiness.requested / .ready / .blocked / .permission_states
   //
-  // Before the fix, step 1 silently dropped shell.execute/
-  // filesystem.read_write from its output whenever Docker wasn't ready,
-  // so permission_states never even got a chance to report "restricted" —
-  // the key was just absent, which is exactly what the founder's live
-  // registration query showed.
+  // It has been inverted TWICE, and both inversions matter. Originally it
+  // proved the capability was not silently ABSENT when Docker was down (the
+  // founder's live registration query showed exactly that). It then asserted
+  // "restricted" + present in `blocked` — honest reporting of a real gate.
+  // As of 2026-08-22 there is no gate: the control plane's own dispatch check
+  // (gateway_execution_service.gateway_registration_execution_readiness ->
+  // gateway_capability_not_ready) reads THIS array, so anything but `ready`
+  // here means a Docker-less box still gets refused one layer up, before the
+  // executor that would have run it on the host ever sees the call.
   const router = new GatewayCapabilityRouter(undefined, new PersonalChannelRuntimeRegistry(), undefined, makeShellRuntime());
-
-  setShellSandboxDockerReady(false);
-  const runtimeMetadataDockerDown = buildRuntimeMetadata("0.1.0-test", router.supportedCapabilities());
-  const snapshotDockerDown = buildFastPassiveInventorySnapshot({
-    requestedCapabilities: runtimeMetadataDockerDown.requestedCapabilities,
+  const runtimeMetadata = buildRuntimeMetadata("0.1.0-test", router.supportedCapabilities());
+  const snapshot = buildFastPassiveInventorySnapshot({
+    requestedCapabilities: runtimeMetadata.requestedCapabilities,
   });
+
   assert.ok(
-    "shell.execute" in snapshotDockerDown.capability_readiness.permission_states,
-    "shell.execute must be a reported key even while Docker is not ready — not silently absent",
+    "shell.execute" in snapshot.capability_readiness.permission_states,
+    "shell.execute must be a reported key, never silently absent",
   );
   assert.ok(
-    "filesystem.read_write" in snapshotDockerDown.capability_readiness.permission_states,
-    "filesystem.read_write must be a reported key even while Docker is not ready — not silently absent",
+    "filesystem.read_write" in snapshot.capability_readiness.permission_states,
+    "filesystem.read_write must be a reported key, never silently absent",
   );
-  assert.equal(snapshotDockerDown.capability_readiness.permission_states["shell.execute"].state, "restricted");
-  assert.ok(snapshotDockerDown.capability_readiness.blocked.includes("shell.execute"));
-  assert.ok(snapshotDockerDown.capability_readiness.blocked.includes("filesystem.read_write"));
-
-  setShellSandboxDockerReady(true);
-  const runtimeMetadataDockerUp = buildRuntimeMetadata("0.1.0-test", router.supportedCapabilities());
-  const snapshotDockerUp = buildFastPassiveInventorySnapshot({
-    requestedCapabilities: runtimeMetadataDockerUp.requestedCapabilities,
-  });
-  assert.equal(snapshotDockerUp.capability_readiness.permission_states["shell.execute"].state, "granted");
-  assert.ok(snapshotDockerUp.capability_readiness.ready.includes("shell.execute"));
-  assert.ok(snapshotDockerUp.capability_readiness.ready.includes("filesystem.read_write"));
-
-  setShellSandboxDockerReady(false); // restore default for any other tests sharing this process
+  assert.equal(snapshot.capability_readiness.permission_states["shell.execute"].state, "granted");
+  assert.ok(snapshot.capability_readiness.ready.includes("shell.execute"));
+  assert.ok(snapshot.capability_readiness.ready.includes("filesystem.read_write"));
+  assert.ok(!snapshot.capability_readiness.blocked.includes("shell.execute"));
+  assert.ok(!snapshot.capability_readiness.blocked.includes("filesystem.read_write"));
 });

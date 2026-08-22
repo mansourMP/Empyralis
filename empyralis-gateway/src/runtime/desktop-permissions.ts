@@ -86,37 +86,18 @@ const DESKTOP_CAPABILITY_PERMISSIONS: Record<string, DesktopPermissionId> = {
   "cli.login.input": "cli_setup",
 };
 
-// Docker readiness for the shell_sandbox permission. Unlike the other
-// permissions above (OS-level, read from env vars with a "granted by
-// default" fallback), shell_sandbox has NO default-granted fallback — it is
-// only ever "granted" when Docker has been actively confirmed ready.
-// Updated from health/service-inventory.ts right after it probes Docker, so
-// this reflects the same probe result the rest of capability-readiness
-// reporting uses (no separate probe, no extra race).
-let shellSandboxDockerReady = false;
-
-export function setShellSandboxDockerReady(ready: boolean): void {
-  shellSandboxDockerReady = ready;
-}
-
-// The box operator's own full_access opt-in (EMPYRALIS_GATEWAY_SHELL_
-// FULL_ACCESS_ENABLED — see config.ts's shellFullAccessLocallyEnabled,
-// which this mirrors) ALSO unlocks the shell_sandbox permission, same as
-// Docker readiness above. This is a static local policy choice, not a
-// probed environment fact (contrast shellSandboxDockerReady), so — same
-// shape as cliSetupLocallyEnabled below — it is set once, here, before the
-// one-time supportedCapabilities() computation at startup, not updated on
-// a timer. See the shell_sandbox branch of defaultDesktopPermissionState()
-// for why this needs to unlock advertisement at all: it always unlocked
-// EXECUTION (shell/runtime.ts's resolveExecutionMode()/runOnHost) but
-// never used to unlock the advertisement gated here, so a Docker-less,
-// full_access-enabled box could never be dispatched to in the first
-// place.
-let shellFullAccessLocallyEnabled = false;
-
-export function setShellFullAccessLocallyEnabled(enabled: boolean): void {
-  shellFullAccessLocallyEnabled = enabled;
-}
+// NOTE (2026-08-22): shell_sandbox used to keep two module-level flags here
+// — shellSandboxDockerReady and shellFullAccessLocallyEnabled — and granted
+// the permission only when one of them was true. Both are GONE, along with
+// their setters, because the question they answered no longer exists: Docker
+// decides HOW a command runs (container vs. the machine itself), never
+// WHETHER one runs. See shell/execution-isolation.ts and the shell_sandbox
+// branch of defaultDesktopPermissionState() below. Docker readiness is still
+// probed and still reported honestly on every heartbeat, as
+// capability_readiness.service_statuses.docker — it simply stopped being a
+// gate. Do not reintroduce a flag here to "protect" a Docker-less box: the
+// protection that actually applies is shell/command-policy.ts, which runs in
+// every mode and is not bypassable.
 
 // Ollama (local model runtime) readiness for the llm_runtime permission.
 // Same shape as shellSandboxDockerReady: NO "granted by default" fallback —
@@ -209,43 +190,35 @@ function defaultDesktopPermissionState(
     return configured;
   }
   if (permission === "shell_sandbox") {
-    // No "granted by default" fallback for this one — either a confirmed-
-    // ready Docker daemon (sandbox mode) or the box operator's own
-    // full_access opt-in (direct host execution, no Docker involved at
-    // all — see shell/runtime.ts's resolveExecutionMode()/runOnHost) must
-    // be true, or this stays restricted.
+    // GRANTED unless the box operator explicitly restricted it through
+    // PERMISSION_ENV_KEYS.shell_sandbox above (that override is checked
+    // before we ever get here, and is the ONE way to genuinely turn shell
+    // access off on a box).
     //
-    // Before this, capability ADVERTISEMENT (this function) only ever
-    // checked Docker readiness, even though EXECUTION (shell/runtime.ts)
-    // has always had a second, Docker-free path for full_access mode. A
-    // box with full_access enabled locally, fully authorized server-side
-    // (runtime_access_mode=full_access, agent_scope=sage,
-    // autonomous_agent_setup_warning_acknowledged=true — see
-    // gateway_execution_service.py), but no Docker daemon at all, would
-    // never even advertise shell.execute/filesystem.read_write, so the
-    // control plane would never dispatch to it in the first place —
-    // dead-ending before resolveExecutionMode() ever got a chance to
-    // choose full_access. That is exactly the case for platform-
-    // provisioned VPS hardware: a fresh box provisioned for or connected
-    // to Empyralis specifically to run agent workloads, nothing on it to
-    // isolate the agent FROM, where Docker is pure friction with no
-    // corresponding safety benefit (Docker only earns its keep protecting
-    // a human's personal machine, or a VPS the operator has separately
-    // configured with their own stuff on it — see cloud-vps-setup-
-    // panel.tsx / ssh-server-connect-panel.tsx, which already request
-    // full_access at pairing time for exactly those two cases).
+    // This used to be the only permission with no granted-by-default
+    // fallback: it required a confirmed-ready Docker daemon, or the box
+    // operator's own full_access opt-in, and otherwise stayed "restricted".
+    // That made Docker a WALL rather than a choice of isolation, at the
+    // earliest of four layers — the capability never reported ready, so the
+    // control plane refused to dispatch, so the executor never ran, so the
+    // agent told the customer it had no permission to act. The founder's
+    // ruling (2026-08-22): "Docker is not something that is going to degrade
+    // what we do... not like 'this is impossible to run here' or 'because
+    // you don't have Docker I don't have any permission to run it'. I don't
+    // want to hear any of those things from my agent."
     //
-    // Granting the PERMISSION here does not, by itself, grant any call
-    // full_access — resolveExecutionMode() still requires the per-call
-    // server authorization on top of this. If that authorization is
-    // absent for a given call, execution still falls back to sandbox mode
-    // and still fails cleanly with the existing "requires Docker... or
-    // full_access" error at invoke time. This only changes whether the
-    // capability is offered to the control plane at all.
-    if (shellSandboxDockerReady) {
-      return "granted";
-    }
-    return shellFullAccessLocallyEnabled ? "granted" : "restricted";
+    // There is now ALWAYS a way to execute — a container when Docker is
+    // ready, the machine itself when it is not (shell/execution-isolation.ts
+    // picks, and labels which one happened). So the honest answer to "is
+    // this capability usable on this box" is yes, and reporting "restricted"
+    // would be a false negative that the control plane correctly acts on.
+    //
+    // This does NOT grant full_access to anything: resolveExecutionMode()
+    // still requires the unchanged two-part opt-in for that escalation, and
+    // a Docker-less box runs in `host` mode, which asserts no such
+    // authorization. What still constrains a host run is command-policy.ts's
+    // hard-blocked commands and hard-protected paths, checked in every mode.
+    return "granted";
   }
   if (permission === "llm_runtime") {
     // No "granted by default" fallback either — the on-box LLM capability is

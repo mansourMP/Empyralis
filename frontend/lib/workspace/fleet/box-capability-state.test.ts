@@ -26,6 +26,13 @@ import {
   planChannelTransportState,
   planSandboxCapabilityState,
   sandboxCapabilityPill,
+  ISOLATION_FULL_ACCESS_STATEMENT,
+  ISOLATION_HOST_STATEMENT,
+  ISOLATION_SANDBOX_STATEMENT,
+  dockerStatusFromGatewayPayload,
+  executionIsolationStatement,
+  planExecutionIsolation,
+  type ExecutionIsolation,
   type ChannelTransportState,
   type SandboxCapabilityState,
 } from "./box-capability-state";
@@ -180,6 +187,132 @@ for (const state of CHANNEL_STATES) {
 // "Ready" never carries a setup action — nothing to fix, no dead control by
 // omission of a needed one either.
 assert(!channelTransportSummary("ready").hasSetupAction, `"ready" carries no setup action`);
+
+// ── Execution isolation: Docker chooses HOW, never WHETHER (2026-08-22) ──
+//
+// This whole section exists because the product used to treat Docker's
+// absence as "I have no permission to run this". It now treats it as one of
+// two true statements about what a computer does. These assertions are what
+// fails if that regresses into a gate again.
+
+const ISOLATIONS: readonly ExecutionIsolation[] = ["sandbox", "host", "full_access", "unknown"];
+
+// Totality: every probe status yields exactly one documented isolation and
+// never throws — same discipline as the sandbox/channel tables above.
+for (const dockerStatus of ALL_PROBE_STATUSES) {
+  const isolation = planExecutionIsolation({ dockerStatus });
+  assert(
+    ISOLATIONS.includes(isolation),
+    `planExecutionIsolation(${String(dockerStatus)}) returns a documented isolation (got ${isolation})`,
+  );
+}
+
+// The founder's rule in one assertion: a Docker probe that came back with a
+// CONFIRMED answer always yields a runnable isolation. There is no probe
+// result that means "nothing can run here".
+assert(planExecutionIsolation({ dockerStatus: "ready" }) === "sandbox", `docker ready -> sandbox`);
+for (const notReady of ["offline", "degraded", "blocked", "missing"] as const) {
+  assert(
+    planExecutionIsolation({ dockerStatus: notReady }) === "host",
+    `docker ${notReady} -> host (a computer without a running sandbox still runs commands)`,
+  );
+}
+
+// "Not probed yet" is a THIRD fact and must not be folded into either
+// statement — the same law CLAUDE.md states for "empty" vs "could not load".
+for (const unconfirmed of ["unknown", undefined] as const) {
+  assert(
+    planExecutionIsolation({ dockerStatus: unconfirmed }) === "unknown",
+    `docker ${String(unconfirmed)} -> unknown, never guessed either way`,
+  );
+  assert(
+    executionIsolationStatement(planExecutionIsolation({ dockerStatus: unconfirmed })) === null,
+    `an unconfirmed probe renders NOTHING rather than a sentence that might be false`,
+  );
+}
+
+// The three statements are distinguishable, and each is present exactly for
+// its own state.
+assert(executionIsolationStatement("sandbox") === ISOLATION_SANDBOX_STATEMENT, `sandbox statement`);
+assert(executionIsolationStatement("host") === ISOLATION_HOST_STATEMENT, `host statement`);
+assert(executionIsolationStatement("full_access") === ISOLATION_FULL_ACCESS_STATEMENT, `full_access statement`);
+assert(
+  new Set([ISOLATION_SANDBOX_STATEMENT, ISOLATION_HOST_STATEMENT, ISOLATION_FULL_ACCESS_STATEMENT]).size === 3,
+  `the three statements never collapse into fewer`,
+);
+
+// CROSS-LANGUAGE PIN. These literals are duplicated in
+// empyralis-gateway/src/shell/execution-isolation.ts (a different npm
+// package — this frontend cannot import it). If someone edits the wording on
+// one side only, the product says one thing on the Hardware surface and a
+// different thing in the tool result for the same computer. Byte-for-byte.
+assert(ISOLATION_SANDBOX_STATEMENT === "Commands run isolated in a container on this computer.", `sandbox literal pinned to the gateway's`);
+assert(ISOLATION_HOST_STATEMENT === "Commands run directly on this computer, because Docker isn't running here.", `host literal pinned to the gateway's`);
+assert(ISOLATION_FULL_ACCESS_STATEMENT === "Commands run directly on this computer, which has full access turned on.", `full_access literal pinned to the gateway's`);
+
+// No statement may lecture, name a command, or read as a failure.
+for (const statement of [ISOLATION_SANDBOX_STATEMENT, ISOLATION_HOST_STATEMENT, ISOLATION_FULL_ACCESS_STATEMENT]) {
+  const lowered = statement.toLowerCase();
+  for (const banned of ["docker run", "install", "brew", "apt", "systemctl", "open -a", "permission", "cannot", "can't", "unable", "failed", "error", "retry", "please"]) {
+    assert(!lowered.includes(banned), `${JSON.stringify(statement)} must not contain ${JSON.stringify(banned)}`);
+  }
+}
+
+// ── The full_access two-part opt-in, reflected honestly ──
+// BOTH halves, or the label does not claim it. One half alone changes
+// nothing about what the box actually does.
+assert(
+  planExecutionIsolation({ dockerStatus: "missing", runtimeAccessMode: "full_access", shellFullAccessLocallyEnabled: true }) === "full_access",
+  `server-authorized AND locally enabled -> full_access`,
+);
+assert(
+  planExecutionIsolation({ dockerStatus: "ready", runtimeAccessMode: "full_access", shellFullAccessLocallyEnabled: true }) === "full_access",
+  `full_access wins over a ready Docker — the owner asked for the machine`,
+);
+assert(
+  planExecutionIsolation({ dockerStatus: "ready", runtimeAccessMode: "full_access", shellFullAccessLocallyEnabled: false }) === "sandbox",
+  `authorized server-side but OFF on the box -> the box sandboxes, and the label says so`,
+);
+assert(
+  planExecutionIsolation({ dockerStatus: "offline", runtimeAccessMode: "full_access", shellFullAccessLocallyEnabled: false }) === "host",
+  `authorized server-side but OFF on the box, no Docker -> host, not a false full_access claim`,
+);
+for (const unreported of [null, undefined] as const) {
+  assert(
+    planExecutionIsolation({ dockerStatus: "ready", runtimeAccessMode: "full_access", shellFullAccessLocallyEnabled: unreported }) === "unknown",
+    `authorized server-side, box half UNREPORTED -> unknown (an older gateway build; guessing either way would be a lie)`,
+  );
+}
+// A box with no full_access authorization at all ignores the local flag
+// entirely — it cannot escalate itself.
+assert(
+  planExecutionIsolation({ dockerStatus: "offline", runtimeAccessMode: "default_guarded", shellFullAccessLocallyEnabled: true }) === "host",
+  `local flag alone never yields full_access — the server half is required`,
+);
+assert(
+  planExecutionIsolation({ dockerStatus: "offline", shellFullAccessLocallyEnabled: true }) === "host",
+  `no runtime_access_mode at all never yields full_access`,
+);
+
+// ── Reading the docker status off a real registration payload shape ──
+assert(
+  dockerStatusFromGatewayPayload({ service_readiness: { docker: { status: "ready" } } }) === "ready",
+  `prefers the backend's distilled service_readiness`,
+);
+assert(
+  dockerStatusFromGatewayPayload({ metadata: { service_inventory: [{ id: "ollama", status: "ready" }, { id: "docker", status: "offline" }] } }) === "offline",
+  `falls back to the raw service_inventory list`,
+);
+assert(
+  dockerStatusFromGatewayPayload({ service_readiness: { docker: { status: "unknown" } }, metadata: { service_inventory: [{ id: "docker", status: "ready" }] } }) === "ready",
+  `a distilled "unknown" defers to a real raw status rather than masking it`,
+);
+assert(
+  dockerStatusFromGatewayPayload({ metadata: { service_inventory: [] } }) === undefined,
+  `nothing reported -> undefined, never a guessed status`,
+);
+assert(dockerStatusFromGatewayPayload(null) === undefined, `a null payload -> undefined, never throws`);
+assert(dockerStatusFromGatewayPayload(undefined) === undefined, `an undefined payload -> undefined, never throws`);
 
 // --- Summary ---
 

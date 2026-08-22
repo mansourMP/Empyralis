@@ -92,6 +92,17 @@ export type FleetGateway = {
    *  shared — never assume true for a missing value. */
   project_sharing_opt_in?: boolean;
   llm_runtimes?: LlmRuntimeSummary | null;
+  /** Docker + channel-transport readiness, already distilled per box by
+   *  gateway_registry_service._hardware_execution_readiness_summary. Shipped
+   *  by the backend for a while with no frontend reader at all; read now by
+   *  box-capability-state.ts's dockerStatusFromGatewayPayload to say which
+   *  isolation a computer actually runs commands under. `status: "unknown"`
+   *  is the honest value for a box that has never reported service_inventory
+   *  — never guessed as installed or missing. */
+  service_readiness?: {
+    docker?: { detected?: boolean; status?: string; ready?: boolean } | null;
+    openclaw?: { detected?: boolean; status?: string; ready?: boolean } | null;
+  } | null;
   /** Optional — a concurrent backend change adds this to the gateway
    *  registration payload. Absent on older backends/gateway builds; every
    *  reader must treat it as possibly undefined, not assume presence. */
