@@ -49,9 +49,9 @@ def _evaluate_sage_memory_store(
     ttl_days: int,
     dry_run: bool,
 ) -> tuple[int, int]:
-    from server_modules import sage_memory_service
+    from server_modules import assistant_memory_service
 
-    entries = sage_memory_service.list_sage_memory(workspace_id=workspace_id)
+    entries = assistant_memory_service.list_sage_memory(workspace_id=workspace_id)
     sage_entries = (entries.get("items") or entries.get("entries") or []) if isinstance(entries, dict) else []
     eligible = 0
     deleted = 0
@@ -68,7 +68,7 @@ def _evaluate_sage_memory_store(
         if not entry_id:
             continue
         try:
-            sage_memory_service.delete_memory_entry(
+            assistant_memory_service.delete_memory_entry(
                 workspace_id=workspace_id,
                 entry_id=str(entry_id),
                 actor_user_id="retention_job",

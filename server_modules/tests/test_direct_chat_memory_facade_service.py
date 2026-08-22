@@ -14,7 +14,7 @@ class DirectChatMemoryFacadeServiceTests(unittest.TestCase):
             patch("server_modules.memory_service.get_recent_logs", return_value="Recent log") as recent_logs,
             patch("server_modules.memory_service.get_memory", return_value="- timezone: Asia/Shanghai") as get_memory,
             patch("server_modules.memory_service.semantic_search", return_value=[{"key": "timezone", "content": "Asia/Shanghai"}]) as semantic_search,
-            patch("server_modules.sage_memory_service.build_sage_memory_context_block", return_value="Sage memory") as sage_memory,
+            patch("server_modules.assistant_memory_service.build_sage_memory_context_block", return_value="Sage memory") as sage_memory,
             patch("server_modules.sage_services_service.build_sage_services_memory_block", return_value="Sage services") as sage_services,
             patch("server_modules.mini_apps_service.build_mini_apps_context_block", return_value="Mini App Summaries") as mini_apps,
         ):
@@ -41,7 +41,7 @@ class DirectChatMemoryFacadeServiceTests(unittest.TestCase):
             patch("server_modules.workspace_context_memory_adapter.read_workspace_context_files", return_value={}),
             patch("server_modules.memory_service.get_recent_logs", return_value="Recent log"),
             patch("server_modules.memory_service.get_memory", return_value="- timezone: Asia/Shanghai"),
-            patch("server_modules.sage_memory_service.build_sage_memory_context_block", return_value="Sage memory"),
+            patch("server_modules.assistant_memory_service.build_sage_memory_context_block", return_value="Sage memory"),
             patch("server_modules.sage_services_service.build_sage_services_memory_block", return_value=""),
             patch("server_modules.mini_apps_service.build_mini_apps_context_block", return_value=""),
         ):

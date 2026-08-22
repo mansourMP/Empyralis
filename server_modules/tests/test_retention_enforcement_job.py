@@ -58,7 +58,7 @@ class RetentionEnforcementTests(unittest.TestCase):
             "server_modules.data_retention_service.build_workspace_retention_inventory",
             new=AsyncMock(return_value=inventory),
         ), patch(
-            "server_modules.sage_memory_service.list_sage_memory",
+            "server_modules.assistant_memory_service.list_sage_memory",
             return_value={
                 "items": [
                     {"id": "old-1", "created_at": "2020-01-01T00:00:00Z"},
@@ -66,7 +66,7 @@ class RetentionEnforcementTests(unittest.TestCase):
                 ]
             },
         ), patch(
-            "server_modules.sage_memory_service.delete_memory_entry"
+            "server_modules.assistant_memory_service.delete_memory_entry"
         ), patch(
             "server_modules.retention_enforcement_job.security_audit_service.emit_security_audit_event",
         ):
@@ -90,7 +90,7 @@ class RetentionEnforcementTests(unittest.TestCase):
             "server_modules.data_retention_service.build_workspace_retention_inventory",
             new=AsyncMock(return_value=inventory),
         ), patch(
-            "server_modules.sage_memory_service.list_sage_memory",
+            "server_modules.assistant_memory_service.list_sage_memory",
             return_value={
                 "items": [
                     {"id": "old-1", "created_at": "2020-01-01T00:00:00Z"},
@@ -98,7 +98,7 @@ class RetentionEnforcementTests(unittest.TestCase):
                 ]
             },
         ), patch(
-            "server_modules.sage_memory_service.delete_memory_entry",
+            "server_modules.assistant_memory_service.delete_memory_entry",
         ) as delete_mock, patch(
             "server_modules.retention_enforcement_job.security_audit_service.emit_security_audit_event",
         ):
@@ -160,14 +160,14 @@ class RetentionEnforcementTests(unittest.TestCase):
             "server_modules.data_retention_service.build_workspace_retention_inventory",
             new=AsyncMock(return_value=inventory),
         ), patch(
-            "server_modules.sage_memory_service.list_sage_memory",
+            "server_modules.assistant_memory_service.list_sage_memory",
             return_value={
                 "entries": [
                     {"id": "old-legacy", "created_at": "2020-01-01T00:00:00Z"},
                 ]
             },
         ), patch(
-            "server_modules.sage_memory_service.delete_memory_entry",
+            "server_modules.assistant_memory_service.delete_memory_entry",
         ) as delete_mock, patch(
             "server_modules.retention_enforcement_job.security_audit_service.emit_security_audit_event",
         ):

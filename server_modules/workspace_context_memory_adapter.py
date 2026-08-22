@@ -313,9 +313,9 @@ def load_workspace_context_payload(
 
     if resolved_include_memory_context and not agent_install_id:
         try:
-            from server_modules import sage_memory_service
+            from server_modules import assistant_memory_service
 
-            memory_block = sage_memory_service.build_sage_memory_context_block(
+            memory_block = assistant_memory_service.build_sage_memory_context_block(
                 workspace_id=workspace_id,
             )
         except Exception:

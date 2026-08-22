@@ -110,7 +110,7 @@ class TestApprovedMCPToolExecutes(unittest.TestCase):
         with (
             patch("server_modules.agent_turn_runtime_service.sage_profile_service.list_sage_profile", return_value={"profile": {}}),
             patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
-            patch("server_modules.agent_turn_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block", return_value=""),
             patch("server_modules.agent_turn_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
             patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[mcp_skill]),
             patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider", return_value=("openai", {"api_key": "test-key"})),
@@ -155,7 +155,7 @@ class TestDisabledMCPToolDoesNotExecute(unittest.TestCase):
         with (
             patch("server_modules.agent_turn_runtime_service.sage_profile_service.list_sage_profile", return_value={"profile": {}}),
             patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
-            patch("server_modules.agent_turn_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block", return_value=""),
             patch("server_modules.agent_turn_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
             patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider", return_value=("openai", {"api_key": "test-key"})),
@@ -225,7 +225,7 @@ class TestMCPFailureReturnsControlledError(unittest.TestCase):
         with (
             patch("server_modules.agent_turn_runtime_service.sage_profile_service.list_sage_profile", return_value={"profile": {}}),
             patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
-            patch("server_modules.agent_turn_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block", return_value=""),
             patch("server_modules.agent_turn_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
             patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[mcp_skill]),
             patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider", return_value=("openai", {"api_key": "test-key"})),
@@ -289,7 +289,7 @@ class TestMCPToolResultIncludedInFinalResponse(unittest.TestCase):
         with (
             patch("server_modules.agent_turn_runtime_service.sage_profile_service.list_sage_profile", return_value={"profile": {}}),
             patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
-            patch("server_modules.agent_turn_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block", return_value=""),
             patch("server_modules.agent_turn_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
             patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[mcp_skill]),
             patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider", return_value=("openai", {"api_key": "test-key"})),

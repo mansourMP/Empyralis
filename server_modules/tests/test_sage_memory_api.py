@@ -4,7 +4,7 @@ import types
 import unittest
 from unittest.mock import patch
 
-from server_modules import sage_memory_api
+from server_modules import assistant_memory_api
 
 
 class _FakeApp:
@@ -41,13 +41,13 @@ class SageMemoryApiTests(unittest.TestCase):
         sys.modules["server"] = fake_server
         try:
             app = _FakeApp()
-            sage_memory_api.register_sage_memory_routes(app)
+            assistant_memory_api.register_sage_memory_routes(app)
             route = app.routes[("GET", "/api/sage-memory")]
             with (
-                patch("server_modules.sage_memory_api.enforce_workspace_access", return_value="workspace-1"),
-                patch("server_modules.sage_memory_api.workspace_tenant_id", return_value="tenant-1"),
+                patch("server_modules.assistant_memory_api.enforce_workspace_access", return_value="workspace-1"),
+                patch("server_modules.assistant_memory_api.workspace_tenant_id", return_value="tenant-1"),
                 patch(
-                    "server_modules.sage_memory_api.list_sage_memory",
+                    "server_modules.assistant_memory_api.list_sage_memory",
                     return_value={"items": [{"id": "memory-1"}], "categories": [], "summary": {}, "updated_at": "2026-04-15T00:00:00Z"},
                 ),
             ):
@@ -70,19 +70,19 @@ class SageMemoryApiTests(unittest.TestCase):
         sys.modules["server"] = fake_server
         try:
             app = _FakeApp()
-            sage_memory_api.register_sage_memory_routes(app)
+            assistant_memory_api.register_sage_memory_routes(app)
             route = app.routes[("POST", "/api/sage-memory/entries")]
             with (
-                patch("server_modules.sage_memory_api.enforce_workspace_access", return_value="workspace-1"),
-                patch("server_modules.sage_memory_api.workspace_tenant_id", return_value="tenant-1"),
+                patch("server_modules.assistant_memory_api.enforce_workspace_access", return_value="workspace-1"),
+                patch("server_modules.assistant_memory_api.workspace_tenant_id", return_value="tenant-1"),
                 patch(
-                    "server_modules.sage_memory_api.upsert_memory_entry",
+                    "server_modules.assistant_memory_api.upsert_memory_entry",
                     return_value={"entry": {"id": "memory-1"}, "items": [], "categories": [], "summary": {}},
                 ) as upsert_mock,
             ):
                 payload = asyncio.run(
                     route(
-                        sage_memory_api.SageMemoryEntryCreateRequest(
+                        assistant_memory_api.SageMemoryEntryCreateRequest(
                             workspace_id="workspace-1",
                             category="personal_context",
                             title="Timezone",
@@ -110,13 +110,13 @@ class SageMemoryApiTests(unittest.TestCase):
         sys.modules["server"] = fake_server
         try:
             app = _FakeApp()
-            sage_memory_api.register_sage_memory_routes(app)
+            assistant_memory_api.register_sage_memory_routes(app)
             route = app.routes[("GET", "/api/sage-memory/storage-policy")]
             with (
-                patch("server_modules.sage_memory_api.enforce_workspace_access", return_value="workspace-1") as enforce_mock,
-                patch("server_modules.sage_memory_api.workspace_tenant_id", return_value="tenant-1"),
+                patch("server_modules.assistant_memory_api.enforce_workspace_access", return_value="workspace-1") as enforce_mock,
+                patch("server_modules.assistant_memory_api.workspace_tenant_id", return_value="tenant-1"),
                 patch(
-                    "server_modules.sage_memory_api.sage_memory_storage_policy",
+                    "server_modules.assistant_memory_api.sage_memory_storage_policy",
                     return_value={"authority": "cloud_canonical", "max_entries": 50},
                 ),
             ):
@@ -138,7 +138,7 @@ class SageMemoryApiTests(unittest.TestCase):
         sys.modules["server"] = fake_server
         try:
             app = _FakeApp()
-            sage_memory_api.register_sage_memory_routes(app)
+            assistant_memory_api.register_sage_memory_routes(app)
             route = app.routes[("GET", "/api/sage-memory/export")]
             export_payload = {
                 "summary": {"total_count": 1, "category_counts": {"private": 1}},
@@ -146,10 +146,10 @@ class SageMemoryApiTests(unittest.TestCase):
                 "markdown": "private content",
             }
             with (
-                patch("server_modules.sage_memory_api.enforce_workspace_access", return_value="workspace-1") as enforce_mock,
-                patch("server_modules.sage_memory_api.workspace_tenant_id", return_value="tenant-1"),
-                patch("server_modules.sage_memory_api.export_sage_memory", return_value=export_payload),
-                patch("server_modules.sage_memory_api.security_audit_service.emit_security_audit_event") as audit_mock,
+                patch("server_modules.assistant_memory_api.enforce_workspace_access", return_value="workspace-1") as enforce_mock,
+                patch("server_modules.assistant_memory_api.workspace_tenant_id", return_value="tenant-1"),
+                patch("server_modules.assistant_memory_api.export_sage_memory", return_value=export_payload),
+                patch("server_modules.assistant_memory_api.security_audit_service.emit_security_audit_event") as audit_mock,
             ):
                 payload = asyncio.run(route(workspace_id="workspace-1", current_user={"user_id": "user-1"}))
             self.assertEqual(payload["items"][0]["id"], "memory-1")
@@ -172,20 +172,20 @@ class SageMemoryApiTests(unittest.TestCase):
         sys.modules["server"] = fake_server
         try:
             app = _FakeApp()
-            sage_memory_api.register_sage_memory_routes(app)
+            assistant_memory_api.register_sage_memory_routes(app)
             route = app.routes[("POST", "/api/sage-memory/wipe")]
             with (
-                patch("server_modules.sage_memory_api.enforce_workspace_access", return_value="workspace-1") as enforce_mock,
-                patch("server_modules.sage_memory_api.workspace_tenant_id", return_value="tenant-1"),
+                patch("server_modules.assistant_memory_api.enforce_workspace_access", return_value="workspace-1") as enforce_mock,
+                patch("server_modules.assistant_memory_api.workspace_tenant_id", return_value="tenant-1"),
                 patch(
-                    "server_modules.sage_memory_api.wipe_sage_memory",
+                    "server_modules.assistant_memory_api.wipe_sage_memory",
                     return_value={"deleted_count": 3, "previous_updated_at": "2026-05-02T00:00:00Z"},
                 ) as wipe_mock,
-                patch("server_modules.sage_memory_api.security_audit_service.emit_security_audit_event") as audit_mock,
+                patch("server_modules.assistant_memory_api.security_audit_service.emit_security_audit_event") as audit_mock,
             ):
                 payload = asyncio.run(
                     route(
-                        sage_memory_api.SageMemoryWipeRequest(
+                        assistant_memory_api.SageMemoryWipeRequest(
                             workspace_id="workspace-1",
                             confirm="WIPE SAGE MEMORY",
                         ),

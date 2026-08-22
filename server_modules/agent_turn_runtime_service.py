@@ -30,7 +30,7 @@ from server_modules import (
     sage_daily_operator_service,
     sage_instruction_compiler_service,
     sage_heartbeat_service,
-    sage_memory_service,
+    assistant_memory_service,
     sage_proof_log_service,
     sage_profile_service,
     secret_redaction_service,
@@ -2123,7 +2123,7 @@ async def _load_context_layer_index(
 
 
 def _load_memory_context(*, workspace_id: str) -> str:
-    return sage_memory_service.build_sage_memory_context_block(
+    return assistant_memory_service.build_sage_memory_context_block(
         workspace_id=workspace_id,
         include_restricted=False,
     )

@@ -156,7 +156,7 @@ class _TurnHarness:
                 return_value={},
             ),
             patch(
-                "server_modules.agent_turn_runtime_service.sage_memory_service."
+                "server_modules.agent_turn_runtime_service.assistant_memory_service."
                 "build_sage_memory_context_block",
                 return_value="",
             ),

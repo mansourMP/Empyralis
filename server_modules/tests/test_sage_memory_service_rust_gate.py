@@ -3,7 +3,7 @@ from unittest import mock
 
 from fastapi import HTTPException
 
-from server_modules import sage_memory_service
+from server_modules import assistant_memory_service
 from server_modules.rust_runtime_kernel_client import RustKernelDecisionError
 
 
@@ -11,19 +11,19 @@ class SageMemoryServiceRustGateTests(unittest.TestCase):
     def test_upsert_memory_entry_calls_rust_before_save(self):
         state = {"version": 1, "entries": []}
         with mock.patch.object(
-            sage_memory_service,
+            assistant_memory_service,
             "_read_state",
             return_value=state,
         ), mock.patch.object(
-            sage_memory_service,
+            assistant_memory_service,
             "_save_state",
             return_value=state,
         ) as save_state, mock.patch.object(
-            sage_memory_service,
+            assistant_memory_service,
             "list_sage_memory",
             return_value={"entries": []},
         ), mock.patch.object(
-            sage_memory_service.rust_runtime_kernel_client,
+            assistant_memory_service.rust_runtime_kernel_client,
             "run_runtime_kernel_enforced",
             return_value={
                 "ok": True,
@@ -33,7 +33,7 @@ class SageMemoryServiceRustGateTests(unittest.TestCase):
                 "next_action": "write_sage_memory_entry",
             },
         ) as rust_gate:
-            result = sage_memory_service.upsert_memory_entry(
+            result = assistant_memory_service.upsert_memory_entry(
                 workspace_id="ws-1",
                 category="safe_general",
                 title="Preference",
@@ -54,14 +54,14 @@ class SageMemoryServiceRustGateTests(unittest.TestCase):
     def test_upsert_memory_entry_wrong_rust_action_blocks_save(self):
         state = {"version": 1, "entries": []}
         with mock.patch.object(
-            sage_memory_service,
+            assistant_memory_service,
             "_read_state",
             return_value=state,
         ), mock.patch.object(
-            sage_memory_service,
+            assistant_memory_service,
             "_save_state",
         ) as save_state, mock.patch.object(
-            sage_memory_service.rust_runtime_kernel_client,
+            assistant_memory_service.rust_runtime_kernel_client,
             "run_runtime_kernel_enforced",
             return_value={
                 "ok": True,
@@ -72,7 +72,7 @@ class SageMemoryServiceRustGateTests(unittest.TestCase):
             },
         ):
             with self.assertRaises(HTTPException) as raised:
-                sage_memory_service.upsert_memory_entry(
+                assistant_memory_service.upsert_memory_entry(
                     workspace_id="ws-1",
                     category="safe_general",
                     title="Preference",
@@ -110,19 +110,19 @@ class SageMemoryServiceRustGateTests(unittest.TestCase):
             ],
         }
         with mock.patch.object(
-            sage_memory_service,
+            assistant_memory_service,
             "_read_state",
             return_value=state,
         ), mock.patch.object(
-            sage_memory_service,
+            assistant_memory_service,
             "_save_state",
         ) as save_state, mock.patch.object(
-            sage_memory_service.rust_runtime_kernel_client,
+            assistant_memory_service.rust_runtime_kernel_client,
             "run_runtime_kernel_enforced",
             side_effect=denied,
         ):
             with self.assertRaises(HTTPException) as raised:
-                sage_memory_service.delete_memory_entry(
+                assistant_memory_service.delete_memory_entry(
                     workspace_id="ws-1",
                     entry_id="entry-1",
                     actor_user_id="owner-1",

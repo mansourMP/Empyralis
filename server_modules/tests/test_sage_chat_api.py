@@ -56,7 +56,7 @@ class SageChatApiContractTests(unittest.TestCase):
         with (
             patch("server_modules.agent_turn_runtime_service.sage_profile_service.list_sage_profile") as mock_profile,
             patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files") as mock_files,
-            patch("server_modules.agent_turn_runtime_service.sage_memory_service.build_sage_memory_context_block") as mock_mem,
+            patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block") as mock_mem,
             patch("server_modules.agent_turn_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
             patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider") as mock_provider,
@@ -101,7 +101,7 @@ class SageChatApiContractTests(unittest.TestCase):
         with (
             patch("server_modules.agent_turn_runtime_service.sage_profile_service.list_sage_profile") as mock_profile,
             patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files") as mock_files,
-            patch("server_modules.agent_turn_runtime_service.sage_memory_service.build_sage_memory_context_block") as mock_mem,
+            patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block") as mock_mem,
             patch("server_modules.agent_turn_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
             patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.agent_turn_runtime_service._resolve_cloud_provider") as mock_provider,

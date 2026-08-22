@@ -613,7 +613,7 @@ class SpecialistTurnStampsAgentInstallIdOntoSessionCtxTests(unittest.TestCase):
                 return_value={"profile": {"user_name": "", "identity_summary": "", "communication_style": "", "recurring_responsibility": "", "standing_rules": []}},
             ),
             patch("server_modules.agent_turn_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
-            patch("server_modules.agent_turn_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.agent_turn_runtime_service.assistant_memory_service.build_sage_memory_context_block", return_value=""),
             patch("server_modules.memory_service.get_memory", return_value=""),
             patch("server_modules.agent_turn_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
             patch("server_modules.agent_turn_runtime_service.list_skill_definitions", return_value=[]),
