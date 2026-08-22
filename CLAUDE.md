@@ -811,6 +811,94 @@ cannot silently drop it from one branch the way this file has repeatedly
 documented happening elsewhere. ~125 words, ~160 cl100k tokens, paid on
 every turn.
 
+## THERE IS NO TOOL TIER. Allow by default; reserve machine administration (2026-08-21)
+
+**Founder's decision, stated four times, settled: *"tools removal is something
+that is going to happen anyways there is no question about it because nobody
+is going to do that shit not even me… I don't want to enable and disable and
+sit on the platform to press buttons every other week."*** This is the rule
+this file already carried ("No tool-authority tiers — access to an agent is
+binary; never weaken an agent's tools per viewer, gate who can reach it")
+finally implemented, and the same posture as the 2026-08-19
+destructive-action ruling: awareness in the prompt, never a mechanism.
+
+```
+GONE   audience_tool_filter.py            stripped every tool lacking
+                                          audience_safe from a NON-OWNER's
+                                          tool list, mid-turn
+       ToolDescriptor.audience_safe       the flag, on 38 descriptors
+       mandate.audience_tools             a per-agent grant handing tools back
+                                          one at a time
+       Configure ▸ Tools tab              the UI that wrote it, its route id,
+                                          its palette entry
+STAYS  authority_tier + both choke points, fail-closed defaults intact
+```
+
+**The replacement is OpenClaw's shape, adopted rather than invented.** Their
+gateway ALLOWS every tool and denies exactly three machine-administration
+ones (`GATEWAY_OWNER_ONLY_CORE_TOOLS = ["cron", "gateway", "nodes"]`). Ours,
+named ONCE in `authority_mandate_service` and expressed as PREFIXES so a tool
+added to either family tomorrow is covered the day it ships:
+
+```
+allowed = (tier is owner) OR NOT (fleet__*  |  goal__*  |  empyralis_configure_agent)
+                                  agents+cron   scheduling   the MCP spelling
+```
+
+The membership test is **"does this administer the platform itself"**, never
+"could this be misused" — `shell__exec` and `hardware__action` are
+deliberately NOT on it. If that list starts growing one obviously-sensitive
+tool at a time, the deleted tier is growing back; `test_authority_mandate_
+service.py` carries a size canary that fails when it does.
+
+**STATE THE CONSEQUENCE, do not soften it: anyone allowed to MESSAGE an agent
+can now make it do anything that agent can do.** The boundaries are the
+channel gates (DM policy, group allowlist, mention gating — untouched, they
+decide who may message it before any model runs), `agent_reachability_
+service`, and the agent's own configuration. With hardware attached that
+includes a shell on the owner's machine.
+
+So HardwareTab's *"Owner only — customers can't trigger hardware, shell, or
+commands, no matter what they message."* is DELETED. It became false the same
+hour, and it sat on the exact screen where the decision is made — the
+outcome-honesty law at its sharpest. One sentence replaces it, naming the
+channels the agent is actually reachable on and pointing at Channels as the
+control; rendered only when hardware is attached, and nothing at all while
+the channel list is still loading ("no channel" and "haven't found out yet"
+are different facts). **Not a gate and not a confirmation** — this file
+forbids approval flows.
+
+**KEPT, and do not collapse these into the thing that was removed:** message
+provenance (channel, sender, group — origin is CONTEXT, never authority); the
+channel gates entirely; `audience: owner | external` as WHO MAY TALK TO IT,
+which is the one axis that genuinely differs between the two product shapes;
+and the execution choke points themselves — a boundary that exists only in
+the tool list is not a boundary, which is why the gate narrowed instead of
+being deleted with the tier.
+
+`purpose_preset` was NOT removed: it seeds default INSTRUCTIONS and derives
+`audience`. It never expressed the tool tier — `audience_tool_filter`'s own
+docstring only claimed it did, and that claim died with the file.
+
+**Stored `mandate` metadata is left on existing installs rather than migrated
+away** — nothing reads it, and rewriting every agent's metadata for no
+behavioural gain is not worth it. Three tests assert a stale copy grants
+nothing, at both choke points and on the read endpoint, because a real
+production `session_ctx` can still carry one.
+
+**Every test that proved the deleted behaviour was INVERTED, never weakened
+or deleted to green** — they are now what fails if a tier is reintroduced.
+Proven red-before-green by running the new tests against a throwaway worktree
+of the pre-change tree: 32 fail there, all pass here.
+
+**A measurement trap worth not re-paying:** a baseline worktree has no
+repo-root `.env`, and this repo's `ORION_ENV=test` boot loads dotenv — so the
+same suite reports 8 fewer failures in a worktree than in the primary
+checkout, purely because the hosted-AI reservation path goes live in one and
+not the other (plus ~200 stale `active` rows accumulated in the real
+`~/.empyralis/state/quota/hosted-ai-reservations.sqlite3`). Symlink the
+`.env` into the baseline worktree before comparing, or the diff is noise.
+
 ## Purple only on primary buttons (2026-08-21)
 
 **Founder's rule, verbatim: "do that, purple only on primary buttons."**
@@ -7309,15 +7397,20 @@ daily-use surfaces judged by how much they show. That is a materially
 different design brief from the one most of this UI was built against, and
 it changes what the product's front door should be. Unanswered.
 
-### 3. Purpose / audience (customer-facing vs owner-facing)
+### 3. HALF-RESOLVED 2026-08-20/21 — the tool-filtering half is gone.
 
-Raised THREE times as unnecessary. Removal of the owner-facing SETTING is
-in progress. The open part: `audience` currently gates real tool filtering
-(`audience_tool_filter.filter_tools_for_audience`, live at
-`sage_agent_runtime_service.py:3331`), and his own prior ruling says there
-must be NO tool-authority tiers — access is binary, gated by who can reach
-an agent. Whether "faces the public" should be DERIVED from being wired to
-a public channel (rather than declared) is the unresolved half.
+The part that made this urgent is closed: `audience` no longer gates tool
+filtering, because there is no tool filtering. `audience_tool_filter.
+filter_tools_for_audience` is DELETED — see "THERE IS NO TOOL TIER" above.
+`audience` now means only WHO MAY TALK TO IT (reachability), which is the
+one axis this file says genuinely differs between the two product shapes,
+and it is not read by any authority gate.
+
+**Still open, and still his call:** whether "faces the public" should be
+DERIVED from being wired to a public channel rather than declared in a
+form, and whether the owner-facing SETTING should disappear entirely. That
+is now a pure product question with no security consequence attached to
+it — which is the difference between this line and the one it replaced.
 
 **Process note for whoever reads this:** when the founder raises a
 question that is a product decision rather than a bug, add it here in the
