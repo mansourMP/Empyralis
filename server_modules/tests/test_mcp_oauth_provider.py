@@ -184,10 +184,15 @@ def test_dynamic_client_registration_round_trip(provider, use_pg):
         assert loaded.client_id == client_info.client_id
         assert loaded.client_name == "Claude"
         assert loaded.redirect_uris == client_info.redirect_uris
-        # client_secret must round-trip too — the token endpoint needs it for
-        # client_secret_post auth — but only the hash is what's queryable
-        # separately (never logged); confirm we don't need to log it to assert this.
-        assert loaded.client_secret == "test-client-secret"
+        # INVERTED 2026-08-23 (was: assert loaded.client_secret ==
+        # "test-client-secret"). That assertion pinned the defect: the
+        # plaintext secret was stored inside client_info_json and handed back
+        # here, while client_secret_hash — the column that was supposed to be
+        # the storage — had zero readers. get_client now returns the HASH, and
+        # EmpyralisClientAuthenticator hashes the presented secret before the
+        # SDK compares. This is now what fails if the cleartext comes back.
+        assert loaded.client_secret != "test-client-secret"
+        assert loaded.client_secret == oauth._hash_token("test-client-secret")
 
     _run(_run_test())
 
@@ -638,7 +643,12 @@ def _consent_app(provider):
 def test_consent_get_not_logged_in_redirects_to_login(provider, monkeypatch):
     from starlette.testclient import TestClient
 
-    monkeypatch.setattr(oauth, "_current_dashboard_user", lambda request: None)
+    # **_kw: _current_dashboard_user takes browser_form_post= on the POST
+    # path. NOTE these consent tests stub the session resolver, so they
+    # never exercise the real auth/CSRF path — that is precisely why they
+    # could not see the form-POST CSRF blocker. The real-path coverage is
+    # test_mcp_oauth_connector_flow.py; these stay for their narrower job.
+    monkeypatch.setattr(oauth, "_current_dashboard_user", lambda request, **_kw: None)
     client_info = _run(_register_client(provider))
     ticket = oauth._sign_consent_ticket(
         {
@@ -659,7 +669,7 @@ def test_consent_get_logged_in_renders_allow_deny_form(provider, monkeypatch):
     from starlette.testclient import TestClient
 
     monkeypatch.setattr(
-        oauth, "_current_dashboard_user", lambda request: {"user_id": "u1", "workspace_ids": ["ws-1"]},
+        oauth, "_current_dashboard_user", lambda request, **_kw: {"user_id": "u1", "workspace_ids": ["ws-1"]},
     )
     client_info = _run(_register_client(provider))
     ticket = oauth._sign_consent_ticket(
@@ -683,7 +693,7 @@ def test_consent_post_allow_issues_code_and_redirects(provider, monkeypatch, use
     from starlette.testclient import TestClient
 
     monkeypatch.setattr(
-        oauth, "_current_dashboard_user", lambda request: {"user_id": "u1", "workspace_ids": ["ws-1"]},
+        oauth, "_current_dashboard_user", lambda request, **_kw: {"user_id": "u1", "workspace_ids": ["ws-1"]},
     )
     client_info = _run(_register_client(provider))
     redirect_uri = str(client_info.redirect_uris[0])
@@ -715,7 +725,7 @@ def test_consent_post_deny_redirects_with_access_denied(provider, monkeypatch):
     from starlette.testclient import TestClient
 
     monkeypatch.setattr(
-        oauth, "_current_dashboard_user", lambda request: {"user_id": "u1", "workspace_ids": ["ws-1"]},
+        oauth, "_current_dashboard_user", lambda request, **_kw: {"user_id": "u1", "workspace_ids": ["ws-1"]},
     )
     client_info = _run(_register_client(provider))
     redirect_uri = str(client_info.redirect_uris[0])
@@ -744,7 +754,7 @@ def test_consent_post_csrf_mismatch_rejected(provider, monkeypatch):
     from starlette.testclient import TestClient
 
     monkeypatch.setattr(
-        oauth, "_current_dashboard_user", lambda request: {"user_id": "u1", "workspace_ids": ["ws-1"]},
+        oauth, "_current_dashboard_user", lambda request, **_kw: {"user_id": "u1", "workspace_ids": ["ws-1"]},
     )
     client_info = _run(_register_client(provider))
     ticket = oauth._sign_consent_ticket(
@@ -769,7 +779,7 @@ def test_consent_post_workspace_not_in_membership_rejected(provider, monkeypatch
     from starlette.testclient import TestClient
 
     monkeypatch.setattr(
-        oauth, "_current_dashboard_user", lambda request: {"user_id": "u1", "workspace_ids": ["ws-1"]},
+        oauth, "_current_dashboard_user", lambda request, **_kw: {"user_id": "u1", "workspace_ids": ["ws-1"]},
     )
     client_info = _run(_register_client(provider))
     ticket = oauth._sign_consent_ticket(
