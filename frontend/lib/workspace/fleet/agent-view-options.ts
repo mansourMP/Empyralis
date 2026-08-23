@@ -59,7 +59,7 @@ import {
   type FleetGateway,
 } from "./gateway-box-picker";
 import type { FleetAgent, FleetProject } from "./fleet-data";
-import { timeAgo } from "./fleet-presentation";
+import { timeAgo, type AgentStatusTone } from "./fleet-presentation";
 
 // ── Vocabulary ──────────────────────────────────────────────────────────────
 
@@ -277,15 +277,67 @@ export const AGENT_STATUS_GROUPS: { value: AgentStatusGroup; label: string }[] =
  *  need to be: FleetAgent already carries every field it asks for. */
 type AgentBrainStatusLike = Parameters<typeof deriveAgentStatus>[0];
 
+/** The one thing agent-card-face.ts's own (private) taskIsActive checks,
+ *  duplicated here rather than importing that whole module for one line —
+ *  same "small duplicate over a wholesale cross-import" call this file's own
+ *  header already makes for AgentsList.tsx's helpers. Structural, so a real
+ *  FleetTask (or the card-face module's own AgentCardTaskInput) satisfies it
+ *  without a cast. */
+function hasActiveTask(tasks: readonly { status?: string | null }[]): boolean {
+  return tasks.some((t) => String(t.status || "").trim().toLowerCase() === "in_progress");
+}
+
+/**
+ * deriveAgentStatus's own tone/label, enriched with the SAME task-based
+ * "Working" signal agent-card-face.ts already established as this product's
+ * one definition (see that module's header) and PrimaryRail's footer pulse
+ * was already fixed to read instead of `current_run_id` alone (CLAUDE.md:
+ * "'Working' now has ONE definition, in that module... once the cards
+ * counted tasks the rail and the grid said different things about the same
+ * fleet on the same screen"). `current_run_id` — deriveAgentStatus's own
+ * signal for "working" — is de-facto always null for a real fleet agent; an
+ * assigned task sitting in_progress is the signal that actually occurs.
+ *
+ * Board/Grouped-List are a THIRD surface rendering this same fact and must
+ * not disagree with the card grid one click away — without this, an agent
+ * with a real in-progress task read "Ready" on its own Board card while
+ * sitting in a column literally labelled "Working" one row up. Confirmed
+ * live against a seeded agent before this fix (Support Desk: an in_progress
+ * task, `tone: "ready"` from deriveAgentStatus alone) and after (tone
+ * upgraded to "working", card and column agree).
+ *
+ * Never invents a label: an agent already reporting "working" (a real,
+ * heartbeat-derived current_run_id) keeps deriveAgentStatus's own tone/label
+ * untouched; everything else either upgrades to the exact {tone, label} pair
+ * agent-card-face.ts uses for this case, or passes through unchanged.
+ */
+export function agentDisplayStatus(
+  agent: AgentBrainStatusLike,
+  gateways: FleetGateway[],
+  tasks: readonly { status?: string | null }[] = [],
+): { tone: AgentStatusTone; label: string } {
+  const status = deriveAgentStatus(agent, gateways);
+  if (status.tone === "working") return status;
+  return hasActiveTask(tasks) ? { tone: "working", label: "Working" } : status;
+}
+
 /**
  * One agent's real status, folded into one of the four board columns.
- * "needs_attention" fires ONLY for deriveAgentStatus's "error" and
- * "degraded" tones — both already real, config-honesty failures the backend
- * computed (see the file header) — never as a made-up fifth state. Every
- * other tone maps to a column that was already true of the agent.
+ * "needs_attention" fires ONLY for "error" and "degraded" tones — both
+ * already real, config-honesty failures the backend computed (see the file
+ * header) — never as a made-up fifth state. Every other tone maps to a
+ * column that was already true of the agent. `tasks` is this ONE agent's own
+ * tasks (see groupTasksByAgent in agent-card-face.ts) — optional and
+ * defaulted to `[]` so an existing call site that predates the Working fix
+ * above still compiles, though every real caller in this codebase now passes
+ * it (AgentsBoard.tsx, AgentsGroupedList.tsx, both via groupAgents below).
  */
-export function agentStatusGroup(agent: AgentBrainStatusLike, gateways: FleetGateway[]): AgentStatusGroup {
-  const { tone } = deriveAgentStatus(agent, gateways);
+export function agentStatusGroup(
+  agent: AgentBrainStatusLike,
+  gateways: FleetGateway[],
+  tasks: readonly { status?: string | null }[] = [],
+): AgentStatusGroup {
+  const { tone } = agentDisplayStatus(agent, gateways, tasks);
   if (tone === "working") return "working";
   // "online" is deriveAgentStatus's own doc comment: reserved for the
   // Hardware page's box-reachability chip, never actually returned here —
@@ -344,7 +396,15 @@ export function groupAgents(
   {
     gateways = [],
     projectById = new Map<string, FleetProject>(),
-  }: { gateways?: FleetGateway[]; projectById?: Map<string, FleetProject> } = {},
+    tasksByAgent = new Map<string, { status?: string | null }[]>(),
+  }: {
+    gateways?: FleetGateway[];
+    projectById?: Map<string, FleetProject>;
+    /** Per-agent tasks (agent-card-face.ts's groupTasksByAgent output) — only
+     *  read for grouping "status", to fold an in-progress task into the same
+     *  "Working" bucket agentDisplayStatus/agentStatusGroup above now use. */
+    tasksByAgent?: Map<string, { status?: string | null }[]>;
+  } = {},
 ): AgentGroup[] {
   if (grouping === "none") {
     return [{ key: "all", label: "All agents", agents, count: agents.length }];
@@ -352,7 +412,9 @@ export function groupAgents(
 
   if (grouping === "status") {
     const buckets = new Map<AgentStatusGroup, FleetAgent[]>(AGENT_STATUS_GROUPS.map((g) => [g.value, []]));
-    for (const agent of agents) buckets.get(agentStatusGroup(agent, gateways))?.push(agent);
+    for (const agent of agents) {
+      buckets.get(agentStatusGroup(agent, gateways, tasksByAgent.get(agent.agent_id) || []))?.push(agent);
+    }
     return AGENT_STATUS_GROUPS.filter((g) => (buckets.get(g.value) || []).length > 0).map((g) => ({
       key: g.value,
       label: g.label,

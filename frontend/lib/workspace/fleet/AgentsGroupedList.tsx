@@ -38,6 +38,7 @@ import {
   AGENT_PLACEMENT_LABELS,
   agentActivityPreviewText,
   agentBrainLabel,
+  agentDisplayStatus,
   agentMoney,
   agentPlacementCategory,
   groupAgents,
@@ -47,7 +48,7 @@ import {
   type AgentGrouping,
   type AgentStatusGroup,
 } from "./agent-view-options";
-import { deriveAgentStatus, resolveHardwarePlacement, type FleetGateway } from "./gateway-box-picker";
+import { resolveHardwarePlacement, type FleetGateway } from "./gateway-box-picker";
 import { AgentSigil, StatusDot } from "./fleet-indicators";
 import { ProjectIcon } from "./fleet-project-identity";
 import { CHANNEL_LABELS, channelIconSrc } from "./fleet-icons";
@@ -107,6 +108,7 @@ export function AgentsGroupedList({
   agents,
   gateways,
   costByAgent,
+  tasksByAgent,
   projectById,
   grouping,
   display,
@@ -117,6 +119,12 @@ export function AgentsGroupedList({
   agents: FleetAgent[];
   gateways: FleetGateway[];
   costByAgent: Map<string, number>;
+  /** Per-agent tasks — see AgentsBoard.tsx's identical prop doc for why this
+   *  is needed (folding an in-progress task into "Working", the same
+   *  agentDisplayStatus/agentStatusGroup enrichment used there, so the
+   *  "status" grouping and each row's own status cell agree with the Board
+   *  and the card grid instead of a fourth opinion on the same fact). */
+  tasksByAgent: Map<string, { status?: string | null }[]>;
   projectById?: Map<string, FleetProject>;
   /** "none" never reaches this component — the page renders AgentsList (the
    *  flat table) for it. */
@@ -147,8 +155,8 @@ export function AgentsGroupedList({
   );
 
   const sections = useMemo(
-    () => groupAgents(agents, grouping, { gateways, projectById: projectById || new Map() }),
-    [agents, grouping, gateways, projectById],
+    () => groupAgents(agents, grouping, { gateways, projectById: projectById || new Map(), tasksByAgent }),
+    [agents, grouping, gateways, projectById, tasksByAgent],
   );
 
   const rowStyle = useMemo(
@@ -190,6 +198,7 @@ export function AgentsGroupedList({
                     agent={agent}
                     gateways={gateways}
                     cost={costByAgent.get(agent.agent_id) || 0}
+                    tasks={tasksByAgent.get(agent.agent_id) || []}
                     display={display}
                     rowStyle={rowStyle}
                     onSelect={onSelect}
@@ -227,6 +236,7 @@ function AgentGroupedRow({
   agent,
   gateways,
   cost,
+  tasks,
   display,
   rowStyle,
   onSelect,
@@ -234,13 +244,18 @@ function AgentGroupedRow({
   agent: FleetAgent;
   gateways: FleetGateway[];
   cost: number;
+  /** This one agent's own tasks — see AgentsGroupedList's own tasksByAgent
+   *  doc. */
+  tasks: { status?: string | null }[];
   display: AgentDisplayState;
   rowStyle: CSSProperties;
   onSelect: (agentId: string, projectId: string) => void;
 }) {
   const presetRaw = (agent.capability_preset || "").toLowerCase().replace(/_/g, " ");
   const preset = presetRaw ? presetRaw.charAt(0).toUpperCase() + presetRaw.slice(1) : "";
-  const st = deriveAgentStatus(agent, gateways);
+  // Enriched, not the bare deriveAgentStatus — see agentDisplayStatus's own
+  // doc comment and AgentsBoard.tsx's identical line.
+  const st = agentDisplayStatus(agent, gateways, tasks);
   const brain = display.brain ? agentBrainLabel(agent.model_config) : "";
   const placement = display.placement
     ? resolveHardwarePlacement(agent.hardware_access, agent.preferred_gateway_id, gateways, agent.model_config)

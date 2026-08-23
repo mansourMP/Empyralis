@@ -39,6 +39,7 @@ import {
   AGENT_STATUS_GROUPS,
   agentActivityPreviewText,
   agentBrainLabel,
+  agentDisplayStatus,
   agentMoney,
   agentPlacementCategory,
   agentStatusGroup,
@@ -46,7 +47,7 @@ import {
   type AgentDisplayState,
   type AgentStatusGroup,
 } from "./agent-view-options";
-import { deriveAgentStatus, resolveHardwarePlacement, type FleetGateway } from "./gateway-box-picker";
+import { resolveHardwarePlacement, type FleetGateway } from "./gateway-box-picker";
 import { AgentSigil, StatusDot } from "./fleet-indicators";
 import { CHANNEL_LABELS, channelIconSrc } from "./fleet-icons";
 import { timeAgo, type AgentStatusTone } from "./fleet-presentation";
@@ -67,6 +68,7 @@ export function AgentsBoard({
   agents,
   gateways,
   costByAgent,
+  tasksByAgent,
   display,
   selectedAgentId,
   onSelect,
@@ -82,6 +84,15 @@ export function AgentsBoard({
    *  standalone rather than threading one shared instance through props. */
   gateways: FleetGateway[];
   costByAgent: Map<string, number>;
+  /** Per-agent tasks (agent-card-face.ts's groupTasksByAgent, computed once
+   *  at the page level off the same shared workspace-tasks fetch AgentCards
+   *  already uses) — needed so agentStatusGroup/agentDisplayStatus can fold
+   *  an in-progress task into "Working" the same way the card grid and
+   *  PrimaryRail's footer pulse already do. Without this, an agent with a
+   *  real in-progress task read "Ready" on its own Board card while sitting
+   *  in a column literally labelled "Working" one row up — the exact "two
+   *  surfaces disagree" bug CLAUDE.md already documents fixing elsewhere. */
+  tasksByAgent: Map<string, { status?: string | null }[]>;
   /** Which card fields this reader wants drawn (the view-options popover's
    *  "Display properties"). */
   display: AgentDisplayState;
@@ -90,11 +101,13 @@ export function AgentsBoard({
 }) {
   const columns = useMemo(() => {
     const buckets = new Map<AgentStatusGroup, FleetAgent[]>(AGENT_STATUS_GROUPS.map((g) => [g.value, []]));
-    for (const agent of agents) buckets.get(agentStatusGroup(agent, gateways))?.push(agent);
+    for (const agent of agents) {
+      buckets.get(agentStatusGroup(agent, gateways, tasksByAgent.get(agent.agent_id) || []))?.push(agent);
+    }
     return AGENT_STATUS_GROUPS.map((g) => ({ ...g, agents: buckets.get(g.value) || [] })).filter(
       (c) => c.agents.length > 0,
     );
-  }, [agents, gateways]);
+  }, [agents, gateways, tasksByAgent]);
 
   // Can only trigger if `agents` is non-empty but somehow matches no group —
   // impossible given AGENT_STATUS_GROUPS is exhaustive over agentStatusGroup's
@@ -120,6 +133,7 @@ export function AgentsBoard({
                 agent={agent}
                 gateways={gateways}
                 cost={costByAgent.get(agent.agent_id) || 0}
+                tasks={tasksByAgent.get(agent.agent_id) || []}
                 display={display}
                 selected={selectedAgentId === agent.agent_id}
                 onSelect={onSelect}
@@ -136,6 +150,7 @@ function AgentCard({
   agent,
   gateways,
   cost,
+  tasks,
   display,
   selected,
   onSelect,
@@ -143,13 +158,18 @@ function AgentCard({
   agent: FleetAgent;
   gateways: FleetGateway[];
   cost: number;
+  /** This one agent's own tasks — see AgentsBoard's own tasksByAgent doc. */
+  tasks: { status?: string | null }[];
   display: AgentDisplayState;
   selected: boolean;
   onSelect: (agentId: string, projectId: string) => void;
 }) {
   const presetRaw = (agent.capability_preset || "").toLowerCase().replace(/_/g, " ");
   const preset = presetRaw ? presetRaw.charAt(0).toUpperCase() + presetRaw.slice(1) : "";
-  const st = deriveAgentStatus(agent, gateways);
+  // Enriched, not the bare deriveAgentStatus — see agentDisplayStatus's own
+  // doc comment. Keeps this card's own status chip agreeing with which
+  // column it is actually sitting in.
+  const st = agentDisplayStatus(agent, gateways, tasks);
 
   const activate = () => onSelect(agent.agent_id, agent.project_id || "");
   const handleClick = () => activate();
