@@ -237,10 +237,18 @@ export type MyPendingWorkspaceInvite = {
 };
 
 function normalizeMyPendingInvite(raw: any): MyPendingWorkspaceInvite {
+  const workspaceId = String(raw?.workspace_id || "");
+  const rawName = String(raw?.workspace_name || "").trim();
   return {
     id: String(raw?.id || ""),
-    workspace_id: String(raw?.workspace_id || ""),
-    workspace_name: String(raw?.workspace_name || raw?.workspace_id || ""),
+    workspace_id: workspaceId,
+    // NEVER fall back to the id. This line used to read
+    // `raw?.workspace_name || raw?.workspace_id`, which put "You've been
+    // invited to ws_b5c1fa225ae6" in the invite banner and defeated
+    // WorkspaceSwitcher's own "Untitled workspace" guard one layer above --
+    // by the time that guard ran, the id was already sitting in the name.
+    // An id is an address; if there is no name, say so in words.
+    workspace_name: !rawName || rawName === workspaceId ? "Untitled workspace" : rawName,
     role: (String(raw?.role || "viewer").toLowerCase() as WorkspaceRole),
     invited_by_user_id: raw?.invited_by_user_id ?? null,
     created_at: raw?.created_at ?? null,

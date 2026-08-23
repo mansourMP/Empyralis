@@ -22,6 +22,7 @@ from server_modules import billing_credit_config
 from server_modules import db as runtime_db
 from server_modules import credit_ledger_contract
 from server_modules import rust_runtime_kernel_client
+from server_modules import workspace_naming
 from server_modules.jwt_secret import resolve_jwt_secret
 from server_modules.sqlite_helpers import connect_sqlite_rw
 
@@ -4860,7 +4861,10 @@ async def create_local_password_account(
     tenant_slug = _slugify(f"{email_prefix}-{resolved_tenant_id[:8]}", f"tenant-{resolved_tenant_id[:8]}")
     workspace_slug = _slugify(f"{email_prefix}-home-{resolved_workspace_id[:8]}", f"workspace-{resolved_workspace_id[:8]}")
     tenant_name = display_label or normalized_email
-    workspace_name = f"{display_label or email_prefix}'s Workspace".strip()
+    # A workspace is where a COMPANY works, so it is named after one when
+    # the signup email carries a company; never after the person, which
+    # reads as a personal folder. See server_modules/workspace_naming.py.
+    workspace_name = workspace_naming.derive_new_workspace_name(normalized_email)
     auth_identity_id = str(uuid.uuid4())
     membership_id = str(uuid.uuid4())
     workspace_metadata = _workspace_shell_metadata(
@@ -5049,13 +5053,13 @@ async def ensure_workspace_membership(
     display_label = str(display_name or "").strip()
     # MAN: a workspace's `name` must never be seeded from its own machine id
     # (was `ws_b5c1fa225ae6` on screen) -- derive a human name the same way
-    # create_local_password_account() already does. Only takes effect when
+    # create_local_password_account() already does, through the one shared
+    # derivation in server_modules/workspace_naming.py. Only takes effect when
     # THIS call creates the workspace row (see the `workspace_row is None`
     # Postgres branch and the SQLite COALESCE fallback below); an existing
     # workspace's stored name is never overwritten as a side effect of a
     # membership update.
-    email_prefix = normalized_email.split("@", 1)[0]
-    workspace_name = f"{display_label or email_prefix}'s Workspace".strip()
+    workspace_name = workspace_naming.derive_new_workspace_name(normalized_email)
     _enforce_control_plane_service_decision(
         operation="membership_update",
         tenant_id=resolved_tenant_id,

@@ -66,7 +66,10 @@ export function OnboardingClient({
     setErrorMessage(null);
     try {
       await updateWorkspace(membership.workspace.id, {
-        name: values.name,
+        // OMITTED, not sent empty. This is a PATCH, so sending "" would blank
+        // the name the server already minted; the auto-submit path below has
+        // no real name to offer and must not overwrite one with a placeholder.
+        ...(String(values.name || "").trim() ? { name: values.name } : {}),
         workspaceType: values.workspaceType,
         preferredShellProfileId: values.preferredShellProfileId,
         defaultRoute: values.defaultRoute,
@@ -127,7 +130,12 @@ export function OnboardingClient({
   // Auto-submit with defaults for single-user platform — skip the setup form.
   useEffect(() => {
     handleSubmit(createDefaultWorkspaceSetupValues(membership.workspace.id, {
-      name: membership.workspace.label || 'My Workspace',
+      // The label is a DISPLAY value and can be a fallback ("Untitled
+      // workspace", and before workspace_naming landed, the workspace's own
+      // id). Persisting it would turn a placeholder into the stored name --
+      // which is plausibly how a workspace whose stored name IS its own id
+      // came to exist. Send nothing and let the server keep what it minted.
+      name: '',
       workspaceType: 'personal',
       preferredShellProfileId: 'personal_shell',
       defaultRoute: membership.defaultRoute || `/w/${encodeURIComponent(membership.workspace.id)}`,

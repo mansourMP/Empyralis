@@ -29,6 +29,7 @@ from server_modules import email_verification_service
 from server_modules import entitlements_service
 from server_modules import client_identity_service, quota_policy_service, quota_response_service
 from server_modules import security_audit_service
+from server_modules import workspace_naming
 from server_modules.downstream_resilience_service import (
     CircuitBreakerPolicy,
     DownstreamCircuitOpenError,
@@ -2859,9 +2860,10 @@ def _ensure_personal_workspace_for_user(
         return None
     record = user if isinstance(user, dict) else _find_user_by_id(clean_user_id)
     email_token = str((record or {}).get("email") or "").strip().lower()
-    display_label = str((record or {}).get("name") or "").strip()
-    fallback_label = email_token.split("@", 1)[0] if email_token else "My"
-    workspace_name = f"{display_label or fallback_label}'s Workspace".strip()
+    # Named after the COMPANY the signup email belongs to, never after the
+    # person -- the same one derivation create_local_password_account and
+    # ensure_workspace_membership use. See server_modules/workspace_naming.py.
+    workspace_name = workspace_naming.derive_new_workspace_name(email_token)
     try:
         created = _control_plane_call(
             control_plane_repository.create_workspace_for_user(

@@ -1043,6 +1043,56 @@ def _accessible_workspace_ids(current_user: Dict[str, Any]) -> List[str]:
     return [w for w in ids if w]
 
 
+async def _named_accessible_workspaces(current_user: Dict[str, Any]) -> List[Dict[str, str]]:
+    """The workspaces this person may consent for, each carrying its NAME.
+
+    An id is an ADDRESS, never a label. This screen used to render
+    `ws_d745c1b2eb2c` as the thing a person picks between, and on 2026-08-22
+    the founder consented a Connector to the wrong workspace because of it --
+    then spent an hour reading a working integration as broken. Names are what
+    a person recognises; the id stays available only to tell two identical
+    names apart.
+
+    The id is still what is SUBMITTED and still what the token is minted from
+    (the radio's `value`, unchanged) -- this changes what is shown, never what
+    is authorized.
+
+    Degrades rather than fails: a workspace whose name cannot be read falls
+    back to "Untitled workspace" and keeps its disambiguating id, because a
+    consent screen that 500s is strictly worse than one naming one workspace
+    imperfectly.
+    """
+    from server_modules import control_plane_repository as cpr
+    from server_modules import workspace_naming
+
+    workspaces: List[Dict[str, str]] = []
+    for workspace_id in _accessible_workspace_ids(current_user):
+        name = ""
+        try:
+            record = await cpr.get_workspace_by_id(workspace_id)
+        except Exception:  # noqa: BLE001 -- a consent screen must still render
+            LOGGER.warning("Could not read the name of workspace %s for the consent screen.", workspace_id)
+            record = None
+        if isinstance(record, dict):
+            name = str(record.get("name") or "").strip()
+        # A workspace whose stored name IS its own id is a workspace with no
+        # name at all (observed live, ws_b5c1fa225ae6). One shared rule for
+        # that, in workspace_naming, rather than a fourth private copy.
+        workspaces.append(
+            {"id": workspace_id, "name": workspace_naming.human_workspace_label(name, workspace_id)}
+        )
+
+    # The id is secondary disambiguation, so it is rendered ONLY where two
+    # workspaces would otherwise be indistinguishable. Showing it on every row
+    # would put the machine id back on the screen for everybody.
+    seen: Dict[str, int] = {}
+    for workspace in workspaces:
+        seen[workspace["name"]] = seen.get(workspace["name"], 0) + 1
+    for workspace in workspaces:
+        workspace["hint"] = workspace["id"] if seen[workspace["name"]] > 1 else ""
+    return workspaces
+
+
 # ── Consent page rendering (plain HTML — no Next.js involved) ───────────
 
 _CONSENT_CSS = """
@@ -1065,6 +1115,7 @@ ul.scopes li:first-child { border-top: none; }
 .workspace-line strong { color: #e7e9ee; }
 .workspace-picker p { margin-bottom: 8px; }
 .workspace-option { display: block; padding: 8px 0; color: #d7dae1; font-size: 0.92rem; }
+.workspace-hint { color: #6c7280; font-size: 0.78rem; font-weight: 400; }
 .actions { display: flex; gap: 10px; margin-top: 24px; }
 .btn { flex: 1; padding: 11px 16px; border-radius: 10px; border: 1px solid transparent; font-size: 0.95rem; font-weight: 600; cursor: pointer; }
 .btn-primary { background: #6c5ce7; color: white; }
@@ -1089,23 +1140,40 @@ def _render_message_page(title: str, message: str, *, status_hint: str = "") -> 
 
 
 def _render_consent_form(
-    *, client: OAuthClientInformationFull, scopes: List[str], workspace_ids: List[str], ticket: str, csrf_token: str,
+    *,
+    client: OAuthClientInformationFull,
+    scopes: List[str],
+    workspaces: List[Dict[str, str]],
+    ticket: str,
+    csrf_token: str,
 ) -> str:
+    """`workspaces` is [{"id", "name", "hint"}] from _named_accessible_workspaces.
+
+    `id` is what gets SUBMITTED; `name` is what gets SHOWN; `hint` is the id
+    again and is non-empty only when two workspaces share a name.
+    """
     client_label = _html.escape(str(client.client_name or client.client_id or "This application"))
     scope_items = "".join(
         f"<li>{_html.escape(_SCOPE_DESCRIPTIONS.get(s, s))}</li>" for s in scopes
     ) or "<li>Basic access</li>"
 
-    if len(workspace_ids) == 1:
+    def _hint(workspace: Dict[str, str]) -> str:
+        hint = str(workspace.get("hint") or "")
+        return f' <span class="workspace-hint">{_html.escape(hint)}</span>' if hint else ""
+
+    if len(workspaces) == 1:
+        only = workspaces[0]
         workspace_field = (
-            f'<input type="hidden" name="workspace_id" value="{_html.escape(workspace_ids[0])}">'
-            f'<p class="workspace-line">Workspace: <strong>{_html.escape(workspace_ids[0])}</strong></p>'
+            f'<input type="hidden" name="workspace_id" value="{_html.escape(only["id"])}">'
+            f'<p class="workspace-line">Workspace: <strong>{_html.escape(only["name"])}</strong>'
+            f'{_hint(only)}</p>'
         )
     else:
         options = "".join(
             '<label class="workspace-option"><input type="radio" name="workspace_id" '
-            f'value="{_html.escape(w)}"{" checked" if i == 0 else ""}> {_html.escape(w)}</label>'
-            for i, w in enumerate(workspace_ids)
+            f'value="{_html.escape(w["id"])}"{" checked" if i == 0 else ""}> '
+            f'{_html.escape(w["name"])}{_hint(w)}</label>'
+            for i, w in enumerate(workspaces)
         )
         workspace_field = f'<div class="workspace-picker"><p>Choose a workspace:</p>{options}</div>'
 
@@ -1348,8 +1416,8 @@ class EmpyralisOAuthProvider(
             login_url = f"{_frontend_origin()}/login?{urlencode({'next': next_path})}"
             return RedirectResponse(login_url, status_code=302)
 
-        workspace_ids = _accessible_workspace_ids(current_user)
-        if not workspace_ids:
+        workspaces = await _named_accessible_workspaces(current_user)
+        if not workspaces:
             return HTMLResponse(
                 _render_message_page("No workspace", "Your Empyralis account is not a member of any workspace yet."),
                 status_code=403,
@@ -1357,7 +1425,7 @@ class EmpyralisOAuthProvider(
 
         csrf_token = secrets.token_urlsafe(24)
         page_html = _render_consent_form(
-            client=client, scopes=list(payload.get("scopes") or []), workspace_ids=workspace_ids,
+            client=client, scopes=list(payload.get("scopes") or []), workspaces=workspaces,
             ticket=ticket, csrf_token=csrf_token,
         )
         response = HTMLResponse(page_html)
