@@ -103,8 +103,20 @@ external AI client should just work.
     "computer"}``) deliberately excludes ``document``, so this whole
     surface needs no paired hardware, unlike a channel or shell tool.
 
-Write-gate decision (task AND document tools): NOT behind
-``EMPYRALIS_MCP_WRITE_ENABLED``. The 8 gated tools below are workspace-wide
+SCOPE GATE (OAuth path only, 2026-08-23): every task/document MUTATION and
+``empyralis_chat`` now requires ``empyralis:write`` when the caller is an
+OAuth-issued Connector token — ``_check_content_write``. Before that, a token
+whose only scope was ``empyralis:read`` could create documents, create tasks,
+comment, change status and overwrite a document body, while the consent screen
+the person approved said "View your projects, agents, and activity". The scope
+strings are shown to a human; they have to be true. ``empyralis_chat`` is on
+the write side deliberately: it runs a full billed agent turn whose side
+effects are whatever that agent's own tools do — unbounded, and not "view".
+The LEGACY bearer-key path is untouched by that gate (see the function's own
+docstring) — the paragraph below still describes it exactly.
+
+Write-gate decision (task AND document tools, LEGACY BEARER-KEY PATH): NOT
+behind ``EMPYRALIS_MCP_WRITE_ENABLED``. The 8 gated tools below are workspace-wide
 configuration mutations (create/reconfigure an agent, take over a channel,
 start an OAuth grant) — exactly what a read-only key must never be able to
 do by accident. Task status/comments/documents are bounded to a project
@@ -343,13 +355,22 @@ async def _resolve_workspace(ctx: Any) -> Dict[str, Any]:
     if access_token is not None:
         workspace_id = str(getattr(access_token, "workspace_id", "") or "").strip()
         if workspace_id:
-            from server_modules.mcp_oauth_provider import SCOPE_WRITE
+            from server_modules.mcp_oauth_provider import LEGACY_CLIENT_ID, SCOPE_WRITE
 
             scopes = set(getattr(access_token, "scopes", None) or [])
+            # A legacy per-workspace bearer key reaches this same branch once
+            # OAuth is enabled — EmpyralisOAuthProvider.load_access_token
+            # synthesizes an AccessToken for it under the LEGACY_CLIENT_ID
+            # sentinel. Its scopes are DERIVED from the key's own
+            # writes_enabled flag, so treating them as a real user-granted
+            # OAuth consent would silently narrow the legacy path the moment
+            # OAuth is switched on. auth_path keeps the two distinguishable.
+            is_legacy = str(getattr(access_token, "client_id", "") or "") == LEGACY_CLIENT_ID
             return {
                 "workspace_id": workspace_id,
                 "writes_enabled": SCOPE_WRITE in scopes,
                 "scopes": scopes,
+                "auth_path": "legacy" if is_legacy else "oauth",
                 # Not minted for the OAuth path yet — see docstring above.
                 "external_agent_id": None,
                 "external_agent_display_name": None,
@@ -380,7 +401,7 @@ async def _resolve_workspace(ctx: Any) -> Dict[str, Any]:
         raise RuntimeError(
             "Invalid or revoked MCP API key. Create a new key at POST /api/connections/mcp-keys."
         )
-    return resolved
+    return {**resolved, "auth_path": "legacy"}
 
 
 async def _ledger_mcp_call(resolved: Dict[str, Any], tool_name: str, ok: bool, **extra: Any) -> None:
@@ -460,6 +481,11 @@ def _build_mcp_server() -> FastMCP | None:
                 provider = mcp_oauth_provider.EmpyralisOAuthProvider(
                     issuer_url=base_url, resource_server_url=resource_server_url,
                 )
+                # Must run before streamable_http_app() builds the SDK's auth
+                # routes — that is where the ClientAuthenticator is constructed
+                # and then sealed inside a cors_middleware closure. See
+                # mcp_oauth_provider.install_hashed_client_secret_authenticator.
+                mcp_oauth_provider.install_hashed_client_secret_authenticator()
                 auth_kwargs["auth_server_provider"] = provider
                 auth_kwargs["auth"] = AuthSettings(
                     issuer_url=base_url,
@@ -548,6 +574,42 @@ if empyralist_mcp is not None:
             raise RuntimeError(
                 "This API key does not have write access. "
                 "Create a new key with writes_enabled=true at POST /api/connections/mcp-keys."
+            )
+
+    def _check_content_write(resolved: Dict[str, Any], what: str) -> None:
+        """Raise unless this caller may MUTATE tasks/documents/agent turns.
+
+        An OAuth token granted only ``empyralis:read`` used to create
+        documents, create tasks, comment, change status and overwrite a
+        document body — all persisted — because only the 6 workspace-config
+        tools were gated at all. The consent screen a person actually read
+        said "View your projects, agents, and activity". A scope string shown
+        to a user is a PROMISE; this is what makes it true.
+
+        Deliberately NOT ``_check_write``: that one additionally requires the
+        deployment-wide ``EMPYRALIS_MCP_WRITE_ENABLED`` off-switch, which
+        exists for the workspace-CONFIGURATION tools (create/reconfigure an
+        agent, take over a channel, start an OAuth grant). Coupling ordinary
+        task and document editing to it would make a granted
+        ``empyralis:write`` silently do nothing on today's default
+        deployment — a control that says yes and means no.
+
+        Deliberately NOT applied to the legacy bearer-key path
+        (``auth_path == "legacy"``). That key is minted by an operator for
+        themselves, its ungated task/document writes are the founder's own
+        core loop, and narrowing it here would change the behaviour of a live
+        path as a side effect of an OAuth fix. Its own ``writes_enabled``
+        boolean still governs the 6 configuration tools exactly as before.
+        """
+        if str(resolved.get("auth_path") or "") != "oauth":
+            return
+        from server_modules.mcp_oauth_provider import SCOPE_WRITE
+
+        if SCOPE_WRITE not in set(resolved.get("scopes") or ()):
+            raise RuntimeError(
+                f"This connection is read-only, so it cannot {what}. It was granted "
+                f"'empyralis:read' only. Reconnect Empyralis and approve "
+                f"'empyralis:write' to allow changes."
             )
 
     async def _tenant(ws: str) -> str:
@@ -725,7 +787,9 @@ if empyralist_mcp is not None:
         EMPYRALIS_MCP_CHAT_TIMEOUT_SECONDS) so a stuck turn surfaces an
         honest timeout instead of hanging forever.
         """
-        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        r = await _resolve(ctx)
+        _check_content_write(r, "run an agent turn")
+        ws = _ws(r); tenant = await _tenant(ws)
         from server_modules import agent_registry_repository as reg
 
         requested_agent_id = str(agent_id or "").strip()
@@ -882,7 +946,33 @@ if empyralist_mcp is not None:
         parent that is itself already a sub-task is rejected with a clear
         error (attach it to that sub-task's own parent instead). Parent and
         sub-task must be in the same project."""
-        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        r = await _resolve(ctx)
+        _check_content_write(r, "create a task")
+        ws = _ws(r); tenant = await _tenant(ws)
+
+        # project_id is VERIFIED against this caller's own workspace before
+        # anything is written -- the same posture empyralis_create_document
+        # already had. It was previously trusted to the FK alone, and the FK
+        # is on projects(id): another tenant's REAL project id satisfies it
+        # perfectly. The row was still stamped with this caller's own
+        # tenant/workspace (so it was never a cross-tenant write) but it
+        # landed on a project nobody in this workspace can open -- orphaned,
+        # invisible, and reported as ok: true. Only a NONEXISTENT id failed,
+        # and that answered with raw Postgres constraint text.
+        from server_modules import projects_repository as _p
+
+        project = await _p.get_project(tenant_id=tenant, workspace_id=ws, project_id=project_id)
+        if project is None:
+            await _ledger_mcp_call(r, "empyralis_create_task", False, project_id=project_id)
+            return {
+                "ok": False,
+                "error": (
+                    f"Project '{project_id}' was not found in your workspace. "
+                    "Call empyralis_list_projects to see the project_id values you can use."
+                ),
+                "project_id": project_id,
+            }
+
         author_id = r.get("external_agent_id") or "external_mcp_client"
         author_name = str(r.get("external_agent_display_name") or "").strip()
         from server_modules import project_tasks_service as tasks
@@ -895,7 +985,7 @@ if empyralist_mcp is not None:
                 created_by=author_id,
                 created_by_display_name=author_name,
             )
-        except Exception as exc:  # noqa: BLE001 — includes an invalid/foreign project_id (FK violation)
+        except Exception as exc:  # noqa: BLE001
             await _ledger_mcp_call(r, "empyralis_create_task", False, project_id=project_id, error=str(exc))
             return {"ok": False, "error": str(exc)}
         await _ledger_mcp_call(r, "empyralis_create_task", True, project_id=project_id, task_id=task.get("id"))
@@ -1032,7 +1122,9 @@ if empyralist_mcp is not None:
         assignment stuck but nothing was woken. "Assigned" and "assigned and
         someone is on it" are not the same claim.
         """
-        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        r = await _resolve(ctx)
+        _check_content_write(r, "assign a task")
+        ws = _ws(r); tenant = await _tenant(ws)
         clean_agent_id = str(agent_id or "").strip()
         clean_user_id = str(user_id or "").strip()
         if bool(clean_agent_id) == bool(clean_user_id):
@@ -1141,7 +1233,9 @@ if empyralist_mcp is not None:
         is ever deleted — sub-tasks are promoted, never deleted with it.
 
         Workspace-scoped like empyralis_get_task."""
-        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        r = await _resolve(ctx)
+        _check_content_write(r, "re-file a task")
+        ws = _ws(r); tenant = await _tenant(ws)
         from server_modules import project_tasks_service as tasks
         try:
             task = await tasks.set_task_parent(
@@ -1175,7 +1269,9 @@ if empyralist_mcp is not None:
         Workspace-scoped like empyralis_get_task — any task in your workspace.
         An invalid status is rejected with a clear, agent-facing error naming
         the valid set; it is never silently coerced."""
-        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        r = await _resolve(ctx)
+        _check_content_write(r, "change a task's status")
+        ws = _ws(r); tenant = await _tenant(ws)
         from server_modules import project_tasks_service as tasks
         try:
             task = await tasks.update_task(tenant_id=tenant, workspace_id=ws, task_id=task_id, status=status)
@@ -1210,7 +1306,9 @@ if empyralist_mcp is not None:
         workspace. An out-of-range priority is rejected with a clear,
         agent-facing error naming the valid set; it is never silently
         coerced to 'none'."""
-        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        r = await _resolve(ctx)
+        _check_content_write(r, "change a task's priority")
+        ws = _ws(r); tenant = await _tenant(ws)
         from server_modules import project_tasks_service as tasks
         try:
             task = await tasks.update_task(
@@ -1235,7 +1333,9 @@ if empyralist_mcp is not None:
         """Post a progress note/comment on a task — visible to the owner and
         any other agent that reads the task afterward (task.metadata.comments).
         Workspace-scoped like empyralis_get_task — any task in your workspace."""
-        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        r = await _resolve(ctx)
+        _check_content_write(r, "comment on a task")
+        ws = _ws(r); tenant = await _tenant(ws)
         author_id = r.get("external_agent_id") or "external_mcp_client"
         author_name = str(r.get("external_agent_display_name") or "").strip()
         from server_modules import project_tasks_service as tasks
@@ -1303,7 +1403,9 @@ if empyralist_mcp is not None:
 
         Workspace-scoped like empyralis_get_task — any task in your
         workspace."""
-        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        r = await _resolve(ctx)
+        _check_content_write(r, "label a task")
+        ws = _ws(r); tenant = await _tenant(ws)
         author_id = r.get("external_agent_id") or "external_mcp_client"
         from server_modules import workspace_labels_service as labels
         try:
@@ -1331,7 +1433,9 @@ if empyralist_mcp is not None:
 
         Workspace-scoped like empyralis_get_task — any task in your
         workspace."""
-        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        r = await _resolve(ctx)
+        _check_content_write(r, "remove a task label")
+        ws = _ws(r); tenant = await _tenant(ws)
         from server_modules import workspace_labels_service as labels
         try:
             remaining = await labels.detach_label(
@@ -1378,7 +1482,9 @@ if empyralist_mcp is not None:
         document's history — see empyralis_list_document_revisions. Nothing
         else to call to get tracked history, including with no hardware
         connected."""
-        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        r = await _resolve(ctx)
+        _check_content_write(r, "create a document")
+        ws = _ws(r); tenant = await _tenant(ws)
         from server_modules import projects_repository as _p
 
         project = await _p.get_project(tenant_id=tenant, workspace_id=ws, project_id=project_id)
@@ -1442,7 +1548,9 @@ if empyralist_mcp is not None:
         Every successful edit is automatically recorded in this document's
         revision history AS A DIFF ("this line changed") — see
         empyralis_list_document_revisions."""
-        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        r = await _resolve(ctx)
+        _check_content_write(r, "edit a document")
+        ws = _ws(r); tenant = await _tenant(ws)
         author_id = r.get("external_agent_id") or "external_mcp_client"
         author_name = str(r.get("external_agent_display_name") or "").strip()
         from server_modules import project_documents_repository as documents
@@ -1515,7 +1623,9 @@ if empyralist_mcp is not None:
 
         Every update is automatically recorded in this document's revision
         history — see empyralis_list_document_revisions."""
-        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        r = await _resolve(ctx)
+        _check_content_write(r, "rewrite a document")
+        ws = _ws(r); tenant = await _tenant(ws)
         clean_title = str(title or "").strip()
         clean_body = body if body else ""
         if not clean_title and not clean_body:
@@ -1885,12 +1995,23 @@ def mount_empyralist_mcp(app: FastAPI) -> None:
     oauth_routes = [r for r in sub_app.routes if getattr(r, "path", None) != protocol_path]
 
     protocol_app = Starlette(routes=protocol_routes, middleware=sub_app.user_middleware)
+
+    # ORDER IS LOAD-BEARING, and getting it wrong made the whole Connector
+    # flow un-completable: Starlette matches routes in registration order and
+    # a Mount matches by PREFIX, so mounting "/mcp" first swallows
+    # "/mcp/consent" into the protocol sub-app — which has no such route and
+    # answers a plain-text 404. /authorize would 302 the person to a 404 page
+    # and the flow simply ended there. The consent pair is registered FIRST so
+    # the exact-path routes win; the mount still serves everything else under
+    # /mcp. (nginx already routes `location = /mcp/consent` separately — see
+    # deploy/nginx-empyralis.conf — so this is purely the in-process ordering.)
+    mcp_oauth_provider.register_consent_routes(app, oauth_provider)
+
     app.mount(EMPYRALIST_MCP_PATH, protocol_app)
 
     for route in oauth_routes:
         app.router.routes.append(route)
 
-    mcp_oauth_provider.register_consent_routes(app, oauth_provider)
     mcp_oauth_provider.register_register_rate_limit_guard(app)
 
 

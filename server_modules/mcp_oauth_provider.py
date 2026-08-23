@@ -29,6 +29,12 @@ Security invariants (see also the module-level tests):
     match before ``exchange_authorization_code`` is ever called).
   * Access/refresh tokens are opaque, random (256 bits), stored only as
     SHA-256 hashes, and revocable. Refresh tokens rotate on every use.
+  * Client secrets are stored only as SHA-256 hashes too, and the presented
+    secret is hashed before the SDK compares it (see
+    ``EmpyralisClientAuthenticator``). This used to be true of tokens only —
+    ``_store_client`` also wrote the plaintext secret inside
+    ``client_info_json`` and the SDK authenticated against THAT, while
+    ``client_secret_hash`` had no readers at all.
   * Nothing here ever logs a raw code/token/secret — only hashes or
     ``_short_id()`` suffixes for correlation.
   * The workspace on an access token is fixed at consent time from the
@@ -68,6 +74,7 @@ from mcp.server.auth.provider import (
     TokenError,
     construct_redirect_uri,
 )
+from mcp.server.auth.middleware.client_auth import ClientAuthenticator
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
 from server_modules import client_identity_service
@@ -85,9 +92,17 @@ SCOPE_WRITE = "empyralis:write"
 SCOPES = (SCOPE_READ, SCOPE_WRITE)
 DEFAULT_SCOPES = (SCOPE_READ,)
 
+# What each line PROMISES has to match what the scope actually permits — the
+# consent screen is where a person decides, and "View your projects, agents,
+# and activity" over a grant that could create tasks, create documents,
+# comment, change status and overwrite a document body was a false promise.
+# `mcp_server._check_content_write` is the code that makes the read line true.
 _SCOPE_DESCRIPTIONS = {
-    SCOPE_READ: "View your projects, agents, and activity",
-    SCOPE_WRITE: "Create and configure agents, send messages, and connect channels on your behalf",
+    SCOPE_READ: "View your projects, tasks, documents, agents, and activity — read only",
+    SCOPE_WRITE: (
+        "Create and edit tasks and documents, run agent turns, and configure "
+        "agents and channels on your behalf"
+    ),
 }
 
 # Sentinel client_id for access tokens synthesized from a legacy per-workspace
@@ -356,8 +371,24 @@ def _resource_matches(requested: Optional[str], expected: str) -> bool:
 # ── Client persistence ───────────────────────────────────────────────────
 
 
+def _client_info_json_without_secret(client_info: OAuthClientInformationFull) -> str:
+    """The stored client blob, with ``client_secret`` REMOVED.
+
+    ``model_dump_json()`` includes the plaintext secret, so the previous
+    version of ``_store_client`` wrote the secret to the database twice: once
+    hashed into ``client_secret_hash`` (which had ZERO readers) and once in
+    cleartext inside ``client_info_json`` — which is what the SDK actually
+    authenticated against. The module docstring's "stored only as SHA-256
+    hashes" was true of tokens and false of client secrets. It is true of both
+    now.
+    """
+    data = client_info.model_dump(mode="json")
+    data.pop("client_secret", None)
+    return json.dumps(data)
+
+
 async def _store_client(client_info: OAuthClientInformationFull) -> None:
-    payload = client_info.model_dump_json()
+    payload = _client_info_json_without_secret(client_info)
     secret_hash = _hash_token(client_info.client_secret) if client_info.client_secret else None
     now = int(time.time())
     await _execute(
@@ -380,14 +411,188 @@ async def _store_client(client_info: OAuthClientInformationFull) -> None:
 
 
 async def _load_client_row(client_id: str) -> Optional[OAuthClientInformationFull]:
+    """Load a registered client, with ``client_secret`` carrying the stored
+    SHA-256 HASH rather than a plaintext secret.
+
+    Two things depend on the hash being what comes back here, not None:
+
+    * ``EmpyralisClientAuthenticator`` (below) hashes the secret the client
+      presents and lets the SDK's own ``hmac.compare_digest`` do the compare,
+      so the two sides line up.
+    * If that authenticator were ever NOT installed, the SDK's stock
+      ``ClientAuthenticator`` would compare the stored hash against the raw
+      presented secret and REFUSE — fail closed. Returning ``None`` here
+      would instead make ``if client.client_secret:`` falsy and skip the
+      secret check entirely, i.e. fail open. That is the whole reason this
+      returns a hash and not nothing.
+
+    Rows written before this change carry the plaintext inside
+    ``client_info_json``. They are migrated LAZILY, on first read: the hash is
+    derived from the cleartext, the row is rewritten without it, and the
+    client keeps working with the secret it already holds. No offline
+    migration step, and no already-registered Connector is broken.
+    """
     row = await _fetchrow(
-        "SELECT client_info_json FROM mcp_oauth_clients WHERE client_id = $1",
-        "SELECT client_info_json FROM mcp_oauth_clients WHERE client_id = ?",
+        "SELECT client_secret_hash, client_info_json FROM mcp_oauth_clients WHERE client_id = $1",
+        "SELECT client_secret_hash, client_info_json FROM mcp_oauth_clients WHERE client_id = ?",
         (client_id,),
     )
     if row is None:
         return None
-    return OAuthClientInformationFull.model_validate_json(row["client_info_json"])
+    try:
+        data = json.loads(row["client_info_json"])
+    except (TypeError, ValueError):
+        LOGGER.warning("MCP OAuth client row is unreadable: client_id=%s", client_id)
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    stored_hash = str(row.get("client_secret_hash") or "").strip() or None
+    legacy_cleartext = str(data.get("client_secret") or "").strip() or None
+    if legacy_cleartext and not stored_hash:
+        stored_hash = _hash_token(legacy_cleartext)
+    data["client_secret"] = stored_hash
+
+    if legacy_cleartext:
+        await _rewrite_client_without_cleartext_secret(client_id, stored_hash or "", data)
+
+    return OAuthClientInformationFull.model_validate(data)
+
+
+async def _rewrite_client_without_cleartext_secret(
+    client_id: str, secret_hash: str, data: Dict[str, Any],
+) -> None:
+    """Lazy migration for a pre-hash row: persist the hash, drop the cleartext.
+
+    Best-effort — a failure here must never take a working Connector down, so
+    it is logged and swallowed. The read above already returned the hash, so
+    authentication succeeds either way; only the at-rest cleanup is deferred
+    to the next read.
+    """
+    scrubbed = dict(data)
+    scrubbed.pop("client_secret", None)
+    try:
+        await _execute(
+            """
+            UPDATE mcp_oauth_clients
+               SET client_secret_hash = $1, client_info_json = $2
+             WHERE client_id = $3
+            """,
+            """
+            UPDATE mcp_oauth_clients
+               SET client_secret_hash = ?, client_info_json = ?
+             WHERE client_id = ?
+            """,
+            (secret_hash or None, json.dumps(scrubbed), client_id),
+        )
+        LOGGER.info(
+            "MCP OAuth client secret migrated to hash-at-rest: client_id=%s", client_id,
+        )
+    except Exception:  # noqa: BLE001 — never break auth over a cleanup write
+        LOGGER.exception(
+            "Could not scrub the cleartext client secret for client_id=%s; "
+            "authentication is unaffected and the next read will retry.",
+            client_id,
+        )
+
+
+# ── Client authentication against the stored HASH ───────────────────────
+#
+# The SDK's ClientAuthenticator compares `client.client_secret` (whatever
+# `get_client` returned) against the secret the client presented, with
+# `hmac.compare_digest`. `_load_client_row` now returns the stored SHA-256
+# hash there, so the two sides only line up if the PRESENTED secret is hashed
+# too — which is what this subclass does, and nothing else.
+#
+# It deliberately does NOT re-implement credential EXTRACTION. The SDK's
+# `authenticate_request` reads exactly two things off the request —
+# `request.headers` and `await request.form()` (mcp/server/auth/middleware/
+# client_auth.py) — so this hands it a stand-in carrying the same request with
+# the presented secret already hashed, and inherits every extraction rule the
+# SDK has today and grows tomorrow (client_secret_basic / client_secret_post /
+# none, the Basic client_id-mismatch check, secret expiry). If a future SDK
+# version reaches for a third attribute, this raises AttributeError loudly
+# rather than authenticating something it did not understand.
+
+
+class _HashedSecretRequest:
+    """A request stand-in whose presented client_secret is already hashed."""
+
+    def __init__(self, headers: Any, form_data: Any) -> None:
+        self.headers = headers
+        self._form_data = form_data
+
+    async def form(self) -> Any:
+        return self._form_data
+
+
+def _hash_presented_client_secret(request: Request) -> Any:
+    """Build the stand-in: same request, secret replaced by its SHA-256."""
+
+    async def _build() -> _HashedSecretRequest:
+        from urllib.parse import quote, unquote
+
+        from starlette.datastructures import Headers
+
+        form_data = await request.form()
+        raw_secret = form_data.get("client_secret")
+        if isinstance(raw_secret, str) and raw_secret:
+            form_data = dict(form_data)
+            form_data["client_secret"] = _hash_token(raw_secret)
+
+        header_items = list(request.headers.items())
+        auth_header = str(request.headers.get("Authorization", "") or "")
+        if auth_header.startswith("Basic "):
+            try:
+                import base64 as _base64
+
+                decoded = _base64.b64decode(auth_header[6:]).decode("utf-8")
+                client_part, _, secret_part = decoded.partition(":")
+                if _:
+                    hashed = _hash_token(unquote(secret_part))
+                    rebuilt = _base64.b64encode(
+                        f"{client_part}:{quote(hashed)}".encode("utf-8")
+                    ).decode("ascii")
+                    header_items = [
+                        (k, v) for (k, v) in header_items if k.lower() != "authorization"
+                    ]
+                    header_items.append(("authorization", f"Basic {rebuilt}"))
+            except Exception:  # noqa: BLE001
+                # Malformed Basic header: leave it exactly as sent so the SDK
+                # produces its own "Invalid Basic authentication header".
+                pass
+
+        return _HashedSecretRequest(Headers(raw=[
+            (k.encode("latin-1"), v.encode("latin-1")) for (k, v) in header_items
+        ]), form_data)
+
+    return _build()
+
+
+class EmpyralisClientAuthenticator(ClientAuthenticator):
+    async def authenticate_request(self, request: Request) -> OAuthClientInformationFull:  # type: ignore[override]
+        return await super().authenticate_request(await _hash_presented_client_secret(request))
+
+
+def install_hashed_client_secret_authenticator() -> bool:
+    """Point the SDK's route builder at ``EmpyralisClientAuthenticator``.
+
+    ``mcp.server.auth.routes.create_auth_routes`` constructs its
+    ``ClientAuthenticator`` internally and wraps the resulting handlers in
+    ``cors_middleware`` closures, so the instance is unreachable once the app
+    is built. Rebinding the symbol the route builder imports is the one seam
+    available, and it must happen BEFORE ``streamable_http_app()`` builds the
+    routes — hence the call from ``mcp_server._build_mcp_server``.
+
+    Idempotent. Returns True when the SDK's route builder is (now) using ours.
+    """
+    try:
+        from mcp.server.auth import routes as _sdk_routes
+    except Exception:  # noqa: BLE001
+        LOGGER.exception("Could not import the MCP SDK auth routes to install client auth.")
+        return False
+    _sdk_routes.ClientAuthenticator = EmpyralisClientAuthenticator  # type: ignore[attr-defined]
+    return True
 
 
 # ── Authorization code persistence ──────────────────────────────────────
@@ -788,15 +993,44 @@ def _cookie_secure(request: Request) -> bool:
     }
 
 
-def _current_dashboard_user(request: Request) -> Optional[Dict[str, Any]]:
+def _current_dashboard_user(
+    request: Request, *, browser_form_post: bool = False,
+) -> Optional[Dict[str, Any]]:
     """Resolve the logged-in dashboard user from the existing session cookie,
-    or None when nobody is logged in. Never raises."""
+    or None when nobody is logged in. Never raises.
+
+    ``browser_form_post`` exists for exactly one caller: the consent screen's
+    ``POST``. ``auth.get_current_user`` requires an ``x-csrf-token`` HEADER on
+    any non-GET request whose credential arrives as a COOKIE — correct for the
+    JSON API the whole dashboard speaks, and impossible for the consent page,
+    which is a plain server-rendered ``<form method="post">``. A browser cannot
+    put a custom header on a form submission, so a genuinely logged-in operator
+    clicking "Allow" was 403'd, swallowed to ``None``, and bounced to /login:
+    the flow could not complete at all, and the message was false as well.
+
+    Passing the session cookie's own value as ``Authorization: Bearer`` takes
+    ``get_current_user``'s header branch, which runs the IDENTICAL session
+    validation and skips only the header-CSRF check. Nothing else is relaxed,
+    and CSRF is not weakened anywhere else in the product.
+
+    The consent POST is not left unprotected: it carries its own double-submit
+    CSRF token (``_CONSENT_CSRF_COOKIE`` + the form's ``csrf_token`` field),
+    checked in ``decide_consent`` BEFORE this is ever called, and a missing or
+    mismatched token is a 400 with nothing minted. That token IS the protection
+    that replaces the header check here — do not remove it.
+    """
     from fastapi import HTTPException
 
     from server_modules import auth
 
+    authorization: Optional[str] = None
+    if browser_form_post:
+        cookie_token = str(auth.auth_cookie_access_token(request) or "").strip()
+        if cookie_token:
+            authorization = f"Bearer {cookie_token}"
+
     try:
-        return auth.get_current_user(request=request, authorization=None, x_api_key=None)
+        return auth.get_current_user(request=request, authorization=authorization, x_api_key=None)
     except HTTPException:
         return None
     except Exception:
@@ -883,8 +1117,15 @@ def _render_consent_form(
         "<body><main class=\"card\">"
         f"<h1>{client_label} wants to access your Empyralis workspace</h1>"
         f'<ul class="scopes">{scope_items}</ul>'
-        f"{workspace_field}"
+        # workspace_field lives INSIDE the form. It used to be rendered just
+        # above the <form> tag, so neither the single-workspace hidden input
+        # nor the multi-workspace radio group was ever submitted -- every
+        # Allow arrived with an empty workspace_id and was refused "That
+        # workspace is not accessible for this account." Found by clicking
+        # Allow in a real browser; every test until then hand-built the POST
+        # body instead of submitting the page's own form, so none could see it.
         f'<form method="post" action="{CONSENT_PATH}">'
+        f"{workspace_field}"
         f'<input type="hidden" name="ticket" value="{_html.escape(ticket)}">'
         f'<input type="hidden" name="csrf_token" value="{_html.escape(csrf_token)}">'
         '<div class="actions">'
@@ -1149,9 +1390,14 @@ class EmpyralisOAuthProvider(
         redirect_uri = str(payload.get("redirect_uri") or "")
         state = payload.get("state")
 
-        current_user = _current_dashboard_user(request)
+        current_user = _current_dashboard_user(request, browser_form_post=True)
         if current_user is None:
-            return RedirectResponse(f"{_frontend_origin()}/login", status_code=302)
+            # Carry the ticket through the login round trip. A bare /login
+            # stranded the person on a page with no way back to the connection
+            # they had started, and gave the client no answer at all.
+            next_path = f"{CONSENT_PATH}?{urlencode({'ticket': ticket})}"
+            login_url = f"{_frontend_origin()}/login?{urlencode({'next': next_path})}"
+            return RedirectResponse(login_url, status_code=302)
 
         decision = str(form.get("decision") or "").strip().lower()
         response: Any
