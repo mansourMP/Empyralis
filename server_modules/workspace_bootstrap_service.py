@@ -11,6 +11,7 @@ from server_modules import auth as auth_module
 from server_modules import control_plane_repository
 from server_modules import entitlements_service
 from server_modules import runtime_attachment_service
+from server_modules import workspace_naming
 
 _WORKSPACE_BOOTSTRAP_CACHE: Dict[str, Dict[str, Any]] = {}
 _WORKSPACE_BOOTSTRAP_CACHE_LIMIT = 128
@@ -551,10 +552,12 @@ def _workspace_payload(
 ) -> Dict[str, Any]:
     record = _coerce_dict(workspace)
     kind = str(record.get("workspace_type") or record.get("kind") or "personal").strip() or "personal"
-    label = (
-        str(record.get("name") or "").strip()
-        or str(workspace_name or "").strip()
-        or workspace_id
+    # NEVER `or workspace_id`: that fallback is what put a machine id into the
+    # desktop pairing approval's "It will join <b>...</b>" sentence and into
+    # every other surface reading this label. See workspace_naming.
+    label = workspace_naming.human_workspace_label(
+        str(record.get("name") or "").strip() or str(workspace_name or "").strip(),
+        workspace_id,
     )
     return {
         "id": workspace_id,

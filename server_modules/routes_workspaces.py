@@ -22,6 +22,7 @@ from server_modules.workspace_channel_operations_service import (
     build_workspace_channel_operations,
 )
 from server_modules.workspace_bootstrap_service import build_workspace_bootstrap
+from server_modules import workspace_naming
 
 
 router = APIRouter()
@@ -224,7 +225,7 @@ def _workspace_summary_payload(workspace_record: Dict[str, Any]) -> Dict[str, An
     metadata = _coerce_dict(workspace_record.get("metadata"))
     shell = _coerce_dict(metadata.get("shell"))
     workspace_id = str(workspace_record.get("workspace_id") or "").strip()
-    label = str(workspace_record.get("name") or "").strip() or workspace_id
+    label = workspace_naming.human_workspace_label(workspace_record.get("name"), workspace_id)
     preferred_shell_profile_id = str(shell.get("preferredProfile") or "").strip() or None
     default_route = control_plane_repository._normalize_workspace_default_route(
         workspace_id,
@@ -1425,7 +1426,12 @@ async def list_my_pending_workspace_invites_route(
             workspace_record = await control_plane_repository.get_workspace_by_id(invite_workspace_id)
         except Exception:  # noqa: BLE001
             workspace_record = None
-        workspace_name = str((workspace_record or {}).get("name") or "").strip() or invite_workspace_id
+        # An id here reached the invite banner ("You've been invited to
+        # ws_b5c1..."), the switcher's invite rows and the invite email
+        # subject, because each of those trusted this field to be a name.
+        workspace_name = workspace_naming.human_workspace_label(
+            (workspace_record or {}).get("name"), invite_workspace_id
+        )
         items.append(
             {
                 "id": invite.get("id"),

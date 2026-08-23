@@ -133,7 +133,14 @@ def build_invite_email_content(
     omits the tag rather than emitting a broken image. The plaintext part is
     unchanged -- a logo has no plaintext form.
     """
-    workspace = str(workspace_name or "").strip() or "a workspace"
+    # `or "a workspace"` covered an EMPTY name but not a name that is the
+    # workspace's own id, which really occurs -- so the subject line read
+    # "X invited you to ws_b5c1fa225ae6 on Empyralis". The caller now
+    # passes a display label (workspace_naming.human_workspace_label), and
+    # this keeps its own guard because an email is not re-sendable once wrong.
+    workspace = str(workspace_name or "").strip()
+    if not workspace or workspace.startswith("ws_"):
+        workspace = "a workspace"
     inviter = str(inviter_label or "").strip() or "A teammate"
     address = str(invitee_email or "").strip()
 

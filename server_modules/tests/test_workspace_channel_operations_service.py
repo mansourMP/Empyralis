@@ -327,7 +327,15 @@ async def test_build_workspace_channel_operations_requires_admin_workspace_acces
         )
 
     assert exc_info.value.status_code == 403
-    assert exc_info.value.detail == "Admin or owner role required for workspace 'ws-1'."
+    # INVERTED 2026-08-23, not weakened: the old message interpolated the raw
+    # workspace id ("... for workspace 'ws-1'.") and getErrorMessage renders a
+    # string `detail` verbatim, so an ordinary viewer was shown a machine id in
+    # a routine permissions message. These assertions now FAIL if it returns.
+    assert "ws-1" not in str(exc_info.value.detail)
+    assert "ws_" not in str(exc_info.value.detail)
+    assert exc_info.value.detail == (
+        "You need to be an owner or admin of this workspace to change its channels."
+    )
 
 
 @pytest.mark.anyio

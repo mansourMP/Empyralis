@@ -524,9 +524,13 @@ def _enforce_workspace_operator_access(
         return resolved_workspace_id
     if bool((current_user or {}).get("is_admin")):
         return resolved_workspace_id
+    # The workspace id used to be interpolated here, and getErrorMessage
+    # renders a string `detail` verbatim -- so an ordinary viewer opening
+    # channel operations was shown a machine id. The id told them nothing they
+    # could act on; they are already looking at the workspace it names.
     raise HTTPException(
         status_code=403,
-        detail=f"Admin or owner role required for workspace '{resolved_workspace_id}'.",
+        detail="You need to be an owner or admin of this workspace to change its channels.",
     )
 
 

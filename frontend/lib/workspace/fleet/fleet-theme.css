@@ -453,6 +453,20 @@ a.fleet-breadcrumb:hover {
   background: var(--rail-active);
 }
 
+/* ONE WORKSPACE PER ACCOUNT: with nothing to switch to and nothing to
+   create, the workspace name is a LABEL, not a control -- rendered as a
+   <span>, not a disabled <button> (see WorkspaceSwitcher.tsx's Trigger).
+   The class stays for the rail header's geometry; the pointer and the hover
+   wash go, because a hover response on something that cannot be pressed is
+   the same lie the disabled button would have told. */
+.fleet-rail-workspace-trigger--static {
+  cursor: default;
+}
+
+.fleet-rail-workspace-trigger--static:hover {
+  background: transparent;
+}
+
 .fleet-rail--collapsed .fleet-rail-workspace-trigger {
   justify-content: center;
   padding: 2px;
@@ -526,17 +540,6 @@ a.fleet-breadcrumb:hover {
   color: var(--text-primary);
 }
 
-.fleet-rail-workspace-popover-row--add {
-  border-top: 1px solid var(--border);
-  border-radius: 0;
-  margin-top: 2px;
-  padding-top: 8px;
-  color: var(--text-muted);
-}
-
-.fleet-rail-workspace-popover-row--add:hover {
-  color: var(--text-primary);
-}
 
 .fleet-rail-workspace-popover-mark {
   width: 22px;
@@ -552,10 +555,6 @@ a.fleet-breadcrumb:hover {
   font-weight: 500;
 }
 
-.fleet-rail-workspace-popover-mark--add {
-  background: var(--rail-active);
-  color: var(--text-muted);
-}
 
 .fleet-rail-workspace-popover-text {
   flex: 1;

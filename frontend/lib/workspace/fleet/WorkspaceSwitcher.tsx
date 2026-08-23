@@ -1,9 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Check, ChevronsUpDown, Plus, X } from "lucide-react";
+import { Check, ChevronsUpDown, X } from "lucide-react";
 
 import { useAccountShell } from "@/lib/shell/account-shell-context";
 import {
@@ -13,6 +12,7 @@ import {
   type MyPendingWorkspaceInvite,
 } from "./members-data";
 import { planPendingInviteIndicator } from "./pending-invite-indicator";
+import { planWorkspaceSwitcher } from "./workspace-switcher-shape";
 
 const ROLE_LABEL: Record<string, string> = {
   owner: "Owner",
@@ -47,6 +47,15 @@ const ROLE_LABEL: Record<string, string> = {
  *
  * With zero pending invites this component renders byte-identically to what
  * it rendered before that change: no badge, no group, no divider.
+ *
+ * ONE WORKSPACE PER ACCOUNT (2026-08-23). The "New workspace" row is gone --
+ * see workspace-switcher-shape.ts for the decision and the measurements
+ * behind it -- and with nothing left to create, a single-workspace popover
+ * would open onto one already-checked row and nothing else. So the trigger
+ * is not a button at all in that state: `planWorkspaceSwitcher` decides, and
+ * the name renders as a plain label. Accounts that already hold several
+ * workspaces are untouched and still switch; no stored workspace was
+ * renamed, merged or removed by any of this.
  */
 export function WorkspaceSwitcher({
   workspaceId,
@@ -80,7 +89,6 @@ export function WorkspaceSwitcher({
   }, [open]);
 
   const memberships = state.workspaceMemberships;
-  const hasOtherWorkspaces = memberships.some((membership) => membership.workspace.id !== workspaceId);
 
   // Its own read of /workspaces/invites/pending rather than a shared store:
   // the banner above the shell owns the same data, and hoisting it into
@@ -93,6 +101,21 @@ export function WorkspaceSwitcher({
     invites: pendingInvites,
     memberWorkspaceIds: memberships.map((membership) => membership.workspace.id),
   });
+  // Picker or plain label — the one rule, in one place. Composed rather than
+  // recomputed here, so this component and its test cannot hold two opinions.
+  const shape = planWorkspaceSwitcher({
+    workspaceCount: memberships.length,
+    pendingInviteCount: invitePlan.count,
+  });
+
+  // A popover open on its last pending invite must not survive that invite
+  // being settled: the trigger behind it is a plain label from that render
+  // on, so nothing would be left to close it.
+  const interactive = shape.interactive;
+  useEffect(() => {
+    if (!interactive) setOpen(false);
+  }, [interactive]);
+
   const [inviteBusyId, setInviteBusyId] = useState<string | null>(null);
   const [inviteErrorById, setInviteErrorById] = useState<Record<string, string>>({});
 
@@ -154,8 +177,8 @@ export function WorkspaceSwitcher({
 
   return (
     <div className="fleet-rail-workspace-switcher" ref={ref}>
-      {open && <div className="fleet-rail-popover-backdrop" onClick={() => setOpen(false)} />}
-      {open && (
+      {interactive && open && <div className="fleet-rail-popover-backdrop" onClick={() => setOpen(false)} />}
+      {interactive && open && (
         <div className="fleet-rail-workspace-popover" role="menu" aria-label="Switch workspace">
           {memberships.map((membership) => {
             const active = membership.workspace.id === workspaceId;
@@ -232,35 +255,23 @@ export function WorkspaceSwitcher({
               })}
             </div>
           )}
-          <Link
-            href="/workspaces/new"
-            role="menuitem"
-            className="fleet-rail-workspace-popover-row fleet-rail-workspace-popover-row--add"
-            onClick={() => setOpen(false)}
-          >
-            <span className="fleet-rail-workspace-popover-mark fleet-rail-workspace-popover-mark--add">
-              <Plus size={12} strokeWidth={2} aria-hidden="true" />
-            </span>
-            <span className="fleet-rail-workspace-popover-text">
-              <span className="fleet-rail-workspace-popover-name">New workspace</span>
-            </span>
-          </Link>
         </div>
       )}
-      <button
-        type="button"
-        className="fleet-rail-workspace-trigger"
-        onClick={() => setOpen((v) => !v)}
-        aria-haspopup="menu"
-        aria-expanded={open}
+      <Trigger
+        interactive={interactive}
+        onOpen={() => setOpen((v) => !v)}
+        open={open}
         // Was conditional on `collapsed` — expanded relied on the visible
         // "{brandLetter}{workspaceName}" content to name the button, which
         // the live a11y tree (MAN-145 item 5) showed coming through empty.
         // Unconditional aria-label is the unambiguous fix in both states.
-        aria-label={
-          invitePlan.show
-            ? `Switch workspace (current: ${workspaceName}) — ${invitePlan.count} pending ${invitePlan.count === 1 ? "invitation" : "invitations"}`
-            : `Switch workspace (current: ${workspaceName})`
+        // In label mode the name is not an action, so it says what it IS.
+        label={
+          !interactive
+            ? workspaceName
+            : invitePlan.show
+              ? `Switch workspace (current: ${workspaceName}) — ${invitePlan.count} pending ${invitePlan.count === 1 ? "invitation" : "invitations"}`
+              : `Switch workspace (current: ${workspaceName})`
         }
         title={collapsed ? workspaceName : undefined}
       >
@@ -280,10 +291,60 @@ export function WorkspaceSwitcher({
             {invitePlan.count}
           </span>
         )}
-        {!collapsed && (hasOtherWorkspaces || invitePlan.show) && (
+        {!collapsed && shape.showsChevron && (
           <ChevronsUpDown size={12} strokeWidth={1.75} className="fleet-rail-workspace-chevron" aria-hidden="true" />
         )}
-      </button>
+      </Trigger>
     </div>
+  );
+}
+
+/**
+ * ONE element, TWO kinds — and the inert kind is not a disabled button.
+ *
+ * A `<button disabled>` still announces itself as a control that is
+ * temporarily unavailable, which is a lie: with one workspace there is
+ * nothing it could ever do. "No dead controls" means the control is not
+ * rendered, so in label mode this is a plain `<span>` with no role, no
+ * `aria-haspopup`, no `aria-expanded` and no click handler. It keeps the
+ * trigger's own class purely for layout — the rail's header geometry is that
+ * class — plus a modifier that removes the pointer and the hover wash, since
+ * a hover response on something that cannot be pressed is the same lie in
+ * CSS.
+ */
+function Trigger({
+  interactive,
+  open,
+  onOpen,
+  label,
+  title,
+  children,
+}: {
+  interactive: boolean;
+  open: boolean;
+  onOpen: () => void;
+  label: string;
+  title?: string;
+  children: React.ReactNode;
+}) {
+  if (!interactive) {
+    return (
+      <span className="fleet-rail-workspace-trigger fleet-rail-workspace-trigger--static" title={title} aria-label={label}>
+        {children}
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      className="fleet-rail-workspace-trigger"
+      onClick={onOpen}
+      aria-haspopup="menu"
+      aria-expanded={open}
+      aria-label={label}
+      title={title}
+    >
+      {children}
+    </button>
   );
 }
