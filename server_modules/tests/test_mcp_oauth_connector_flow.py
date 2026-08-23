@@ -279,6 +279,60 @@ def test_authorize_redirect_target_is_actually_servable(assembled, pool):
 # ═════════════════════════════════════════════════════════════════════════
 
 
+def _submit_rendered_consent_form(test_client, page_html: str, *, decision: str, overrides: dict | None = None):
+    """POST exactly what the RENDERED page would submit — every input inside
+    the <form>, plus the clicked button's own name/value — instead of a
+    hand-built body.
+
+    This is not fussiness. Every test in this repo used to hand-build
+    ``{"ticket": ..., "csrf_token": ..., "decision": ..., "workspace_id": ...}``
+    and therefore could not see that the workspace field was rendered OUTSIDE
+    the <form> and never submitted at all: a real browser sent no
+    workspace_id and every Allow was refused. CLAUDE.md, "a fixture that
+    invents its own input cannot notice the real input is shaped
+    differently." A real browser found it; this helper is how a test can.
+    """
+    import html as _html_mod
+    import re as _re
+
+    form_match = _re.search(r"<form\b[^>]*>(.*?)</form>", page_html, _re.S)
+    assert form_match, "the consent page rendered no <form> at all"
+    body = form_match.group(1)
+
+    fields: dict[str, str] = {}
+    for name, value in _re.findall(
+        r'<input[^>]*type="hidden"[^>]*name="([^"]+)"[^>]*value="([^"]*)"', body
+    ):
+        fields[name] = _html_mod.unescape(value)
+    for name, value in _re.findall(
+        r'<input[^>]*type="radio"[^>]*name="([^"]+)"[^>]*value="([^"]*)"[^>]*checked', body
+    ):
+        fields.setdefault(name, _html_mod.unescape(value))
+    fields["decision"] = decision
+    if overrides:
+        fields.update(overrides)
+    return test_client.post(oauth.CONSENT_PATH, data=fields, follow_redirects=False), fields
+
+
+def test_the_rendered_form_actually_carries_the_workspace(assembled, pool):
+    """The single-workspace hidden input (and the multi-workspace radio group)
+    must be INSIDE the form, or the browser submits neither."""
+    from starlette.testclient import TestClient
+    import re as _re
+
+    app, provider = assembled
+    client_info = _register_client(provider)
+    with TestClient(app) as tc:
+        _login(tc)
+        page = tc.get(f"{oauth.CONSENT_PATH}?ticket={_ticket(client_info)}")
+    assert page.status_code == 200
+    form_body = _re.search(r"<form\b[^>]*>(.*?)</form>", page.text, _re.S)
+    assert form_body, "no <form> on the consent page"
+    assert 'name="workspace_id"' in form_body.group(1), (
+        "workspace_id is rendered outside the <form>, so a browser never sends it"
+    )
+
+
 def test_allow_from_a_plain_form_post_mints_a_code(assembled, pool):
     """No ``x-csrf-token`` header anywhere — a browser form cannot send one.
     The real ``auth.get_current_user`` runs; only the page's own double-submit
@@ -294,17 +348,9 @@ def test_allow_from_a_plain_form_post_mints_a_code(assembled, pool):
         _login(tc)
         page = tc.get(f"{oauth.CONSENT_PATH}?ticket={ticket}")
         assert page.status_code == 200
-        form_csrf = page.cookies[oauth._CONSENT_CSRF_COOKIE]
-
-        response = tc.post(
-            oauth.CONSENT_PATH,
-            data={
-                "ticket": ticket,
-                "csrf_token": form_csrf,
-                "decision": "allow",
-                "workspace_id": "ws-connector-1",
-            },
-            follow_redirects=False,
+        response, submitted = _submit_rendered_consent_form(tc, page.text, decision="allow")
+        assert submitted.get("workspace_id") == "ws-connector-1", (
+            f"the rendered form did not carry the workspace: {submitted}"
         )
 
     assert response.status_code == 302, (
@@ -359,15 +405,8 @@ def test_allow_refuses_a_workspace_the_session_does_not_hold(assembled, pool):
     with TestClient(app) as tc:
         _login(tc, workspace_ids=("ws-connector-1",))
         page = tc.get(f"{oauth.CONSENT_PATH}?ticket={ticket}")
-        response = tc.post(
-            oauth.CONSENT_PATH,
-            data={
-                "ticket": ticket,
-                "csrf_token": page.cookies[oauth._CONSENT_CSRF_COOKIE],
-                "decision": "allow",
-                "workspace_id": "ws-somebody-elses",
-            },
-            follow_redirects=False,
+        response, _submitted = _submit_rendered_consent_form(
+            tc, page.text, decision="allow", overrides={"workspace_id": "ws-somebody-elses"},
         )
     assert response.status_code == 403
 
@@ -382,16 +421,7 @@ def test_deny_from_a_plain_form_post_reaches_the_client(assembled, pool):
     with TestClient(app) as tc:
         _login(tc)
         page = tc.get(f"{oauth.CONSENT_PATH}?ticket={ticket}")
-        response = tc.post(
-            oauth.CONSENT_PATH,
-            data={
-                "ticket": ticket,
-                "csrf_token": page.cookies[oauth._CONSENT_CSRF_COOKIE],
-                "decision": "deny",
-                "workspace_id": "ws-connector-1",
-            },
-            follow_redirects=False,
-        )
+        response, _submitted = _submit_rendered_consent_form(tc, page.text, decision="deny")
     assert response.status_code == 302
     assert "error=access_denied" in response.headers["location"]
 
@@ -775,16 +805,9 @@ def test_the_connector_flow_completes_end_to_end(assembled, pool):
         assert page.status_code == 200, f"the consent page 404'd: {page.status_code}"
         ticket = parse_qs(urlparse(consent_url).query)["ticket"][0]
 
-        allow = tc.post(
-            oauth.CONSENT_PATH,
-            data={
-                "ticket": ticket,
-                "csrf_token": page.cookies[oauth._CONSENT_CSRF_COOKIE],
-                "decision": "allow",
-                "workspace_id": "ws-connector-1",
-            },
-            follow_redirects=False,
-        )
+        allow, submitted = _submit_rendered_consent_form(tc, page.text, decision="allow")
+        assert submitted.get("ticket") == ticket
+        assert submitted.get("workspace_id") == "ws-connector-1"
         assert allow.status_code == 302, f"Allow: {allow.status_code} {allow.text[:300]}"
         callback = urlparse(allow.headers["location"])
         code = parse_qs(callback.query)["code"][0]

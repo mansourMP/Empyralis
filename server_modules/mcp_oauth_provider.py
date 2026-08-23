@@ -1117,8 +1117,15 @@ def _render_consent_form(
         "<body><main class=\"card\">"
         f"<h1>{client_label} wants to access your Empyralis workspace</h1>"
         f'<ul class="scopes">{scope_items}</ul>'
-        f"{workspace_field}"
+        # workspace_field lives INSIDE the form. It used to be rendered just
+        # above the <form> tag, so neither the single-workspace hidden input
+        # nor the multi-workspace radio group was ever submitted -- every
+        # Allow arrived with an empty workspace_id and was refused "That
+        # workspace is not accessible for this account." Found by clicking
+        # Allow in a real browser; every test until then hand-built the POST
+        # body instead of submitting the page's own form, so none could see it.
         f'<form method="post" action="{CONSENT_PATH}">'
+        f"{workspace_field}"
         f'<input type="hidden" name="ticket" value="{_html.escape(ticket)}">'
         f'<input type="hidden" name="csrf_token" value="{_html.escape(csrf_token)}">'
         '<div class="actions">'
