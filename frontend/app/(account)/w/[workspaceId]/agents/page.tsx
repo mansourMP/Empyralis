@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 
 import {
@@ -8,12 +8,26 @@ import {
   useFleetAgents,
   useFleetProjects,
   useFleetWorkspaceTasks,
+  type FleetProject,
 } from "@/lib/workspace/fleet/fleet-data";
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
 import { useWorkspaceGateways } from "@/lib/workspace/fleet/gateway-box-picker";
 import { breadcrumbCount, findSageAgent } from "@/lib/workspace/fleet/fleet-presentation";
 import { quickCreateAgentChatPath } from "@/lib/workspace/fleet/agent-quick-create";
 import { AgentCreateCard } from "@/lib/workspace/fleet/AgentCreateCard";
 import { AgentCards, AgentCardsSkeleton } from "@/lib/workspace/fleet/AgentCards";
+import { groupTasksByAgent } from "@/lib/workspace/fleet/agent-card-face";
+import { rememberLastViewedAgent } from "@/lib/workspace/fleet/AgentsList";
+import { AgentsBoard } from "@/lib/workspace/fleet/AgentsBoard";
+import { AgentsGroupedList } from "@/lib/workspace/fleet/AgentsGroupedList";
+import { AgentViewOptions } from "@/lib/workspace/fleet/AgentViewOptions";
+import {
+  DEFAULT_AGENT_VIEW_OPTIONS,
+  readAgentViewOptions,
+  sortAgentsForView,
+  writeAgentViewOptions,
+  type AgentViewOptions as AgentViewOptionsState,
+} from "@/lib/workspace/fleet/agent-view-options";
 import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
 import { FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import { HeaderAction, useBreadcrumbBadge } from "@/lib/workspace/fleet/Breadcrumbs";
@@ -54,7 +68,121 @@ import { createButtonClass } from "@/lib/workspace/fleet/create-accent";
  * planAgentCountShape, never a second rule: 0 real agents -> FirstAgentEmpty,
  * exactly 1 -> straight into that agent (a grid of one is worse than no grid,
  * the same call this codebase makes for a table of one), 2+ -> the grid.
+ *
+ * VIEW OPTIONS (2026-08-23) — Board/Grouped-List are wired in as an OPT-IN,
+ * popover-driven view, exactly the relationship Tasks already has between its
+ * default board and TaskViewOptions: a gear icon (AgentViewOptions.tsx) opens
+ * a popover offering Board or List, grouping (status/project/placement),
+ * ordering and the six display properties (Brain/Placement/Channels/Last
+ * active/Cost/Status) AgentsBoard.tsx/AgentsGroupedList.tsx already draw. The
+ * DEFAULT is untouched — DEFAULT_AGENT_VIEW_OPTIONS is layout:"list",
+ * grouping:"none", which resolves to the exact <AgentCards> render above,
+ * unchanged, for anyone who never opens the popover. Choosing Board or a
+ * grouping swaps in AgentsBoard/AgentsGroupedList instead; the choice
+ * persists per workspace under its own `fleet:agent-view:*` localStorage key
+ * (agent-view-options.ts), never touching Tasks' `fleet:task-view:*`.
+ *
+ * This retires the narrower half of primary-rail-space.test.ts's 2026-08-20
+ * reintroduction guard, which banned importing AgentsBoard/AgentsGroupedList/
+ * AgentViewOptions outright — that guard was written when the only way these
+ * three could reappear was behind the deleted rail-morphing pick-list this
+ * page used to gate behind (an accidental resurrection of dead code, never a
+ * deliberate feature). This is not that: the deleted rail space stays dead
+ * (still asserted there), and these three are now a deliberate, tested,
+ * popover-gated feature that never touches the rail and never displaces the
+ * card-grid default. See that test's own updated assertion for the invariant
+ * that replaced it.
+ *
+ * DRIFT FOUND AND FIXED WHILE WIRING THIS IN: agent-view-options.ts's own
+ * agentStatusGroup (the Board's four columns, and the List's "status"
+ * grouping) predates agent-card-face.ts's 2026-08-22 build and read
+ * deriveAgentStatus's raw tone alone — which means "Working" depended
+ * entirely on `current_run_id`, de-facto always null for a real fleet agent
+ * (CLAUDE.md's own documented finding). A seeded agent with a genuinely
+ * in-progress task read "Ready" on its own Board card while sitting one
+ * click away from a card grid that correctly called it "Working" — the
+ * exact "two surfaces disagree about the same fleet on the same screen" bug
+ * CLAUDE.md already records fixing for PrimaryRail's footer pulse ("Working"
+ * now has ONE definition, in agent-card-face.ts"). Fixed the same way:
+ * agentDisplayStatus (agent-view-options.ts) folds an in-progress task into
+ * the same {tone:"working", label:"Working"} pair agent-card-face.ts uses,
+ * and Board/Grouped-List both now read it instead of the bare tone — see
+ * that function's own doc comment for the full reasoning and the live
+ * before/after this pass measured.
  */
+
+/**
+ * Board-shaped skeleton reusing AgentsBoard's OWN real classNames
+ * (`.fleet-agent-board`/`.fleet-agent-board-column*`/`.fleet-agent-board-card`,
+ * fleet-theme.css) — a saved "board" view option persists across visits
+ * (readAgentViewOptions), so the very first paint on a fresh load can already
+ * be in board mode. Falling back to AgentCardsSkeleton's grid shape there
+ * would mean the page opens as a card grid and then, the instant the fetch
+ * resolves, reflows into multi-column kanban — the exact "loading shape
+ * doesn't match the saved layout" bug this file's own AgentCardsSkeleton
+ * comment already names for the default case. Ported verbatim from this
+ * page's own pre-2026-08-20 history (git show c352a305, before the
+ * conversation-list redesign trimmed it as dead code) rather than rewritten.
+ */
+function AgentsBoardSkeleton() {
+  const columns = [3, 2, 4];
+  return (
+    <div className="fleet-agent-board" aria-busy="true" aria-label="Loading">
+      {columns.map((count, ci) => (
+        <section key={ci} className="fleet-agent-board-column">
+          <header className="fleet-agent-board-column-header">
+            <div className="fleet-skeleton-bar" style={{ width: 60, height: 11 }} />
+            <div className="fleet-skeleton-bar" style={{ width: 16, height: 11 }} />
+          </header>
+          <div className="fleet-agent-board-column-body">
+            {Array.from({ length: count }).map((_, i) => (
+              <article key={i} className="fleet-agent-board-card" style={{ cursor: "default" }}>
+                <div className="fleet-agent-board-card-head">
+                  <div className="fleet-skeleton-bar" style={{ width: 20, height: 20, borderRadius: 999 }} />
+                  <div className="fleet-skeleton-bar" style={{ width: "60%", height: 12 }} />
+                </div>
+                <div className="fleet-skeleton-bar" style={{ width: "80%", height: 11, marginTop: 8, opacity: 0.7 }} />
+              </article>
+            ))}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Grouped-list-shaped skeleton reusing AgentsGroupedList's real classNames
+ * (`.fleet-agent-glist*`) — same "saved layout can already be non-default on
+ * first paint" reasoning as AgentsBoardSkeleton above. Also ported from this
+ * page's pre-2026-08-20 history.
+ */
+function AgentsGroupedSkeleton() {
+  return (
+    <div className="fleet-agent-glist" aria-busy="true" aria-label="Loading">
+      {[3, 2].map((rows, si) => (
+        <section key={si} className="fleet-agent-glist-section">
+          <header className="fleet-agent-glist-header">
+            <div className="fleet-agent-glist-header-btn" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <div className="fleet-skeleton-bar" style={{ width: 13, height: 13 }} />
+              <div className="fleet-skeleton-bar" style={{ width: 100, height: 12 }} />
+              <div className="fleet-skeleton-bar" style={{ width: 18, height: 11 }} />
+            </div>
+          </header>
+          <div className="fleet-agent-glist-rows">
+            {Array.from({ length: rows }).map((_, i) => (
+              <div key={i} className="fleet-agent-glist-row" style={{ display: "flex", alignItems: "center", gap: 10, minHeight: 52, cursor: "default" }}>
+                <div className="fleet-skeleton-bar" style={{ width: 20, height: 20, borderRadius: 999 }} />
+                <div className="fleet-skeleton-bar" style={{ width: "35%", height: 12 }} />
+              </div>
+            ))}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
 export default function AgentsPage() {
   const params = useParams();
   const router = useRouter();
@@ -79,6 +207,97 @@ export default function AgentsPage() {
   const agents = useMemo(
     () => (sageAgent ? allAgents.filter((a) => a.agent_id !== sageAgent.agent_id) : allAgents),
     [allAgents, sageAgent],
+  );
+
+  // Bucketed ONCE for Board/Grouped-List — same shape AgentCards.tsx already
+  // builds for itself off this same `tasks` fetch (see that file's own
+  // "Bucketed ONCE for the whole grid" comment). Needed so
+  // agentDisplayStatus/agentStatusGroup (agent-view-options.ts) can fold an
+  // in-progress task into "Working" the same way the card grid and
+  // PrimaryRail's footer pulse already do — without it, Board/Grouped-List
+  // would be a THIRD surface reading `current_run_id` alone, which
+  // CLAUDE.md documents as de-facto always null in practice.
+  const tasksByAgent = useMemo(() => groupTasksByAgent(tasks), [tasks]);
+
+  // Per-agent spend, for the Board/Grouped-List "Cost" column and ordering.
+  // Same /fleet/usage response this page's own pre-2026-08-20 history built
+  // this map from (git show c352a305) — the endpoint and response shape are
+  // unchanged (verified against routes_fleet.fleet_usage /
+  // usage_events_repository.summarize_usage before reusing this verbatim).
+  // AgentCards' own default render never reads this — only Board/Grouped-List
+  // do — so this fetch is pure addition, never a regression to the default.
+  const [cost, setCost] = useState<Map<string, number>>(new Map());
+  useEffect(() => {
+    let cancelled = false;
+    fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/usage?scope=workspace&period=day`, {
+      credentials: "include",
+    })
+      .then((r) => r.json())
+      .then((d) => {
+        if (cancelled) return;
+        const m = new Map<string, number>();
+        for (const a of d?.by_agent || []) m.set(a.agent_install_id, a.usd_cost);
+        setCost(m);
+      })
+      .catch(() => {
+        /* Cost is a display extra, not a page-blocking fetch — a failure here
+           just means every card reads $0.0000 until the next mount, same
+           posture the pre-2026-08-20 version of this page took. */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId]);
+
+  const projectById = useMemo(() => new Map<string, FleetProject>(projects.map((p) => [p.id, p])), [projects]);
+
+  // Board/List view options (agent-view-options.ts) — hydrated from
+  // localStorage in an effect, never during render, so the server's markup
+  // and the client's first paint agree (same discipline TaskViewOptions'
+  // own wiring on the project page already follows).
+  const [viewOptions, setViewOptions] = useState<AgentViewOptionsState>(DEFAULT_AGENT_VIEW_OPTIONS);
+  useEffect(() => {
+    if (workspaceId) setViewOptions(readAgentViewOptions(workspaceId));
+  }, [workspaceId]);
+  // An UPDATER, not a value — see AgentViewOptions.tsx's identical prop doc:
+  // two changes landing in one React batch must not both start from the same
+  // stale snapshot. The write rides inside the updater, the only place the
+  // resolved next value exists.
+  const updateViewOptions = useCallback(
+    (update: (prev: AgentViewOptionsState) => AgentViewOptionsState) => {
+      setViewOptions((prev) => {
+        const next = update(prev);
+        writeAgentViewOptions(workspaceId, next);
+        return next;
+      });
+    },
+    [workspaceId],
+  );
+
+  // Ordering applies ONLY to Board/Grouped-List — neither sorts internally
+  // (see AgentsBoard.tsx/AgentsGroupedList.tsx's own doc comments: "the page
+  // passes already-sorted agents"). AgentCards is deliberately NOT re-sorted
+  // by this: its own planAgentCards ranks by attention (blocked > working >
+  // unfinished setup > stopped > healthy) rather than by recency or name,
+  // CLAUDE.md's own settled call for that surface ("never recency... a
+  // card's position is stable") — running the view-options ordering over it
+  // too would silently override a deliberate, already-shipped decision the
+  // instant a saved "cost" or "name" ordering happened to be active.
+  const orderedAgents = useMemo(
+    () => sortAgentsForView(agents, viewOptions.ordering, viewOptions.direction, cost),
+    [agents, viewOptions.ordering, viewOptions.direction, cost],
+  );
+
+  // Board/Grouped-List navigate the same way AgentCards' own card Link does
+  // (rememberLastViewedAgent + the workspace-scoped agent route, no project
+  // id in the URL) — onSelect's `projectId` parameter predates the
+  // workspace-scoped route and is intentionally unused here.
+  const goToAgent = useCallback(
+    (agentId: string) => {
+      rememberLastViewedAgent(agentId);
+      router.push(`${base}/agents/${encodeURIComponent(agentId)}`);
+    },
+    [router, base],
   );
   // U3-E: the count lives on the breadcrumb line itself ("Agents · 4"), not
   // a second toolbar row — "Agents" is both the section and the unit, so it
@@ -196,12 +415,33 @@ export default function AgentsPage() {
         </button>
       </HeaderAction>
 
-      <div className="fleet-content-main">
+      {/* U3-H shape, mirrored from the Tasks tab: the view-control cluster is
+          its own row below the header, not squeezed into it beside "+ New
+          agent". Hidden with nothing to view-option over — same "no dead
+          controls" gate TaskViewOptions' own row uses (`tasks.length > 0`). */}
+      {agents.length > 0 && (
+        <div className="fleet-content-toolbar">
+          <div className="fleet-agent-view-cluster">
+            <AgentViewOptions options={viewOptions} onChange={updateViewOptions} />
+          </div>
+        </div>
+      )}
+
+      <div
+        className={`fleet-content-main${viewOptions.layout === "board" ? " fleet-content-main--agent-board" : ""}`}
+      >
         {loading && agents.length === 0 ? (
-          // A card-grid skeleton, not the old row skeleton: a loading state
-          // whose shape is not the shape that arrives is its own small lie,
-          // and it reflows the whole pane the moment real data lands.
-          <AgentCardsSkeleton cards={6} />
+          // Which skeleton to show is decided by the SAME viewOptions the real
+          // branches below switch on, for the reason AgentsBoardSkeleton's own
+          // comment gives: a saved non-default layout can already be active on
+          // the very first paint.
+          viewOptions.layout === "board" ? (
+            <AgentsBoardSkeleton />
+          ) : viewOptions.grouping !== "none" ? (
+            <AgentsGroupedSkeleton />
+          ) : (
+            <AgentCardsSkeleton cards={6} />
+          )
         ) : error && agents.length === 0 ? (
           <FleetSurfaceError title="Couldn’t load agents" message={error} onRetry={refresh} />
         ) : agents.length === 0 ? (
@@ -211,7 +451,30 @@ export default function AgentsPage() {
             onCreate={openCreateCard}
             createCardOpen={cardOpen}
           />
+        ) : viewOptions.layout === "board" ? (
+          <AgentsBoard
+            agents={orderedAgents}
+            gateways={gateways}
+            costByAgent={cost}
+            tasksByAgent={tasksByAgent}
+            display={viewOptions.display}
+            onSelect={goToAgent}
+          />
+        ) : viewOptions.grouping !== "none" ? (
+          <AgentsGroupedList
+            workspaceId={workspaceId}
+            agents={orderedAgents}
+            gateways={gateways}
+            costByAgent={cost}
+            tasksByAgent={tasksByAgent}
+            projectById={projectById}
+            grouping={viewOptions.grouping}
+            display={viewOptions.display}
+            onSelect={goToAgent}
+          />
         ) : (
+          // The unchanged default: everyone who never opens the view-options
+          // popover sees exactly this, exactly as before this feature landed.
           <AgentCards workspaceId={workspaceId} agents={agents} tasks={tasks} gateways={gateways} />
         )}
       </div>

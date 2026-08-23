@@ -14,6 +14,21 @@
  * claim about, and the rule they composed (planAgentCountShape) keeps its
  * own test.
  *
+ * UPDATED 2026-08-23 — one of the assertions below (guarding against
+ * AgentsBoard/AgentsGroupedList/AgentViewOptions being imported into the
+ * workspace Agents page) is now INVERTED, same convention as the two
+ * deletions above. That guard's own reasoning was narrow: it banned
+ * resurrecting those three components because the only way they could
+ * reappear at the time was behind the just-deleted workspace-agents rail
+ * space — an ACCIDENT, not a feature. They are now wired in deliberately, as
+ * an opt-in view behind AgentViewOptions' own popover trigger (mirroring
+ * TaskViewOptions exactly), never displacing the card-grid default and never
+ * touching the rail. The actual invariant this file exists to guard — no
+ * rail-space picker — is untouched and still asserted below; only the
+ * over-broad "never import" half of the old guard is retired. See
+ * agents/page.tsx's own "VIEW OPTIONS (2026-08-23)" header for the full
+ * wiring.
+ *
  * Run: npx tsx lib/workspace/fleet/primary-rail-space.test.ts
  */
 
@@ -305,9 +320,26 @@ assert(
   !/Pick an agent to watch it work/.test(agentsPageSource),
   "…and no longer prompts a pick, which only ever made sense beside the deleted column",
 );
+// INVERTED 2026-08-23 (see this file's own header): AgentsBoard/
+// AgentsGroupedList/AgentViewOptions are now DELIBERATELY imported here, as
+// an opt-in view behind AgentViewOptions' own popover — never a rail-space
+// picker, and never the default. The rail-space half of the old guard is the
+// part that still matters, so it is asserted directly instead: nothing on
+// this page may reference the deleted workspace-agents rail space (the same
+// two strings the assertions above already ban on PrimaryRail itself).
 assert(
-  !/from ["']@\/lib\/workspace\/fleet\/(AgentsBoard|AgentsGroupedList|AgentViewOptions)["']/.test(agentsPageSource),
-  "the workspace Agents index no longer IMPORTS the fleet-management surfaces that were already unreachable behind the old rail-space gate (mentioning them in prose, e.g. explaining they're now orphaned, is fine — this only bans a live import)",
+  /from ["']@\/lib\/workspace\/fleet\/AgentsBoard["']/.test(agentsPageSource) &&
+    /from ["']@\/lib\/workspace\/fleet\/AgentsGroupedList["']/.test(agentsPageSource) &&
+    /from ["']@\/lib\/workspace\/fleet\/AgentViewOptions["']/.test(agentsPageSource),
+  "Board/Grouped-List/AgentViewOptions ARE now imported — a deliberate, tested, opt-in view beside the card-grid default, not orphaned code",
+);
+assert(
+  !/workspace-agents/.test(agentsPageSource) && !/workspaceAgentsSpaceLinks/.test(agentsPageSource),
+  "…but nothing on this page reintroduces the deleted workspace-agents RAIL SPACE — the opt-in view is a popover trigger, never a rail morph",
+);
+assert(
+  agentsPageSource.includes('from "@/lib/workspace/fleet/AgentCards"') && /<AgentCards\b/.test(agentsPageSource),
+  "…and the card grid is still the thing actually rendered by default — the opt-in view sits beside it, never in place of it",
 );
 
 // And the in-content sidebar is actually GONE: SettingsShell must not render
