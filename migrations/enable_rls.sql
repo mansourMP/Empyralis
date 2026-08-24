@@ -487,4 +487,21 @@ CREATE POLICY empyralis_workspace_storage_objects_scope ON workspace_storage_obj
     USING (public.empyralis_rls_scope_match(tenant_id, workspace_id))
     WITH CHECK (public.empyralis_rls_scope_match(tenant_id, workspace_id));
 
+-- push_device_tokens is a BRAND NEW table (migrations/
+-- add_push_device_tokens.sql -- APNs device tokens per person per
+-- workspace). Same posture as the two above: its only reader/writer
+-- (server_modules/push_device_repository.py) was written against the
+-- scoped rls_fetch/rls_fetchrow/rls_execute helpers from the first
+-- commit, so RLS ships with the table rather than after it. The policy
+-- expresses the tenant/workspace scope only; the per-person boundary
+-- (user_id) is enforced in that module, where user_id is a required
+-- keyword with no default on every function.
+ALTER TABLE push_device_tokens ENABLE ROW LEVEL SECURITY;
+ALTER TABLE push_device_tokens FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS empyralis_push_device_tokens_scope ON push_device_tokens;
+CREATE POLICY empyralis_push_device_tokens_scope ON push_device_tokens
+    FOR ALL
+    USING (public.empyralis_rls_scope_match(tenant_id, workspace_id))
+    WITH CHECK (public.empyralis_rls_scope_match(tenant_id, workspace_id));
+
 COMMIT;

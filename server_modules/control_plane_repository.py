@@ -1048,6 +1048,33 @@ CREATE TABLE IF NOT EXISTS workspace_storage_objects (
 CREATE INDEX IF NOT EXISTS idx_workspace_storage_objects_bucket
     ON workspace_storage_objects(tenant_id, workspace_id, project_id);
 
+-- APNs device tokens (migrations/add_push_device_tokens.sql). DDL only --
+-- nothing to backfill, since a device token can only be produced by a real
+-- device registering itself. device_token is GLOBALLY unique on purpose:
+-- Apple reassigns a token across app installs, so the newest registration
+-- must be the only live row or one person's push lands on another's lock
+-- screen. See push_device_repository.py for the per-user boundary RLS's
+-- two-column scope_match cannot express.
+CREATE TABLE IF NOT EXISTS push_device_tokens (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    device_token TEXT NOT NULL,
+    platform TEXT NOT NULL DEFAULT 'ios',
+    bundle_id TEXT NOT NULL DEFAULT '',
+    environment TEXT NOT NULL DEFAULT 'production',
+    device_id TEXT NOT NULL DEFAULT '',
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_push_device_tokens_token UNIQUE (device_token)
+);
+
+CREATE INDEX IF NOT EXISTS idx_push_device_tokens_workspace_user
+    ON push_device_tokens(workspace_id, user_id);
+
 -- Bug reports (MAN-106): a small, honest "report an issue" entry point
 -- reachable from anywhere in the product via a rail icon button (see
 -- frontend/lib/workspace/fleet/BugReportButton.tsx). Deliberately NOT a
