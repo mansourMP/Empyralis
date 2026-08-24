@@ -12,11 +12,20 @@ import {
   googleLogin,
   listAuthProviders,
   login,
+  me,
   type AuthProviderOptions,
   watchExternalAuthCompletion,
 } from '@/lib/auth/auth-client';
 import { GoogleProviderIcon } from '@/lib/auth/auth-provider-icons';
 import { safeNextPath } from '@/lib/auth/login-next';
+import {
+  accountInitials,
+  forgetAccount,
+  listRememberedAccounts,
+  planLoginEntry,
+  rememberAccount,
+  type RememberedAccount,
+} from '@/lib/auth/remembered-accounts';
 import { AppButton, AppInput } from '@/lib/ui/primitives';
 
 function authErrorCopy(error: string): string {
@@ -105,6 +114,16 @@ function LoginPageContent() {
     email: { enabled: false },
     google: { enabled: false },
   });
+  // Who this device has signed in as before. Read on hydrate only —
+  // localStorage does not exist during SSR, and reading it during render
+  // would produce a server/client mismatch on the one page nobody can
+  // route around.
+  const [remembered, setRemembered] = useState<RememberedAccount[]>([]);
+  // `null` means "show the account chooser". A value means "we know who is
+  // signing in" — the form then confirms that identity instead of asking
+  // for it again.
+  const [chosen, setChosen] = useState<RememberedAccount | null>(null);
+  const [showChooser, setShowChooser] = useState(false);
   const agentParam = String(searchParams.get('agent') || '').trim();
   const channelAttribution = String(searchParams.get('channel_attribution') || '').trim();
   const sourceParam = String(searchParams.get('source') || '').trim();
@@ -138,6 +157,17 @@ function LoginPageContent() {
 
   useEffect(() => {
     setIsHydrated(true);
+    const accounts = listRememberedAccounts();
+    setRemembered(accounts);
+    // An explicit ?email= (an invite link, a "sign in as" hand-off) is a
+    // stated intent and always beats what this device happens to remember.
+    const requestedEmail = String(searchParams.get('email') || '').trim().toLowerCase();
+    if (requestedEmail) {
+      setEmail(requestedEmail);
+      setShowChooser(false);
+    } else {
+      setShowChooser(planLoginEntry(accounts) === 'chooser');
+    }
     if (providerError) {
       clearExternalAuthPending();
       setError(providerError);
@@ -162,7 +192,7 @@ function LoginPageContent() {
         setAuthRuntimeError(message);
         setProvidersLoaded(true);
       });
-  }, [providerError]);
+  }, [providerError, searchParams]);
 
   useEffect(() => {
     if (!isHydrated) {
@@ -182,6 +212,23 @@ function LoginPageContent() {
           return;
         }
         clearExternalAuthPending();
+        // Google never passes an email through this page — the browser was
+        // redirected away and back — so the identity is read from the
+        // session that now exists. Best-effort by design: failing to
+        // remember an account must never delay or block a completed
+        // sign-in, so this neither throws nor gates the redirect below.
+        try {
+          const account = await me();
+          const user = (account as { user?: Record<string, unknown> } | null)?.user ?? account;
+          rememberAccount({
+            email: (user as Record<string, unknown> | null)?.email,
+            name: (user as Record<string, unknown> | null)?.name,
+            avatarUrl: (user as Record<string, unknown> | null)?.avatar_url,
+            method: 'google',
+          });
+        } catch {
+          /* the sign-in itself succeeded; only the convenience is lost */
+        }
         window.location.replace(loginRedirectTarget);
       } catch {
         // keep waiting for the callback tab or focus handoff
@@ -206,7 +253,19 @@ function LoginPageContent() {
     setSubmitting(true);
     setError(null);
     try {
-      await login(trimmedEmail, password);
+      const payload = await login(trimmedEmail, password);
+      // Recorded HERE — after login() resolved and before the readiness
+      // poll — because this is the exact point the credential was proven
+      // correct. Recording on submit would put a typo'd address on the
+      // chooser forever; recording after the poll would forget a real,
+      // successful sign-in whenever cookie propagation happened to be slow.
+      const user = (payload as { user?: Record<string, unknown> } | null)?.user;
+      rememberAccount({
+        email: trimmedEmail,
+        name: user?.name,
+        avatarUrl: user?.avatar_url,
+        method: 'email',
+      });
     } catch (nextError) {
       const message = nextError instanceof Error ? nextError.message : 'Login failed.';
       setError(message);
@@ -250,6 +309,123 @@ function LoginPageContent() {
     && providers.google?.enabled === true;
   const emailSubmitEnabled = email.trim().length > 0 && password.length > 0;
 
+  function chooseAccount(account: RememberedAccount) {
+    setError(null);
+    if (account.method === 'google') {
+      // Showing a password field to someone who has only ever used Google
+      // would be a control they cannot satisfy — send them down the door
+      // they actually came through.
+      void googleLogin();
+      return;
+    }
+    setChosen(account);
+    setEmail(account.email);
+    setPassword('');
+    setShowChooser(false);
+  }
+
+  function removeAccount(account: RememberedAccount) {
+    forgetAccount(account.email);
+    const next = listRememberedAccounts();
+    setRemembered(next);
+    if (next.length === 0) setShowChooser(false);
+  }
+
+  function useAnotherAccount() {
+    setChosen(null);
+    setEmail('');
+    setPassword('');
+    setError(null);
+    setShowChooser(false);
+  }
+
+  if (showChooser && remembered.length > 0) {
+    return (
+      <main className="app-auth-page">
+        <div className="app-auth-shell app-auth-shell--centered">
+          <div className="app-auth-card">
+            <div className="app-auth-header">
+              <img
+                src="/brand-assets/empyralis/empyralis-mark.svg"
+                alt=""
+                aria-hidden="true"
+                width={64}
+                height={64}
+                className="app-auth-brand-mark"
+              />
+              <h1 className="app-auth-title">Choose an account</h1>
+              <p className="app-auth-subtitle">to continue to Empyralis</p>
+            </div>
+
+            <ul className="app-auth-account-list">
+              {remembered.map((account) => (
+                <li key={account.email} className="app-auth-account-row">
+                  <button
+                    type="button"
+                    className="app-auth-account"
+                    onClick={() => chooseAccount(account)}
+                    disabled={submitting}
+                  >
+                    <span className="app-auth-account__avatar" aria-hidden="true">
+                      {account.avatarUrl
+                        ? <img src={account.avatarUrl} alt="" width={36} height={36} />
+                        : <span>{accountInitials(account)}</span>}
+                    </span>
+                    <span className="app-auth-account__identity">
+                      {account.name ? (
+                        <>
+                          <span className="app-auth-account__name">{account.name}</span>
+                          <span className="app-auth-account__email">{account.email}</span>
+                        </>
+                      ) : (
+                        <span className="app-auth-account__name">{account.email}</span>
+                      )}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="app-auth-account__remove"
+                    onClick={() => removeAccount(account)}
+                    aria-label={`Forget ${account.email} on this device`}
+                    title="Forget on this device"
+                  >
+                    &times;
+                  </button>
+                </li>
+              ))}
+
+              <li className="app-auth-account-row">
+                <button
+                  type="button"
+                  className="app-auth-account app-auth-account--other"
+                  onClick={useAnotherAccount}
+                  disabled={submitting}
+                >
+                  <span className="app-auth-account__avatar app-auth-account__avatar--ghost" aria-hidden="true">
+                    +
+                  </span>
+                  <span className="app-auth-account__identity">
+                    <span className="app-auth-account__name">Use another account</span>
+                  </span>
+                </button>
+              </li>
+            </ul>
+
+            {/* Says plainly what the list IS, so nobody mistakes it for
+                the server knowing who they are. */}
+            <p className="app-auth-account-note">
+              Accounts you&rsquo;ve used on this device. Signing in still needs your password.
+            </p>
+
+            <p className="app-auth-footer">
+              No account? <Link href={signupHref}>Sign up</Link>
+            </p>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
   return (
     <main className="app-auth-page">
       <div className="app-auth-shell app-auth-shell--centered">
@@ -265,16 +441,54 @@ function LoginPageContent() {
               height={64}
               className="app-auth-brand-mark"
             />
-            <h1 className="app-auth-title">Log in to Empyralis</h1>
+            <h1 className="app-auth-title">
+              {chosen ? 'Welcome back' : 'Log in to Empyralis'}
+            </h1>
             {/* Matches signup/page.tsx's own hero rewrite (CLAUDE.md,
                 "copy that names a SCREEN goes stale... copy that names the
                 WORK does not") — this line was the same stale, agent-first
                 framing on the surface every returning customer sees first. */}
-            <p className="app-auth-subtitle">Your projects, documents, and tasks in one place.</p>
+            {!chosen ? (
+              <p className="app-auth-subtitle">Your projects, documents, and tasks in one place.</p>
+            ) : null}
           </div>
+
+          {/* IDENTITY-FIRST. When we know who is signing in, show them —
+              and give them a way out. A password field under an unlabelled
+              form is the moment people typo a DIFFERENT account's password
+              and conclude the product is broken. */}
+          {chosen ? (
+            <div className="app-auth-chosen">
+              <span className="app-auth-account__avatar" aria-hidden="true">
+                {chosen.avatarUrl
+                  ? <img src={chosen.avatarUrl} alt="" width={28} height={28} />
+                  : <span>{accountInitials(chosen)}</span>}
+              </span>
+              <span className="app-auth-chosen__email">{chosen.email}</span>
+              <button
+                type="button"
+                className="app-auth-chosen__switch"
+                onClick={() => { setChosen(null); setPassword(''); setShowChooser(true); }}
+                disabled={submitting}
+              >
+                Not you?
+              </button>
+            </div>
+          ) : null}
           {authRuntimeError ? (
             <AuthErrorNotice title="Auth unavailable" message={authRuntimeError} />
           ) : null}
+          {/* Both hidden once an account is chosen: the identity question
+              is already answered, and re-offering Google there would be a
+              second way to become a DIFFERENT person on a screen whose
+              whole job is confirming one. */}
+          {/* NOT the `hidden` ATTRIBUTE — these classes set an explicit
+              `display`, which beats the UA stylesheet's `[hidden]` rule, so
+              the attribute renders them anyway. Verified live: both the
+              Google button and the email field stayed on screen. Real
+              conditional rendering is the only version that actually
+              removes them. */}
+          {!chosen ? (
           <div className="app-auth-provider-stack">
             <div className="app-auth-social-stack">
               <AppButton
@@ -299,6 +513,8 @@ function LoginPageContent() {
               <span aria-hidden="true" />
             </div>
           </div>
+          ) : null}
+          {!chosen ? (
           <label className="app-auth-field">
             <span className="app-auth-field__label">Email</span>
             <span className="app-auth-input-shell">
@@ -316,6 +532,7 @@ function LoginPageContent() {
               />
             </span>
           </label>
+          ) : null}
           <label className="app-auth-field">
             <span className="app-auth-field__label">Password</span>
             <span className="app-auth-input-shell">
