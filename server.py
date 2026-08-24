@@ -255,6 +255,7 @@ from server_modules.routes_platform_analytics import router as platform_analytic
 from server_modules.routes_runs import router as runs_router
 from server_modules.routes_studio import router as studio_router
 from server_modules.routes_workspaces import router as workspaces_router
+from server_modules.routes_push import router as push_router
 from server_modules.routes_workflows import router as workflows_router
 from server_modules.routes_doctor import router as doctor_router
 from server_modules.routes_sage_telegram_hosted import router as sage_telegram_hosted_router
@@ -393,6 +394,7 @@ from server_modules.routes_gateway import register_gateway as _register_gateway_
 app.post("/gateway/registrations")(_register_gateway_fallback)
 app.include_router(personal_channels_router, prefix="/api")
 app.include_router(workspaces_router, prefix="/api")
+app.include_router(push_router, prefix="/api")
 app.include_router(billing_router, prefix="/api")
 app.include_router(deployed_agents_router, prefix="/api")
 app.include_router(agent_traces_router, prefix="/api")

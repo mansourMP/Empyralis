@@ -26317,3 +26317,189 @@ body[data-theme='dark'] .sage-integration-brand__image[src*='notion.svg'] {
   opacity: 0.6;
   cursor: default;
 }
+
+/* ── Account chooser (login) ─────────────────────────────────────────────
+   The returning-customer front door. Matches the existing .app-auth-social
+   control geometry (48px min-height, 12px radius, panel background,
+   default border) so a remembered account and the Google button read as
+   the same class of control rather than two different design eras.
+
+   NO ACCENT ANYWHERE IN HERE, deliberately: per CLAUDE.md the violet is
+   reserved for the single primary action, and on this screen that is the
+   Continue button on the password step. An account row is a navigation
+   choice, so it is neutral — selection and emphasis come from weight and
+   the hover wash, never hue. */
+
+.app-auth-account-list {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--app-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* The row is the positioning context for the remove button, which is
+   overlaid rather than nested — a <button> inside a <button> is invalid
+   and gets un-nested by the browser, which silently breaks the row. */
+.app-auth-account-row {
+  position: relative;
+  display: block;
+}
+
+.app-auth-account {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-3);
+  width: 100%;
+  min-height: 48px;
+  /* Right padding clears the overlaid remove button so a long email is
+     never printed underneath it. */
+  padding: 8px 44px 8px 12px;
+  border-radius: 12px;
+  background: var(--app-bg-panel);
+  border: 1px solid var(--app-border-default);
+  color: var(--app-text-primary);
+  text-align: left;
+  cursor: pointer;
+  transition: background 120ms ease-out, border-color 120ms ease-out;
+}
+
+.app-auth-account:hover:not(:disabled) {
+  background: var(--app-bg-card-hover, var(--app-bg-panel));
+  border-color: var(--app-border-strong);
+}
+
+.app-auth-account:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.app-auth-account__avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--app-bg-inset);
+  border: 1px solid var(--app-border-default);
+  color: var(--app-text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.app-auth-account__avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.app-auth-account__avatar--ghost {
+  background: transparent;
+  border-style: dashed;
+  font-size: 18px;
+  font-weight: 400;
+}
+
+.app-auth-account__identity {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.app-auth-account__name {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--app-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-auth-account__email {
+  font-size: 12px;
+  color: var(--app-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-auth-account__remove {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  border: 0;
+  background: transparent;
+  color: var(--app-text-muted);
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 120ms ease-out, color 120ms ease-out;
+}
+
+.app-auth-account__remove:hover {
+  background: var(--app-bg-inset);
+  color: var(--app-text-primary);
+}
+
+.app-auth-account-note {
+  margin: var(--app-space-3) 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--app-text-muted);
+  text-align: center;
+}
+
+/* The identity strip on the password step. */
+.app-auth-chosen {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+  padding: 6px 10px 6px 6px;
+  border-radius: 999px;
+  background: var(--app-bg-inset);
+  border: 1px solid var(--app-border-default);
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 auto;
+}
+
+.app-auth-chosen .app-auth-account__avatar {
+  width: 28px;
+  height: 28px;
+  font-size: 11px;
+}
+
+.app-auth-chosen__email {
+  font-size: 13px;
+  color: var(--app-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-auth-chosen__switch {
+  border: 0;
+  background: transparent;
+  padding: 0 2px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--app-text-secondary);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.app-auth-chosen__switch:hover {
+  color: var(--app-text-primary);
+}
