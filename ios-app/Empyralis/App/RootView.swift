@@ -6,6 +6,11 @@ struct RootView: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.scenePhase) private var scenePhase
 
+    /// Read once at construction rather than in the body — reading
+    /// UserDefaults during render would flip the screen out from under
+    /// someone the moment markSeen() lands.
+    @State private var showWelcome = !WelcomeState.hasSeen
+
     var body: some View {
         Group {
             switch session.state {
@@ -15,7 +20,17 @@ struct RootView: View {
                     ProgressView()
                 }
             case .signedOut:
-                LoginView()
+                // The greeting comes before the ask, once per install. A
+                // returning person who signed out gets the login screen
+                // directly — greeting someone who just left is noise.
+                if showWelcome {
+                    WelcomeView {
+                        WelcomeState.markSeen()
+                        withAnimation(.easeOut(duration: 0.15)) { showWelcome = false }
+                    }
+                } else {
+                    LoginView()
+                }
             case .signedIn:
                 MainTabView()
             }

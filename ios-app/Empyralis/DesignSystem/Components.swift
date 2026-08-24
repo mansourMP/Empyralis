@@ -152,3 +152,58 @@ extension View {
         }
     }
 }
+
+// MARK: - Auth pills
+//
+// The entry screens use TALL, FULLY-ROUNDED, FULL-WIDTH buttons rather than
+// the 6px-radius controls the rest of the app uses. That is deliberate and
+// scoped: inside the product, tight radii read as an operator tool and are
+// correct. The entry screens are a different job — one decision per row,
+// nothing else on screen — and a 52pt pill is the shape that reads as
+// "press this" on a phone with no chrome around it.
+//
+// Do NOT spread this shape into the product's own surfaces.
+
+/// The single accent-filled option. Exactly one of these per screen — the
+/// accent law is unchanged here.
+struct AuthPrimaryPillStyle: ButtonStyle {
+    @Environment(\.colorScheme) private var scheme
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 16, weight: .medium))
+            .foregroundStyle(isEnabled ? Theme.accentContrast : Theme.textMuted(scheme))
+            .frame(maxWidth: .infinity)
+            .frame(height: 52)
+            .background(
+                isEnabled
+                    ? Theme.accent(scheme).opacity(configuration.isPressed ? 0.86 : 1)
+                    : Theme.bgInset(scheme),
+                in: Capsule()
+            )
+            .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
+    }
+}
+
+/// Every other option. Neutral by weight — never a second accent.
+struct AuthSecondaryPillStyle: ButtonStyle {
+    @Environment(\.colorScheme) private var scheme
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 16, weight: .regular))
+            .foregroundStyle(Theme.textPrimary(scheme))
+            .frame(maxWidth: .infinity)
+            .frame(height: 52)
+            .background(
+                scheme == .dark ? Color(hex: 0x1C1C1E) : Color(hex: 0xF2F2F4),
+                in: Capsule()
+            )
+            .overlay(
+                Capsule().stroke(Theme.border(scheme), lineWidth: 1)
+            )
+            .opacity(configuration.isPressed ? 0.75 : 1)
+            .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
+    }
+}
