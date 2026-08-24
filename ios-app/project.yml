@@ -8,7 +8,14 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    DEVELOPMENT_TEAM: ""
+    # Read from the signing certificate installed on this Mac — specifically
+    # its Organizational Unit, which is what Apple defines as the Team ID.
+    #   security find-certificate -c "Apple Development: <apple-id>" -p \
+    #     | openssl x509 -noout -subject
+    # NOT the value in parentheses in the certificate's common name — that is
+    # the certificate's own id (AP284MTHFQ here) and using it produces a
+    # signing failure whose message never mentions the team.
+    DEVELOPMENT_TEAM: LYUMASNB36
     CODE_SIGN_STYLE: Automatic
 
 targets:
