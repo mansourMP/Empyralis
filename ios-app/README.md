@@ -59,17 +59,54 @@ links, or status. Selection is weight and shape. Verify with:
 grep -rn "Theme\.accent" Empyralis --include="*.swift" | grep -v DesignSystem/Theme.swift
 ```
 
-## Setup that needs a real Apple account
+## Apple account: FREE PERSONAL TEAM vs PAID PROGRAM
 
-None of this is required to build and run in the Simulator.
+These are two different things and the difference decides what this app can
+do. Signing into Xcode with any Apple ID creates a **free personal team**
+automatically — that is what this project is currently signed with
+(`DEVELOPMENT_TEAM: LYUMASNB36`, verified against the installed certificate).
 
-| Need | Where | Blocks |
+| | Free personal team (today) | Paid Developer Program ($99/yr) |
 | --- | --- | --- |
-| Team ID | Xcode ▸ Settings ▸ Accounts | running on a physical device, TestFlight |
+| Simulator | yes | yes |
+| Install on your own iPhone | yes | yes |
+| App expiry on device | **7 days**, then re-sign | 1 year |
+| Push notifications | **no** | yes |
+| Universal links (Associated Domains) | **no** | yes |
+| TestFlight / App Store | no | yes |
+
+A personal team cannot even *build* an app that DECLARES push or associated
+domains — Xcode refuses at provisioning time and the whole device build
+fails. That is why `Empyralis.entitlements` is deliberately empty and the
+real capabilities sit unreferenced in `Empyralis-paid.entitlements`.
+
+**After enrolling in the paid program**, turn both on by changing one line in
+`project.yml`:
+
+```yaml
+CODE_SIGN_ENTITLEMENTS: Empyralis/Empyralis-paid.entitlements
+```
+
+Then, and only then, these become useful:
+
+| Need | Where | Enables |
+| --- | --- | --- |
 | APNs auth key (`.p8`) | developer.apple.com ▸ Keys ▸ **+** ▸ Apple Push Notifications | push delivery |
 | `apple-app-site-association` | served from `https://empyralis.ai/.well-known/` | universal links |
 
 The `.p8` is downloadable **once** — Apple never shows it again.
+
+### Finding the Team ID correctly
+
+It is the certificate's **Organizational Unit**, not the value in parentheses
+in its common name — that parenthetical is the certificate's own id, and
+using it fails with an error that never mentions the team:
+
+```bash
+security find-identity -v -p codesigning       # lists installed certs
+security find-certificate -c "Apple Development: <your-apple-id>" -p \
+  | openssl x509 -noout -subject                # OU=<TEAM ID>
+```
 
 Backend env for push (see `server_modules/apns_service.py`):
 `EMPYRALIS_APNS_KEY_P8`, `EMPYRALIS_APNS_KEY_ID`, `EMPYRALIS_APNS_TEAM_ID`,

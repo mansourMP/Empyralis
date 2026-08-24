@@ -2,23 +2,29 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- APNs. `development` is correct for debug and TestFlight-internal
-	     builds; Xcode's distribution flow re-signs an App Store build to
-	     `production`. A device token minted under one environment is
-	     rejected by the other, which is why PushManager reports its own
-	     environment to the server alongside the token. -->
-	<key>aps-environment</key>
-	<string>development</string>
+	<!-- DELIBERATELY EMPTY.
 
-	<!-- Universal links: makes a task/document URL an agent posts into
-	     Telegram or Slack open THIS APP instead of Safari. Requires an
-	     apple-app-site-association file served from
-	     https://empyralis.ai/.well-known/apple-app-site-association
-	     carrying the real Team ID. Until that file is live these links
-	     open in Safari, which is a correct degradation, not a break. -->
-	<key>com.apple.developer.associated-domains</key>
-	<array>
-		<string>applinks:empyralis.ai</string>
-	</array>
+	     A FREE personal Apple team cannot sign an app that declares either
+	     Push Notifications (aps-environment) or Associated Domains
+	     (universal links). Xcode refuses at provisioning time with:
+
+	       "Personal development teams ... do not support the Associated
+	        Domains and Push Notifications capabilities."
+
+	     That refusal blocks the WHOLE device build, so declaring a
+	     capability the account cannot hold makes the app impossible to
+	     install at all — a much worse trade than not having push, which
+	     nothing triggers yet anyway (no backend caller of send_push
+	     exists, and the apple-app-site-association file is not served).
+
+	     Both capabilities live in Empyralis-paid.entitlements. To turn
+	     them on after enrolling in the paid Apple Developer Program, change
+	     ONE line in project.yml:
+
+	       CODE_SIGN_ENTITLEMENTS: Empyralis/Empyralis-paid.entitlements
+
+	     Keeping the paid file present-but-unreferenced rather than deleting
+	     it means the upgrade is a one-line switch instead of a rewrite, and
+	     the capabilities we intend to hold stay reviewable in git. -->
 </dict>
 </plist>
