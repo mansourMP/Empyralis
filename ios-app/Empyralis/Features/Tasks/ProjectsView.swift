@@ -30,7 +30,7 @@ struct ProjectsView: View {
                     List {
                         ForEach(store.projects) { project in
                             NavigationLink {
-                                ProjectTasksView(project: project)
+                                ProjectDetailView(project: project)
                             } label: {
                                 ProjectRow(project: project, openCount: openCount(project))
                             }
@@ -73,7 +73,70 @@ struct ProjectRow: View {
     }
 }
 
-struct ProjectTasksView: View {
+/// A PROJECT IS TASKS AND DOCUMENTS — the web's own `PROJECT_TAB_VIEWS`,
+/// which is exactly `["tasks", "documents"]` and nothing else.
+///
+/// Documents used to be a top-level tab on this app, which contradicted a
+/// decision the web already made: a cross-project document LENS does not
+/// earn a permanent rail slot, because documents belong to the project whose
+/// knowledge they are. Moving them here is that decision applied, not a
+/// reorganisation for its own sake — and it is what frees the fifth tab slot
+/// for the "My work" surface the phone was missing entirely.
+///
+/// The picker is a plain segmented control: selection is weight and shape,
+/// never hue, and there is no accent anywhere on this screen.
+struct ProjectDetailView: View {
+    let project: Project
+
+    @Environment(\.colorScheme) private var scheme
+    @State private var section: Section = .tasks
+
+    /// Mirrors PROJECT_TAB_VIEWS / PROJECT_TAB_LABEL. Deliberately not a
+    /// third member — Agents were removed from a project's tab bar on the
+    /// web (an agent belongs to the WORKSPACE), and this app already agrees
+    /// by putting Agents at the top level.
+    enum Section: String, CaseIterable, Identifiable {
+        case tasks
+        case documents
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .tasks: return "Tasks"
+            case .documents: return "Documents"
+            }
+        }
+    }
+
+    var body: some View {
+        ZStack {
+            Theme.bgPage(scheme).ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                Picker("Section", selection: $section) {
+                    ForEach(Section.allCases) { value in
+                        Text(value.label).tag(value)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, Space.x4)
+                .padding(.vertical, Space.x2)
+
+                switch section {
+                case .tasks:
+                    ProjectTasksSection(project: project)
+                case .documents:
+                    ProjectDocumentsView(project: project)
+                }
+            }
+        }
+        .navigationTitle(project.name)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+struct ProjectTasksSection: View {
     let project: Project
     @EnvironmentObject private var store: WorkspaceStore
     @Environment(\.colorScheme) private var scheme
@@ -83,9 +146,7 @@ struct ProjectTasksView: View {
     }
 
     var body: some View {
-        ZStack {
-            Theme.bgPage(scheme).ignoresSafeArea()
-
+        Group {
             if tasks.isEmpty {
                 ScrollView {
                     EmptyStateView(
@@ -109,7 +170,5 @@ struct ProjectTasksView: View {
                 .refreshable { await store.refresh() }
             }
         }
-        .navigationTitle(project.name)
-        .navigationBarTitleDisplayMode(.inline)
     }
 }
