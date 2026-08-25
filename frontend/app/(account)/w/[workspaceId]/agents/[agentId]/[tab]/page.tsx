@@ -44,7 +44,7 @@ export default function WorkspaceAgentDetailPage() {
   const base = `/w/${encodeURIComponent(workspaceId)}`;
   const agentBase = `${base}/agents/${encodeURIComponent(agentId)}`;
 
-  const { agents, refresh: refreshAgents } = useFleetAgents(workspaceId);
+  const { agents, loading: agentsLoading, error: agentsError, refresh: refreshAgents } = useFleetAgents(workspaceId);
   const { projects, loading: projectsLoading } = useFleetProjects(workspaceId);
   const agent = agents.find((a) => a.agent_id === agentId) || null;
   const projectId = useMemo(() => resolveAgentProjectId(agent?.project_id, projects), [agent?.project_id, projects]);
@@ -58,6 +58,8 @@ export default function WorkspaceAgentDetailPage() {
       workspaceId={workspaceId}
       agentId={agentId}
       agent={agent}
+      agentsLoading={agentsLoading}
+      agentsError={agentsError}
       projectId={projectId}
       projectName={projectName}
       // "Up" from HERE is the agents list, not the agent's project — this

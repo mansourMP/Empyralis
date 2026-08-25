@@ -49,7 +49,7 @@ export default function AgentDetailPage() {
   const base = `/w/${encodeURIComponent(workspaceId)}`;
   const agentBase = `${base}/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentId)}`;
 
-  const { agents, refresh: refreshAgents } = useFleetAgents(workspaceId);
+  const { agents, loading: agentsLoading, error: agentsError, refresh: refreshAgents } = useFleetAgents(workspaceId);
   const { projects, loading: projectsLoading } = useFleetProjects(workspaceId);
   const agent = agents.find((a) => a.agent_id === agentId) || null;
   const project = projects.find((p) => p.id === projectId);
@@ -73,6 +73,8 @@ export default function AgentDetailPage() {
       workspaceId={workspaceId}
       agentId={agentId}
       agent={agent}
+      agentsLoading={agentsLoading}
+      agentsError={agentsError}
       projectId={projectId}
       projectName={projectName}
       initialTab={tab}
