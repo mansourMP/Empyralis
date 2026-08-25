@@ -29,6 +29,31 @@ targets:
       properties:
         UILaunchScreen: {}
         CFBundleDisplayName: Empyralis
+        # ── Sign in with Google ────────────────────────────────────────
+        # EMPTY ON PURPOSE, and the empty string is what keeps the button
+        # off the login screen (GoogleAuthConfig.clientId treats blank as
+        # absent; LoginView renders nothing at all rather than a control
+        # that could only fail).
+        #
+        # To turn it on, BOTH of these must be filled in with the SAME
+        # Google **iOS** OAuth client id, and `GOOGLE_IOS_CLIENT_ID` must
+        # be set to it on the backend — see ios-app/README.md.
+        #
+        #   EmpyralisGoogleClientID: 1234-abcd.apps.googleusercontent.com
+        #   CFBundleURLSchemes:    [com.googleusercontent.apps.1234-abcd]
+        #                          ^ the client id's parts reversed. Google
+        #                            calls this the reversed client id and
+        #                            accepts no other scheme for an iOS
+        #                            client.
+        #
+        # This belongs HERE and never in Empyralis/Info.plist, which is
+        # GENERATED — an edit there is erased by the next `xcodegen
+        # generate`, silently.
+        EmpyralisGoogleClientID: ""
+        CFBundleURLTypes:
+          - CFBundleTypeRole: Editor
+            CFBundleURLName: ai.empyralis.app.google-oauth
+            CFBundleURLSchemes: []
         NSAppTransportSecurity:
           NSAllowsArbitraryLoadsInWebContent: false
           # A DEBUG build talks to a disposable stack on 127.0.0.1 over
@@ -48,6 +73,13 @@ targets:
       base:
         CODE_SIGN_ENTITLEMENTS: Empyralis/Empyralis.entitlements
         PRODUCT_BUNDLE_IDENTIFIER: ai.empyralis.app
+        # The asset catalog (added for the Google mark) carries no AppIcon
+        # set, and `actool` fails the whole build looking for one the moment
+        # ANY catalog exists — this app has never shipped an icon asset, so
+        # the empty name preserves exactly the state it was already in
+        # rather than quietly introducing an icon requirement. Give this a
+        # real value the day an icon set lands.
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""
         MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"
         TARGETED_DEVICE_FAMILY: "1"

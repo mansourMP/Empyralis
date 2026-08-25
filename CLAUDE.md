@@ -8503,9 +8503,240 @@ Tests went 64 -> 98. `ios-app/UIDriver/` is the opt-in XCUITest harness that
 found five of these — the canonical `xcodegen generate` does NOT build it
 (`xcodegen generate --spec project.uidriver.yml`).
 
-**STILL UNVERIFIED, and do not let a later summary claim otherwise:** the
+~~**STILL UNVERIFIED, and do not let a later summary claim otherwise:** the
 Inbox's Notifications and Failed-runs sections have never rendered WITH
 DATA; a LIVE streaming trace has never been seen (the only trace present is
 finished-and-failed); and a task write has never been watched commit and
-roll back from the UI. Push and deep links are structurally untestable while
-the Apple account is a free personal team.
+roll back from the UI.~~ **ALL THREE CLOSED 2026-08-25 — see the section
+below.** Push and deep links remain structurally untestable while the Apple
+account is a free personal team.
+
+## The three iPhone verification gaps are CLOSED, and none of them was a code defect (2026-08-25)
+
+**Verdict: the app was right. Every one of the three "never watched work"
+gaps was a MISSING FIXTURE, not a missing feature — the seed simply never
+produced the data, and nobody had driven the offline path.** Driven live on
+a real simulator against the disposable stack; screenshots in
+`/tmp/emp-shots/gaps/`, harness in `ios-app/UIDriver/VerificationGaps.swift`
+(opt-in spec, same as the rest of that directory).
+
+```
+GAP 1  a task WRITE, committed and rolled back
+       status In progress -> In review · priority Urgent -> Medium ·
+       assignee Iris -> Dana, each seen on the row AND re-read from
+       GET /fleet/tasks:  status=in_review priority=3 assignee=<Dana>
+       then the backend was KILLED and a write attempted:
+         alert "Couldn't save" / "Couldn't confirm that change. Check your
+         connection and pull to refresh."   ← the honest three-outcome
+         branch, not a claimed failure
+         the row reverted to In review, and the SERVER still read
+         in_review — the rollback took nothing with it
+GAP 2  Inbox Notifications + Failed runs, WITH DATA and correctly ranked
+       Needs your input 2   OLDEST-first  (5 hr, then 4 hr)
+       Notifications    6   newest-first, all three kinds present
+       Failed runs      2   newest-first  (1 hr, then 3 hr)
+GAP 3  a LIVE trace, arriving incrementally
+       footer "Working" (amber) at 1 step -> 3 steps -> 4 steps ->
+       "Run finished" (green) after trace.completed. Row timestamps
+       (20:55:18/:22/:26/:38) match the emitter's own log line for line,
+       so the events crossed the wire as they were written.
+```
+
+**HOW THE DATA WAS MADE, because "produce it legitimately" is most of the
+work.** Notifications came from a SECOND REAL USER through the real HTTP
+API — signed up via `/auth/signup`, invited via `POST /workspaces/{ws}/
+invites`, accepted via `/workspaces/invites/accept`, then assigning,
+commenting and `@Iris Vance`-mentioning. Not one row was hand-written.
+Blocked runs came from `outbox_service.emit_run_transition_event(to_state=
+"failed")`, whose own pump turns it into a `run_failed` notification that
+`activity_ledger_service.record_notification_activity` classifies as
+`blocked_action` — the genuine chain, not an `append_activity_event` call.
+The live trace is the one honest compromise and it is stated plainly: the
+EVENTS go through the real `agent_trace_service` emit functions
+(`start_trace` / `emit_tool_started` / `emit_trace_completed` / …), i.e.
+exactly what `agent_turn.py` calls, but the LLM turn that would normally
+call them is scripted — this stack has placeholder provider keys on purpose,
+so there is no way to make a real model turn produce a multi-second live
+trace without spending money.
+
+**A MEMBERSHIP CHANGE STALES A BEARER TOKEN IMMEDIATELY.** Granting the
+second user project access made every subsequent call answer
+`"Bearer token is stale and must be refreshed."` — the claim carries a
+`membership_version`. Re-login after any membership write in a script, or
+every step after it fails for a reason that names nothing about membership.
+
+**`app.buttons["In review"]` RESOLVES TO NOTHING while the row is plainly on
+screen, and that cost a whole run.** A `PickerRow`'s accessibility label is
+the COMPOSITE of its leading view and its title: `StatusDot` contributes the
+raw status token and `ActorAvatar` the initial, so the real labels are
+`"in review, In review"` and `"D, Dana Okafor"`. Match on CONTAINS — and
+exclude the sheet's own navigation-bar button, or the `Done` STATUS option
+and the `Done` DISMISS button are the same query.
+
+**A SIMULATOR DEVICE CAN GO BAD IN A WAY THAT READS AS AN APP CRASH.** On
+one device the run died with `Failed to get matching snapshot: Application
+ai.empyralis.app is not running`, then repeatedly at
+`Wait for ai.empyralis.app to idle`, with the runner PID changing — while
+`simctl launch` on that same device ran the app perfectly and no crash
+report existed anywhere. Rebooting it did not help; a DIFFERENT device ran
+the identical bundle green on the first try. Before believing a UI harness
+is reporting an app defect: check `app.state` (it needs no accessibility
+snapshot, so it separates "died" from "never idles"), look for a crash
+report, launch the app manually — and then just try another device.
+
+**`hostDo`: the simulator shares the host's `/tmp`, so a two-file handshake
+(`REQUEST-<name>` / `ACK-<name>`) is how an XCUITest gets something done on
+the HOST mid-flight** — killing the backend, starting the trace emitter.
+XCUITest cannot shell out and `EMPYRALIS_API_BASE_URL` cannot express "die
+halfway through", because `restoreSession()` needs a live backend and a dead
+one at launch just lands on the login screen.
+
+**Observed, not fixed, and it is a product decision rather than a bug:** an
+agent streaming a live trace shows `Working` in the trace footer while the
+header beside it reads `Ready`. Those are two different facts by design —
+the header is `deriveAgentStatus` and `agent-card-face.ts` deliberately
+defines "Working" as an assigned task `in_progress` or `current_run_id`, not
+as an open trace — but on one screen they read as a contradiction.
+
+## The iPhone's dark theme is PURE BLACK, and it deliberately leaves the web behind (2026-08-25)
+
+**Founder: *"I want pure black in my phone application, not like what I have
+on the platform."* `Theme.bgPage` is `#000000` on iOS while
+`theme-tokens.css` keeps `#1A1A1A`. This is the FIRST sanctioned divergence
+from "design tokens are ported verbatim", it is scoped to ONE COLUMN of one
+file, and light mode is byte-for-byte unchanged.**
+
+The web's dark values are DESKTOP values — authored for a panel where true
+black is unreachable anyway, so a raised grey is the only way to say "page".
+An OLED phone keeps every one of those pixels lit, which is what reads as
+washed-out grey next to the system's own black chrome.
+
+**A ONE-VALUE CHANGE WOULD HAVE MADE CARDS INVISIBLE, so the whole dark ramp
+is re-derived rather than patched.** The derivation is not taste: for each
+surface the target is *the same perceptual separation from its own page* that
+the web token has from its own page, recomputed against black.
+
+```
+token          web dark      phone dark    vs. its page   the web's own ratio
+bgPage         #1A1A1A   ->  #000000       —              —
+bgInset        #1D1D1D   ->  #161616       1.16 : 1       1.16   (light inset)
+bgRail         #232323   ->  #191919       1.19 : 1       between the two
+bgCard         #292929   ->  #1C1C1C       1.23 : 1       1.20   (dark card)
+border         w/0.08    ->  w/0.14        1.35 : 1       1.25
+borderStrong   w/0.16    ->  w/0.24        1.94 : 1       1.64
+```
+
+Three things that only fall out of doing the arithmetic:
+
+- **`bgInset` INVERTS DIRECTION.** On the web "inset" means carved *below*
+  the page (`#EEEEEF` under a white page). There is nothing below black, so
+  on the phone the recessed surface becomes a faint RAISE. Same role,
+  opposite direction — and any future "inset" token on a black page has the
+  same problem.
+- **AN ALPHA HAIRLINE LOSES ~10% OF ITS CONTRAST ON BLACK AND MUST BE PAID
+  BACK.** `white.opacity(0.08)` composites to `#2C2C2C` over `#1A1A1A`
+  (1.25:1) but only to `#141414` over `#000000` (1.14:1) — the same token,
+  visibly fainter. That is exactly how borders vanish on OLED, and it is
+  invisible to anyone who only changes the page colour. Raise the ALPHA so
+  the *composited* line lands where the web's does; do not reuse the number.
+- **Nothing in the text ramp needed re-deriving** — every text token gains
+  contrast on black (`textMuted` 4.4 -> 7.5:1, `textSecondary` -> 13.4:1,
+  `textPrimary` -> 19.1:1), and `textPrimary` staying `#F4F4F5` rather than
+  pure white is what keeps OLED halation off the glyph edges.
+
+**MEASURE THE RENDERED PIXELS, NOT THE SOURCE.** Every figure above was read
+back out of real screenshots (`PIL` histogram over 31 captures on two
+devices), not computed and hoped for. That is also what proved the accent law
+still holds: `#A56DDE` appears in exactly ONE of the 31 screenshots — the one
+with a primary button on it — which is a stronger statement than any grep.
+
+Two consequential knock-ons, both in files the theme owns:
+`SkeletonRow` now fills with `bgCard`, because its shimmer multiplies the
+fill to 0.45 opacity and from `bgInset` that trough composites to `#0D0D0D`
+(1.08:1) and disappears at the bottom of every cycle. And `Theme.bgField`
+exists now — a text input cannot simply use `bgCard`, since in LIGHT mode a
+card is white and a field on a white page would be invisible; the pair used
+to sit as a magic number at two call sites.
+
+## Sign in with Google on iPhone: built, and OFF because the button would be dead (2026-08-25)
+
+**Founder: *"logging in should go to a specific link to Google to do it
+because in Linear it's like that."* The flow is complete —
+`ASWebAuthenticationSession` + PKCE, no SDK, the project still has zero SPM
+dependencies — and the login screen renders NO Google button today, because
+no Google iOS OAuth client id exists yet.**
+
+This does not fork identity: Google sign-in already exists on the web
+(`auth-client.ts`'s `googleLogin`) and the backend route was already built
+for a native caller. Do not add a provider the web does not have.
+
+**THE WEB'S OWN GOOGLE FLOW IS STRUCTURALLY UNUSABLE FROM AN APP, and this is
+worth not re-deriving.** `frontend/app/api/auth/google/*` finishes on an
+HTTPS 200 HTML page, sets HttpOnly cookies, and hardcodes `channel: 'web'` —
+which makes `_sanitize_browser_auth_payload` STRIP `token` from the body.
+Three independent dead ends: no custom-scheme callback for the session to
+catch, the token deliberately removed, and credentials in cookies the session
+cannot read. An `https` callback would need Associated Domains, which a free
+personal team cannot even declare.
+
+```
+ASWebAuthenticationSession + PKCE ─▶ accounts.google.com
+   the app exchanges the code ITSELF (an iOS client is a PUBLIC client:
+   no secret, PKCE is what replaces it)          ─▶ id_token (RS256 JWT)
+POST /auth/provider-login {provider, identity_token, channel:"mobile"}
+   auth.py verifies it against Google's live JWKS — real verification,
+   not a decode                                  ─▶ bearer + 180-day refresh
+```
+
+**`channel: "mobile"` is MANDATORY on that route too.** `browser_auth_session_
+channel` defaults an absent/unknown channel to `"web"`, so omitting it returns
+a 200 that signs nobody in — cookies set, token stripped.
+
+**WHAT BLOCKS IT IS ONE ENV VAR AND ONE CONSOLE ACTION, NOT CODE.**
+`_configured_provider_audiences("google")` (`auth.py:454`) already reads
+`GOOGLE_IOS_CLIENT_ID`; it is set nowhere. The only configured audience is the
+*Web* client id, and Google rejects custom-scheme redirects for Web clients,
+so it cannot be reused. Create an **iOS**-type OAuth client, set that env var
+to it, put the same id plus its reversed form in `project.yml`. Steps are in
+`ios-app/README.md`.
+
+**THE GATE IS THE HONEST ANSWER TO "no dead controls", and it has two halves
+for a reason.** The BUILD's own client id is local, synchronous and decisive —
+without it there is nothing to send to Google, so the whole block is ABSENT
+rather than disabled. `GET /auth/providers` then refines it, the same gate the
+web login uses, and can only ever take the button away. Verified both ways by
+XCUITest: with a client id injected, tapping raises iOS's own *"'Empyralis'
+Wants to Use 'accounts.google.com' to Sign In"* consent alert — which the
+system only shows once the authorize URL AND the reversed-client-id scheme are
+both well-formed; without one, no button exists.
+
+**THE ACCENT MOVES WITH THE PRIMARY ACTION.** With Google present it is the
+top pill and email/password's "Continue" goes neutral; with Google absent
+"Continue" is the accent, because a screen whose only action is painted as a
+secondary has no primary action at all. One computed rule
+(`LoginView.googleIsPrimary`), so the two arrangements can never both be
+accented or both be neutral.
+
+**`APIClient` maps every 401 to `.unauthorized` and DISCARDS the body** —
+correct everywhere else, wrong here, because on this one route a 401 is how a
+misconfiguration reports itself (`Identity token audience is invalid.`) and
+that sentence is the entire diagnosis. `SessionStore.exchangeIdentityToken` is
+a deliberate ~25-line exception scoped to that route, not a change to
+`APIClient`'s contract.
+
+**Adding ANY asset catalog to this project fails the build until you say
+there is no app icon.** `actool` looks for `AppIcon` the moment one exists;
+the app has never shipped an icon asset, so `ASSETCATALOG_COMPILER_APPICON_
+NAME: ""` in `project.yml` preserves the state it was already in rather than
+quietly introducing an icon requirement.
+
+**Harness notes that cost real time.** The MCP simulator panel crash-loops and
+its recovery RELAUNCHES the app — which presents exactly like the app
+crashing, except there is no Empyralis crash report and the `.ips` files are
+named `claude-ios-sim-*`. Check whose crash it is before debugging your own.
+`UIDriver` is one target shared with whatever other agents have added to it,
+so `-only-testing:UIDriver/<Class>/<test>` is mandatory or you inherit their
+deliberate failure-state tests. And a seeded backend can be stopped by another
+agent's tests mid-run: a "sign-in failed" that reports `Couldn't sign in.
+Check your connection` may be telling the exact truth — `curl` the health
+endpoint before suspecting the client.

@@ -59,6 +59,56 @@ links, or status. Selection is weight and shape. Verify with:
 grep -rn "Theme\.accent" Empyralis --include="*.swift" | grep -v DesignSystem/Theme.swift
 ```
 
+## The dark theme is PURE BLACK, and that is a deliberate divergence
+
+Founder, 2026-08-25: *"I want pure black in my phone application, not like
+what I have on the platform."* `bgPage` is `#000000` on iOS while the web
+stays `#1A1A1A`. **Light mode is byte-for-byte the web's, and the web's own
+tokens are untouched** — the divergence is one column of `Theme.swift`, and
+the whole dark ramp is re-derived there rather than one value being patched.
+The reasoning, the measured contrast targets, and why `bgInset` has to invert
+direction on black all live in `Theme.swift`'s own header. Read it before
+changing a dark value.
+
+## Sign in with Google
+
+**Built, and deliberately OFF until someone does the two operator steps
+below.** The login screen renders no Google button at all today — not a
+greyed-out one — because `EmpyralisGoogleClientID` in `project.yml` is empty.
+That is the "no dead controls" law: the fact that decides whether the flow
+can start is local and synchronous, so the control is absent rather than
+present-and-doomed.
+
+The flow itself is complete: `ASWebAuthenticationSession` + PKCE against
+Google, then `POST /auth/provider-login` with `channel: "mobile"`. No SDK, no
+new dependency. `Auth/GoogleSignIn.swift` carries the full trace.
+
+**This does not fork identity.** Google sign-in already exists on the web
+(`frontend/lib/auth/auth-client.ts`'s `googleLogin`), and the backend route
+the phone uses was already built for exactly this. Do not add a provider the
+web does not have.
+
+### Turning it on
+
+1. **Create a Google OAuth client of type *iOS*** — Google Cloud Console ▸
+   APIs & Services ▸ Credentials ▸ Create credentials ▸ OAuth client ID ▸
+   iOS, bundle id `ai.empyralis.app`. It has **no client secret**; that is
+   correct, PKCE replaces it. **It must be an iOS client** — the existing
+   `GOOGLE_OAUTH_CLIENT_ID` is a *Web* client, and Google rejects
+   custom-scheme redirects for Web clients, so it cannot be reused here.
+2. **Set `GOOGLE_IOS_CLIENT_ID`** to that client id on the backend.
+   `server_modules/auth.py`'s `_configured_provider_audiences` already reads
+   this exact name — nothing to write, just an env var and a restart.
+3. **Fill in both `project.yml` keys** with the same client id (see the
+   commented block there): `EmpyralisGoogleClientID`, and
+   `CFBundleURLSchemes` with the *reversed* client id.
+4. `xcodegen generate`, rebuild. The button appears on its own.
+
+Without step 2 the flow reaches Google, comes back with a real ID token, and
+the backend answers **401 `Identity token audience is invalid.`** — which the
+app relays verbatim rather than turning into something generic, because that
+sentence is the whole diagnosis.
+
 ## Apple account: FREE PERSONAL TEAM vs PAID PROGRAM
 
 These are two different things and the difference decides what this app can

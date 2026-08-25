@@ -1,32 +1,102 @@
 import SwiftUI
 
-/// The single source of colour truth, ported verbatim from the web app's
-/// lib/ui/theme-tokens.css so the two products read as ONE product. When a
-/// token changes there, change it here — never invent an iOS-only colour.
+/// The single source of colour truth. LIGHT mode is ported verbatim from the
+/// web app's lib/ui/theme-tokens.css so the two products read as ONE product.
+/// When a light token changes there, change it here — never invent an
+/// iOS-only colour.
 ///
 /// THE ACCENT LAW CARRIES OVER FROM THE WEB APP AND IS NOT NEGOTIABLE HERE:
 /// violet appears ONLY on the single primary-action button in a view.
 /// Not on selected rows, not on tab bars, not on badges, not on toggles,
 /// not on links. Selection is weight and shape, never hue. Semantic status
 /// (online/working/blocked) is its own vocabulary and is never "the accent".
+///
+/// ═══════════════════════════════════════════════════════════════════════
+/// THE PHONE'S DARK RAMP DELIBERATELY DIVERGES FROM THE WEB. DO NOT "FIX"
+/// IT BACK TO PARITY.
+/// ═══════════════════════════════════════════════════════════════════════
+///
+/// Founder's instruction, 2026-08-25: *"I want pure black in my phone
+/// application, not like what I have on the platform."* The web's dark
+/// surfaces (`#1A1A1A` page, `#292929` card) are DESKTOP values, authored
+/// for an LCD panel where a true black is unreachable anyway and a raised
+/// grey is the only way to say "page". On an OLED phone those same values
+/// keep every pixel lit and read as washed-out grey beside the system's own
+/// black chrome. `bgPage` is `#000000` here and the pixels are genuinely
+/// off.
+///
+/// A one-value change would have made cards invisible, so the WHOLE dark
+/// ramp is re-derived rather than patched. The derivation is not taste — for
+/// each surface the target is *the same perceptual separation from its own
+/// page* that the web token has from its own page, recomputed against black:
+///
+/// ```
+/// token      web dark   phone dark   contrast vs. its page   web's own ratio
+/// bgPage     #1A1A1A ->  #000000     —                       —
+/// bgInset    #1D1D1D ->  #161616     1.16 : 1                1.16  (light)
+/// bgRail     #232323 ->  #191919     1.19 : 1                between the two
+/// bgCard     #292929 ->  #1C1C1C     1.23 : 1                1.20  (dark)
+/// border     w/0.08  ->  w/0.14      1.35 : 1                1.25
+/// borderStrong w/0.16 -> w/0.24      1.94 : 1                1.64
+/// ```
+///
+/// Three things that only fall out of doing the arithmetic:
+///
+/// 1. **`bgInset` INVERTS DIRECTION.** On the web "inset" means carved
+///    *below* the page (`#EEEEEF` under a white page). There is nothing
+///    below black, so on the phone the recessed surface must become a faint
+///    RAISE. It is still the quietest filled block in the app — it just
+///    reaches that role from the other side.
+/// 2. **A hairline loses ~10% of its contrast on black and must be paid
+///    back.** `white.opacity(0.08)` composites to `#2C2C2C` over `#1A1A1A`
+///    (1.25:1) but only to `#141414` over `#000000` (1.14:1) — the same
+///    token, visibly fainter, which is exactly how borders vanish on OLED.
+///    The alphas are raised so the *composited* hairline lands above where
+///    the web's does, not at the same alpha.
+/// 3. **Nothing in the text ramp needed re-deriving.** Every text token gets
+///    strictly MORE contrast on black (`textMuted` goes 4.4:1 -> 7.5:1,
+///    `textSecondary` -> 13.4:1, `textPrimary` -> 19.1:1), and `textPrimary`
+///    staying `#F4F4F5` rather than pure white is what keeps OLED halation
+///    off the glyph edges. The accent and every status hue likewise only
+///    gain contrast, so the accent law is untouched.
+///
+/// **Light mode is byte-for-byte unchanged, and the web platform's own
+/// tokens are NOT touched by any of this.** This divergence is scoped to
+/// one column of one file.
 enum Theme {
 
     // MARK: - Surfaces
 
+    /// TRUE BLACK on the phone — see the divergence note above.
     static func bgPage(_ scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(hex: 0x1A1A1A) : Color(hex: 0xFFFFFF)
+        scheme == .dark ? Color(hex: 0x000000) : Color(hex: 0xFFFFFF)
     }
 
+    /// The raised content surface. `#1C1C1C` is also where iOS puts its own
+    /// secondary background on a black page, so a card sits at the level the
+    /// platform's sheets and search fields already occupy — nothing on
+    /// screen looks like it belongs to a different app.
     static func bgCard(_ scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(hex: 0x292929) : Color(hex: 0xFFFFFF)
+        scheme == .dark ? Color(hex: 0x1C1C1C) : Color(hex: 0xFFFFFF)
     }
 
+    /// The quietest filled block (skeletons excepted): code blocks, chips,
+    /// a disabled control's fill. On black this is a faint RAISE rather than
+    /// the web's recess — same role, opposite direction.
     static func bgInset(_ scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(hex: 0x1D1D1D) : Color(hex: 0xEEEEEF)
+        scheme == .dark ? Color(hex: 0x161616) : Color(hex: 0xEEEEEF)
     }
 
     static func bgRail(_ scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(hex: 0x232323) : Color(hex: 0xF4F4F5)
+        scheme == .dark ? Color(hex: 0x191919) : Color(hex: 0xF4F4F5)
+    }
+
+    /// A text INPUT's fill. Named rather than repeated as a literal because
+    /// it cannot simply be `bgCard`: in light mode a card is white and a
+    /// field on a white page would be invisible but for its hairline. Two
+    /// call sites used to carry this pair as magic numbers.
+    static func bgField(_ scheme: ColorScheme) -> Color {
+        scheme == .dark ? Color(hex: 0x1C1C1C) : Color(hex: 0xF2F2F4)
     }
 
     // MARK: - Text
@@ -45,12 +115,17 @@ enum Theme {
 
     // MARK: - Borders
 
+    /// 0.14, not the web's 0.08 — an alpha hairline is composited against
+    /// whatever it lands on, so the SAME token is visibly fainter over black
+    /// (1.14:1) than over `#1A1A1A` (1.25:1). The alpha is raised so the
+    /// rendered line lands above where the web's does, which is the whole
+    /// reason borders survive on OLED.
     static func border(_ scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.08)
+        scheme == .dark ? Color.white.opacity(0.14) : Color.black.opacity(0.08)
     }
 
     static func borderStrong(_ scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color.white.opacity(0.16) : Color.black.opacity(0.16)
+        scheme == .dark ? Color.white.opacity(0.24) : Color.black.opacity(0.16)
     }
 
     // MARK: - Accent (primary action ONLY — see the law above)
