@@ -4004,6 +4004,22 @@ tab, read the console.
   Corollary for whoever holds the primary tree: **do not run git state
   changes there while another session's agent is live in it** — that is the
   same mistake pointed the other way. Ask, wait, then merge.
+
+  **BOTH sessions running that night were doing it, which is the fact that
+  makes this a DEFAULT problem rather than a carelessness problem.** The
+  other session — the one whose files were destroyed — disclosed afterwards,
+  unprompted, that every agent it had dispatched that night also ran in the
+  primary checkout, and that it simply had not collided. Its own words:
+  *"that's luck, not a correct setup on my part."* Two independent
+  orchestrators, neither of them junior, both read this rule and both
+  defaulted to the unsafe arrangement anyway.
+
+  So do not read the entry above as one session being sloppy. Read it as: the
+  unsafe setup is what you get by doing the obvious thing, the safe one takes
+  a deliberate extra argument, and the damage lands on somebody who did
+  nothing wrong and cannot see it coming. A rule that has now been read and
+  broken by two orchestrators in one night is not being under-emphasised —
+  it is being asked to do a job that only a default can do.
 - **Never `git stash` when other agents are running.** Worktrees share one
   `.git`, so they share one stash stack — a `stash pop` can silently pull in a
   *different* agent's uncommitted work. This happened 2026-07-31 and was caught
