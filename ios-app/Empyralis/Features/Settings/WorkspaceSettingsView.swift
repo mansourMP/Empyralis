@@ -138,6 +138,15 @@ struct WorkspaceSettingsView: View {
                         .foregroundStyle(Theme.textSecondary(scheme))
                 )
                 .frame(width: 28, height: 28)
+                // A lone letter is not a word — Xcode's own accessibility
+                // audit flags it as "Label not human-readable", and it is
+                // redundant besides: the member's full name sits right next
+                // to it in the same row. This is a plain HStack (not a
+                // Button), so unlike PickerRow's leading-view pattern
+                // nothing combines it into a composite label on its own —
+                // hiding it is what keeps a VoiceOver swipe from stopping on
+                // a bare "I" with no context before reaching the real name.
+                .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(member.name)

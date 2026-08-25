@@ -93,6 +93,20 @@ final class CloseoutVerification: XCTestCase {
         miss("could not focus a text field")
     }
 
+    /// An EMPTY SwiftUI TextField/SecureField's `.value` is not `""` in this
+    /// harness — it is the PLACEHOLDER STRING ("Email" / "Password"), which
+    /// is exactly what is visibly on screen. A naive `.isEmpty` check on
+    /// `.value` therefore reads an untouched field as "filled" and never
+    /// retries — reproduced live, twice, on the cold-launch path: the field-
+    /// verification loop below ran, logged nothing (meaning it believed both
+    /// fields were already correct), and the app still submitted a real
+    /// email against a truly empty password. `placeholder` is the one
+    /// argument that makes this call honest.
+    private func hasRealValue(_ field: XCUIElement, placeholder: String) -> Bool {
+        let v = (field.value as? String) ?? ""
+        return !v.isEmpty && v != placeholder
+    }
+
     /// Same as VerificationGaps' `signIn()`, EXCEPT the final "Continue" tap
     /// is a parameter — the cold-launch test needs to arm the backend pause
     /// in the instant between filling the form and tapping it, which a fixed
@@ -139,8 +153,8 @@ final class CloseoutVerification: XCTestCase {
             // exactly what a real wrong password looks like, produced here
             // by a harness race rather than a person mistyping.
             for _ in 0..<3 {
-                let emailFilled = !((email.value as? String) ?? "").isEmpty
-                let pwFilled = !((app.secureTextFields.firstMatch.value as? String) ?? "").isEmpty
+                let emailFilled = hasRealValue(email, placeholder: "Email")
+                let pwFilled = hasRealValue(app.secureTextFields.firstMatch, placeholder: "Password")
                 if emailFilled && pwFilled { break }
                 note("login field verification: email='\(emailFilled)' password='\(pwFilled)' — retyping")
                 if !emailFilled { type(into: email, "ios.verify@example.com") }
@@ -498,8 +512,8 @@ final class CloseoutVerification: XCTestCase {
         let email = app.textFields.firstMatch
         let pw = app.secureTextFields.firstMatch
         for _ in 0..<3 {
-            let emailFilled = !((email.value as? String) ?? "").isEmpty
-            let pwFilled = !((pw.value as? String) ?? "").isEmpty
+            let emailFilled = hasRealValue(email, placeholder: "Email")
+            let pwFilled = hasRealValue(pw, placeholder: "Password")
             if emailFilled && pwFilled { break }
             note("pre-tap field check: email='\(emailFilled)' password='\(pwFilled)' — retyping")
             if !emailFilled { type(into: email, "ios.verify@example.com") }
@@ -751,16 +765,32 @@ final class CloseoutVerification: XCTestCase {
         }
 
         // ---- Xcode's own automated audit, on the richest screen we have --
+        // The issueHandler overload is what actually makes this usable: with
+        // no handler, performAccessibilityAudit() records every finding as
+        // its OWN XCTIssue directly on the test case — bypassing a do/catch
+        // entirely — so a plain `try? app.performAccessibilityAudit()` still
+        // fails the test on the first real finding, silently. Apple's own
+        // contract is easy to misread backwards (it was misread here on the
+        // first pass, and the test kept failing with the exact same 8
+        // findings until this was caught): the handler returns `true` when
+        // an issue should be IGNORED, `false` when it is a real problem —
+        // i.e. the boolean answers "is this handled", not "did it fail".
+        // Every issue is still logged either way — this is triage, never a
+        // silent swallow.
+        var auditFindings: [String] = []
         do {
-            try app.performAccessibilityAudit()
-            note("ACCESSIBILITY_AUDIT: no issues reported on the current screen")
+            try app.performAccessibilityAudit { issue in
+                auditFindings.append("\(issue.auditType) | \(issue.compactDescription) | element=\(issue.element?.debugDescription ?? "nil")")
+                return true
+            }
         } catch {
-            // Xcode's audit throws with every finding attached. Log every
-            // one rather than failing outright on the first pass — some
-            // categories (e.g. contrast against a screenshot-only render)
-            // are known to false-positive in a simulator, and the value
-            // here is a full list to triage, not a hard gate.
-            note("ACCESSIBILITY_AUDIT findings:\n\(error)")
+            note("ACCESSIBILITY_AUDIT threw despite issueHandler: \(error)")
+        }
+        if auditFindings.isEmpty {
+            note("ACCESSIBILITY_AUDIT: no issues reported on the current screen")
+        } else {
+            note("ACCESSIBILITY_AUDIT: \(auditFindings.count) finding(s):")
+            for f in auditFindings { note("  \(f)") }
         }
 
         print("VOICEOVER_DONE misses=\(misses.count) \(misses)")
