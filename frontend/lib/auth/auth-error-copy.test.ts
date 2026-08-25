@@ -16,6 +16,24 @@
  * body text that itself claims success/uncertainty rather than failure —
  * catching the next such branch, not just this one.
  *
+ * SECOND, DEEPER INSTANCE (same day): login/page.tsx's own catch around
+ * awaitBrowserAuthReady discarded the exact message that function had
+ * already thrown and replaced it with a hardcoded 'Session not ready.'
+ * literal, unconditionally. But that function throws THREE distinguishable
+ * things (auth-client.ts): attempts exhausted while still warming up
+ * (genuinely "press Continue again"), 3 consecutive 401s ("Your session
+ * expired. Sign in again." — the session is actually gone), and a 403
+ * ("This workspace is not accessible for this account." — a permissions
+ * problem). Flattening all three into "press Continue again" told a
+ * customer with a dead session or no workspace access to keep retrying
+ * forever. The fix is to STOP discarding the thrown message (login/page.tsx
+ * now passes it through) and to make classifyLoginOutcome route each of the
+ * three to its own correct tone: 401 lands on the existing 'session
+ * expired' failure branch, 403 lands on a new 'not accessible for this
+ * account' failure branch that never invites a retry, and only the
+ * exhausted-attempts case keeps the 'notice' tone and the "press Continue"
+ * instruction.
+ *
  * Run: npx tsx lib/auth/auth-error-copy.test.ts
  */
 
@@ -65,6 +83,61 @@ assert(badPassword.title === FALLBACK_TITLE, 'a real 401 keeps the caller-suppli
 const expired = classifyLoginOutcome('Your session expired. Sign in again.', FALLBACK_TITLE);
 assert(expired.tone === 'error', 'session-expired classifies as an error');
 assert(expired.title !== FALLBACK_TITLE, 'session-expired gets its own specific title, not the generic fallback');
+
+// ── The second regression: awaitBrowserAuthReady's three distinguishable
+// throws (auth-client.ts), fed through classifyLoginOutcome with the EXACT
+// strings that function actually throws — not paraphrases. The 401 case is
+// the one the coordinator called out specifically: it must never produce a
+// notice tone or a "press Continue" body, because a dead session cannot be
+// fixed by retrying the same poll. ────────────────────────────────────────
+
+// 1) 3 consecutive 401s — the session is actually gone.
+const readinessExpired = classifyLoginOutcome('Your session expired. Sign in again.', FALLBACK_TITLE);
+assert(readinessExpired.tone === 'error', 'readiness-poll 401x3 classifies as an error, never a notice');
+assert(
+  !/press continue/i.test(readinessExpired.body),
+  'readiness-poll 401x3 body never tells the customer to press Continue again',
+);
+assert(
+  !/you'?re signed in/i.test(readinessExpired.body),
+  'readiness-poll 401x3 body never claims the sign-in is fine',
+);
+
+// 2) 403 — this account cannot open this workspace. Distinct branch,
+// distinct title, and it must not invite a retry either.
+const readinessForbidden = classifyLoginOutcome('This workspace is not accessible for this account.', FALLBACK_TITLE);
+assert(readinessForbidden.tone === 'error', 'readiness-poll 403 classifies as an error, never a notice');
+assert(
+  readinessForbidden.title !== FALLBACK_TITLE && readinessForbidden.title !== 'Almost there',
+  'readiness-poll 403 gets its own specific title (not the generic fallback, not the notice title)',
+);
+assert(
+  !/press continue/i.test(readinessForbidden.body),
+  'readiness-poll 403 body never tells the customer to press Continue again',
+);
+assert(
+  !/you'?re signed in/i.test(readinessForbidden.body),
+  'readiness-poll 403 body never claims the sign-in is fine',
+);
+
+// 3) Attempts exhausted while genuinely still warming up — the ONLY case
+// that may keep the notice tone and the "press Continue" instruction. Both
+// exact message shapes auth-client.ts can throw for this case.
+for (const stillWarmingMessage of [
+  'Auth readiness check did not complete.',
+  'Auth readiness check did not recover from status 500.',
+]) {
+  const stillWarming = classifyLoginOutcome(stillWarmingMessage, FALLBACK_TITLE);
+  assert(stillWarming.tone === 'notice', `"${stillWarmingMessage}" classifies as a notice, not an error`);
+  assert(
+    stillWarming.title !== FALLBACK_TITLE,
+    `"${stillWarmingMessage}" never wears the caller-supplied failure title`,
+  );
+  assert(
+    /signed in/i.test(stillWarming.body),
+    `"${stillWarmingMessage}" body says the sign-in already succeeded`,
+  );
+}
 
 // ── Structural guard: no branch can pair a non-error tone with a failure
 // title, and no 'error' branch can describe success/uncertainty in its body.

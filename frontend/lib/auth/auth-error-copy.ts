@@ -71,12 +71,34 @@ export function classifyLoginOutcome(error: string, fallbackTitle: string): Auth
   if (normalized.includes('status 401')) {
     return fail(fallbackTitle, 'Email or password was not accepted.');
   }
+  // awaitBrowserAuthReady's own 403 branch (auth-client.ts) — this account
+  // genuinely cannot open this workspace. Distinct from the generic
+  // 'status 403' branch below (a raw HTTP status string from other
+  // callers): this one has already been diagnosed by the readiness poll
+  // itself, and it must NOT invite a retry — pressing Continue again can
+  // never fix a permissions problem, only re-run the same poll that just
+  // failed for the same reason.
+  if (normalized.includes('not accessible for this account')) {
+    return fail('Workspace not accessible', 'This account does not have access to this workspace. Sign in with an account that does, or ask an owner to invite you.');
+  }
   // login() already succeeded and set real session cookies — only the
-  // post-login readiness poll (awaitBrowserAuthReady) timed out waiting for
-  // them to propagate. Nothing failed here; pressing Continue again both
+  // post-login readiness poll (awaitBrowserAuthReady) timed out while the
+  // session was STILL WARMING (attempts exhausted, never a diagnosed
+  // failure). Nothing failed here; pressing Continue again both
   // re-confirms and re-polls. This must never wear a failure heading or
   // failure styling.
-  if (normalized.includes('session not ready')) {
+  //
+  // Two other things that same poll can throw are handled by OTHER
+  // branches above/below and must never reach here: 3 consecutive 401s
+  // ('session expired' branch — the session is actually gone, not
+  // warming) and a 403 ('not accessible for this account', just above —
+  // a permissions problem, not warming). Only the exhausted-attempts
+  // shape belongs to this branch.
+  if (
+    normalized.includes('session not ready')
+    || normalized.includes('auth readiness check did not complete')
+    || normalized.includes('auth readiness check did not recover from status')
+  ) {
     return {
       tone: 'notice',
       title: 'Almost there',

@@ -227,14 +227,27 @@ function LoginPageContent() {
     // send an unready session straight into a page whose own auth guard
     // would find nothing and bounce it right back to a blank /login, with
     // nothing on screen ever explaining why. A submitted login must never
-    // resolve into silence: on a poll failure, stay here and say so — the
-    // login itself is not in question, only whether the session has
-    // finished propagating, and pressing Continue again (this same handler)
-    // both re-confirms and re-polls.
+    // resolve into silence: on a poll failure, stay here and say so.
+    //
+    // CORRECTION: the line that used to sit here claimed "the login itself
+    // is not in question, only whether the session has finished
+    // propagating" for EVERY poll failure. That is true only when
+    // awaitBrowserAuthReady exhausts its attempts while still warming up —
+    // it is FALSE for two of the three things that function can throw: 3
+    // consecutive 401s means the session is actually gone (its own comment
+    // says so), and a 403 means this account genuinely cannot open this
+    // workspace. Both of those are real failures, not propagation lag, and
+    // telling the customer to "press Continue again" tells someone with a
+    // dead session or no access to retry forever. So the thrown message is
+    // preserved and classified below (classifyLoginOutcome, via
+    // AuthErrorNotice) instead of being discarded for one hardcoded
+    // "press Continue" string — only the genuinely-still-warming case keeps
+    // that instruction.
     try {
       await awaitBrowserAuthReady({ attempts: 12, delayMs: 250 });
-    } catch {
-      setError('Session not ready.');
+    } catch (readinessError) {
+      const message = readinessError instanceof Error ? readinessError.message : 'Session not ready.';
+      setError(message);
       setSubmitting(false);
       return;
     }
