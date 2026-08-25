@@ -8386,24 +8386,55 @@ matches ZERO rows — so every agent reads "hasn't run yet" forever with
 nothing anywhere reporting why. Caught before shipping; the prefix is
 commented at the call site in `AgentDetailView`.
 
-**PARITY GAPS THAT ARE REAL, not stylistic.** The phone must eventually hold
-what the platform holds, and today it does not:
+**THE THREE PARITY GAPS ARE CLOSED (2026-08-25). The paragraph that used to
+sit here listed them as open; it is kept only as the record of what was
+wrong, because a "known unfixed" note in this file is a claim with a
+timestamp and this one has already expired.**
+
 ```
-web rail    Inbox · My work · Projects · Agents
-iOS tabs    Inbox · Projects · Docs · Agents · Search · Settings
-                    ^^^^^^^ MISSING My work
-                                     ^^^^ Docs is TOP-LEVEL on iOS, which
-                                     contradicts the web decision that a
-                                     cross-project document LENS does not
-                                     earn a rail slot — documents live
-                                     inside their project
+BEFORE  Inbox · Projects · Docs · Agents · Search · Settings   (6 tabs)
+AFTER   Inbox · My work · Projects · Agents · Search           (5 + Settings
+                                                                in the toolbar)
 ```
-And **iOS "Inbox" shows something different from web "Inbox" under the same
-name**: web composes `inbox-needs-you.ts` (three ranked sources — real
-notifications, awaiting-input, blocked), iOS lists open tasks. The web
-version exists BECAUSE a raw list was measured useless (a real task sat in
-Needs input for 17 days unseen). Port `inbox-needs-you.ts` and `my-work.ts`
-rather than inventing phone-side rules.
+
+- **Inbox showed something different under the same word.** Web composes
+  three ranked sources; iOS listed every open task. `inbox-needs-you.ts` is
+  now PORTED to `Models/InboxNeedsYou.swift` — same three sources, same
+  per-group ranking (stuck tasks OLDEST-first: that is the founder's own
+  17-day complaint encoded, and a newest-first merge re-buries exactly the
+  item the surface exists for).
+- **My work did not exist.** `my-work.ts` is ported to `Models/MyWork.swift`,
+  both buckets intact. The `createdBy` clause on the agent bucket is
+  load-bearing and asserted by a test — dropping it files a teammate's
+  agents' work under the reader's name.
+- **Docs was top-level.** Documents now live inside a project
+  (`ProjectDetailView`, Tasks · Documents, mirroring `PROJECT_TAB_VIEWS`),
+  and the fetch passes `project_id` — the two modes of `fleet_list_documents`
+  are NOT the same ACL, so fetching everything and filtering on the phone
+  would silently take the weaker one.
+
+**A PORT IS A PORT: the RULE crosses, the affordance is translated.** Two
+translations were needed and both preserve meaning rather than shape — `href`
+became `InboxDestination?` (nil still means "no resolvable home", still
+renders untappable rather than as a link to nowhere), and `Date.parse` became
+`inboxSortMillis`. That second one is not boilerplate: `_iso_ts` emits
+Python's `datetime.isoformat()`, i.e. SIX fractional digits, and
+`ISO8601DateFormatter` accepts zero or three — so the obvious one-line port
+returns nil on every real ledger timestamp, every item sorts as 0, and the
+ranking degrades to input order with nothing reporting it. `TaskDates.parse`
+has the same three-digit limit; anything reading an activity-ledger timestamp
+needs the normalize fallback.
+
+**No accent on either new screen, deliberately.** The web paints the Inbox's
+notification icon with `var(--accent)`; the iOS law is stricter (violet only
+on the single primary-action button) and an Inbox row is not one. The kinds
+separate by icon and section instead.
+
+Both ported rules are guarded by `EmpyralisTests/{InboxNeedsYou,MyWork}Tests`
+— every assertion a port of the web test's own, negative cases included —
+and proven red-before-green: reintroducing the two documented mistakes (drop
+`createdBy`, sort stuck tasks newest-first) plus the naive date parse fails
+15 of 64.
 
 **Harness notes that cost real time.** A `display:none`/`hidden` equivalent
 is a trap on both platforms — on the web an explicit CSS `display` silently

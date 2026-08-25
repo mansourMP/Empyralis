@@ -50,6 +50,20 @@ final class SessionStore: ObservableObject {
             apply(payload)
         } catch APIError.server(let message) {
             lastErrorMessage = message
+        } catch APIError.unauthorized {
+            // "WRONG PASSWORD" AND "COULDN'T REACH THE SERVER" ARE DIFFERENT
+            // FACTS AND MUST NOT SHARE ONE MESSAGE. Without this branch a 401
+            // fell into the generic catch below and the login screen said
+            // "Check your connection" about a connection that was working
+            // perfectly — sending someone to their wifi settings when the
+            // thing to fix was their password. Verified live: a rejected
+            // password and an unreachable backend produced byte-identical
+            // copy.
+            //
+            // Deliberately does not say WHICH of the two was wrong, matching
+            // the server's own "Invalid email or password." — naming the
+            // wrong half tells an attacker which addresses exist.
+            lastErrorMessage = "That email and password don't match."
         } catch {
             lastErrorMessage = "Couldn't sign in. Check your connection and try again."
         }

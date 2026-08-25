@@ -68,6 +68,17 @@ final class APIClient {
         do {
             return try decoder.decode(T.self, from: data)
         } catch {
+            // A decode failure on a 2xx is a CONTRACT mismatch between this
+            // app and the route — and callers wrap these fetches in `try?`,
+            // so the throw becomes an empty list and the screen tells a
+            // plausible lie instead of reporting anything. That is exactly
+            // how `Agent` decoded its id from a key the route never sends,
+            // and the Agents tab read "No agents yet" for months. Name it in
+            // DEBUG so the next one is one console line rather than an
+            // investigation.
+            #if DEBUG
+            print("[APIClient] DECODE FAILED \(method) \(path) as \(T.self): \(error)")
+            #endif
             throw APIError.decoding
         }
     }

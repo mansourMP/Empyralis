@@ -34,6 +34,24 @@ final class WorkspaceStore: ObservableObject {
     /// comment or an attribution row into a name.
     @Published private(set) var members: [WorkspaceMember] = []
 
+    /// THE TWO INBOX SOURCES THAT ARE NOT TASKS. Held here, cached to disk
+    /// and refreshed with everything else for one reason: the Inbox is a
+    /// list screen, and a list screen that awaits a fetch to render is the
+    /// regression this whole class exists to prevent. See InboxNeedsYou.swift
+    /// for what each source is and why there are exactly three.
+    @Published private(set) var notifications: [FleetNotification] = []
+    @Published private(set) var blockedRuns: [WorkspaceActivityEvent] = []
+
+    /// PER-SOURCE, and deliberately not folded into `loadError`. The Inbox
+    /// composes three independent reads, so "notifications failed" has to be
+    /// sayable next to a task section that loaded perfectly — collapsing
+    /// them would render a failed source as "this section has zero items",
+    /// which is the empty-vs-couldn't-load lie one level down. Set on
+    /// failure, cleared on success, and the last-good rows stay on screen
+    /// either way (they are still true, just possibly not the newest).
+    @Published private(set) var notificationsError: String?
+    @Published private(set) var blockedRunsError: String?
+
     /// True once ANY source — disk or network — has populated this store.
     /// Skeletons key off this, never off an in-flight request.
     @Published private(set) var hasLoadedOnce = false
@@ -48,6 +66,17 @@ final class WorkspaceStore: ObservableObject {
     /// could not find out who is assigned" are different facts and never
     /// share one label.
     @Published private(set) var identityLookupFailed = false
+
+    /// The same fourth fact, for agents, and it exists because the collapse
+    /// it prevents actually shipped: `Agent` decoded its id from the wrong
+    /// key, every row threw, `try?` turned the throw into an empty list, and
+    /// the Agents tab told a workspace WITH agents that it had none. A
+    /// wrong-but-plausible empty state is worse than an error, because
+    /// nobody goes looking for a bug behind a sentence that reads fine.
+    ///
+    /// Only ever true when we have NOTHING cached to fall back on — a stale
+    /// list is still true, just possibly not the newest.
+    @Published private(set) var agentsLookupFailed = false
 
     /// Set when a refresh genuinely failed AND we have nothing cached to
     /// show. With cached content present a failure is deliberately silent —
@@ -75,6 +104,8 @@ final class WorkspaceStore: ObservableObject {
             agents = cached.agents
             labelVocabulary = cached.labels
             members = cached.members
+            notifications = cached.notifications
+            blockedRuns = cached.blockedRuns
             hasLoadedOnce = true
         }
     }
@@ -103,8 +134,15 @@ final class WorkspaceStore: ObservableObject {
         async let membersResult: MembersResponse? = try? APIClient.shared.get(
             "/workspaces/\(workspaceId)/members"
         )
+        // The two Inbox sources. `nonisolated static` so they actually run
+        // concurrently — a @MainActor instance method inside `async let`
+        // would serialize on the main actor and turn seven parallel round
+        // trips back into seven sequential ones.
+        async let notificationsResult = Self.fetchNotifications(workspaceId: workspaceId)
+        async let blockedRunsResult = Self.fetchBlockedRuns(workspaceId: workspaceId)
 
         let (t, p, a, l, m) = await (tasksResult, projectsResult, agentsResult, labelsResult, membersResult)
+        let (n, r) = await (notificationsResult, blockedRunsResult)
 
         // A partial failure updates what DID come back rather than discarding
         // the whole refresh — one dead endpoint must not blank two healthy
@@ -112,7 +150,15 @@ final class WorkspaceStore: ObservableObject {
         var changed = false
         if let t, t.ok { tasks = t.tasks; changed = true }
         if let p, p.ok { projects = p.projects; changed = true }
-        if let a, a.ok { agents = a.agents; changed = true }
+        if let a, a.ok {
+            agents = a.agents
+            agentsLookupFailed = false
+            changed = true
+        } else {
+            // Report the failure only when there is nothing already on
+            // screen to keep. See agentsLookupFailed.
+            agentsLookupFailed = agents.isEmpty
+        }
         if let l, l.ok { labelVocabulary = l.labels; changed = true }
 
         // Identity is the one lookup whose FAILURE has to be remembered
@@ -125,6 +171,27 @@ final class WorkspaceStore: ObservableObject {
             identityLookupFailed = true
         }
 
+        // Same posture as the web's own Inbox sources: a failed poll keeps
+        // the last-good rows and reports the failure beside them, rather
+        // than blanking a section that was true a minute ago.
+        switch n {
+        case .loaded(let items):
+            notifications = items
+            notificationsError = nil
+            changed = true
+        case .failed(let message):
+            notificationsError = message
+        }
+
+        switch r {
+        case .loaded(let items):
+            blockedRuns = items
+            blockedRunsError = nil
+            changed = true
+        case .failed(let message):
+            blockedRunsError = message
+        }
+
         if changed {
             hasLoadedOnce = true
             loadError = nil
@@ -132,6 +199,105 @@ final class WorkspaceStore: ObservableObject {
         } else if !hasLoadedOnce {
             loadError = "Couldn't reach Empyralis. Pull to retry."
         }
+    }
+
+    // MARK: - Inbox sources
+
+    /// `GET /api/w/{ws}/fleet/notifications?limit=50&unread_only=true` — the
+    /// caller's own feed, recipient-scoped by the route itself. `unread_only`
+    /// mirrors the web's default: a "needs you" surface only ever wants
+    /// notifications nobody has acted on yet.
+    ///
+    /// Returns a `SourceLoad` rather than an optional because the caller has
+    /// to be able to tell an empty feed from an unreachable one — the route answers
+    /// HTTP 200 with `ok:false` on a service-level failure, so a bare array
+    /// would report "you're all caught up" about a read that never happened.
+    private nonisolated static func fetchNotifications(
+        workspaceId: String
+    ) async -> SourceLoad<[FleetNotification]> {
+        do {
+            let response: NotificationsResponse = try await APIClient.shared.get(
+                "/w/\(workspaceId)/fleet/notifications",
+                query: ["limit": "50", "unread_only": "true"]
+            )
+            guard response.ok else {
+                return .failed(response.error ?? "Couldn't load your notifications.")
+            }
+            return .loaded(response.notifications)
+        } catch APIError.server(let message) {
+            return .failed(message)
+        } catch {
+            return .failed("Couldn't load your notifications.")
+        }
+    }
+
+    /// `GET /api/activity/timeline?workspace_id=…&event_class=blocked_action`.
+    ///
+    /// TWO THINGS ABOUT THIS PATH ARE EASY TO GET WRONG. It is NOT under
+    /// `/w/{id}/fleet` — it is a top-level route taking `workspace_id` as a
+    /// query parameter (access is still enforced inside, at viewer). And the
+    /// filter is `event_class`, the STRUCTURAL field, never a text match on
+    /// the title: `run_failed` / `machine_revoked` /
+    /// `machine_enrollment_failed` are classified into `blocked_action`
+    /// server-side, and their human-readable titles change without notice.
+    private nonisolated static func fetchBlockedRuns(
+        workspaceId: String
+    ) async -> SourceLoad<[WorkspaceActivityEvent]> {
+        do {
+            let response: ActivityTimelineResponse = try await APIClient.shared.get(
+                "/activity/timeline",
+                query: [
+                    "workspace_id": workspaceId,
+                    "limit": "30",
+                    "event_class": "blocked_action",
+                ]
+            )
+            return .loaded(response.items)
+        } catch APIError.server(let message) {
+            return .failed(message)
+        } catch {
+            return .failed("Couldn't load failed runs.")
+        }
+    }
+
+    /// `POST /api/w/{ws}/fleet/notifications/{id}/read`.
+    ///
+    /// Optimistic like every other write here: the feed is fetched
+    /// `unread_only`, so a read notification simply leaves the list. On a
+    /// refusal it goes back where it was — losing someone's notification
+    /// because a request failed is strictly worse than showing it twice.
+    ///
+    /// The WHERE clause behind this is recipient-scoped server-side, so
+    /// there is no ownership check to make on this side beyond passing the
+    /// id through.
+    func markNotificationRead(_ notificationId: String) async {
+        guard let workspaceId else { return }
+        guard let index = notifications.firstIndex(where: { $0.id == notificationId }) else { return }
+
+        let removed = notifications[index]
+        notifications.remove(at: index)
+        persist()
+
+        do {
+            let ack: NotificationReadAck = try await APIClient.shared.post(
+                "/w/\(workspaceId)/fleet/notifications/\(notificationId)/read", body: [:]
+            )
+            if !ack.ok { restore(removed, at: index) }
+        } catch APIError.decoding {
+            // 2xx. APIClient only throws .decoding AFTER its status guard
+            // passes, so the server accepted and acted; only the reply was
+            // unreadable. Restoring here would put back a notification the
+            // server has already marked read.
+            return
+        } catch {
+            restore(removed, at: index)
+        }
+    }
+
+    private func restore(_ notification: FleetNotification, at index: Int) {
+        guard !notifications.contains(where: { $0.id == notification.id }) else { return }
+        notifications.insert(notification, at: min(index, notifications.count))
+        persist()
     }
 
     // MARK: - The one write path
@@ -405,7 +571,12 @@ final class WorkspaceStore: ObservableObject {
         agents = []
         labelVocabulary = []
         members = []
+        notifications = []
+        blockedRuns = []
+        notificationsError = nil
+        blockedRunsError = nil
         identityLookupFailed = false
+        agentsLookupFailed = false
         hasLoadedOnce = false
         workspaceId = nil
         DiskCache.clearAll()
@@ -419,7 +590,9 @@ final class WorkspaceStore: ObservableObject {
                 projects: projects,
                 agents: agents,
                 labels: labelVocabulary,
-                members: members
+                members: members,
+                notifications: notifications,
+                blockedRuns: blockedRuns
             ),
             as: "workspace-\(workspaceId)"
         )
@@ -436,4 +609,56 @@ struct CachedWorkspace: Codable {
     // first refresh rather than needing a migration.
     let labels: [TaskLabel]
     let members: [WorkspaceMember]
+
+    // The two Inbox sources, added when the phone's Inbox stopped being a
+    // list of open tasks and started answering the same question the web's
+    // does. Defaulted rather than required so a cache written by the build
+    // before them still decodes — the self-healing above works, but silently
+    // throwing away someone's whole cached workspace to add two lists is a
+    // cold-start regression for no reason.
+    let notifications: [FleetNotification]
+    let blockedRuns: [WorkspaceActivityEvent]
+
+    init(
+        tasks: [EmpTask],
+        projects: [Project],
+        agents: [Agent],
+        labels: [TaskLabel],
+        members: [WorkspaceMember],
+        notifications: [FleetNotification] = [],
+        blockedRuns: [WorkspaceActivityEvent] = []
+    ) {
+        self.tasks = tasks
+        self.projects = projects
+        self.agents = agents
+        self.labels = labels
+        self.members = members
+        self.notifications = notifications
+        self.blockedRuns = blockedRuns
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case tasks, projects, agents, labels, members, notifications, blockedRuns
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        tasks = try c.decode([EmpTask].self, forKey: .tasks)
+        projects = try c.decode([Project].self, forKey: .projects)
+        agents = try c.decode([Agent].self, forKey: .agents)
+        labels = try c.decode([TaskLabel].self, forKey: .labels)
+        members = try c.decode([WorkspaceMember].self, forKey: .members)
+        notifications = (try? c.decodeIfPresent([FleetNotification].self, forKey: .notifications)).flatMap { $0 } ?? []
+        blockedRuns = (try? c.decodeIfPresent([WorkspaceActivityEvent].self, forKey: .blockedRuns)).flatMap { $0 } ?? []
+    }
+}
+
+/// Deliberately NOT `Result<T, Error>`. What every caller of this actually
+/// needs is a MESSAGE it can put on screen, not a thrown type to
+/// re-classify — and two named cases keep "this source is empty" and "this
+/// source could not be read" different facts the whole way from the request
+/// to the row, which is the one thing collapsing them would destroy.
+enum SourceLoad<T> {
+    case loaded(T)
+    case failed(String)
 }

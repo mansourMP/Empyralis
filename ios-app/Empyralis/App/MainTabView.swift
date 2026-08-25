@@ -8,36 +8,50 @@ struct MainTabView: View {
     @State private var selectedTab: Tab = .inbox
     @State private var inboxPath = NavigationPath()
 
-    enum Tab: Hashable { case inbox, search, projects, docs, agents, settings }
+    enum Tab: Hashable { case inbox, myWork, projects, agents, search }
 
+    /// THE TAB BAR IS THE WEB RAIL PLUS SEARCH, and every difference from
+    /// what shipped before is a web decision this app was contradicting:
+    ///
+    ///   Inbox · My work · Projects · Agents          the rail, in its order
+    ///   Search                                        a phone affordance the
+    ///                                                 web solves with ⌘K
+    ///
+    ///   My work   was MISSING entirely. It is the one question the phone
+    ///             could not answer: what is assigned to me, across every
+    ///             project.
+    ///   Docs      was TOP-LEVEL, which contradicts the web's own ruling
+    ///             that a cross-project document lens does not earn a rail
+    ///             slot. Documents now live inside the project that owns
+    ///             them (ProjectDetailView), mirroring PROJECT_TAB_VIEWS.
+    ///   Settings  was a TAB. It is a question people have twice, so it is a
+    ///             toolbar control on the front door instead — which is also
+    ///             what keeps this at five tabs rather than six, where iOS
+    ///             would collapse the tail into a "More" list nobody finds.
     var body: some View {
         TabView(selection: $selectedTab) {
             InboxView(path: $inboxPath)
                 .tabItem { Label("Inbox", systemImage: "tray") }
                 .tag(Tab.inbox)
 
-            // Second, not last: search is the answer to "where is that
-            // task", which is a question people have constantly and
-            // Settings is a question they have twice.
-            SearchView()
-                .tabItem { Label("Search", systemImage: "magnifyingglass") }
-                .tag(Tab.search)
+            MyWorkView()
+                .tabItem { Label("My work", systemImage: "checklist") }
+                .tag(Tab.myWork)
 
             ProjectsView()
                 .tabItem { Label("Projects", systemImage: "folder") }
                 .tag(Tab.projects)
 
-            DocumentsView()
-                .tabItem { Label("Docs", systemImage: "doc.text") }
-                .tag(Tab.docs)
-
             AgentsView()
                 .tabItem { Label("Agents", systemImage: "cpu") }
                 .tag(Tab.agents)
 
-            SettingsView()
-                .tabItem { Label("Settings", systemImage: "gearshape") }
-                .tag(Tab.settings)
+            // Last: search is the answer to "where is that task", which is
+            // a real and constant question, but it is a way of REACHING the
+            // four surfaces above rather than a fifth one of its own.
+            SearchView()
+                .tabItem { Label("Search", systemImage: "magnifyingglass") }
+                .tag(Tab.search)
         }
         .onChange(of: deepLinks.pending) { _, link in
             guard let link else { return }
@@ -60,7 +74,14 @@ struct MainTabView: View {
             // next sync rather than dead-ending.
             inboxPath.append(TaskRoute(taskId: taskId))
         case .document:
-            selectedTab = .docs
+            // Documents now live inside their project, and `DeepLink` does
+            // not carry the project half of the URL it parsed — so the
+            // honest landing spot is the project list, one tap from the
+            // document, rather than a tab that no longer exists. Widening
+            // the enum to carry `projectId` would let this push all the way
+            // through; that is a change to the deep-link contract and its
+            // tests, not a side effect of moving a tab.
+            selectedTab = .projects
         case .project:
             selectedTab = .projects
         case .agent:
@@ -76,11 +97,22 @@ struct TaskRoute: Hashable {
     let taskId: String
 }
 
+/// The Inbox's "Failed runs" rows open the agent that failed. Carries the
+/// install id only — a route that carried the whole `Agent` would go stale
+/// the moment the store refreshed underneath it.
+struct AgentRoute: Hashable {
+    let agentId: String
+}
+
+/// Presented as a SHEET from the Inbox's toolbar rather than as a tab — see
+/// MainTabView's own note. It therefore needs its own way out, which a tab
+/// never did.
 struct SettingsView: View {
     @EnvironmentObject private var session: SessionStore
     @EnvironmentObject private var store: WorkspaceStore
     @EnvironmentObject private var push: PushManager
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
@@ -112,6 +144,13 @@ struct SettingsView: View {
                 .scrollContentBackground(.hidden)
             }
             .navigationTitle("Settings")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                        .font(.empBody)
+                        .foregroundStyle(Theme.textSecondary(scheme))
+                }
+            }
             .task { await push.refreshAuthorizationState() }
         }
     }
@@ -122,10 +161,16 @@ struct SettingsView: View {
     private var notificationRow: some View {
         switch push.state {
         case .notDetermined:
+            // MEDIUM WEIGHT IS THE AFFORDANCE. With the app-wide neutral
+            // tint (see RootView) a plain-weight row button is the same ink
+            // as the label beside it and stops reading as something you can
+            // press. Weight is what this design system uses for emphasis —
+            // hue is not available, and the accent belongs to a view's one
+            // primary button, which a settings row is not.
             Button("Turn on notifications") {
                 Task { await push.requestAuthorization() }
             }
-            .font(.empBody)
+            .font(.empBodyMedium)
 
         case .registering:
             HStack {
@@ -153,7 +198,7 @@ struct SettingsView: View {
                     guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
                     UIApplication.shared.open(url)
                 }
-                .font(.empBody)
+                .font(.empBodyMedium)
             }
             .padding(.vertical, Space.x1)
 
@@ -168,7 +213,7 @@ struct SettingsView: View {
                 Button("Try again") {
                     Task { await push.requestAuthorization() }
                 }
-                .font(.empBody)
+                .font(.empBodyMedium)
             }
             .padding(.vertical, Space.x1)
         }

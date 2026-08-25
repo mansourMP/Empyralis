@@ -21,12 +21,25 @@ struct AgentsView: View {
                     .listStyle(.plain)
                 } else if store.realAgents.isEmpty {
                     ScrollView {
-                        EmptyStateView(
-                            title: "No agents yet",
-                            message: "Create one from the web app to see it here.",
-                            systemImage: "cpu"
-                        )
-                        .padding(.top, Space.x10)
+                        // "None" and "couldn't find out" are different facts.
+                        // This screen used to say the first while meaning the
+                        // second, for months, because a decode failure became
+                        // an empty array on the way here.
+                        if store.agentsLookupFailed {
+                            EmptyStateView(
+                                title: "Couldn't load agents",
+                                message: "The list didn't come back. Pull down to try again.",
+                                systemImage: "exclamationmark.triangle"
+                            )
+                            .padding(.top, Space.x10)
+                        } else {
+                            EmptyStateView(
+                                title: "No agents yet",
+                                message: "Create one from the web app to see it here.",
+                                systemImage: "cpu"
+                            )
+                            .padding(.top, Space.x10)
+                        }
                     }
                     .refreshable { await store.refresh() }
                 } else {

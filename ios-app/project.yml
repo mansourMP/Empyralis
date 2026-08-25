@@ -31,6 +31,19 @@ targets:
         CFBundleDisplayName: Empyralis
         NSAppTransportSecurity:
           NSAllowsArbitraryLoadsInWebContent: false
+          # A DEBUG build talks to a disposable stack on 127.0.0.1 over
+          # cleartext (see APIConfig). ATS blocks that by default and the
+          # failure surfaces as a generic "could not connect", naming
+          # nothing — so the exception is scoped to loopback ONLY. Every
+          # other host, production included, still requires TLS.
+          NSAllowsLocalNetworking: true
+          NSExceptionDomains:
+            "127.0.0.1":
+              NSExceptionAllowsInsecureHTTPLoads: true
+              NSIncludesSubdomains: false
+            localhost:
+              NSExceptionAllowsInsecureHTTPLoads: true
+              NSIncludesSubdomains: false
     settings:
       base:
         CODE_SIGN_ENTITLEMENTS: Empyralis/Empyralis.entitlements

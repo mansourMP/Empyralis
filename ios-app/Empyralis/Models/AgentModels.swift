@@ -14,8 +14,20 @@ struct Agent: Codable, Identifiable, Equatable {
     let currentRunId: String?
     let stopped: StoppedState?
 
+    /// `id` COMES FROM `agent_id`, AND THERE IS NO `id` KEY TO FALL BACK TO.
+    ///
+    /// `fleet_list_agents` emits `agent_id` and nothing else — verified
+    /// against the live route, not assumed. Decoding `id` from `"id"` threw
+    /// `keyNotFound` on every row, which took the whole `AgentsResponse`
+    /// down; `WorkspaceStore.refresh` wraps that fetch in `try?`, so the
+    /// throw became an empty list and the Agents tab rendered "No agents
+    /// yet" for a workspace that had agents. Nothing anywhere said why.
+    ///
+    /// Do not "fix" this back to `case id` because every sibling model uses
+    /// `id` — the agent row is genuinely the odd one out.
     enum CodingKeys: String, CodingKey {
-        case id, label, channel
+        case id = "agent_id"
+        case label, channel
         case agentKind = "agent_kind"
         case currentRunId = "current_run_id"
         case stopped

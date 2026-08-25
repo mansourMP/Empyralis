@@ -143,7 +143,11 @@ struct AgentTraceView: View {
                     Circle().fill(Theme.warning(scheme)).frame(width: 6, height: 6)
                     Text("Working")
                 case .finished:
-                    Circle().fill(Theme.online(scheme)).frame(width: 6, height: 6)
+                    // Two outcomes, two tones. The words below already say
+                    // which; the dot must not contradict them.
+                    Circle()
+                        .fill(model.finishedWithError ? Theme.offline(scheme) : Theme.online(scheme))
+                        .frame(width: 6, height: 6)
                     Text(model.finishedNote ?? "Run finished")
                 case .failed(let message):
                     Circle().fill(Theme.offline(scheme)).frame(width: 6, height: 6)
@@ -262,6 +266,14 @@ final class AgentTraceModel: ObservableObject {
     @Published private(set) var phase: Phase = .connecting
     @Published private(set) var finishedNote: String?
 
+    /// `.finished` covers BOTH a clean finish and a run that ended in an
+    /// error, so the phase alone cannot colour the footer. It was painting
+    /// Theme.online either way — a green dot next to the words "Run ended
+    /// with an error", which is a status colour claiming success about a
+    /// failure. Kept as its own fact rather than sniffed back out of
+    /// `finishedNote`'s prose.
+    @Published private(set) var finishedWithError = false
+
     /// Set from the view's geometry probes; together they answer whether the
     /// reader is parked at the bottom.
     var contentBottom: CGFloat = 0
@@ -313,7 +325,8 @@ final class AgentTraceModel: ObservableObject {
                 apply(event)
                 if event.isTerminal {
                     sawTerminal = true
-                    finishedNote = event.normalizedType == "trace.failed"
+                    finishedWithError = event.normalizedType == "trace.failed"
+                    finishedNote = finishedWithError
                         ? "Run ended with an error"
                         : "Run finished"
                     phase = .finished

@@ -393,6 +393,25 @@ enum TaskDates {
         guard let value, !value.isEmpty else { return nil }
         if let d = isoFractional.date(from: value) { return d }
         if let d = iso.date(from: value) { return d }
+
+        // THE SPACE SEPARATOR. `created_at` / `updated_at` / `due_at` arrive
+        // as "2026-08-25 07:38:07.933865+00:00" — not ISO 8601, and both
+        // parsers above reject it. Without this line every one of them fell
+        // through to the date-only branch below and resolved to MIDNIGHT
+        // UTC, so a task created 35 minutes ago rendered as "8 hr ago" and
+        // "Created by … 8 hr ago" was wrong on every task in the product.
+        //
+        // Reuses InboxNeedsYou's normalizer rather than growing a second
+        // copy of the same rule — it already handles microsecond precision
+        // and a missing timezone, which are the other two shapes this
+        // backend emits.
+        let normalized = InboxDateParsing.normalize(value)
+        if normalized != value {
+            if let d = isoFractional.date(from: normalized) { return d }
+            if let d = iso.date(from: normalized) { return d }
+        }
+
+        // Genuinely date-only ("2026-08-20"), which `due_at` is by contract.
         if let d = dateOnly.date(from: String(value.prefix(10))) { return d }
         return nil
     }

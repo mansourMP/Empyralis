@@ -35,6 +35,21 @@ struct RootView: View {
                 MainTabView()
             }
         }
+        // THE APP HAS NO SYSTEM BLUE IN IT. Left unset, SwiftUI tints every
+        // control it owns — the selected tab, a plain Button in a List, the
+        // pull-to-refresh spinner, the caret — with Apple's default blue,
+        // which is a hue this product's design system never defines. It was
+        // rendering on the tab bar of every screen.
+        //
+        // The replacement is NOT the accent: Theme's own header forbids the
+        // violet on tab bars and selected rows by name. It is the primary
+        // TEXT colour, which is the design system's own answer — selection
+        // is weight and shape, never hue. Buttons that genuinely are a
+        // view's primary action paint themselves (AuthPrimaryPillStyle, the
+        // comment send button) and are unaffected by this; `role:
+        // .destructive` still goes red, which is an iOS convention people
+        // read as "careful", not as branding.
+        .tint(Theme.textPrimary(scheme))
         .task { await session.restoreSession() }
         // Binding is synchronous and hydrates from disk, so by the time the
         // tab view's first frame renders the lists already hold real content.
