@@ -7,9 +7,18 @@ struct LoginView: View {
     @State private var email = ""
     @State private var password = ""
     @State private var isLoading = false
+    @State private var isGoogleLoading = false
     @FocusState private var focusedField: Field?
 
     private enum Field { case email, password }
+
+    /// THE ACCENT FOLLOWS THE PRIMARY ACTION, WHICH IS NOT ALWAYS THE SAME
+    /// CONTROL. With Google present it is the top pill and email/password is
+    /// the fallback beneath it — Linear's own shape. With Google absent there
+    /// is only one way in, and a screen whose single action is painted as a
+    /// secondary has no primary action at all. One rule, computed, so the two
+    /// arrangements can never both be accented and never both be neutral.
+    private var googleIsPrimary: Bool { session.googleSignInAvailable }
 
     var body: some View {
         ZStack {
@@ -36,6 +45,41 @@ struct LoginView: View {
                         .foregroundStyle(Theme.textPrimary(scheme))
                         .padding(.top, Space.x5)
 
+                    // GOOGLE FIRST, THEN THE FORM — the founder's own
+                    // reference: "logging in should go to a specific link to
+                    // Google to do it because in Linear it's like that."
+                    // Linear puts the provider above the fields because it is
+                    // the faster door, not because it is the only one.
+                    //
+                    // THE WHOLE BLOCK IS ABSENT, NOT DISABLED, when this
+                    // build has no Google client id or the backend has Google
+                    // switched off (SessionStore.googleSignInAvailable). A
+                    // greyed-out provider button is the dead control this
+                    // codebase forbids, and an "or" rule dangling under
+                    // nothing is worse.
+                    if session.googleSignInAvailable {
+                        Button {
+                            signInWithGoogle()
+                        } label: {
+                            if isGoogleLoading {
+                                ProgressView().tint(Theme.accentContrast)
+                            } else {
+                                HStack(spacing: Space.x2) {
+                                    Image("GoogleMark")
+                                        .resizable()
+                                        .scaledToFit()
+                                        .frame(width: 18, height: 18)
+                                    Text("Continue with Google")
+                                }
+                            }
+                        }
+                        .buttonStyle(AuthPrimaryPillStyle())
+                        .disabled(isGoogleLoading || isLoading)
+                        .padding(.top, Space.x8)
+
+                        orRule.padding(.top, Space.x5)
+                    }
+
                     VStack(spacing: Space.x3) {
                         pill("Email", text: $email, isSecure: false)
                             .focused($focusedField, equals: .email)
@@ -52,7 +96,7 @@ struct LoginView: View {
                             .submitLabel(.go)
                             .onSubmit { submit() }
                     }
-                    .padding(.top, Space.x8)
+                    .padding(.top, googleIsPrimary ? Space.x5 : Space.x8)
 
                     if let error = session.lastErrorMessage {
                         Text(error)
@@ -62,17 +106,18 @@ struct LoginView: View {
                             .padding(.top, Space.x4)
                     }
 
-                    Button {
-                        submit()
-                    } label: {
-                        if isLoading {
-                            ProgressView().tint(Theme.accentContrast)
+                    // Exactly one accent pill on this screen, whichever
+                    // arrangement is showing — see `googleIsPrimary`.
+                    Group {
+                        if googleIsPrimary {
+                            Button(action: submit) { continueLabel(tint: Theme.textPrimary(scheme)) }
+                                .buttonStyle(AuthSecondaryPillStyle())
                         } else {
-                            Text("Continue")
+                            Button(action: submit) { continueLabel(tint: Theme.accentContrast) }
+                                .buttonStyle(AuthPrimaryPillStyle())
                         }
                     }
-                    .buttonStyle(AuthPrimaryPillStyle())
-                    .disabled(email.isEmpty || password.isEmpty || isLoading)
+                    .disabled(email.isEmpty || password.isEmpty || isLoading || isGoogleLoading)
                     .padding(.top, Space.x4)
 
                     Spacer(minLength: Space.x8)
@@ -83,6 +128,38 @@ struct LoginView: View {
                 .scrollDismissesKeyboard(.interactively)
             }
         }
+        // Confirms with the server that Google is actually on. Not awaited
+        // before rendering — the button's first-frame state comes from this
+        // build's own config, and this call can only ever take it away.
+        .task { await session.refreshGoogleAvailability() }
+    }
+
+    @ViewBuilder
+    private func continueLabel(tint: Color) -> some View {
+        if isLoading {
+            ProgressView().tint(tint)
+        } else {
+            Text("Continue")
+        }
+    }
+
+    /// Says the two doors are alternatives rather than a sequence. A hairline
+    /// either side of one lowercase word — the divider carries the meaning,
+    /// so the word stays as quiet as it can be and still be read.
+    private var orRule: some View {
+        HStack(spacing: Space.x3) {
+            line
+            Text("or")
+                .font(.empSecondary)
+                .foregroundStyle(Theme.textMuted(scheme))
+            line
+        }
+    }
+
+    private var line: some View {
+        Rectangle()
+            .fill(Theme.border(scheme))
+            .frame(height: 1)
     }
 
     /// A text field wearing the same 52pt capsule as the buttons, so the
@@ -102,10 +179,7 @@ struct LoginView: View {
         .multilineTextAlignment(.center)
         .padding(.horizontal, Space.x5)
         .frame(height: 52)
-        .background(
-            scheme == .dark ? Color(hex: 0x1C1C1E) : Color(hex: 0xF2F2F4),
-            in: Capsule()
-        )
+        .background(Theme.bgField(scheme), in: Capsule())
         .overlay(Capsule().stroke(Theme.border(scheme), lineWidth: 1))
     }
 
@@ -116,6 +190,16 @@ struct LoginView: View {
         Task {
             await session.login(email: email, password: password)
             isLoading = false
+        }
+    }
+
+    private func signInWithGoogle() {
+        guard !isGoogleLoading, !isLoading else { return }
+        focusedField = nil
+        isGoogleLoading = true
+        Task {
+            await session.loginWithGoogle()
+            isGoogleLoading = false
         }
     }
 }

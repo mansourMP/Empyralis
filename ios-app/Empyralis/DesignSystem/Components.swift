@@ -122,17 +122,36 @@ struct EmptyStateView: View {
 
 /// A skeleton row. Shown ONLY when nothing is known yet — never over
 /// content already on screen. See WorkspaceStore's hasLoadedOnce.
+///
+/// THE FILL IS A DIFFERENT RAMP STEP PER SCHEME, and that is the "bgInset
+/// inverts direction on black" rule from `Theme` showing up in a component.
+///
+/// A skeleton has to be the quietest visible thing on the page, and the
+/// shimmer multiplies its fill down to 0.45 opacity — so which token can
+/// survive that trough depends on which side of the page it sits on:
+///
+///   light  page #FFFFFF   `bgInset` #EEEEEF  is BELOW the page  ✓ 1.16:1
+///                         `bgCard`  #FFFFFF  is the page itself ✗ invisible
+///   dark   page #000000   `bgInset` #161616  troughs to #0D0D0D ✗ 1.08:1
+///                         `bgCard`  #1C1C1C  holds               ✓ 1.18:1
+///
+/// Picking either one for both schemes makes the loading state disappear in
+/// the other — measured, not guessed.
 struct SkeletonRow: View {
     @Environment(\.colorScheme) private var scheme
     @State private var shimmer = false
 
+    private var fill: Color {
+        scheme == .dark ? Theme.bgCard(scheme) : Theme.bgInset(scheme)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: Space.x2) {
             RoundedRectangle(cornerRadius: 4)
-                .fill(Theme.bgInset(scheme))
+                .fill(fill)
                 .frame(width: 60, height: 10)
             RoundedRectangle(cornerRadius: 4)
-                .fill(Theme.bgInset(scheme))
+                .fill(fill)
                 .frame(maxWidth: .infinity)
                 .frame(height: 14)
         }
@@ -196,10 +215,7 @@ struct AuthSecondaryPillStyle: ButtonStyle {
             .foregroundStyle(Theme.textPrimary(scheme))
             .frame(maxWidth: .infinity)
             .frame(height: 52)
-            .background(
-                scheme == .dark ? Color(hex: 0x1C1C1E) : Color(hex: 0xF2F2F4),
-                in: Capsule()
-            )
+            .background(Theme.bgField(scheme), in: Capsule())
             .overlay(
                 Capsule().stroke(Theme.border(scheme), lineWidth: 1)
             )
