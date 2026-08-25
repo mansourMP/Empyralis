@@ -127,6 +127,21 @@ struct SettingsView: View {
                         .listRowBackground(Theme.bgCard(scheme))
                     }
 
+                    // Workspace/Connections — parity with the web's own
+                    // Settings shell (SettingsShell.tsx's "workspace" and
+                    // "connections" sections). Account is above (this
+                    // screen's own row) and Shortcuts doesn't apply to
+                    // touch, so these two are the only sections this app
+                    // ports — see each screen's own file header for exactly
+                    // what was and wasn't built.
+                    Section {
+                        NavigationLink("Workspace") { WorkspaceSettingsView() }
+                            .font(.empBody)
+                        NavigationLink("Connections") { ConnectionsSettingsView() }
+                            .font(.empBody)
+                    }
+                    .listRowBackground(Theme.bgCard(scheme))
+
                     Section("Notifications") {
                         notificationRow
                     }
