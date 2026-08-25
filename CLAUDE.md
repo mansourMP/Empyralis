@@ -3962,6 +3962,48 @@ tab, read the console.
 
 - **One agent = one worktree = one branch.** Never two agents editing the same
   working tree. See `docs/AGENT-OPERATING-RULES.md`.
+
+  **THIS RULE HAS NOW DESTROYED REAL WORK, and the orchestrator broke it
+  having already read it (2026-08-26).** A session dispatching pre-launch
+  fixes ran four subagents concurrently in the PRIMARY checkout instead of
+  isolated worktrees. Two of them fought over HEAD; one committed onto the
+  wrong branch and had to move the commit by branch-pointer surgery; a later
+  one hit a branch-name collision, "untangled" it with `git checkout` +
+  `git reset --hard`, and destroyed UNCOMMITTED, UNSTAGED edits belonging to
+  a DIFFERENT live session — five `ios-app/` files (`Theme.swift`,
+  `WorkspaceSettingsView.swift`, `TaskDetailView.swift`, `Info.plist`,
+  `project.yml`) plus this file's own in-flight edits.
+
+  **Unstaged work never enters git, so there is nothing to recover.** Checked
+  properly before concluding that, and each path is worth knowing so nobody
+  re-derives it under pressure: `git fsck --lost-found` finds only objects
+  that were once STAGED (the dangling commits present were from Aug 19/21 and
+  unrelated); macOS `tmutil listlocalsnapshots` on this box holds OS-update
+  snapshots only, no user data; and the sibling worktrees held the same
+  post-reset content. `git reflog` cannot help either — it records where HEAD
+  has been, never the working tree.
+
+  Two mechanics that make this worse than it sounds. `reset --hard` is not
+  the only way in: any `git checkout <branch>` that must overwrite a dirty
+  file, or a `stash` from the neighbouring rule, does the same damage from a
+  command nobody reads as destructive. And a subagent CANNOT SEE that a
+  dirty file belongs to someone else — `git status` in a shared tree shows
+  one undifferentiated list, so "these edits are not mine, leave them" is not
+  a judgement it is able to make. That is why the fix is isolation, not
+  care.
+
+  **So: dispatch every subagent with `isolation: "worktree"`.** The
+  orchestrator owns this, not the subagent — a prompt saying "be careful with
+  git" cannot help an agent that cannot tell whose files it is looking at.
+  Measured on the same day: the one agent dispatched into its own worktree
+  caused none of this and needed no git instructions at all. If work MUST
+  happen in the primary tree, commit or `git diff > /tmp/x.patch` everything
+  first, and never leave another session's edits uncommitted underneath a
+  running agent.
+
+  Corollary for whoever holds the primary tree: **do not run git state
+  changes there while another session's agent is live in it** — that is the
+  same mistake pointed the other way. Ask, wait, then merge.
 - **Never `git stash` when other agents are running.** Worktrees share one
   `.git`, so they share one stash stack — a `stash pop` can silently pull in a
   *different* agent's uncommitted work. This happened 2026-07-31 and was caught
@@ -5484,6 +5526,13 @@ the refusal:
   unreachable from any screen — its own "built, tested, and never wired"
   instance, not fixed here (building a settings UI from scratch is out of
   this pass's scope).
+  **NO LONGER TRUE as of 2026-08-26 — re-grepped, it HAS a screen.**
+  `OpenClawChannelsPanel.tsx` reads (:1466), writes (:1499) and summarises
+  (:1717) it. Kept rather than deleted so the next reader sees it was closed
+  rather than that nobody looked. The paragraph near the identity-links entry
+  repeated the same stale claim and is corrected there too — two sections
+  echoing one dead fact is how a "still open" note outlives its own fix.
+  Re-run the grep before citing either.
 - `agent_channel_bindings` is populated for the OpenClaw-transported
   channel family by NOTHING today. Its only writer,
   `_ensure_agent_channel_binding_enabled`, fires exclusively for
@@ -5675,9 +5724,20 @@ it back above the channel check, and do not add a fourth reader.
 **Still open, flagged not fixed:** those identity-links endpoints (`GET`/`PUT`
 `/workspaces/{id}/identity-links`) have zero frontend callers and now feed
 only a disjunct that can never decide anything real — either give them a
-surface or delete them; and `PATCH .../{channel_key}/gateways/{id}/group-policy`
-remains the same shape (built, tested, zero frontend callers), already noted
-in the multi-agent-per-box section above.
+surface or delete them.
+
+**CORRECTED 2026-08-26: the group-policy half of this paragraph was STALE.**
+It claimed `PATCH .../{channel_key}/gateways/{id}/group-policy` was still
+"built, tested, zero frontend callers". It has a screen —
+`OpenClawChannelsPanel.tsx` reads it (:1466), writes it (:1499) and folds it
+into its own summary (:1717), and that file's own comment at :1417 records
+the transition ("already existed and, until now, had no screen"). Verified by
+grep, not by re-reading either passage. The identity-links half IS still true.
+
+This matters more than a stale note usually would: that route is the only
+thing that configures WHO MAY MESSAGE an agent, and since the tool tier was
+deleted, reachability is the whole boundary. A note saying it has no UI reads
+as a live security gap that does not exist.
 
 ## A launcher pins the path it was launched from (2026-08-18, MAN-355)
 
