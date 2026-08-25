@@ -29,6 +29,26 @@ targets:
       properties:
         UILaunchScreen: {}
         CFBundleDisplayName: Empyralis
+        # ── Orientation ──────────────────────────────────────────────────
+        # PORTRAIT ONLY, and this is a fix, not a default that was left
+        # alone: this key was ABSENT until 2026-08-26, and an absent key is
+        # NOT the same as portrait-locked — iOS's own fallback with nothing
+        # declared is to allow every orientation. Rotating a real build
+        # confirmed it: the frame genuinely rotates (a screenshot taken
+        # after `XCUIDevice.shared.orientation = .landscapeLeft` measures
+        # 874x402, wider than tall), but nothing in this app's layout code
+        # is orientation-aware — zero hits for "orientation" anywhere in
+        # `Empyralis/` before this change — so what actually renders is the
+        # portrait interface with its coordinate space rotated: title and
+        # buttons legible only with the phone turned on its side, not a
+        # reflowed landscape layout. That is a broken screen, not a design
+        # choice nobody happened to make yet, and every screen in this app
+        # (Theme.swift's own "operator-tool density" type scale, dense
+        # single-column lists) is built for a fixed portrait width — so
+        # portrait-only is the correct fix, matching this app's actual
+        # density, not a workaround.
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
         # ── Sign in with Google ────────────────────────────────────────
         # EMPTY ON PURPOSE, and the empty string is what keeps the button
         # off the login screen (GoogleAuthConfig.clientId treats blank as

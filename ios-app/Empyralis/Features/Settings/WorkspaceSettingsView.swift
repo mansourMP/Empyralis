@@ -302,6 +302,10 @@ struct WorkspaceSettingsView: View {
                         .font(.system(size: 13))
                         .foregroundStyle(Theme.textSecondary(scheme))
                 }
+                // Icon-only, and an SF Symbol name alone ("doc on doc") tells
+                // a VoiceOver user nothing about what the control does. The
+                // label mirrors the visual state the checkmark already shows.
+                .accessibilityLabel(copiedLink ? "Copied" : "Copy invite link")
             }
             .padding(Space.x2)
             .background(Theme.bgInset(scheme), in: RoundedRectangle(cornerRadius: Radius.control))
