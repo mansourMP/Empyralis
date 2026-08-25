@@ -17,6 +17,7 @@ import {
   watchExternalAuthCompletion,
 } from '@/lib/auth/auth-client';
 import { GoogleProviderIcon } from '@/lib/auth/auth-provider-icons';
+import { classifyLoginOutcome } from '@/lib/auth/auth-error-copy';
 import { safeNextPath } from '@/lib/auth/login-next';
 import {
   accountInitials,
@@ -28,74 +29,17 @@ import {
 } from '@/lib/auth/remembered-accounts';
 import { AppButton, AppInput } from '@/lib/ui/primitives';
 
-function authErrorCopy(error: string): string {
-  const unwrapped = error
-    .trim()
-    .replace(/^(login request failed|session readiness failed|authentication request failed):\s*/i, '');
-  const normalized = unwrapped.toLowerCase();
-  if (normalized.includes('control plane is unavailable') || normalized.includes('fetch failed')) {
-    return 'This deployment cannot reach the Empyralis control plane. Open the local app or connect this deployment to a reachable backend.';
-  }
-  if (normalized.includes('google_not_configured')) {
-    return 'Google sign-in is not configured for this environment yet.';
-  }
-  if (normalized.includes('google_origin_not_allowed')) {
-    return 'Google sign-in is restricted to approved Empyralis domains.';
-  }
-  if (normalized.includes('google_runtime_not_configured')) {
-    return 'Google sign-in is not fully enabled on the runtime yet. Use email for now.';
-  }
-  if (normalized.includes('google_rate_limited')) {
-    return 'Too many Google sign-in attempts. Wait a minute, then try again.';
-  }
-  // WorkspaceTransportAdapter.redirectToLogin (workspace-services.tsx) lands
-  // here after a 401 survives a real refresh attempt — the session is
-  // genuinely gone, not merely mid-race with a concurrent refresh (see
-  // auth.py's RefreshTokenSupersededError for that case, which never
-  // reaches this redirect). Naming it explicitly, rather than letting it
-  // fall through to the generic "could not finish" copy below, is the
-  // difference between "reload and try again" (implies OUR bug) and "sign
-  // in again" (tells the owner what actually happened and what to do) —
-  // the dead-end a 401 used to be before this branch existed.
-  if (normalized.includes('session expired') || normalized.includes('refresh token has expired')) {
-    return 'Your session expired. Sign in again to continue.';
-  }
-  if (normalized.includes('google_state_invalid') || normalized.includes('google_auth_failed')) {
-    return 'Google sign-in could not finish. Try again or use email.';
-  }
-  if (normalized.includes('status 401')) {
-    return 'Email or password was not accepted.';
-  }
-  if (normalized.includes('session not ready')) {
-    return "You're signed in, but your session isn't ready yet. Press Continue again in a moment.";
-  }
-  if (normalized.includes('csrf')) {
-    return "Your session looks out of date. Clear this site's cookies in your browser, then try again.";
-  }
-  if (normalized.includes('status 403')) {
-    return 'This session is not allowed to open the workspace yet. Sign in again or use an allowed account.';
-  }
-  if (normalized.includes('status 404')) {
-    return 'The auth route is not available in this environment.';
-  }
-  if (normalized.includes('status 429')) {
-    return 'Too many sign-in attempts. Wait a minute, then try again.';
-  }
-  if (/(?:status\s*)?5\d\d/.test(normalized)
-    || /internal server|bad gateway|service unavailable|gateway timeout|temporarily unavailable|warming up/.test(normalized)) {
-    return 'The auth service is warming up or unavailable. Try again in a moment.';
-  }
-  if (normalized.includes('password') || normalized.includes('credential') || normalized.includes('invalid')) {
-    return 'Email or password was not accepted.';
-  }
-  return 'Authentication could not finish. Try again when ready.';
-}
-
+// classifyLoginOutcome (lib/auth/auth-error-copy.ts) is the ONE
+// classification that decides both the heading and the body below — see
+// its own header for why the title can no longer be hardcoded separately
+// from the message it accompanies.
 function AuthErrorNotice({ title, message }: { title: string; message: string }) {
+  const outcome = classifyLoginOutcome(message, title);
+  const isNotice = outcome.tone === 'notice';
   return (
-    <div role="alert" className="app-auth-error">
-      <strong>{title}</strong>
-      <span>{authErrorCopy(message)}</span>
+    <div role={isNotice ? 'status' : 'alert'} className={isNotice ? 'app-auth-notice' : 'app-auth-error'}>
+      <strong>{outcome.title}</strong>
+      <span>{outcome.body}</span>
     </div>
   );
 }
