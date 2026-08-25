@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { CalendarClock, FileText, Info, Loader2, Lock, Sparkles, Trash2 } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
+import { getErrorMessage } from "@/lib/ui/api-error";
 import { parseMarkdownLiteBlocks, renderMarkdownLiteInline } from "@/lib/workspace/markdown-lite";
 import type { FleetAgent } from "../fleet-data";
 
@@ -304,7 +305,7 @@ export function MemoryTab({
     try {
       const res = await fleetAuthorizedFetch(`${apiBase}/facts`, { credentials: "include" });
       const d = await res.json().catch(() => ({}));
-      if (!res.ok || d?.ok === false) throw new Error(d?.error || `HTTP ${res.status}`);
+      if (!res.ok || d?.ok === false) throw new Error(getErrorMessage(d, `HTTP ${res.status}`));
       setFacts(Array.isArray(d?.facts) ? (d.facts as MemoryFact[]) : []);
       setFactsError(null);
     } catch (e) {
@@ -318,7 +319,7 @@ export function MemoryTab({
     try {
       const res = await fleetAuthorizedFetch(`${apiBase}/daily`, { credentials: "include" });
       const d = await res.json().catch(() => ({}));
-      if (!res.ok || d?.ok === false) throw new Error(d?.error || `HTTP ${res.status}`);
+      if (!res.ok || d?.ok === false) throw new Error(getErrorMessage(d, `HTTP ${res.status}`));
       setDaily(String(d?.content || ""));
       setDailyError(null);
     } catch (e) {
@@ -332,7 +333,7 @@ export function MemoryTab({
     try {
       const res = await fleetAuthorizedFetch(`${apiBase}/private-note`, { credentials: "include" });
       const d = await res.json().catch(() => ({}));
-      if (!res.ok || d?.ok === false) throw new Error(d?.error || `HTTP ${res.status}`);
+      if (!res.ok || d?.ok === false) throw new Error(getErrorMessage(d, `HTTP ${res.status}`));
       const text = String(d?.note?.content || "");
       setPrivateNote(text);
       setPrivateOriginal(text);
@@ -353,7 +354,7 @@ export function MemoryTab({
         headers: buildCookieAuthHeaders("DELETE", {}),
       });
       const d = await res.json().catch(() => ({}));
-      if (!res.ok || d?.ok === false) throw new Error(d?.error || `HTTP ${res.status}`);
+      if (!res.ok || d?.ok === false) throw new Error(getErrorMessage(d, `HTTP ${res.status}`));
       setFacts((prev) => prev.filter((f) => f.key !== key));
       setFactsError(null);
     } catch (e) {
@@ -371,7 +372,7 @@ export function MemoryTab({
         body: JSON.stringify({ content: privateNote }),
       });
       const d = await res.json().catch(() => ({}));
-      if (!res.ok || d?.ok === false) throw new Error(d?.error || `HTTP ${res.status}`);
+      if (!res.ok || d?.ok === false) throw new Error(getErrorMessage(d, `HTTP ${res.status}`));
       setPrivateOriginal(privateNote);
       setPrivateError(null);
     } catch (e) {
@@ -457,7 +458,7 @@ export function MemoryTab({
         body: JSON.stringify({ content }),
       });
       const d = await res.json().catch(() => ({}));
-      if (!res.ok || d?.ok === false) throw new Error(d?.error || d?.detail || `HTTP ${res.status}`);
+      if (!res.ok || d?.ok === false) throw new Error(getErrorMessage(d, `HTTP ${res.status}`));
       setOriginal(content);
       // The owner just wrote this content, so it's real regardless of what
       // it happens to say — never re-flag as the seeded scaffold.
@@ -486,7 +487,7 @@ export function MemoryTab({
       // (as this used to) reads that as success and shows "deleted" for a
       // file that's still there. Same ok===false parse as save() above.
       const d = await res.json().catch(() => ({}));
-      if (!res.ok || d?.ok === false) throw new Error(d?.error || d?.detail || `HTTP ${res.status}`);
+      if (!res.ok || d?.ok === false) throw new Error(getErrorMessage(d, `HTTP ${res.status}`));
       setSelected(null);
       setContent("");
       setOriginal("");
