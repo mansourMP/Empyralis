@@ -413,7 +413,9 @@ async def _register_telegram_native_commands() -> None:
 async def _telegram_api(method: str, body: dict) -> dict:
     token = _bot_token()
     if not token:
-        raise RuntimeError("EMPYRALIS_TELEGRAM_HOSTED_BOT_TOKEN is not configured")
+        LOGGER.error("Telegram hosted bot token is not configured "
+                     "(EMPYRALIS_TELEGRAM_HOSTED_BOT_TOKEN unset).")
+        raise RuntimeError("The hosted Telegram bot isn't available on this deployment right now.")
     url = f"{TELEGRAM_API_BASE}/bot{token}/{method}"
     async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
         resp = await client.post(url, json=body)
@@ -1076,7 +1078,9 @@ async def send_photo(chat_id: str, photo: str, *, caption: str | None = None, re
     import pathlib as _pl
     token = _bot_token()
     if not token:
-        raise RuntimeError("EMPYRALIS_TELEGRAM_HOSTED_BOT_TOKEN is not configured")
+        LOGGER.error("Telegram hosted bot token is not configured "
+                     "(EMPYRALIS_TELEGRAM_HOSTED_BOT_TOKEN unset).")
+        raise RuntimeError("The hosted Telegram bot isn't available on this deployment right now.")
     # Resolve file:// URLs and local paths to actual file bytes
     file_bytes: bytes | None = None
     filename: str | None = None
@@ -1124,7 +1128,9 @@ async def send_document(chat_id: str, document: str, *, caption: str | None = No
     import pathlib as _pl
     token = _bot_token()
     if not token:
-        raise RuntimeError("EMPYRALIS_TELEGRAM_HOSTED_BOT_TOKEN is not configured")
+        LOGGER.error("Telegram hosted bot token is not configured "
+                     "(EMPYRALIS_TELEGRAM_HOSTED_BOT_TOKEN unset).")
+        raise RuntimeError("The hosted Telegram bot isn't available on this deployment right now.")
     # Resolve file:// URLs and local paths to actual file bytes
     file_bytes: bytes | None = None
     resolved_path: _pl.Path | None = None

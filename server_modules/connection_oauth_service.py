@@ -2353,11 +2353,22 @@ def _provider_env(provider: str) -> tuple[str, str, tuple[str, ...], tuple[str, 
 def ensure_oauth_configured(provider: str) -> tuple[str, str]:
     client_id, client_secret, client_names, secret_names = _provider_env(provider)
     if not client_id or not client_secret:
+        # The operator-facing detail (which env vars to set) is genuinely
+        # useful, but only to whoever can set env vars on our server — a
+        # customer clicking "Connect" cannot act on it. Log it for us, raise
+        # a customer-safe message with no env var names for them. Same shape
+        # as the Google Cloud VPS fix (MAN-302, vps_provisioning_service.py's
+        # _google_operator_identity/_google_operator_access_token).
+        _log.error(
+            "%s OAuth is not configured: missing %s and/or %s.",
+            _connector_label(provider),
+            " or ".join(client_names) or "<no client_id env var declared>",
+            " or ".join(secret_names) or "<no client_secret env var declared>",
+        )
         raise HTTPException(
             status_code=409,
             detail=(
-                f"{_connector_label(provider)} OAuth is not configured. "
-                f"Set {' or '.join(client_names)} and {' or '.join(secret_names)}."
+                f"{_connector_label(provider)} isn't available on this deployment yet."
             ),
         )
     return client_id, client_secret
@@ -3192,7 +3203,8 @@ def _exchange_discord(code: str, redirect_uri: str) -> Dict[str, Any]:
     # authorizes the bot to operate in a specific server (guild).
     bot_token = str(os.getenv("DISCORD_BOT_TOKEN") or "").strip()
     if not bot_token:
-        raise RuntimeError("DISCORD_BOT_TOKEN is not configured in the server environment.")
+        _log.error("Discord OAuth connect failed: DISCORD_BOT_TOKEN is not configured in the server environment.")
+        raise RuntimeError("Discord isn't available on this deployment yet.")
     # Call /users/@me to get the bot's Discord user ID for display.
     me_req = urlrequest.Request(
         "https://discord.com/api/users/@me",

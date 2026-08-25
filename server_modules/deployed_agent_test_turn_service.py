@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any, Dict, Optional
 
@@ -21,6 +22,8 @@ from server_modules import (
     security_audit_service,
 )
 from server_modules.schemas import DeployedAgentTestTurnRequest, DeployedAgentTestTurnResponse
+
+_LOGGER = logging.getLogger(__name__)
 
 ALLOWED_TEST_CHANNELS = {"telegram", "whatsapp", "web_widget", "test"}
 ALLOWED_RUNTIME_MODES = {
@@ -637,9 +640,12 @@ async def _generate_live_test_reply(
     resolved_model = _coerce_text(credentials_payload.get("model")) or model
     credentials = credentials_payload.get("credentials")
     if not isinstance(credentials, dict):
+        _LOGGER.error(
+            "Studio test turn failed: DeepSeek is not configured "
+            "(DEEPSEEK_API_KEY / ORION_HOSTED_DEEPSEEK_API_KEY unset)."
+        )
         raise RuntimeError(
-            "DeepSeek is not configured for Studio test turns. "
-            "Set DEEPSEEK_API_KEY or ORION_HOSTED_DEEPSEEK_API_KEY and restart the backend."
+            "Live test turns aren't available on this deployment right now."
         )
 
     model_messages, prompt_context = _build_live_test_messages(

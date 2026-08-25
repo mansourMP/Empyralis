@@ -80,7 +80,11 @@ def test_production_launch_token_requires_strong_secret(monkeypatch: pytest.Monk
     monkeypatch.setenv("ORION_ENV", "production")
     monkeypatch.setenv("EMPYRALIS_MINI_APP_LAUNCH_SECRET", "short")
 
-    with pytest.raises(RuntimeError, match="high-entropy"):
+    # MAN-365: the raised message is customer-safe (no env var names, no
+    # "high-entropy" mechanism detail) -- that detail now goes to the
+    # logger only. Assert the refusal still happens and the log line still
+    # carries the operator-facing diagnostic.
+    with pytest.raises(RuntimeError, match="Mini apps aren't available"):
         mini_app_host_service.issue_hosted_launch_token(
             workspace_id="ws-1",
             app_id="travel_partner",
