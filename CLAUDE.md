@@ -8445,3 +8445,67 @@ fix with `GeometryReader` + `minHeight`, never by deleting the ScrollView,
 which the keyboard still needs. And a simulator's permission/UserDefaults
 state PERSISTS across reinstalls — `xcrun simctl erase <udid>` before
 testing a first-run path, or you inherit the previous run's answer.
+
+## Driving the iPhone app against a REAL backend found 11 defects that every unit test agreed were fine (2026-08-25)
+
+**Three of them made a WHOLE SURFACE SILENTLY DEAD. All three compiled, ran,
+passed their own tests, and lied.** This is the strongest evidence yet for
+this file's own standing rule that a static read is worth little.
+
+```
+Agents tab could NEVER show an agent
+  Agent.id decoded "id"   ·   fleet_list_agents only ever sends "agent_id"
+  every row threw -> `try?` ate it -> empty state told a workspace FULL of
+  agents "No agents yet"
+```
+That is the "a fixture that invents its own input cannot notice the real
+input is shaped differently" failure, again, on a model written from
+assumption whose unit tests agreed with it perfectly. **When you write a
+Codable/DTO against an endpoint, build the fixture from a REAL response —
+`curl` it — never from the field names you expect.**
+
+**`URLSession.AsyncBytes.lines` CANNOT PARSE SSE.** It silently drops the
+BLANK LINE that terminates an SSE record, so no record is ever emitted. The
+agent trace stream — the product's marquee feature — delivered zero events
+on every run and every Work view read "the connection closed before the run
+reported an outcome" regardless of what happened. Parse the byte stream and
+keep the blank lines, or the feature is structurally incapable of working.
+
+**THE BACKEND EMITS TWO DIFFERENT DATE FORMATS IN ONE OBJECT.**
+```
+created_at / updated_at / due_at   "2026-08-25 07:38:07.933865+00:00"  SPACE, not ISO-T
+metadata.activity[].timestamp      "2026-08-25T07:38:07.356134+00:00"  ISO-T, 6 digits
+```
+`ISO8601DateFormatter` accepts neither reliably (it wants 0 or 3 fractional
+digits, and rejects the space entirely). A task created 35 minutes earlier
+rendered "8 hr ago", and the Inbox's oldest-first ranking degraded silently
+to API order because every sort key was 0. Any client parsing these needs
+both shapes and a fractional-digit normalize.
+
+**A GENERATED Info.plist CANNOT BE HAND-EDITED.** xcodegen regenerates it,
+so an ATS exception written there is erased by the next `xcodegen generate`.
+It belongs in `project.yml`. Same class as this file's "a compiled artifact
+is a live-path risk grep can't see".
+
+**PROVE A BUILD-CONFIGURATION CLAIM BY SCANNING THE BINARY, NOT BY READING
+THE `#if`.** The DEBUG-only localhost API base was verified by scanning the
+built Mach-O: Release contains only `https://empyralis.ai/api`, and the same
+scan DOES find localhost in Debug. **That Debug hit is the canary** — without
+it, "not found in Release" could just mean the scan was broken.
+
+Also fixed, each real: a wrong password reported "Check your connection"
+(byte-identical to an unreachable server, discarding the server's own
+message); markdown tables rendered as raw pipes in 3 of 4 seeded documents,
+one of which was the release checklist whose own row claims tables render;
+system blue on the tab bar; a green footer beside "Run ended with an error".
+
+Tests went 64 -> 98. `ios-app/UIDriver/` is the opt-in XCUITest harness that
+found five of these — the canonical `xcodegen generate` does NOT build it
+(`xcodegen generate --spec project.uidriver.yml`).
+
+**STILL UNVERIFIED, and do not let a later summary claim otherwise:** the
+Inbox's Notifications and Failed-runs sections have never rendered WITH
+DATA; a LIVE streaming trace has never been seen (the only trace present is
+finished-and-failed); and a task write has never been watched commit and
+roll back from the UI. Push and deep links are structurally untestable while
+the Apple account is a free personal team.
