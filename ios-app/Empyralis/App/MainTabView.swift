@@ -161,10 +161,16 @@ struct SettingsView: View {
     private var notificationRow: some View {
         switch push.state {
         case .notDetermined:
+            // MEDIUM WEIGHT IS THE AFFORDANCE. With the app-wide neutral
+            // tint (see RootView) a plain-weight row button is the same ink
+            // as the label beside it and stops reading as something you can
+            // press. Weight is what this design system uses for emphasis —
+            // hue is not available, and the accent belongs to a view's one
+            // primary button, which a settings row is not.
             Button("Turn on notifications") {
                 Task { await push.requestAuthorization() }
             }
-            .font(.empBody)
+            .font(.empBodyMedium)
 
         case .registering:
             HStack {
@@ -192,7 +198,7 @@ struct SettingsView: View {
                     guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
                     UIApplication.shared.open(url)
                 }
-                .font(.empBody)
+                .font(.empBodyMedium)
             }
             .padding(.vertical, Space.x1)
 
@@ -207,7 +213,7 @@ struct SettingsView: View {
                 Button("Try again") {
                     Task { await push.requestAuthorization() }
                 }
-                .font(.empBody)
+                .font(.empBodyMedium)
             }
             .padding(.vertical, Space.x1)
         }

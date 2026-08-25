@@ -67,6 +67,17 @@ final class WorkspaceStore: ObservableObject {
     /// share one label.
     @Published private(set) var identityLookupFailed = false
 
+    /// The same fourth fact, for agents, and it exists because the collapse
+    /// it prevents actually shipped: `Agent` decoded its id from the wrong
+    /// key, every row threw, `try?` turned the throw into an empty list, and
+    /// the Agents tab told a workspace WITH agents that it had none. A
+    /// wrong-but-plausible empty state is worse than an error, because
+    /// nobody goes looking for a bug behind a sentence that reads fine.
+    ///
+    /// Only ever true when we have NOTHING cached to fall back on — a stale
+    /// list is still true, just possibly not the newest.
+    @Published private(set) var agentsLookupFailed = false
+
     /// Set when a refresh genuinely failed AND we have nothing cached to
     /// show. With cached content present a failure is deliberately silent —
     /// the content on screen is still true, just possibly not the newest.
@@ -139,7 +150,15 @@ final class WorkspaceStore: ObservableObject {
         var changed = false
         if let t, t.ok { tasks = t.tasks; changed = true }
         if let p, p.ok { projects = p.projects; changed = true }
-        if let a, a.ok { agents = a.agents; changed = true }
+        if let a, a.ok {
+            agents = a.agents
+            agentsLookupFailed = false
+            changed = true
+        } else {
+            // Report the failure only when there is nothing already on
+            // screen to keep. See agentsLookupFailed.
+            agentsLookupFailed = agents.isEmpty
+        }
         if let l, l.ok { labelVocabulary = l.labels; changed = true }
 
         // Identity is the one lookup whose FAILURE has to be remembered
@@ -557,6 +576,7 @@ final class WorkspaceStore: ObservableObject {
         notificationsError = nil
         blockedRunsError = nil
         identityLookupFailed = false
+        agentsLookupFailed = false
         hasLoadedOnce = false
         workspaceId = nil
         DiskCache.clearAll()

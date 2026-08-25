@@ -290,13 +290,30 @@ enum InboxDateParsing {
         return f
     }()
 
-    /// Truncates sub-millisecond precision and supplies a missing timezone.
-    /// Both are shapes the backend really produces: Postgres timestamps come
-    /// back through `datetime.isoformat()` with microseconds, and a value
-    /// that was already a string when it reached `_iso_ts` is passed through
-    /// untouched, timezone or not.
+    /// Turns what the backend really sends into something
+    /// `ISO8601DateFormatter` will actually accept. THREE shapes, and the
+    /// first one is the one that was missing:
+    ///
+    ///   "2026-08-25 07:38:07.933865+00:00"   SPACE separator — NOT ISO 8601
+    ///   "2026-08-25T07:38:07.933865+00:00"   microseconds
+    ///   "2026-08-25T07:38:07"                no timezone
+    ///
+    /// `created_at`, `updated_at` and `due_at` all arrive space-separated on
+    /// every task (Postgres renders them with `str()`, not `isoformat()`),
+    /// and both ISO parsers reject that outright. The measured consequence:
+    /// `inboxSortMillis` returned 0 for EVERY stuck task, so the Inbox's
+    /// oldest-first ranking — the whole reason that surface exists —
+    /// silently degraded to whatever order the API happened to return.
     static func normalize(_ raw: String) -> String {
         var value = raw
+
+        // Only the date/time separator, and only at the position where a
+        // date/time separator can be. A blanket space-strip would corrupt a
+        // value that is not a timestamp at all.
+        if value.count > 10 {
+            let sep = value.index(value.startIndex, offsetBy: 10)
+            if value[sep] == " " { value.replaceSubrange(sep...sep, with: "T") }
+        }
 
         if let dot = value.firstIndex(of: "."), dot > value.startIndex {
             var end = value.index(after: dot)

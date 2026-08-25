@@ -1,8 +1,17 @@
 import SwiftUI
 
 /// Renders the same markdown subset the web app's `markdown-lite.tsx`
-/// supports, minus tables and images (a phone-width table is a worse lie
-/// than an honest paragraph; images come with the next pass).
+/// supports, minus images (which come with the next pass).
+///
+/// TABLES ARE STACKED, NOT GRIDDED. A markdown table has no width budget on
+/// a phone: three columns of prose either truncate to uselessness or force
+/// the page to scroll sideways. So each ROW is rendered as a small record —
+/// its first cell as the row's heading, every other cell as a
+/// `column name / value` pair underneath. Nothing truncates, nothing
+/// scrolls sideways, and the column meanings survive, which a squeezed grid
+/// loses. Rendering them as paragraphs (what happened before) put raw
+/// pipes on screen: three of the four seeded documents carry a table, and
+/// one of them is the release checklist.
 ///
 /// BLOCK STRUCTURE IS HAND-PARSED, INLINE FORMATTING IS NOT. SwiftUI's
 /// `AttributedString(markdown:)` handles bold/italic/inline-code/links
@@ -89,12 +98,56 @@ struct MarkdownRenderer: View {
                 }
             }
 
+        case let .table(header, rows):
+            VStack(alignment: .leading, spacing: Space.x2) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                    tableRecord(header: header, row: row)
+                }
+            }
+
         case .rule:
             Rectangle()
                 .fill(Theme.border(scheme))
                 .frame(height: 1)
                 .padding(.vertical, Space.x1)
         }
+    }
+
+    /// One table row as a record. The first cell is the heading because in
+    /// every real table the first column is what the row IS; the rest are
+    /// labelled so a reader still knows which column a value came from.
+    private func tableRecord(header: [String], row: [String]) -> some View {
+        let title = row.first ?? ""
+        let rest = Array(row.dropFirst())
+
+        return VStack(alignment: .leading, spacing: Space.x2) {
+            if !title.isEmpty {
+                inline(title)
+                    .font(.empBodyMedium)
+                    .foregroundStyle(Theme.textPrimary(scheme))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            ForEach(Array(rest.enumerated()), id: \.offset) { index, cell in
+                if !cell.isEmpty {
+                    VStack(alignment: .leading, spacing: 2) {
+                        // A header cell can legitimately be blank; then the
+                        // value stands alone rather than under an empty label.
+                        if index + 1 < header.count, !header[index + 1].isEmpty {
+                            Text(header[index + 1].uppercased())
+                                .font(.empSectionHeader)
+                                .foregroundStyle(Theme.textMuted(scheme))
+                        }
+                        inline(cell)
+                            .font(.empSecondary)
+                            .foregroundStyle(Theme.textSecondary(scheme))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+        }
+        .padding(Space.x3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.bgInset(scheme), in: RoundedRectangle(cornerRadius: Radius.card))
     }
 
     private func headingFont(_ level: Int) -> Font {
@@ -143,6 +196,7 @@ enum MarkdownBlock: Equatable {
     case quote([String])
     case code(lines: [String], language: String)
     case list(items: [MarkdownListItem], ordered: Bool)
+    case table(header: [String], rows: [[String]])
     case rule
 
     static func parse(_ markdown: String) -> [MarkdownBlock] {
@@ -214,6 +268,16 @@ enum MarkdownBlock: Equatable {
                 continue
             }
 
+            // Tables, before the list/paragraph fallthrough. A line is only
+            // a table when the line UNDER it is a separator row — prose that
+            // merely contains a pipe must never be captured.
+            if let table = matchTable(lines, index) {
+                flushParagraph()
+                blocks.append(.table(header: table.header, rows: table.rows))
+                index = table.next
+                continue
+            }
+
             if let marker = matchListMarker(line) {
                 flushParagraph()
                 let ordered = marker.ordered
@@ -281,4 +345,64 @@ enum MarkdownBlock: Equatable {
 struct MarkdownListItem: Equatable {
     let text: String
     let depth: Int
+}
+
+
+// MARK: - Table parsing
+
+/// Splits `| a | b |` into `["a", "b"]`. Handles an escaped pipe (`\|`) and
+/// a row written without the outer pipes, which is legal markdown.
+func markdownSplitRow(_ line: String) -> [String] {
+    var cells: [String] = []
+    var current = ""
+    var escaped = false
+    for ch in line {
+        if escaped { current.append(ch); escaped = false; continue }
+        if ch == "\\" { escaped = true; continue }
+        if ch == "|" { cells.append(current); current = "" } else { current.append(ch) }
+    }
+    cells.append(current)
+    if let first = cells.first, first.trimmingCharacters(in: .whitespaces).isEmpty { cells.removeFirst() }
+    if let last = cells.last, last.trimmingCharacters(in: .whitespaces).isEmpty { cells.removeLast() }
+    return cells.map { $0.trimmingCharacters(in: .whitespaces) }
+}
+
+/// `| --- | :--: |` — the row that makes the line above it a header. This is
+/// the ONLY thing that promotes a pipe-bearing line to a table, which is
+/// what keeps a sentence containing "5 | 10" from being eaten.
+func markdownIsSeparatorRow(_ line: String) -> Bool {
+    let cells = markdownSplitRow(line)
+    guard !cells.isEmpty else { return false }
+    for cell in cells {
+        let body = cell.replacingOccurrences(of: ":", with: "")
+        if body.isEmpty { return false }
+        if body.contains(where: { $0 != "-" }) { return false }
+    }
+    return true
+}
+
+struct MarkdownTableMatch {
+    let header: [String]
+    let rows: [[String]]
+    let next: Int
+}
+
+func matchTable(_ lines: [String], _ start: Int) -> MarkdownTableMatch? {
+    guard start + 1 < lines.count else { return nil }
+    let head = lines[start].trimmingCharacters(in: .whitespaces)
+    let separator = lines[start + 1].trimmingCharacters(in: .whitespaces)
+    guard head.contains("|"), markdownIsSeparatorRow(separator) else { return nil }
+
+    let header = markdownSplitRow(head)
+    guard !header.isEmpty else { return nil }
+
+    var index = start + 2
+    var rows: [[String]] = []
+    while index < lines.count {
+        let trimmed = lines[index].trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty || !trimmed.contains("|") { break }
+        rows.append(markdownSplitRow(trimmed))
+        index += 1
+    }
+    return MarkdownTableMatch(header: header, rows: rows, next: index)
 }

@@ -4,7 +4,29 @@ import Foundation
 /// Production is empyralis.ai; swap to a local disposable stack for dev
 /// (never point this at anyone's real database from a device build).
 enum APIConfig {
-    static let baseURL = URL(string: "https://empyralis.ai/api")!
+    /// Production. The only URL a shipped build may ever talk to.
+    private static let productionURL = URL(string: "https://empyralis.ai/api")!
+
+    /// A DEBUG build talks to a local disposable stack by default, because a
+    /// developer build pointed at production is one careless tap away from
+    /// writing into real customer data. Release is untouched.
+    ///
+    /// Override in either configuration with an `EMPYRALIS_API_BASE_URL`
+    /// environment variable on the scheme (Xcode ▸ Edit Scheme ▸ Run ▸
+    /// Arguments) — that is how you demo a DEBUG build against production
+    /// without editing this file and forgetting to put it back.
+    static let baseURL: URL = {
+        if let raw = ProcessInfo.processInfo.environment["EMPYRALIS_API_BASE_URL"],
+           let url = URL(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+           url.scheme != nil {
+            return url
+        }
+        #if DEBUG
+        return URL(string: "http://127.0.0.1:8001/api")!
+        #else
+        return productionURL
+        #endif
+    }()
 
     static let devicePlatform = "ios"
     static var deviceName: String {

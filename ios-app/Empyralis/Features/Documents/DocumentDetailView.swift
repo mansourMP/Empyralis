@@ -45,7 +45,13 @@ struct DocumentDetailView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Theme.bgPage(scheme))
-        .navigationTitle(document.displayTitle)
+        // NO NAVIGATION TITLE — the body owns the title, exactly as
+        // TaskDetailView does. Setting one here put the same string on
+        // screen THREE times at once: the navigation bar, this view's own
+        // header, and the document's leading `# H1`, which every real
+        // markdown document has (all four seeded documents do). The
+        // navigation-bar copy was also the one that truncated first, since
+        // it is the narrowest of the three.
         .navigationBarTitleDisplayMode(.inline)
         .task { await load() }
         .refreshable { await load() }
