@@ -8,13 +8,20 @@ struct MainTabView: View {
     @State private var selectedTab: Tab = .inbox
     @State private var inboxPath = NavigationPath()
 
-    enum Tab: Hashable { case inbox, projects, docs, agents, settings }
+    enum Tab: Hashable { case inbox, search, projects, docs, agents, settings }
 
     var body: some View {
         TabView(selection: $selectedTab) {
             InboxView(path: $inboxPath)
                 .tabItem { Label("Inbox", systemImage: "tray") }
                 .tag(Tab.inbox)
+
+            // Second, not last: search is the answer to "where is that
+            // task", which is a question people have constantly and
+            // Settings is a question they have twice.
+            SearchView()
+                .tabItem { Label("Search", systemImage: "magnifyingglass") }
+                .tag(Tab.search)
 
             ProjectsView()
                 .tabItem { Label("Projects", systemImage: "folder") }

@@ -262,6 +262,7 @@ from server_modules.routes_sage_telegram_hosted import router as sage_telegram_h
 from server_modules.routes_wechat_official import router as wechat_official_router
 from server_modules.routes_fleet import router as fleet_router
 from server_modules.routes_conversations import router as conversations_router
+from server_modules.routes_search import router as search_router
 from server_modules.connectors.discord_bot_runtime_service import DiscordBotRuntimeService
 
 
@@ -409,6 +410,9 @@ app.include_router(sage_telegram_hosted_router, prefix="/api")
 app.include_router(wechat_official_router, prefix="/api")
 app.include_router(fleet_router, prefix="")
 app.include_router(conversations_router, prefix="")
+# Declares its own full "/api/w/{workspace_id}/search" path, exactly like
+# fleet_router above -- hence prefix="" rather than "/api".
+app.include_router(search_router, prefix="")
 
 
 def _runtime_cli_args() -> argparse.Namespace:
