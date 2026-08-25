@@ -8329,3 +8329,88 @@ model_config model." Codex already solved this exact problem for itself
 not the static list) — the same pattern needs extending to the other
 adapter-routed providers, which is real, separately-scoped work, not done
 in this pass.
+
+## There is a native iPhone app, and it is a COMPANION (2026-08-25)
+
+**`ios-app/` — native Swift/SwiftUI, zero SPM dependencies, Xcode project
+GENERATED from `project.yml` (the `.xcodeproj` is gitignored, so never edit
+it). Read `ios-app/README.md` before touching it; it carries the traps.**
+
+Founder's reference is Linear and GitHub. Linear's own iOS positioning is
+worth copying verbatim: *"a **companion** to the Linear desktop app"*,
+*"purpose-designed for away-from-keyboard workflows"* — they shipped it in
+2024 after five years of desktop-only, and the ONE axis they are expanding
+it along in 2026 is AGENT SUPERVISION (reviewing diffs, steering a coding
+session from the phone). That is the workload that suits a phone; a phone is
+not where someone configures an agent.
+
+```
+THE PLATFORM LAWS CARRY OVER UNCHANGED
+  no message composer, anywhere        talking to an agent is the CHANNEL's job
+  accent violet on the primary button   selection is weight + a checkmark
+  no focus ring                         the founder's decision, still binding
+  "empty" != "couldn't load"            four states, never collapsed
+```
+
+**LOCAL-FIRST IS THE ARCHITECTURE, and a fetch-on-appear list view is a
+regression rather than a feature.** `WorkspaceStore` hydrates from disk
+SYNCHRONOUSLY at launch so the first frame already holds real content;
+writes apply optimistically and roll back only on refusal. `hasLoadedOnce`
+is deliberately separate from `isRefreshing` — only the former may draw a
+skeleton, because a spinner over content already on screen lies about what
+is known.
+
+**Design tokens are ported VERBATIM from `frontend/lib/ui/theme-tokens.css`.**
+When a token changes there, change `DesignSystem/Theme.swift` with it; never
+invent an iOS-only colour. The MARK stays clay while the UI accent stays
+violet — that split is the documented exception, not a bug to reconcile.
+`BrandMark` DRAWS the mark (a port of the four shapes in
+`empyralis-mark.svg`) because the largest PNG in the repo is 180px and the
+welcome screen renders it at 160pt.
+
+**THE APPLE ACCOUNT IS A FREE PERSONAL TEAM, NOT THE PAID PROGRAM.** Team ID
+`LYUMASNB36`, read from the signing certificate's ORGANIZATIONAL UNIT — NOT
+the value in parentheses in its common name, which is the certificate's own
+id and fails with an error that never mentions the team. Consequences: 7-day
+on-device expiry, no TestFlight, and **a personal team cannot even BUILD an
+app that DECLARES push or associated domains** — provisioning refuses and
+the whole device build dies. Hence `Empyralis.entitlements` is deliberately
+EMPTY and the real capabilities sit unreferenced in
+`Empyralis-paid.entitlements`; enabling them after enrolling is one line in
+`project.yml`.
+
+**`agent_traces.root_agent_id` IS NEVER A BARE INSTALL ID.** It is
+`specialist:{install_id}`, stamped independently by `agent_turn.py` and
+`run_service.py`. Querying with the bare id compiles, returns 200, and
+matches ZERO rows — so every agent reads "hasn't run yet" forever with
+nothing anywhere reporting why. Caught before shipping; the prefix is
+commented at the call site in `AgentDetailView`.
+
+**PARITY GAPS THAT ARE REAL, not stylistic.** The phone must eventually hold
+what the platform holds, and today it does not:
+```
+web rail    Inbox · My work · Projects · Agents
+iOS tabs    Inbox · Projects · Docs · Agents · Search · Settings
+                    ^^^^^^^ MISSING My work
+                                     ^^^^ Docs is TOP-LEVEL on iOS, which
+                                     contradicts the web decision that a
+                                     cross-project document LENS does not
+                                     earn a rail slot — documents live
+                                     inside their project
+```
+And **iOS "Inbox" shows something different from web "Inbox" under the same
+name**: web composes `inbox-needs-you.ts` (three ranked sources — real
+notifications, awaiting-input, blocked), iOS lists open tasks. The web
+version exists BECAUSE a raw list was measured useless (a real task sat in
+Needs input for 17 days unseen). Port `inbox-needs-you.ts` and `my-work.ts`
+rather than inventing phone-side rules.
+
+**Harness notes that cost real time.** A `display:none`/`hidden` equivalent
+is a trap on both platforms — on the web an explicit CSS `display` silently
+beats the `hidden` attribute, and in SwiftUI prefer removing a view from the
+hierarchy over hiding it. `Spacer()` does NOT expand inside a `ScrollView`
+(it sizes to content), which pins a column to the top with dead space below;
+fix with `GeometryReader` + `minHeight`, never by deleting the ScrollView,
+which the keyboard still needs. And a simulator's permission/UserDefaults
+state PERSISTS across reinstalls — `xcrun simctl erase <udid>` before
+testing a first-run path, or you inherit the previous run's answer.
