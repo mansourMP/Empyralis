@@ -2800,8 +2800,11 @@ def test_google_operator_access_token_fails_gracefully_when_unconfigured(tmp_pat
     _isolate_vps_state(tmp_path, monkeypatch)
     monkeypatch.delenv("GOOGLE_CLOUD_OPERATOR_REFRESH_TOKEN", raising=False)
 
-    with pytest.raises(vps.VPSProvisioningError, match="GOOGLE_CLOUD_OPERATOR_REFRESH_TOKEN"):
+    # MAN-302: the customer-facing message must never name the operator's
+    # own env var — only the log line does.
+    with pytest.raises(vps.VPSProvisioningError) as exc_info:
         vps._google_operator_access_token()
+    assert "GOOGLE_CLOUD_OPERATOR_REFRESH_TOKEN" not in str(exc_info.value)
 
 
 def test_google_active_token_requires_fully_connected_credentials():
@@ -5167,3 +5170,20 @@ def test_cloud_init_script_does_not_set_blanket_package_update():
     apt-get update at the system_dependencies phase."""
     script = vps.cloud_init_script("pair_test", api_url="https://api.example.com")
     assert "package_update" not in script
+
+
+def test_google_operator_identity_missing_does_not_leak_env_var_name(monkeypatch):
+    monkeypatch.delenv("GOOGLE_CLOUD_OPERATOR_CLIENT_EMAIL", raising=False)
+    with pytest.raises(vps.VPSProvisioningError) as exc_info:
+        vps._google_operator_identity()
+    message = str(exc_info.value)
+    assert "GOOGLE_CLOUD_OPERATOR_CLIENT_EMAIL" not in message
+    assert "GOOGLE_CLOUD" not in message.upper().replace("GOOGLE CLOUD", "")
+
+
+def test_google_operator_access_token_missing_does_not_leak_env_var_name(monkeypatch):
+    monkeypatch.delenv("GOOGLE_CLOUD_OPERATOR_REFRESH_TOKEN", raising=False)
+    with pytest.raises(vps.VPSProvisioningError) as exc_info:
+        vps._google_operator_access_token()
+    message = str(exc_info.value)
+    assert "GOOGLE_CLOUD_OPERATOR_REFRESH_TOKEN" not in message

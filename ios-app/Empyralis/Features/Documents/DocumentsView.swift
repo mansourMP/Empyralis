@@ -96,7 +96,12 @@ struct ProjectDocumentsView: View {
             Text(document.displayTitle)
                 .font(.empBodyMedium)
                 .foregroundStyle(Theme.textPrimary(scheme))
-                .lineLimit(1)
+                // 2 lines, matching every other primary-title row in the app
+                // (TaskRow, InboxRow, search's task/document rows) — this was
+                // the one outlier still at 1. No fixed-height container here
+                // either way, so this is a truncation/consistency fix rather
+                // than a clipping one.
+                .lineLimit(2)
             if let folder = document.folder {
                 Text(folder)
                     .font(.empCaption)

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+import { getErrorMessage } from "@/lib/ui/api-error";
 
 /**
  * Shared "what is this agent's model, and how do we save a change to it"
@@ -277,7 +278,7 @@ export async function saveAgentModelConfig(
       body: JSON.stringify({ patch: { model_config: patch } }),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
+    if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
   }
 
   if (mode === "byok_api") {
@@ -307,7 +308,7 @@ export async function saveAgentModelConfig(
         }),
       });
       const credData = await credRes.json().catch(() => ({}));
-      if (!credRes.ok) throw new Error(credData?.detail || credData?.error || `HTTP ${credRes.status}`);
+      if (!credRes.ok) throw new Error(getErrorMessage(credData, `HTTP ${credRes.status}`));
 
       const profileRes = await fleetAuthorizedFetch("/api/providers/profiles", {
         method: "POST",
@@ -322,7 +323,7 @@ export async function saveAgentModelConfig(
         }),
       });
       const profileData = await profileRes.json().catch(() => ({}));
-      if (!profileRes.ok) throw new Error(profileData?.detail || profileData?.error || `HTTP ${profileRes.status}`);
+      if (!profileRes.ok) throw new Error(getErrorMessage(profileData, `HTTP ${profileRes.status}`));
       await patchModelConfig();
     }
   } else {

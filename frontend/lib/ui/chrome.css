@@ -3072,6 +3072,34 @@ body[data-theme='dark'] .app-auth-input:-webkit-autofill:focus {
   color: rgba(95, 34, 34, 0.8);
 }
 
+/* Same shell as .app-auth-error, deliberately different tone: this renders
+   for a login attempt that already succeeded (real cookies already set)
+   and is only waiting on the readiness poll — never for a genuine
+   failure. Red would claim the sign-in itself was wrong; this is calm and
+   green-leaning instead, matching the fact that the session already
+   exists. See classifyLoginOutcome (lib/auth/auth-error-copy.ts). */
+.app-auth-notice {
+  display: grid;
+  gap: 4px;
+  padding: 14px 16px;
+  border: 1px solid rgba(47, 158, 104, 0.22);
+  border-radius: 18px;
+  background: #f3fbf6;
+  color: #1f6a41;
+  font-size: var(--app-font-12);
+  line-height: 1.55;
+}
+
+.app-auth-notice strong {
+  color: #185533;
+  font-size: 12px;
+  font-weight: var(--app-weight-semibold);
+}
+
+.app-auth-notice span {
+  color: rgba(24, 85, 51, 0.85);
+}
+
 .app-auth-footer {
   /* Explicit margin, not the browser default: an unreset <p> was adding its
      own ~1em (14px) top margin on top of .app-auth-form's 16px grid gap,

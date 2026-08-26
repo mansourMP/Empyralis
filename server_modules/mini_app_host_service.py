@@ -6,6 +6,7 @@ import hmac
 import ipaddress
 import importlib
 import json
+import logging
 import os
 import secrets
 import time
@@ -17,6 +18,8 @@ from fastapi import HTTPException
 
 from server_modules import app_bridge_service, external_content_guard
 from server_modules.url_security import obvious_private_url_reason
+
+_log = logging.getLogger(__name__)
 
 
 DEFAULT_HOSTED_BRIDGE_MESSAGE_TYPE = "empyralis.hosted_app.bridge.request"
@@ -107,10 +110,19 @@ def _launch_token_secret() -> bytes:
     )
     if not secret:
         if _is_production_environment():
-            raise RuntimeError("CRITICAL: EMPYRALIS_MINI_APP_LAUNCH_SECRET must be configured in production.")
+            _log.error(
+                "CRITICAL: mini-app launch token secret is not configured "
+                "(EMPYRALIS_MINI_APP_LAUNCH_SECRET/ORION_JWT_SECRET/ORION_SECRET_KEY all unset)."
+            )
+            raise RuntimeError("Mini apps aren't available on this deployment right now.")
         secret = "empyralis-mini-app-local-dev-secret"
     if _is_production_environment() and _is_weak_launch_secret(secret):
-        raise RuntimeError("CRITICAL: EMPYRALIS_MINI_APP_LAUNCH_SECRET must be at least 32 high-entropy characters in production.")
+        _log.error(
+            "CRITICAL: mini-app launch token secret is too weak for production "
+            "(needs >=32 high-entropy characters; check EMPYRALIS_MINI_APP_LAUNCH_SECRET/"
+            "ORION_JWT_SECRET/ORION_SECRET_KEY)."
+        )
+        raise RuntimeError("Mini apps aren't available on this deployment right now.")
     return secret.encode("utf-8")
 
 
