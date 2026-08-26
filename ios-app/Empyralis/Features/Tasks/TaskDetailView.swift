@@ -39,6 +39,7 @@ struct TaskDetailView: View {
     @State private var activeSheet: DetailSheet?
     @State private var commentDraft: String = ""
     @State private var isPostingComment = false
+    @State private var showSubtaskComposer = false
     @FocusState private var composerFocused: Bool
 
     private enum DetailSheet: String, Identifiable {
@@ -81,6 +82,11 @@ struct TaskDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .sheet(item: $activeSheet) { sheet in
             if let task { sheetContent(sheet, task) }
+        }
+        .sheet(isPresented: $showSubtaskComposer) {
+            if let task {
+                NewTaskSheet(projectId: task.projectId ?? "", parentTask: task)
+            }
         }
         .alert("Couldn't save", isPresented: .constant(writeError != nil)) {
             Button("OK") { writeError = nil }
@@ -331,42 +337,80 @@ struct TaskDetailView: View {
 
     // MARK: - Sub-tasks
 
+    /// A sub-task cannot itself have sub-tasks — the backend's one-level
+    /// rule (`_resolve_parent_task`) refuses that unconditionally, and as a
+    /// consequence a task that IS a sub-task always carries
+    /// `subtaskCount == 0` (nothing could ever have been parented under it
+    /// in the first place). So this whole section, "Add sub-task" included,
+    /// is hidden on a sub-task's own detail page rather than rendering a
+    /// control that could only ever fail — "no dead controls" applied to a
+    /// whole section, not just one row.
     @ViewBuilder
     private func subtasksSection(_ task: EmpTask) -> some View {
-        let children = store.subtasks(of: task.id)
-        if task.subtaskCount > 0 || !children.isEmpty {
+        if (task.parentTaskId ?? "").isEmpty {
+            let children = store.subtasks(of: task.id)
+            let totalCount = TaskAuthoring.subtaskTotal(rollup: task.subtaskCount, synced: children.count)
             VStack(alignment: .leading, spacing: Space.x2) {
                 SectionHeader(
                     title: "Sub-tasks",
-                    trailing: "\(task.subtaskDoneCount)/\(task.subtaskCount)"
+                    trailing: totalCount > 0 ? "\(task.subtaskDoneCount)/\(totalCount)" : nil
                 )
                 DetailCard {
-                    ForEach(Array(children.enumerated()), id: \.element.id) { index, child in
+                    ForEach(Array(children.enumerated()), id: \.element.id) { _, child in
                         NavigationLink {
                             TaskDetailView(taskId: child.id)
                         } label: {
                             subtaskRow(child)
                         }
                         .buttonStyle(.plain)
-                        if index < children.count - 1 { RowDivider() }
+                        RowDivider()
                     }
                     // The parent's rollup is authoritative; this list is only
                     // what has synced. Saying so beats showing a short list
                     // as if it were the whole set.
-                    if children.count < task.subtaskCount {
-                        if !children.isEmpty { RowDivider() }
+                    if children.count < totalCount {
                         Text(children.isEmpty
-                             ? "\(task.subtaskCount) sub-task\(task.subtaskCount == 1 ? "" : "s") haven't synced yet. Pull to refresh."
-                             : "\(task.subtaskCount - children.count) more haven't synced yet. Pull to refresh.")
+                             ? "\(totalCount) sub-task\(totalCount == 1 ? "" : "s") haven't synced yet. Pull to refresh."
+                             : "\(totalCount - children.count) more haven't synced yet. Pull to refresh.")
                             .font(.empCaption)
                             .foregroundStyle(Theme.textMuted(scheme))
                             .padding(.horizontal, Space.x3)
                             .padding(.vertical, Space.x3)
                             .frame(maxWidth: .infinity, alignment: .leading)
+                        RowDivider()
                     }
+                    addSubtaskRow
                 }
             }
         }
+    }
+
+    /// The section's only "no sub-tasks yet" affordance ALSO doubles as its
+    /// creation entry point — the section used to render nothing at all
+    /// with zero sub-tasks, which meant there was no way to add the FIRST
+    /// one. Always the last row in the card, so a divider always precedes
+    /// it when anything else is showing above (handled by subtasksSection
+    /// itself, never here).
+    private var addSubtaskRow: some View {
+        Button {
+            showSubtaskComposer = true
+        } label: {
+            HStack(spacing: Space.x3) {
+                Image(systemName: "plus")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.textSecondary(scheme))
+                    .frame(width: 20)
+                Text("Add sub-task")
+                    .font(.empBody)
+                    .foregroundStyle(Theme.textSecondary(scheme))
+                Spacer()
+            }
+            .padding(.horizontal, Space.x3)
+            .padding(.vertical, Space.x3)
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private func subtaskRow(_ child: EmpTask) -> some View {
