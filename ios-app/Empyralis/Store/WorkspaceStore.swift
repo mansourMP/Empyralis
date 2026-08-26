@@ -527,6 +527,114 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
+    /// PATCH /fleet/tasks/{id}. TITLE IS NEVER SENT EMPTY — refused here
+    /// rather than server-side, because `project_tasks_service.update_task`'s
+    /// own SQL is `title = COALESCE(NULLIF($4, ''), title)`: an empty string
+    /// is silently IGNORED, not applied, so a caller that sent one and
+    /// treated the 200 as success would be lying about what changed.
+    /// TaskDetailView's own edit sheet already disables Save on a blank
+    /// trimmed title (TaskAuthoring.canSaveEdit(requiresNonEmpty: true)) —
+    /// this is the second, independent floor for any future caller.
+    func setTaskTitle(_ task: EmpTask, to title: String) async -> String? {
+        guard let workspaceId else { return "No workspace." }
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "Title can't be empty." }
+        return await commit(taskId: task.id) { $0.title = trimmed } write: {
+            let ack: TaskWriteAck = try await APIClient.shared.patch(
+                "/w/\(workspaceId)/fleet/tasks/\(task.id)", body: ["title": trimmed]
+            )
+            return (ack.ok, ack.error)
+        }
+    }
+
+    /// Same PATCH route. Unlike title, an empty description is a REAL, valid
+    /// value — `description = COALESCE($5, description)` treats only an
+    /// OMITTED field as "leave alone", and this app always sends the field,
+    /// never omits it — so clearing the box really does clear the task.
+    func setTaskDescription(_ task: EmpTask, to description: String) async -> String? {
+        guard let workspaceId else { return "No workspace." }
+        let trimmed = description.trimmingCharacters(in: .whitespacesAndNewlines)
+        return await commit(taskId: task.id) {
+            $0.description = trimmed.isEmpty ? nil : trimmed
+        } write: {
+            let ack: TaskWriteAck = try await APIClient.shared.patch(
+                "/w/\(workspaceId)/fleet/tasks/\(task.id)", body: ["description": trimmed]
+            )
+            return (ack.ok, ack.error)
+        }
+    }
+
+    // MARK: - Creating tasks
+
+    /// Two ways of creating funnel through here — a top-level task
+    /// (`parentTaskId: nil`) and a SUB-task — because the shape is
+    /// identical apart from one field: a sub-task IS a task, the backend's
+    /// only difference is `parent_task_id` on the same create call, so two
+    /// near-duplicate functions would be exactly the kind of drift this
+    /// file's own `commit()` was written to avoid one level up.
+    ///
+    /// UNLIKE every other write in this file, there is NO optimistic apply.
+    /// Every other mutation here changes a ROW ALREADY IN `tasks`; a create
+    /// has no id to mutate until the server hands one back. Fabricating a
+    /// locally-minted placeholder row would need its own reconciliation
+    /// machinery (swap the fake id for the real one, or roll it back on
+    /// refusal) for a screen where the honest, simpler behaviour is to show
+    /// "Creating…" and wait — the same posture the web's own TaskComposer
+    /// takes (a busy state, no optimistic list entry).
+    func createTask(
+        projectId: String,
+        title: String,
+        description: String,
+        parentTaskId: String? = nil
+    ) async -> TaskCreateOutcome {
+        guard let workspaceId else { return .failed("No workspace.") }
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else { return .failed("Title can't be empty.") }
+        let trimmedDescription = description.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        var body: [String: Any] = [
+            "project_id": projectId,
+            "title": trimmedTitle,
+            "description": trimmedDescription,
+        ]
+        if let parentTaskId, !parentTaskId.isEmpty {
+            body["parent_task_id"] = parentTaskId
+        }
+
+        do {
+            let ack: TaskWriteAck = try await APIClient.shared.post(
+                "/w/\(workspaceId)/fleet/tasks", body: body
+            )
+            guard ack.ok else { return .failed(ack.error ?? "Couldn't create that task.") }
+            guard let task = ack.task else {
+                // ok:true with no task body would itself be a contract
+                // break -- treated the same as an unreadable reply below
+                // rather than crashing on a force-unwrap.
+                Task { await self.refresh() }
+                return .createdUnconfirmed
+            }
+            tasks.append(task)
+            persist()
+            return .created(task)
+        } catch APIError.unauthorized {
+            await session.handleUnauthorized()
+            return .failed("Couldn't verify your session. Try again.")
+        } catch APIError.server(let message) {
+            return .failed(message)
+        } catch APIError.decoding {
+            // 2xx. APIClient only throws .decoding AFTER its 2xx guard
+            // passes, so the task WAS created -- only the reply was
+            // unreadable, and with no id in hand there is nothing to
+            // append optimistically. commit()'s identical branch trusts
+            // this the same way; a background refresh reconciles the real
+            // row.
+            Task { await self.refresh() }
+            return .createdUnconfirmed
+        } catch {
+            return .failed("Couldn't confirm whether that task was created. Check your connection and pull to refresh.")
+        }
+    }
+
     // MARK: - Reads
 
     func task(_ id: String) -> EmpTask? {
@@ -660,5 +768,18 @@ struct CachedWorkspace: Codable {
 /// to the row, which is the one thing collapsing them would destroy.
 enum SourceLoad<T> {
     case loaded(T)
+    case failed(String)
+}
+
+/// THREE outcomes, not two — the same "never collapse a confirmed write
+/// into an unconfirmed one" law `commit()` already follows for edits,
+/// applied to creation. `.createdUnconfirmed` is a 2xx whose body could not
+/// be decoded: the task genuinely exists, there is simply no id in hand to
+/// show it with yet, so it must never be reported as `.failed` (that would
+/// tell someone to retry and risk a duplicate) nor silently treated
+/// identically to a normal `.created` with a task to show for it.
+enum TaskCreateOutcome {
+    case created(EmpTask)
+    case createdUnconfirmed
     case failed(String)
 }

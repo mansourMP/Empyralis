@@ -39,10 +39,11 @@ struct TaskDetailView: View {
     @State private var activeSheet: DetailSheet?
     @State private var commentDraft: String = ""
     @State private var isPostingComment = false
+    @State private var showSubtaskComposer = false
     @FocusState private var composerFocused: Bool
 
     private enum DetailSheet: String, Identifiable {
-        case status, priority, assignee, due, labels
+        case status, priority, assignee, due, labels, title, description
         var id: String { rawValue }
     }
 
@@ -82,6 +83,11 @@ struct TaskDetailView: View {
         .sheet(item: $activeSheet) { sheet in
             if let task { sheetContent(sheet, task) }
         }
+        .sheet(isPresented: $showSubtaskComposer) {
+            if let task {
+                NewTaskSheet(projectId: task.projectId ?? "", parentTask: task)
+            }
+        }
         .alert("Couldn't save", isPresented: .constant(writeError != nil)) {
             Button("OK") { writeError = nil }
         } message: {
@@ -91,18 +97,36 @@ struct TaskDetailView: View {
 
     // MARK: - Header
 
+    /// Tappable, like every other editable field on this screen — a pencil
+    /// glyph rather than PropertyRow's chevron, because this opens an edit
+    /// sheet for the title ITSELF rather than navigating to something else.
     private func header(_ task: EmpTask) -> some View {
-        VStack(alignment: .leading, spacing: Space.x2) {
-            if let displayId = task.displayId, !displayId.isEmpty {
-                Text(displayId)
-                    .font(.empMono)
+        Button {
+            activeSheet = .title
+        } label: {
+            HStack(alignment: .top, spacing: Space.x2) {
+                VStack(alignment: .leading, spacing: Space.x2) {
+                    if let displayId = task.displayId, !displayId.isEmpty {
+                        Text(displayId)
+                            .font(.empMono)
+                            .foregroundStyle(Theme.textMuted(scheme))
+                    }
+                    Text(task.title)
+                        .font(.empTitle)
+                        .foregroundStyle(Theme.textPrimary(scheme))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(.leading)
+                }
+                Spacer(minLength: Space.x2)
+                Image(systemName: "pencil")
+                    .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(Theme.textMuted(scheme))
+                    .padding(.top, 4)
             }
-            Text(task.title)
-                .font(.empTitle)
-                .foregroundStyle(Theme.textPrimary(scheme))
-                .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
     }
 
     /// MAN-294's honesty row. A task can read "In progress" while the wake
@@ -283,58 +307,110 @@ struct TaskDetailView: View {
 
     // MARK: - Description
 
-    @ViewBuilder
+    /// ALWAYS renders, unlike the version this replaced — which rendered
+    /// NOTHING at all when a task had no description, so there was no way
+    /// to add one from this screen: the section itself was the dead end,
+    /// not just a missing control on it. Tappable either way, with an
+    /// honest "Add a description…" placeholder standing in for empty text.
     private func descriptionSection(_ task: EmpTask) -> some View {
-        if let description = task.description, !description.isEmpty {
-            VStack(alignment: .leading, spacing: Space.x2) {
-                SectionHeader(title: "Description")
-                Text(description)
-                    .font(.empBody)
-                    .foregroundStyle(Theme.textSecondary(scheme))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+        let text = task.description ?? ""
+        return VStack(alignment: .leading, spacing: Space.x2) {
+            SectionHeader(title: "Description")
+            Button {
+                activeSheet = .description
+            } label: {
+                HStack(alignment: .top, spacing: Space.x2) {
+                    Text(text.isEmpty ? "Add a description…" : text)
+                        .font(.empBody)
+                        .foregroundStyle(text.isEmpty ? Theme.textMuted(scheme) : Theme.textSecondary(scheme))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Image(systemName: "pencil")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Theme.textMuted(scheme))
+                }
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
         }
     }
 
     // MARK: - Sub-tasks
 
+    /// A sub-task cannot itself have sub-tasks — the backend's one-level
+    /// rule (`_resolve_parent_task`) refuses that unconditionally, and as a
+    /// consequence a task that IS a sub-task always carries
+    /// `subtaskCount == 0` (nothing could ever have been parented under it
+    /// in the first place). So this whole section, "Add sub-task" included,
+    /// is hidden on a sub-task's own detail page rather than rendering a
+    /// control that could only ever fail — "no dead controls" applied to a
+    /// whole section, not just one row.
     @ViewBuilder
     private func subtasksSection(_ task: EmpTask) -> some View {
-        let children = store.subtasks(of: task.id)
-        if task.subtaskCount > 0 || !children.isEmpty {
+        if (task.parentTaskId ?? "").isEmpty {
+            let children = store.subtasks(of: task.id)
+            let totalCount = TaskAuthoring.subtaskTotal(rollup: task.subtaskCount, synced: children.count)
             VStack(alignment: .leading, spacing: Space.x2) {
                 SectionHeader(
                     title: "Sub-tasks",
-                    trailing: "\(task.subtaskDoneCount)/\(task.subtaskCount)"
+                    trailing: totalCount > 0 ? "\(task.subtaskDoneCount)/\(totalCount)" : nil
                 )
                 DetailCard {
-                    ForEach(Array(children.enumerated()), id: \.element.id) { index, child in
+                    ForEach(Array(children.enumerated()), id: \.element.id) { _, child in
                         NavigationLink {
                             TaskDetailView(taskId: child.id)
                         } label: {
                             subtaskRow(child)
                         }
                         .buttonStyle(.plain)
-                        if index < children.count - 1 { RowDivider() }
+                        RowDivider()
                     }
                     // The parent's rollup is authoritative; this list is only
                     // what has synced. Saying so beats showing a short list
                     // as if it were the whole set.
-                    if children.count < task.subtaskCount {
-                        if !children.isEmpty { RowDivider() }
+                    if children.count < totalCount {
                         Text(children.isEmpty
-                             ? "\(task.subtaskCount) sub-task\(task.subtaskCount == 1 ? "" : "s") haven't synced yet. Pull to refresh."
-                             : "\(task.subtaskCount - children.count) more haven't synced yet. Pull to refresh.")
+                             ? "\(totalCount) sub-task\(totalCount == 1 ? "" : "s") haven't synced yet. Pull to refresh."
+                             : "\(totalCount - children.count) more haven't synced yet. Pull to refresh.")
                             .font(.empCaption)
                             .foregroundStyle(Theme.textMuted(scheme))
                             .padding(.horizontal, Space.x3)
                             .padding(.vertical, Space.x3)
                             .frame(maxWidth: .infinity, alignment: .leading)
+                        RowDivider()
                     }
+                    addSubtaskRow
                 }
             }
         }
+    }
+
+    /// The section's only "no sub-tasks yet" affordance ALSO doubles as its
+    /// creation entry point — the section used to render nothing at all
+    /// with zero sub-tasks, which meant there was no way to add the FIRST
+    /// one. Always the last row in the card, so a divider always precedes
+    /// it when anything else is showing above (handled by subtasksSection
+    /// itself, never here).
+    private var addSubtaskRow: some View {
+        Button {
+            showSubtaskComposer = true
+        } label: {
+            HStack(spacing: Space.x3) {
+                Image(systemName: "plus")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.textSecondary(scheme))
+                    .frame(width: 20)
+                Text("Add sub-task")
+                    .font(.empBody)
+                    .foregroundStyle(Theme.textSecondary(scheme))
+                Spacer()
+            }
+            .padding(.horizontal, Space.x3)
+            .padding(.vertical, Space.x3)
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private func subtaskRow(_ child: EmpTask) -> some View {
@@ -621,6 +697,47 @@ struct TaskDetailView: View {
         case .assignee: assigneeSheet(task)
         case .due: dueSheet(task)
         case .labels: labelsSheet(task)
+        case .title: titleSheet(task)
+        case .description: descriptionEditSheet(task)
+        }
+    }
+
+    /// Same shape as `apply(current:_:)` above (dismiss immediately, write
+    /// async, surface a refusal through the shared alert) but text-entry
+    /// sheets need the FINAL STRING the person typed, not a fixed picker
+    /// value — so this is its own small helper rather than a sixth branch
+    /// squeezed into `apply`'s `Bool`-only signature.
+    private func titleSheet(_ task: EmpTask) -> some View {
+        TextEditSheet(
+            navTitle: "Edit title",
+            placeholder: "Task title",
+            initialText: task.title,
+            requiresNonEmpty: true,
+            multiline: false,
+            isPresented: sheetBinding
+        ) { newValue in
+            activeSheet = nil
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            Task {
+                if let error = await store.setTaskTitle(task, to: newValue) { writeError = error }
+            }
+        }
+    }
+
+    private func descriptionEditSheet(_ task: EmpTask) -> some View {
+        TextEditSheet(
+            navTitle: "Edit description",
+            placeholder: "Add a description…",
+            initialText: task.description ?? "",
+            requiresNonEmpty: false,
+            multiline: true,
+            isPresented: sheetBinding
+        ) { newValue in
+            activeSheet = nil
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            Task {
+                if let error = await store.setTaskDescription(task, to: newValue) { writeError = error }
+            }
         }
     }
 
@@ -852,6 +969,125 @@ private struct DueDateSheet: View {
             }
         }
         .presentationDetents([.large])
+    }
+}
+
+// MARK: - Title / description edit sheet
+
+/// A single free-text field, edited full-screen with Cancel/Save — the same
+/// chrome DueDateSheet uses above, extended to text entry. Shared by the
+/// task title and description edits, which differ only in whether an empty
+/// result is a valid save (see TaskAuthoring.canSaveEdit) and whether the
+/// field wraps to one line or many.
+///
+/// THERE IS NO FOCUS RING in this product — the border stepping from
+/// `border` to `borderStrong` on focus, plus the caret, is the whole
+/// signal, matching the composer field this screen already draws the same
+/// way at its own bottom.
+private struct TextEditSheet: View {
+    let navTitle: String
+    let placeholder: String
+    let initialText: String
+    let requiresNonEmpty: Bool
+    let multiline: Bool
+    @Binding var isPresented: Bool
+    let onSave: (String) -> Void
+
+    @State private var draft: String
+    @FocusState private var focused: Bool
+    @Environment(\.colorScheme) private var scheme
+
+    init(
+        navTitle: String,
+        placeholder: String,
+        initialText: String,
+        requiresNonEmpty: Bool,
+        multiline: Bool,
+        isPresented: Binding<Bool>,
+        onSave: @escaping (String) -> Void
+    ) {
+        self.navTitle = navTitle
+        self.placeholder = placeholder
+        self.initialText = initialText
+        self.requiresNonEmpty = requiresNonEmpty
+        self.multiline = multiline
+        self._isPresented = isPresented
+        self.onSave = onSave
+        self._draft = State(initialValue: initialText)
+    }
+
+    private var trimmed: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var canSave: Bool {
+        TaskAuthoring.canSaveEdit(draft: draft, initial: initialText, requiresNonEmpty: requiresNonEmpty)
+    }
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                Theme.bgPage(scheme).ignoresSafeArea()
+                ScrollView {
+                    field.padding(Space.x4)
+                }
+                .scrollDismissesKeyboard(.interactively)
+            }
+            .navigationTitle(navTitle)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancel") { isPresented = false }
+                        .font(.empBody)
+                        .foregroundStyle(Theme.textSecondary(scheme))
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Save") { onSave(trimmed) }
+                        .font(.empBodyMedium)
+                        .foregroundStyle(canSave ? Theme.textPrimary(scheme) : Theme.textMuted(scheme))
+                        .disabled(!canSave)
+                }
+            }
+        }
+        .presentationDetents(multiline ? [.large] : [.medium, .large])
+        .onAppear { focused = true }
+    }
+
+    @ViewBuilder
+    private var field: some View {
+        if multiline {
+            ZStack(alignment: .topLeading) {
+                if draft.isEmpty {
+                    Text(placeholder)
+                        .font(.empBody)
+                        .foregroundStyle(Theme.textMuted(scheme))
+                        .padding(.horizontal, Space.x3)
+                        .padding(.vertical, Space.x3 + 4)
+                        .allowsHitTesting(false)
+                }
+                TextEditor(text: $draft)
+                    .font(.empBody)
+                    .foregroundStyle(Theme.textPrimary(scheme))
+                    .scrollContentBackground(.hidden)
+                    .focused($focused)
+                    .frame(minHeight: 200)
+                    .padding(Space.x2)
+            }
+            .background(Theme.bgField(scheme), in: RoundedRectangle(cornerRadius: Radius.control))
+            .overlay(
+                RoundedRectangle(cornerRadius: Radius.control)
+                    .stroke(focused ? Theme.borderStrong(scheme) : Theme.border(scheme), lineWidth: 1)
+            )
+        } else {
+            TextField(placeholder, text: $draft, axis: .vertical)
+                .font(.empBody)
+                .foregroundStyle(Theme.textPrimary(scheme))
+                .lineLimit(1...6)
+                .focused($focused)
+                .padding(Space.x3)
+                .background(Theme.bgField(scheme), in: RoundedRectangle(cornerRadius: Radius.control))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Radius.control)
+                        .stroke(focused ? Theme.borderStrong(scheme) : Theme.border(scheme), lineWidth: 1)
+                )
+        }
     }
 }
 
