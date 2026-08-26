@@ -57,12 +57,15 @@ import {
   deleteFleetAgentSchedule,
   friendlyChannelOwnershipError,
   useFleetProjects,
+  useFleetWorkspaceTasks,
   type FleetAgent,
   type FleetAgentSkill,
   type FleetChannel,
   type FleetCapability,
   type FleetScheduleItem,
 } from "./fleet-data";
+import { groupTasksByAgent } from "./agent-card-face";
+import { agentDisplayStatus } from "./agent-view-options";
 import { timeAgo, formatDateTime, formatNumber, usagePayerLabel, type AgentStatusTone, type UsageMatrixRow } from "./fleet-presentation";
 import { AgentSigil, StatusChip, StatusDot } from "./fleet-indicators";
 import { PanelSection, PanelRow, FleetRightPanel, type PanelValueTone } from "./FleetRightPanel";
@@ -479,6 +482,7 @@ function AgentDetailHeader({
   workspaceId,
   agentId,
   agent,
+  agentLoadPhase,
   agentLabel,
   statusTone,
   statusLabel,
@@ -494,6 +498,10 @@ function AgentDetailHeader({
   workspaceId: string;
   agentId: string;
   agent: FleetAgent | null;
+  /** "loading"/"failed" render a neutral placeholder instead of the fixed
+   *  agentLabel/statusLabel below — see FleetAgentDetail's own computation
+   *  of this for why those two facts are not the same thing. */
+  agentLoadPhase: "ready" | "loading" | "failed" | "notFound";
   agentLabel: string;
   statusTone: AgentStatusTone;
   statusLabel: string;
@@ -569,20 +577,48 @@ function AgentDetailHeader({
     };
   }, [menuOpen]);
 
-  const identityInner = (
-    <>
-      <span className="fleet-chat-header-avatar">
-        <AgentSigil seed={agentId} size={26} />
-      </span>
-      <span className="fleet-chat-header-identity">
-        <span className="fleet-chat-header-name">{agentLabel}</span>
-        <span className="fleet-chat-header-status">
-          <StatusDot tone={statusTone} size={6} />
-          {statusLabel}
+  const identityInner =
+    agentLoadPhase === "loading" ? (
+      <>
+        <span className="fleet-chat-header-avatar">
+          <div className="fleet-skeleton-bar" style={{ width: 26, height: 26, borderRadius: 999 }} aria-hidden="true" />
         </span>
-      </span>
-    </>
-  );
+        <span className="fleet-chat-header-identity" aria-busy="true" aria-label="Loading agent">
+          <span className="fleet-chat-header-name">
+            <span className="fleet-skeleton-bar" style={{ width: 120, height: 13 }} />
+          </span>
+          <span className="fleet-chat-header-status">
+            <span className="fleet-skeleton-bar" style={{ width: 70, height: 11, marginTop: 2 }} />
+          </span>
+        </span>
+      </>
+    ) : agentLoadPhase === "failed" ? (
+      <>
+        <span className="fleet-chat-header-avatar">
+          <AgentSigil seed={agentId} size={26} />
+        </span>
+        <span className="fleet-chat-header-identity">
+          <span className="fleet-chat-header-name">Couldn’t load this agent</span>
+          <span className="fleet-chat-header-status">
+            <StatusDot tone="error" size={6} />
+            Check your connection — it’ll keep retrying
+          </span>
+        </span>
+      </>
+    ) : (
+      <>
+        <span className="fleet-chat-header-avatar">
+          <AgentSigil seed={agentId} size={26} />
+        </span>
+        <span className="fleet-chat-header-identity">
+          <span className="fleet-chat-header-name">{agentLabel}</span>
+          <span className="fleet-chat-header-status">
+            <StatusDot tone={statusTone} size={6} />
+            {statusLabel}
+          </span>
+        </span>
+      </>
+    );
 
   return (
     <div className="fleet-chat-header">
@@ -841,6 +877,8 @@ export function FleetAgentDetail({
   workspaceId,
   agentId,
   agent,
+  agentsLoading,
+  agentsError,
   projectId,
   projectName,
   backHref,
@@ -853,6 +891,18 @@ export function FleetAgentDetail({
   workspaceId: string;
   agentId: string;
   agent: FleetAgent | null;
+  /** From the caller's own useFleetAgents(workspaceId) — `agent` is `null`
+   *  both while the fetch is still in flight AND once it has genuinely
+   *  failed (a 503, a dropped connection), and those are different facts
+   *  (CLAUDE.md's outcome-honesty law: "empty" and "I could not load this"
+   *  and "haven't found out yet" may never share one rendering). Before
+   *  this, the header rendered the confident, fabricated "Unnamed agent" /
+   *  "Not deployed" for BOTH — a definite claim about deployment state made
+   *  before any data had arrived. Optional/defaulted so a caller that never
+   *  passes them (none exist today, but a future test fixture might) keeps
+   *  the same "not yet found" fallback this page already had. */
+  agentsLoading?: boolean;
+  agentsError?: string | null;
   /** The URL's own projectId segment — available on first paint,
    *  independent of the agents fetch. Used to build the chat header's back
    *  link (AgentDetailHeader below), same "resolved from the route, never
@@ -1022,7 +1072,40 @@ export function FleetAgentDetail({
   // top): a cli_subscription agent whose bound CLI isn't signed in reads
   // "Needs sign-in", never a false "Ready" — the header must never claim an
   // agent is runnable when its brain can't produce a turn.
-  const status = deriveAgentStatus(agent ?? {}, gateways);
+  //
+  // agentDisplayStatus wraps that with the SAME "an in-progress assigned
+  // task means Working" enrichment AgentCards.tsx/AgentsBoard.tsx/
+  // AgentsGroupedList.tsx already apply (agent-view-options.ts) — this page
+  // used to call the bare deriveAgentStatus, which is why the grid one click
+  // away could read "Working" while this header, for the same agent at the
+  // same moment, read "Ready". "Working" has ONE definition in this product
+  // (CLAUDE.md) and this is the last surface that had not adopted it.
+  // useFleetWorkspaceTasks is the SAME shared, workspace-wide cache
+  // PrimaryRail/Inbox/My work already poll — reusing it here costs no extra
+  // request, per that hook's own module comment.
+  const { tasks: workspaceTasksForStatus } = useFleetWorkspaceTasks(workspaceId);
+  const thisAgentTasks = useMemo(
+    () => groupTasksByAgent(workspaceTasksForStatus).get(agentId) || [],
+    [workspaceTasksForStatus, agentId],
+  );
+  const status = agentDisplayStatus(agent ?? {}, gateways, thisAgentTasks);
+  // Three facts, never collapsed into the two the header used to render
+  // ("Unnamed agent" / "Not deployed" for both a genuine empty result and a
+  // fetch that has not settled yet). `agent` truthy always wins — a stale
+  // "loading" from a slower sibling poll must never blank out data already
+  // in hand. Otherwise: still in flight -> "loading" (loading can flip back
+  // true on the 30s poll retry even after a prior failure, and that retry
+  // deserves the neutral treatment too, not a repeated error). Settled with
+  // nothing and an error on record -> "failed". Settled with nothing and no
+  // error -> "notFound" (an id that genuinely doesn't resolve — the
+  // pre-existing fallback text below is kept for this one, rare case).
+  const agentLoadPhase: "ready" | "loading" | "failed" | "notFound" = agent
+    ? "ready"
+    : agentsLoading
+      ? "loading"
+      : agentsError
+        ? "failed"
+        : "notFound";
   // Role itself no longer has a Properties-panel row: every user-created
   // agent is seeded role="specialist" (see fleet_tools.py's create path)
   // and there's no UI to change it, so the row only ever read "Specialist"
@@ -1315,6 +1398,7 @@ export function FleetAgentDetail({
         workspaceId={workspaceId}
         agentId={agentId}
         agent={agent}
+        agentLoadPhase={agentLoadPhase}
         agentLabel={agent?.label || "Unnamed agent"}
         statusTone={status.tone}
         statusLabel={status.label}
@@ -1543,13 +1627,32 @@ export function FleetAgentDetail({
         <div className="agent-configure-header">
           <div className="agent-profile-identity">
             <AgentSigil seed={agentId} size={36} />
-            <div style={{ minWidth: 0 }}>
-              <p className="agent-profile-identity-name">{agent?.label || "Unnamed agent"}</p>
-              <span className="agent-profile-identity-status">
-                <StatusDot tone={status.tone} size={6} />
-                {status.label}
-              </span>
-            </div>
+            {agentLoadPhase === "loading" ? (
+              <div style={{ minWidth: 0 }} aria-busy="true" aria-label="Loading agent">
+                <p className="agent-profile-identity-name">
+                  <span className="fleet-skeleton-bar" style={{ width: 140, height: 14 }} />
+                </p>
+                <span className="agent-profile-identity-status">
+                  <span className="fleet-skeleton-bar" style={{ width: 80, height: 11, marginTop: 2 }} />
+                </span>
+              </div>
+            ) : agentLoadPhase === "failed" ? (
+              <div style={{ minWidth: 0 }}>
+                <p className="agent-profile-identity-name">Couldn’t load this agent</p>
+                <span className="agent-profile-identity-status">
+                  <StatusDot tone="error" size={6} />
+                  Check your connection — it’ll keep retrying
+                </span>
+              </div>
+            ) : (
+              <div style={{ minWidth: 0 }}>
+                <p className="agent-profile-identity-name">{agent?.label || "Unnamed agent"}</p>
+                <span className="agent-profile-identity-status">
+                  <StatusDot tone={status.tone} size={6} />
+                  {status.label}
+                </span>
+              </div>
+            )}
           </div>
           <button type="button" className="fleet-detail-close" onClick={closeSheet} aria-label="Close">
             <X size={16} strokeWidth={1.75} />
@@ -4301,7 +4404,6 @@ import {
 import {
   GatewayBoxPicker,
   connectionPresentation,
-  deriveAgentStatus,
   gatewayId,
   gatewayLabel,
   gatewayRuntimeReady,
