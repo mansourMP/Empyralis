@@ -369,18 +369,24 @@ final class TaskAuthoring: XCTestCase {
     /// same tap mechanism worked for every other button in the same run)
     /// fails the whole test with no second attempt.
     ///
-    /// The retry condition mirrors `tapRow`/`openTask`'s own fix: if the
-    /// tapped element is STILL hittable shortly after, nothing changed as a
-    /// result of the tap (no sheet covered it, no navigation occurred, no
-    /// label change) — that is the generic signal a miss actually happened,
-    /// as opposed to a slow transition after a tap that DID land, where the
-    /// element would already be covered/gone.
+    /// The retry condition mirrors `tapRow`/`openTask`'s own fix, and
+    /// DELIBERATELY checks only `.exists`, never `.isHittable` — a second
+    /// crash, found immediately after fixing the first: calling
+    /// `.isHittable` on a button that is mid-rename (e.g. "Create task" ->
+    /// "Creating…", the exact transition this whole file's tapFrameOf
+    /// comment already documents) can itself THROW —
+    /// "Failed to determine hittability... Activation point invalid and no
+    /// suggested hit points based on element frame" — where `.exists`
+    /// alone answers safely. `.exists` is also sufficient: a button that
+    /// renamed no longer matches ITS OWN original query, so `.exists`
+    /// already reads false the moment the tap actually landed and changed
+    /// something.
     private func tapFrameOfVerified(_ element: XCUIElement) {
         for attempt in 0..<2 {
             tapFrameOf(element)
             usleep(400_000)
-            if attempt == 0 && element.exists && element.isHittable {
-                note("tap on '\(element.label)' left it unchanged (still hittable) — retrying once")
+            if attempt == 0 && element.exists {
+                note("tap on '\(element.label)' left it unchanged (still exists) — retrying once")
                 continue
             }
             return
