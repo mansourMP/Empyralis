@@ -70,7 +70,7 @@ struct WorkspaceSettingsView: View {
     // misleading. `stopStateError` is set only when `stoppedState` is still
     // nil (a real load failure with nothing to fall back on); it never hides
     // the primary "Stop all agents" control — see `emergencyStopSection`.
-    @State private var stoppedState: StoppedState?
+    @State private var stoppedState: WorkspaceStopState?
     @State private var stopStateError: String?
     @State private var confirmingStop = false
     @State private var stopReason = ""
@@ -610,7 +610,7 @@ struct WorkspaceSettingsView: View {
         .padding(.vertical, Space.x2)
     }
 
-    private func stoppedCard(_ stopped: StoppedState) -> some View {
+    private func stoppedCard(_ stopped: WorkspaceStopState) -> some View {
         VStack(alignment: .leading, spacing: Space.x2) {
             Label("All agents stopped", systemImage: "stop.circle.fill")
                 .font(.empBodyMedium)
@@ -640,7 +640,7 @@ struct WorkspaceSettingsView: View {
     /// EmergencyStopSection.tsx's own composed line exactly. `TaskDates.parse`
     /// (not a second date parser) already carries the space-separator /
     /// fractional-seconds cascade this backend's `at` field needs.
-    private func stoppedDetailLine(_ stopped: StoppedState) -> String {
+    private func stoppedDetailLine(_ stopped: WorkspaceStopState) -> String {
         let trimmedLabel = stopped.stoppedByLabel?.trimmingCharacters(in: .whitespaces)
         let who = (trimmedLabel?.isEmpty == false) ? trimmedLabel! : "an owner"
         var line = "Stopped by \(who)"
@@ -666,7 +666,7 @@ struct WorkspaceSettingsView: View {
                 stopStateError = "Couldn't load the stop state."
                 return
             }
-            stoppedState = response.workspace?.stopped ?? StoppedState(active: false, reason: nil, stoppedByLabel: nil, at: nil)
+            stoppedState = response.workspace?.stopped ?? WorkspaceStopState(active: false, reason: nil, stoppedByLabel: nil, at: nil)
             stopStateError = nil
         } catch APIError.unauthorized {
             await session.handleUnauthorized()
@@ -709,7 +709,7 @@ struct WorkspaceSettingsView: View {
                 stopActionError = ack.error ?? "Couldn't stop all agents."
                 return
             }
-            stoppedState = ack.stopped ?? StoppedState(active: true, reason: nil, stoppedByLabel: nil, at: nil)
+            stoppedState = ack.stopped ?? WorkspaceStopState(active: true, reason: nil, stoppedByLabel: nil, at: nil)
             stopStateError = nil
             confirmingStop = false
             stopReason = ""
@@ -746,7 +746,7 @@ struct WorkspaceSettingsView: View {
                 stopActionError = ack.error ?? "Couldn't resume agents."
                 return
             }
-            stoppedState = ack.stopped ?? StoppedState(active: false, reason: nil, stoppedByLabel: nil, at: nil)
+            stoppedState = ack.stopped ?? WorkspaceStopState(active: false, reason: nil, stoppedByLabel: nil, at: nil)
             stopStateError = nil
         } catch APIError.unauthorized {
             await session.handleUnauthorized()

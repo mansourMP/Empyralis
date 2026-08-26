@@ -278,12 +278,12 @@ func mcpServerHost(_ endpoint: String) -> String {
 // MARK: - Emergency stop — Settings ▸ Workspace
 //
 // Ported from frontend/lib/workspace/fleet/EmergencyStopSection.tsx +
-// fleet-data.ts's `StoppedState`/`stopFleetWorkspace`/`resumeFleetWorkspace`
+// fleet-data.ts's `WorkspaceStopState`/`stopFleetWorkspace`/`resumeFleetWorkspace`
 // — same fields, same semantics. Backend contract
 // (server_modules/routes_fleet.py:2258/2280, owner-gated via
 // `enforce_workspace_access(..., minimum_role="owner")`):
 //
-//   GET  /w/{id}/fleet/workspace          -> {"ok", "workspace": {"stopped": StoppedState, ...}}
+//   GET  /w/{id}/fleet/workspace          -> {"ok", "workspace": {"stopped": WorkspaceStopState, ...}}
 //   POST /w/{id}/fleet/stop-all  {reason} -> {"ok", "workspace_id", "stopped"} | {"ok":false, "error"}
 //   POST /w/{id}/fleet/resume-all {}      -> {"ok", "workspace_id", "stopped"} | {"ok":false, "error"}
 //
@@ -301,7 +301,7 @@ func mcpServerHost(_ endpoint: String) -> String {
 //
 // `{active:false}` (no other fields set) once resumed — reason/who/at only
 // ever carry meaning while `active` is true, matching the web type exactly.
-struct StoppedState: Decodable, Equatable {
+struct WorkspaceStopState: Decodable, Equatable {
     let active: Bool
     let reason: String?
     let stoppedByLabel: String?
@@ -318,7 +318,7 @@ struct StoppedState: Decodable, Equatable {
 /// is rendered" discipline as `GatewayRegistration` above.
 struct FleetWorkspaceStopStateResponse: Decodable {
     struct Workspace: Decodable {
-        let stopped: StoppedState?
+        let stopped: WorkspaceStopState?
     }
     let ok: Bool
     let workspace: Workspace?
@@ -330,5 +330,5 @@ struct FleetWorkspaceStopStateResponse: Decodable {
 struct FleetStopControlAck: Decodable {
     let ok: Bool
     let error: String?
-    let stopped: StoppedState?
+    let stopped: WorkspaceStopState?
 }
