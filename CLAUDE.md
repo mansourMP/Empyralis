@@ -8768,13 +8768,23 @@ POST /auth/provider-login {provider, identity_token, channel:"mobile"}
 channel` defaults an absent/unknown channel to `"web"`, so omitting it returns
 a 200 that signs nobody in — cookies set, token stripped.
 
-**WHAT BLOCKS IT IS ONE ENV VAR AND ONE CONSOLE ACTION, NOT CODE.**
+**SUPERSEDED 2026-08-26 — DO NOT SEND THE FOUNDER TO GOOGLE'S CONSOLE. The
+native-Google flow below is no longer the way the phone signs in, and the
+"one env var and one console action" it asks for is NO LONGER NEEDED.** The
+app now logs in through the WEBSITE in an `ASWebAuthenticationSession` Safari
+sheet — so Google (and every other method the web login offers, now or later)
+works with no Google iOS OAuth client at all. See "The phone signs in through
+Safari" near the end of this file. The paragraph below is kept only because
+its three dead-ends are still TRUE and still worth not re-deriving; its
+*instruction* is dead.
+
+~~**WHAT BLOCKS IT IS ONE ENV VAR AND ONE CONSOLE ACTION, NOT CODE.**
 `_configured_provider_audiences("google")` (`auth.py:454`) already reads
 `GOOGLE_IOS_CLIENT_ID`; it is set nowhere. The only configured audience is the
 *Web* client id, and Google rejects custom-scheme redirects for Web clients,
 so it cannot be reused. Create an **iOS**-type OAuth client, set that env var
 to it, put the same id plus its reversed form in `project.yml`. Steps are in
-`ios-app/README.md`.
+`ios-app/README.md`.~~
 
 **THE GATE IS THE HONEST ANSWER TO "no dead controls", and it has two halves
 for a reason.** The BUILD's own client id is local, synchronous and decisive —
@@ -8816,3 +8826,84 @@ deliberate failure-state tests. And a seeded backend can be stopped by another
 agent's tests mid-run: a "sign-in failed" that reports `Couldn't sign in.
 Check your connection` may be telling the exact truth — `curl` the health
 endpoint before suspecting the client.
+
+## The phone signs in through Safari, not through a native provider flow (2026-08-26)
+
+**Founder, pointing at Linear's iOS app: *"There is a logo, there is not even
+a brand name. There is just a brand logo and it says start"*, and pressing it
+*"just goes to open a page that seems like a Safari because it's default
+probably."* That is the whole design, and it is now built.**
+
+```
+WelcomeView   logo + "Get started"        NO brand-name text. one button.
+   │          ("Sign in with email instead" is a secondary link below it)
+   ▼
+ASWebAuthenticationSession  ─▶  {webOrigin}/login?native=ios
+                                &code_challenge=<S256>&state=<random>
+   │   the person logs in with ANYTHING the website offers
+   ▼
+empyralis://auth?code=…&state=…      single-use, 90s, PKCE-bound
+   ▼
+POST /auth/native/exchange {code, code_verifier}
+   ▼   the SAME payload channel:"mobile" login returns
+bearer + refresh  ─▶  SessionStore.apply() ─▶ Keychain   (one storage path)
+```
+
+**THIS IS WHY THE APPLE-ACCOUNT AND GOOGLE-CONSOLE BLOCKERS ARE GONE.** The
+website does the authenticating, so every method it supports — email, Google,
+and whatever is added next — reaches the phone for free. No Google iOS OAuth
+client, no `GOOGLE_IOS_CLIENT_ID`. A **custom scheme** (`empyralis://`) needs
+no Associated Domains entitlement, so a FREE personal Apple team can ship it —
+unlike universal links and push, which genuinely still need the paid program.
+
+**A TOKEN MUST NEVER RIDE IN THE REDIRECT.** Safari hands back a code, not a
+session — redirect URLs land in history, logs and `Referer`. Hence
+`native_auth_service.py`: one atomic
+`UPDATE … WHERE consumed_at IS NULL AND expires_at > ?` checked on
+`rowcount == 1`, **fired BEFORE the verifier is compared**, so a wrong
+verifier still burns the code and it can never be retried against a live one.
+The exchange request accepts **no user-identity field of any kind** — the row
+the code names is the only source of "who this is", so there is structurally
+nothing to smuggle another user into. `redirect_uri` comes from a hardcoded
+server-side table; the caller picks a KEY, never a URL, so there is no
+open-redirect surface.
+
+**THE GOOGLE PATH DOES NOT COME BACK TO `/login`, AND MISSING THAT WOULD HAVE
+SILENTLY KILLED THE WHOLE FEATURE.** A real OAuth round trip terminates at
+`/auth/complete` (hardcoded in `callback/route.ts`), which never sees
+`/login`'s query string — so the handoff is relayed through `sessionStorage`,
+set before `googleLogin()` navigates away. Without it, someone signs in with
+Google in the Safari sheet and simply never returns to the app: no error, no
+message, nothing. Both the email path and the Google path funnel through ONE
+`completeAuthenticatedRedirect()` — the "guard called once will be skipped by
+the next branch" shape this file already documents twice.
+
+**A WRONG PASSWORD DELIBERATELY PRODUCES NO APP-SIDE MESSAGE, and that is not
+an oversight.** The website only ever redirects on SUCCESS; on failure it
+leaves the sheet open showing its own inline error. So the app structurally
+cannot distinguish "still typing" from "just failed" — and inventing a message
+there would duplicate an error the person is already looking at. Cancelling is
+silent (not an error). A failed exchange and a `state` mismatch each get their
+own distinct message, the second flavoured as a security refusal.
+
+**THE SAFARI SHEET CANNOT BE AUTOMATED, EVER.** It is out-of-process and
+system-owned, and it raises a one-time system consent alert. No XCUITest can
+drive it. `UIDriver/SignInFlow.swift` therefore NEVER taps "Get started" — it
+reaches the email form through the secondary link, and any test needing a
+session goes that way. **A human pass is the only way this flow is ever
+verified**; that is a property of the platform, not a gap in the work.
+
+`SignInFlow` probes tab-bar -> welcome -> login-form-directly, in that order,
+because `WelcomeState.hasSeen` is read ONCE at `RootView` construction: within
+one test run the first file to execute marks it seen and every later file
+lands on a different screen. A helper assuming the welcome screen passes on a
+fresh install and hangs on every run after it.
+
+**STILL UNVERIFIED AS OF THIS ENTRY, and do not let a later summary claim
+otherwise:** the sheet, the redirect, the exchange and all four outcome
+messages have never been seen on screen — the machine had overheated from
+simulator load and simulators were off-limits for the session that built this.
+Everything above is compile-verified plus a live `TestClient` pass over the
+real FastAPI routes. Nothing verifies that "Get started" itself starts the
+flow; `GoogleButton.swift`'s trick of asserting the system consent alert
+appears would work for it, and is unwritten.
