@@ -214,6 +214,56 @@ extension Font {
     static var empMono: Font { empScaled(12, weight: .medium, design: .monospaced, relativeTo: .caption) }
     static var empTitle: Font { empScaled(24, weight: .semibold, relativeTo: .title) }
     static var empSectionHeader: Font { empScaled(12, weight: .semibold, relativeTo: .caption2) }
+
+    // MARK: - Document headings (H1-H4)
+    //
+    // MarkdownRenderer's headingFont() used to hand back a raw, non-scaling
+    // .system(size:weight:) per level while body text already rode empBody's
+    // UIFontMetrics curve — so at large accessibility sizes a document's own
+    // H1 could render SMALLER than its paragraphs. Fixing that with the
+    // "obvious" mapping (title1/title2/title3/headline for H1-H4) turns out
+    // to reintroduce the identical bug ONE LEVEL DOWN, and that is not a
+    // hypothetical: it is computed directly from Apple's own published
+    // Dynamic Type tables (developer.apple.com/design/human-interface-
+    // guidelines/typography), not extrapolated.
+    //
+    // Apple's title-class curves (title1/title2/title3) scale LESS steeply
+    // than body-class curves (body/headline) at accessibility sizes — by
+    // design, so a large title doesn't become "massive" (Apple's title
+    // styles get away with a flatter curve because their DEFAULT size is
+    // already a long way above body's: title1 is 65% bigger than body,
+    // title2 29%, title3 18%, all measured at Apple's own 17pt body
+    // default). An independent write-up on building custom Dynamic-Type
+    // scales confirms the consequence directly: "at AX5, the Body relative
+    // style is larger than the Title 1 relative style. The scaling rate of
+    // Relative Title 1 is lower" (Bang Tran, "Designing for scalable
+    // Dynamic Type in iOS", UX Collective).
+    //
+    // This app's heading sizes (22/18/16/15 over a 15pt empBody) do not
+    // have that kind of head start — H3 is only 6.7% bigger than body, H4
+    // is not bigger at all. Plugging Apple's REAL xSmall/Large/AX1 numbers
+    // into H3 on the title3 curve shows it is already a near-exact tie with
+    // H4 on the headline curve at AX1 (24.8pt vs 24.7pt) — the MILDEST
+    // accessibility step, not an extreme edge case. So H3 and H4 share the
+    // headline curve (== body's own curve) here and are separated by base
+    // size alone, which — because the curve is identical on both — keeps H3
+    // exactly 16/15 bigger than H4 at every size category, by construction,
+    // not by hoping the curves stay far enough apart.
+    //
+    // H1 and H2 keep the "natural" title1/title2 mapping: their bigger
+    // base-size cushion over body (47% and 20%) gives them real headroom,
+    // and deviating further without hard numbers to justify it would be
+    // guessing in the other direction. That headroom is real but SMALLER
+    // than Apple's own title1/title2-over-body cushion (65%/29%) — the
+    // exact cushion whose title1 case is the one confirmed above to invert
+    // by AX5 — so it is plausible, not just theoretically possible, that H1
+    // and especially H2 compress toward H3/body at the most extreme
+    // accessibility sizes. Nobody has looked at this on a device; see the
+    // MarkdownRenderer fix's own report for what still needs a human eye.
+    static var empHeading1: Font { empScaled(22, weight: .semibold, relativeTo: .title) }
+    static var empHeading2: Font { empScaled(18, weight: .semibold, relativeTo: .title2) }
+    static var empHeading3: Font { empScaled(16, weight: .semibold, relativeTo: .headline) }
+    static var empHeading4: Font { empScaled(15, weight: .semibold, relativeTo: .headline) }
 }
 
 private extension Font.TextStyle {

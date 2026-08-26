@@ -134,7 +134,17 @@ struct WorkspaceSettingsView: View {
                 .overlay(Circle().stroke(Theme.border(scheme), lineWidth: 1))
                 .overlay(
                     Text(member.initial)
-                        .font(.empCaptionMedium)
+                        // Deliberately NOT a scaling .emp* token. This sits
+                        // inside a FIXED 28x28 circle; if the glyph grows
+                        // with Dynamic Type but the badge doesn't, the
+                        // letter outgrows its circle and overlaps the name
+                        // beside it at large accessibility sizes. Matches
+                        // ActorAvatar's own non-scaling letter treatment
+                        // (Features/Tasks/TaskDetailComponents.swift) —
+                        // same formula, size * 0.44 at .semibold, so a
+                        // fixed-size avatar's initial is sized consistently
+                        // everywhere in the app.
+                        .font(.system(size: 28 * 0.44, weight: .semibold))
                         .foregroundStyle(Theme.textSecondary(scheme))
                 )
                 .frame(width: 28, height: 28)

@@ -29,10 +29,22 @@ struct WelcomeView: View {
 
                 VStack(spacing: Space.x1) {
                     Text("Welcome to")
-                        .font(.system(size: 17, weight: .medium))
+                        // UIFontMetrics via Theme's empScaled, relativeTo:
+                        // .subheadline — this is a small kicker line above
+                        // the hero wordmark, and subheadline is the style
+                        // Apple defines for exactly that role. Its own
+                        // default (15) sits close to this base (17), so the
+                        // curve is well matched to the size actually used.
+                        .font(Font.empScaled(17, weight: .medium, relativeTo: .subheadline))
                         .foregroundStyle(Theme.textMuted(scheme))
                     Text("Empyralis")
-                        .font(.system(size: 34, weight: .bold))
+                        // relativeTo: .largeTitle — 34pt is Apple's own
+                        // largeTitle default size exactly, and this line
+                        // has a huge (100%) base-size cushion over "Welcome
+                        // to" above it, so even largeTitle's flat curve
+                        // (the flattest of all the title-class curves)
+                        // cannot plausibly invert that ordering.
+                        .font(Font.empScaled(34, weight: .bold, relativeTo: .largeTitle))
                         .foregroundStyle(Theme.textPrimary(scheme))
                 }
                 .padding(.top, Space.x6)
