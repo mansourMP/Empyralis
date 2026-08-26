@@ -3,8 +3,8 @@ import UIKit
 
 /// Settings ▸ Workspace — parity with the web's `SettingsShell`
 /// `section === "workspace"` branch (`WorkspaceNameSection` +
-/// `MembersSection`; Billing and Emergency Stop are deliberately NOT ported
-/// — see the file-level scope note below).
+/// `MembersSection` + `EmergencyStopSection`; Billing is deliberately NOT
+/// ported — see the file-level scope note below).
 ///
 /// Pushed from `SettingsView` (MainTabView.swift), so it does not own a
 /// `NavigationStack` of its own.
@@ -17,10 +17,25 @@ import UIKit
 /// nothing revokes one, and nothing patches an existing member's role). A
 /// control with no route behind it is a dead control, which this app's own
 /// design law forbids more strongly than an absent screen ever costs.
-/// Workspace rename and the workspace-wide Emergency Stop are both real
-/// write surfaces of their own kind (and Emergency Stop is a destructive
-/// fleet-wide action) — left for the web, matching the brief's "companion,
-/// not a second desktop" framing.
+/// Workspace rename is a real write surface of its own kind — left for the
+/// web, matching the brief's "companion, not a second desktop" framing.
+///
+/// **Emergency Stop is the one exception, added later, and it earns the
+/// exception rather than contradicting the framing above.** Every other
+/// screen in this app is setup/observation done at a desk; a kill switch is
+/// the opposite — it is precisely the control someone reaches for AWAY from
+/// a keyboard, mid-incident, on the device already in their hand. Linear's
+/// own "companion, purpose-designed for away-from-keyboard workflows"
+/// positioning (see `README.md`) argues FOR this control on a phone, not
+/// against it. It is placed here — one level into Settings ▸ Workspace,
+/// exactly where the web puts it — rather than surfaced more prominently
+/// (a toolbar action, a banner on Inbox): two navigation taps to reach the
+/// screen plus a confirm step is the same depth a phone OS puts "erase this
+/// device" or "sign out everywhere" behind, which is the right company for
+/// a rare, destructive, fleet-wide action. A persistent stop button on the
+/// app's daily-use front door would both overstate how often this is needed
+/// and read as exactly the kind of surface this app's own law rejects — see
+/// "A surface must earn its place" in the root CLAUDE.md.
 struct WorkspaceSettingsView: View {
     @EnvironmentObject private var session: SessionStore
     @EnvironmentObject private var store: WorkspaceStore
@@ -48,6 +63,20 @@ struct WorkspaceSettingsView: View {
     @State private var lastInviteResult: InviteResult?
     @State private var copiedLink = false
 
+    // Emergency stop. `nil` means "not yet loaded" (or the load failed) —
+    // deliberately NOT persisted to WorkspaceStore/DiskCache, same reasoning
+    // as the invites state above: nothing else in the app reads it, and this
+    // is exactly the one place stale-cached "safe" state would be actively
+    // misleading. `stopStateError` is set only when `stoppedState` is still
+    // nil (a real load failure with nothing to fall back on); it never hides
+    // the primary "Stop all agents" control — see `emergencyStopSection`.
+    @State private var stoppedState: WorkspaceStopState?
+    @State private var stopStateError: String?
+    @State private var confirmingStop = false
+    @State private var stopReason = ""
+    @State private var isStopBusy = false
+    @State private var stopActionError: String?
+
     private struct InviteResult: Equatable {
         let link: String
         let delivery: EmailDelivery?
@@ -73,15 +102,18 @@ struct WorkspaceSettingsView: View {
                 membersSection
                 if canInvite { inviteSection }
                 pendingInvitesSection
+                emergencyStopSection
             }
             .scrollContentBackground(.hidden)
             .refreshable {
                 await store.refresh()
                 await loadInvites()
+                await loadStopState()
             }
         }
         .navigationTitle("Workspace")
         .task { await loadInvites() }
+        .task { await loadStopState() }
     }
 
     // MARK: - Members
@@ -448,6 +480,282 @@ struct WorkspaceSettingsView: View {
             invitesError = message
         } catch {
             invitesError = "Couldn't load pending invites."
+        }
+    }
+
+    // MARK: - Emergency stop
+
+    /// Workspace-wide kill switch — every agent, every channel, immediately.
+    /// See this file's own header for why it lives on this screen. Renders
+    /// one of: a skeleton (never loaded yet), the stopped card (Resume), the
+    /// confirm form, or the plain trigger — never more than one at a time,
+    /// and the trigger still renders even when the GET below failed, so a
+    /// flaky connection can never take the one control this section exists
+    /// for away from someone who needs it.
+    @ViewBuilder
+    private var emergencyStopSection: some View {
+        Section {
+            if let stopActionError {
+                Text(stopActionError)
+                    .font(.empCaption)
+                    .foregroundStyle(Theme.offline(scheme))
+            }
+
+            if stoppedState == nil && stopStateError == nil {
+                SkeletonRow()
+            } else if let stopped = stoppedState, stopped.active {
+                stoppedCard(stopped)
+            } else {
+                if let stopStateError, stoppedState == nil {
+                    // "Not stopped" and "could not find out" are different
+                    // facts — the control below still renders either way;
+                    // stopping is safe to attempt even without a confirmed
+                    // prior state.
+                    Text("Couldn't confirm whether agents are already stopped.")
+                        .font(.empCaption)
+                        .foregroundStyle(Theme.textMuted(scheme))
+                }
+                if confirmingStop {
+                    confirmStopForm
+                } else {
+                    stopTriggerButton
+                }
+            }
+        } header: {
+            Text("Emergency stop")
+        } footer: {
+            // Mirrors EmergencyStopSection.tsx's own subtitle verbatim.
+            Text("Immediately stops every agent in this workspace from replying, on every channel. Nothing is deleted — resume at any time to pick back up where they left off.")
+        }
+        .listRowBackground(Theme.bgCard(scheme))
+    }
+
+    /// Neutral weight, never the accent. Matches `MainTabView.swift`'s Sign
+    /// Out precedent rather than the web's own `fleet-btn--accent` on
+    /// "Confirm stop" — Theme.swift's accent law reserves violet for a
+    /// view's single PRIMARY action, and a destructive control is never
+    /// that; see `confirmStopForm` below for where the platform's own
+    /// destructive-role red is used instead.
+    private var stopTriggerButton: some View {
+        Button {
+            confirmingStop = true
+            stopActionError = nil
+        } label: {
+            Label("Stop all agents", systemImage: "stop.circle")
+                .font(.empBodyMedium)
+        }
+        .foregroundStyle(Theme.textPrimary(scheme))
+    }
+
+    @ViewBuilder
+    private var confirmStopForm: some View {
+        VStack(alignment: .leading, spacing: Space.x3) {
+            Label("Stop every agent in this workspace?", systemImage: "exclamationmark.triangle")
+                .font(.empBodyMedium)
+                .foregroundStyle(Theme.textPrimary(scheme))
+
+            Text("No one will get a reply from any agent here — on any channel — until you resume.")
+                .font(.empCaption)
+                .foregroundStyle(Theme.textMuted(scheme))
+
+            // Same "own, fully-styled placeholder" workaround as the invite
+            // email field above — TextField's built-in placeholder
+            // mechanisms both render in system blue regardless of override.
+            ZStack(alignment: .leading) {
+                if stopReason.isEmpty {
+                    Text("Reason (optional, visible in the activity log)")
+                        .font(.empBody)
+                        .foregroundStyle(Theme.textMuted(scheme))
+                }
+                TextField("", text: $stopReason)
+                    .font(.empBody)
+                    .foregroundStyle(Theme.textPrimary(scheme))
+            }
+            .padding(.horizontal, Space.x3)
+            .padding(.vertical, 10)
+            .background(Theme.bgField(scheme), in: RoundedRectangle(cornerRadius: Radius.control))
+            .overlay(
+                RoundedRectangle(cornerRadius: Radius.control)
+                    .stroke(Theme.border(scheme), lineWidth: 1)
+            )
+
+            HStack {
+                Button("Cancel") {
+                    confirmingStop = false
+                    stopReason = ""
+                    stopActionError = nil
+                }
+                .font(.empBodyMedium)
+                .foregroundStyle(Theme.textSecondary(scheme))
+                .disabled(isStopBusy)
+
+                Spacer()
+
+                // `role: .destructive` — the platform's own red, the same
+                // mechanism Sign Out uses (MainTabView.swift). Never the
+                // brand accent for a destructive action.
+                Button(role: .destructive) {
+                    Task { await confirmStopAllAgents() }
+                } label: {
+                    if isStopBusy {
+                        ProgressView()
+                    } else {
+                        Text("Confirm stop")
+                    }
+                }
+                .font(.empBodyMedium)
+                .disabled(isStopBusy)
+            }
+        }
+        .padding(.vertical, Space.x2)
+    }
+
+    private func stoppedCard(_ stopped: WorkspaceStopState) -> some View {
+        VStack(alignment: .leading, spacing: Space.x2) {
+            Label("All agents stopped", systemImage: "stop.circle.fill")
+                .font(.empBodyMedium)
+                .foregroundStyle(Theme.offline(scheme))
+
+            Text(stoppedDetailLine(stopped))
+                .font(.empCaption)
+                .foregroundStyle(Theme.textMuted(scheme))
+
+            Button {
+                Task { await resumeAllAgents() }
+            } label: {
+                if isStopBusy {
+                    ProgressView()
+                } else {
+                    Label("Resume all agents", systemImage: "play.circle")
+                }
+            }
+            .font(.empBodyMedium)
+            .foregroundStyle(Theme.textPrimary(scheme))
+            .disabled(isStopBusy)
+        }
+        .padding(.vertical, Space.x1)
+    }
+
+    /// "Stopped by X · 3 hr ago · "reason"" — mirrors
+    /// EmergencyStopSection.tsx's own composed line exactly. `TaskDates.parse`
+    /// (not a second date parser) already carries the space-separator /
+    /// fractional-seconds cascade this backend's `at` field needs.
+    private func stoppedDetailLine(_ stopped: WorkspaceStopState) -> String {
+        let trimmedLabel = stopped.stoppedByLabel?.trimmingCharacters(in: .whitespaces)
+        let who = (trimmedLabel?.isEmpty == false) ? trimmedLabel! : "an owner"
+        var line = "Stopped by \(who)"
+        if let at = stopped.at, let date = TaskDates.parse(at) {
+            line += " · \(relativeTimeString(date))"
+        }
+        if let reason = stopped.reason?.trimmingCharacters(in: .whitespaces), !reason.isEmpty {
+            line += " · \"\(reason)\""
+        }
+        return line
+    }
+
+    /// `GET /w/{id}/fleet/workspace` — viewer-reachable, so this always
+    /// resolves for anyone who can even see this screen (unlike the two
+    /// mutations below, which are owner-only).
+    private func loadStopState() async {
+        guard let workspaceId = session.currentWorkspaceId else { return }
+        do {
+            let response: FleetWorkspaceStopStateResponse = try await APIClient.shared.get(
+                "/w/\(workspaceId)/fleet/workspace"
+            )
+            guard response.ok else {
+                stopStateError = "Couldn't load the stop state."
+                return
+            }
+            stoppedState = response.workspace?.stopped ?? WorkspaceStopState(active: false, reason: nil, stoppedByLabel: nil, at: nil)
+            stopStateError = nil
+        } catch APIError.unauthorized {
+            await session.handleUnauthorized()
+        } catch APIError.server(let message) {
+            stopStateError = message
+        } catch {
+            stopStateError = "Couldn't load whether agents are stopped."
+        }
+    }
+
+    /// `POST /w/{id}/fleet/stop-all`. THREE outcomes, matching this file's
+    /// own `sendInvite()` pattern and the root CLAUDE.md's outcome-honesty
+    /// law — never collapsed into a plain "stopped" or "failed":
+    ///
+    ///   ok:false            the server READ the request and refused (e.g. a
+    ///                       non-owner caller). Show its own reason verbatim.
+    ///   2xx, undecodable    the stop LANDED server-side — APIClient only
+    ///                       throws .decoding after its 2xx guard passes.
+    ///                       Re-fetch the real state rather than claim a
+    ///                       failure that did not happen.
+    ///   no response at all  we genuinely cannot tell. Say so — never claim
+    ///                       "stopped" (the worst possible lie here) and
+    ///                       never claim "failed" outright, which could send
+    ///                       someone hunting for a laptop for a stop that
+    ///                       may have already landed.
+    private func confirmStopAllAgents() async {
+        guard let workspaceId = session.currentWorkspaceId else {
+            stopActionError = "No workspace."
+            return
+        }
+        isStopBusy = true
+        stopActionError = nil
+        defer { isStopBusy = false }
+        do {
+            let ack: FleetStopControlAck = try await APIClient.shared.post(
+                "/w/\(workspaceId)/fleet/stop-all",
+                body: ["reason": stopReason.trimmingCharacters(in: .whitespacesAndNewlines)]
+            )
+            guard ack.ok else {
+                stopActionError = ack.error ?? "Couldn't stop all agents."
+                return
+            }
+            stoppedState = ack.stopped ?? WorkspaceStopState(active: true, reason: nil, stoppedByLabel: nil, at: nil)
+            stopStateError = nil
+            confirmingStop = false
+            stopReason = ""
+        } catch APIError.unauthorized {
+            await session.handleUnauthorized()
+        } catch APIError.server(let message) {
+            stopActionError = message
+        } catch APIError.decoding {
+            confirmingStop = false
+            stopReason = ""
+            await loadStopState()
+        } catch {
+            stopActionError = "Couldn't confirm whether that stopped. Check your connection and try again."
+        }
+    }
+
+    /// `POST /w/{id}/fleet/resume-all`. Same three-outcome shape as the stop
+    /// above, kept as its own function rather than a shared helper — the
+    /// optimistic values differ (`active: true` vs `active: false`) and both
+    /// are short enough that sharing would cost more clarity than it saves.
+    private func resumeAllAgents() async {
+        guard let workspaceId = session.currentWorkspaceId else {
+            stopActionError = "No workspace."
+            return
+        }
+        isStopBusy = true
+        stopActionError = nil
+        defer { isStopBusy = false }
+        do {
+            let ack: FleetStopControlAck = try await APIClient.shared.post(
+                "/w/\(workspaceId)/fleet/resume-all", body: [:]
+            )
+            guard ack.ok else {
+                stopActionError = ack.error ?? "Couldn't resume agents."
+                return
+            }
+            stoppedState = ack.stopped ?? WorkspaceStopState(active: false, reason: nil, stoppedByLabel: nil, at: nil)
+            stopStateError = nil
+        } catch APIError.unauthorized {
+            await session.handleUnauthorized()
+        } catch APIError.server(let message) {
+            stopActionError = message
+        } catch APIError.decoding {
+            await loadStopState()
+        } catch {
+            stopActionError = "Couldn't confirm whether that resumed. Check your connection and try again."
         }
     }
 
