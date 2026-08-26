@@ -9178,3 +9178,43 @@ screen. And on the document feature, four branches were never exercised live
 and are flagged in its merge commit rather than glossed: "Use theirs
 instead", the background-and-restore draft path, viewer gating when
 `canWrite` is false, and the `.decoding`/`.unauthorized` save branches.
+
+## A SIMULATOR'S TEXT SIZE PERSISTS, and it will read as a code bug (2026-08-26)
+
+**`xcrun simctl ui <udid> content_size` survives reboots, reinstalls and
+`simctl erase`.** A device left at `accessibility-extra-extra-extra-large` by
+an earlier sweep stays there, silently, and every later run on that device is
+measuring a different app than the runs beside it.
+
+This produced a genuinely confusing signal and cost a full extra pass:
+
+```
+DEVICE MATRIX, task authoring, same commit, same harness
+  iPhone 13      create ✓  subtask ✓  rename ✓  description ✗
+  iPhone 14 Pro  create ✓  subtask ✗   ← FAILED THE STEP THE SMALLER SCREEN PASSED
+  iPhone 16      all four ✓
+  iPhone 17 Pro  all four ✓
+
+  read as: a layout bug that is somehow WORSE on the larger screen
+  actually: 14 Pro was still at AX5 from a previous sweep; the other three
+            were at `large`. Content pushed "Add sub-task" below the fold.
+```
+
+**The tell is non-monotonicity.** A real screen-size layout defect degrades
+in ONE direction — the smallest screen fails first. When a bigger screen
+fails a step a smaller one passes, suspect device STATE, not the code.
+`xcrun simctl ui <udid> content_size` with no argument prints the current
+value; check it before believing a per-device difference.
+
+**Reproducibility is what separated flake from defect here, and it is worth
+running the second pass rather than guessing:** re-run on a quiet machine
+changed iPhone 13's failure to a DIFFERENT step (non-reproducible → flake)
+while iPhone 14 Pro failed at the SAME step twice (reproducible → real
+cause, which turned out to be the stale text size).
+
+**The accident was worth more than the matrix.** Running at AX5 by mistake
+surfaced a REAL defect the deliberate AX5 sweep had missed:
+`TaskDetailView`'s property labels wrap MID-WORD at accessibility sizes —
+`Statu/s`, `Priori/ty`, `Assi/gnee`. The earlier sweep confirmed the HEADING
+ladder by eye and never looked at the property rows. **A sweep that "passed"
+only proves what it actually looked at.**
