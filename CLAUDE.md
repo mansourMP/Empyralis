@@ -8907,3 +8907,49 @@ Everything above is compile-verified plus a live `TestClient` pass over the
 real FastAPI routes. Nothing verifies that "Get started" itself starts the
 flow; `GoogleButton.swift`'s trick of asserting the system consent alert
 appears would work for it, and is unwritten.
+
+## Dynamic Type at AX5 is VERIFIED on the smallest screen — and the guard that kept aborting was wrong, not the machine (2026-08-26)
+
+**The heading ladder holds.** iPhone 13, `content_size accessibility-extra-
+extra-extra-large`, 22 screens captured through the real UIDriver harness
+(`Supplementary/testSupplementary`), TEST SUCCEEDED. Verified by eye on the
+document reader: **H1 > body > H2**, the hierarchy intact, nothing clipped,
+nothing overlapping. The specific failure this was built to prevent — a
+heading rendering SMALLER than its own body text — does not occur.
+
+That also settles the deviation recorded in the heading-font entry above:
+pairing H3/H4 to body's own curve instead of the title curves the dispatch
+asked for was correct. The instruction was wrong; the agent that refused it
+was right.
+
+The login screen at the same size is verified too: the headline scales
+hugely and wraps to two lines, and every pill field GROWS to hold it. With
+the fixed `.frame(height:)` values that preceded the container audit, that
+text would have spilled out of its own field — so that audit was not
+theoretical.
+
+**THE LOAD GUARD WAS DIAGNOSING A HEALTHY MACHINE AS A DEAD ONE, and the
+wrong conclusion got written down before it was caught.** Measured here:
+
+```
+booting one simulator   load 25 -> ~120, then 120 -> 110 -> 95 -> 78 ...
+a 90s deadline gives up at 78   <- while the number is still FALLING
+```
+
+Two runs aborted that way and produced the confident, wrong claim that this
+machine "genuinely cannot handle simulator work." It can. What actually
+separates a startup burst from real pressure is whether load is coming DOWN,
+so `ios-app/verify-on-device.sh` now watches the TREND and gives up only if
+the number stops falling. Same ceiling — the threshold was never the problem.
+The identical command that had failed twice then ran straight through.
+
+**What DID make the machine unusable (2026-08-26, earlier) was four
+simulators at once plus parallel builds plus a build that HUNG and never
+released** — not a simulator as such. Do not over-correct from that incident
+into refusing to boot one; measure instead, and let it settle before judging.
+
+**STILL UNVERIFIED, and one of them permanently unautomatable:** the Safari
+sign-in sheet actually opening and handing back (needs a frontend running
+alongside the seeded backend — `npm run dev`, since the seeded backend alone
+leaves `/login` non-existent), and iPhone 14 Pro / 16 / 17 Pro at AX5, which
+have only been seen at default text size.
