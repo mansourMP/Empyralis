@@ -70,7 +70,19 @@ struct WelcomeView: View {
                         Text("Get started")
                     }
                 }
-                .buttonStyle(AuthSecondaryPillStyle())
+                // The ACCENT pill, not the neutral one. This screen has exactly
+                // one action, so it is by definition the single primary action
+                // the accent law reserves the violet for — and the law has a
+                // positive half as well as a restraining one: a view with zero
+                // accent uses has no primary action at all.
+                //
+                // It was the neutral `AuthSecondaryPillStyle` until 2026-08-26,
+                // which put the hierarchy exactly backwards: `LoginView` — the
+                // FALLBACK door, reached only behind this screen's own quiet
+                // "Sign in with email instead" link — painted its submit with
+                // `AuthPrimaryPillStyle`, so the secondary path looked primary
+                // and the primary path looked secondary.
+                .buttonStyle(AuthPrimaryPillStyle())
                 .disabled(isSigningIn)
                 .padding(.horizontal, Space.x5)
 
