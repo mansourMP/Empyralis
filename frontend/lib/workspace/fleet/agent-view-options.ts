@@ -60,6 +60,7 @@ import {
 } from "./gateway-box-picker";
 import type { FleetAgent, FleetProject } from "./fleet-data";
 import { timeAgo, type AgentStatusTone } from "./fleet-presentation";
+import { formatUsd } from "../../ui/money";
 
 // ── Vocabulary ──────────────────────────────────────────────────────────────
 
@@ -564,7 +565,7 @@ export function agentBrainLabel(config?: Record<string, any>): string {
 /** 4 decimal places, matching AgentsList.tsx's own `money` — real per-turn
  *  costs are fractions of a cent. */
 export function agentMoney(n: number): string {
-  return `$${n.toFixed(4)}`;
+  return formatUsd(n);
 }
 
 /** Splits fleet_tools._fetch_agent_channels' "key +N" string back apart —

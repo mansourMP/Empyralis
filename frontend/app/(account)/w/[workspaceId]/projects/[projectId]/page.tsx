@@ -55,8 +55,9 @@ import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
 import { FleetBoardSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import { PROJECT_TAB_LABEL, PROJECT_TAB_VIEWS } from "@/lib/workspace/fleet/project-views";
 import { ListChecks, FileText } from "lucide-react";
+import { formatUsd } from "@/lib/ui/money";
 
-const money = (n: number | undefined) => `$${(n ?? 0).toFixed(4)}`;
+const money = (n: number | undefined) => formatUsd(n ?? 0);
 
 /**
  * Flat-list skeleton reusing `.fleet-tasks-list`/`.fleet-tasks-list-header`/

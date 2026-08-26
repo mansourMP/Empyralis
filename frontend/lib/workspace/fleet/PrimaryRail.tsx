@@ -47,6 +47,7 @@ import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 
 import { RAIL_WIDTH, useResizableWidth } from "./fleet-preferences";
 import type { FleetTheme, FleetSectionKey } from "./fleet-preferences";
+import { formatUsd } from "../../ui/money";
 
 // Rail vocabulary lives in primary-rail-nav.ts — a pure, dependency-light
 // module a plain test imports directly (primary-rail-nav.test.ts). Read that
@@ -87,7 +88,7 @@ const CONTROL_ICON = 16;
 // (MAN-145) — an em dash, this codebase's existing convention for "nothing
 // to show" (see AgentsList/CreditsPanel/TaskDetailView), says the same thing
 // honestly.
-const money = (n: number) => (n === 0 ? "—" : `$${n.toFixed(4)}`);
+const money = (n: number) => (n === 0 ? "—" : formatUsd(n));
 
 /**
  * Persistent primary rail — the app's spine, and PROJECTS is the spine of

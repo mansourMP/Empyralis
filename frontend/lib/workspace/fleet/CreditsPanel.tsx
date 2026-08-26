@@ -7,6 +7,7 @@ import { useCreditBalance, useCreditUsageHistory, startCreditTopUp, type CreditU
 import { useBillingSummary, planUpgradeControl, resolvePlanDisplayLabel, startPlanCheckout, startPortalSession } from "./billing-plan";
 import { MultiSeriesChart, type ChartSeries } from "./fleet-sparkline";
 import { FleetSurfaceError } from "./fleet-states";
+import { formatUsd } from "../../ui/money";
 
 // Every preset must be >= the server's own floor
 // (billing_service._MIN_CREDIT_PURCHASE_USD, $10). A $5 button that the
@@ -166,7 +167,7 @@ export function CreditsPanel({ workspaceId }: { workspaceId: string }) {
               {balanceLoading || credits === null ? "…" : credits.toLocaleString("en-US")}
             </div>
             <div className="fleet-stat-label">
-              Credit balance{typeof balanceUsd === "number" ? ` · $${balanceUsd.toFixed(2)}` : ""}
+              Credit balance{typeof balanceUsd === "number" ? ` · ${formatUsd(balanceUsd)}` : ""}
             </div>
           </div>
         </div>

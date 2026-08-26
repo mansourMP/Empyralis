@@ -20,10 +20,11 @@ import { FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import { FleetToolbar, type ToolbarFilter } from "@/lib/workspace/fleet/FleetToolbar";
 import { FleetRightPanel, PanelSection, PanelRow } from "@/lib/workspace/fleet/FleetRightPanel";
 import { UsageStat, bucketSeries, type UsageBucket } from "@/lib/workspace/fleet/fleet-sparkline";
+import { formatUsd } from "@/lib/ui/money";
 
 // 4 decimal places — same convention as AgentsList/FleetAgentDetail/project
 // detail's money(): real per-turn costs are fractions of a cent.
-const money = (n: number) => `$${n.toFixed(4)}`;
+const money = (n: number) => formatUsd(n);
 
 type ProjectStats = {
   agents: number;
@@ -381,7 +382,7 @@ export default function ProjectsPage() {
             <UsageStat
               label="Spend today"
               total={workspaceTotals?.usd_cost ?? 0}
-              formattedTotal={`$${(workspaceTotals?.usd_cost ?? 0).toFixed(4)}`}
+              formattedTotal={formatUsd(workspaceTotals?.usd_cost ?? 0)}
               values={bucketSeries(workspaceBuckets, "usd_cost")}
             />
             <UsageStat

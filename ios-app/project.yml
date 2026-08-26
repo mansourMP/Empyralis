@@ -74,6 +74,26 @@ targets:
           - CFBundleTypeRole: Editor
             CFBundleURLName: ai.empyralis.app.google-oauth
             CFBundleURLSchemes: []
+          # ── Native web login (Safari-based sign-in) ─────────────────────
+          # `empyralis://auth` is where the website redirects once someone
+          # finishes logging in at https://empyralis.ai/login?native=ios...
+          # (NativeWebLogin.swift, server_modules/native_auth_service.py's
+          # NATIVE_REDIRECT_TARGETS["ios"]). Unlike the Google entry above,
+          # this scheme is NOT gated behind an operator setup step — it is
+          # fixed and already live on the backend, so it is registered for
+          # real rather than left empty.
+          #
+          # ASWebAuthenticationSession's completion handler catches this
+          # callback directly and does not strictly require an Info.plist
+          # URL type to do so — but registering it is what Apple documents
+          # as correct (it is also how the Google entry above already works
+          # in this same project), and it is what lets the OS route the
+          # callback to this app if the sheet ever has to fall back to the
+          # ordinary URL-opening mechanism instead of its own interception.
+          - CFBundleTypeRole: Editor
+            CFBundleURLName: ai.empyralis.app.native-login
+            CFBundleURLSchemes:
+              - empyralis
         NSAppTransportSecurity:
           NSAllowsArbitraryLoadsInWebContent: false
           # A DEBUG build talks to a disposable stack on 127.0.0.1 over

@@ -28,6 +28,30 @@ enum APIConfig {
         #endif
     }()
 
+    /// The WEBSITE origin — where `/login` (the Safari-based sign-in page,
+    /// see `NativeWebLogin`) is actually served. Deliberately NOT derived
+    /// from `baseURL`: in production the two share a host but not a path
+    /// (`empyralis.ai/api` vs `empyralis.ai`), while a local DEBUG stack
+    /// runs them on entirely different ports — the frontend's own
+    /// `npm run dev` is `next dev -H localhost -p 3000`, unrelated to
+    /// `baseURL`'s 127.0.0.1:8001 backend default below.
+    ///
+    /// Same override pattern as `baseURL`: set `EMPYRALIS_WEB_ORIGIN` on the
+    /// scheme to point a DEBUG build at a differently-ported local frontend
+    /// without editing this file.
+    static let webOrigin: URL = {
+        if let raw = ProcessInfo.processInfo.environment["EMPYRALIS_WEB_ORIGIN"],
+           let url = URL(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+           url.scheme != nil {
+            return url
+        }
+        #if DEBUG
+        return URL(string: "http://127.0.0.1:3000")!
+        #else
+        return URL(string: "https://empyralis.ai")!
+        #endif
+    }()
+
     static let devicePlatform = "ios"
     static var deviceName: String {
         #if canImport(UIKit)

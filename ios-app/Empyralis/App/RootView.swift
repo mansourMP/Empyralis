@@ -24,8 +24,10 @@ struct RootView: View {
                 // returning person who signed out gets the login screen
                 // directly — greeting someone who just left is noise.
                 if showWelcome {
+                    // markSeen() happens inside WelcomeView itself (both its
+                    // primary and secondary actions call it) — this closure
+                    // only needs to reveal LoginView.
                     WelcomeView {
-                        WelcomeState.markSeen()
                         withAnimation(.easeOut(duration: 0.15)) { showWelcome = false }
                     }
                 } else {

@@ -139,6 +139,77 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    /// The founder's own described flow: "Get started" opens the real
+    /// website in Safari, login happens there however the website offers it
+    /// (email/password, Google, whatever it grows later), and the app comes
+    /// back signed in. See `NativeWebLogin`'s own header for the full
+    /// authorization-code + PKCE design.
+    ///
+    /// Same split as `loginWithGoogle()`: the browser-facing half never
+    /// talks to Empyralis, this function owns the exchange call and is the
+    /// only place the resulting payload is `apply`-ed — so a token reaches
+    /// the Keychain through exactly ONE path regardless of which door
+    /// someone used to sign in.
+    func loginWithNativeWebFlow() async {
+        lastErrorMessage = nil
+        let result: NativeWebLoginResult
+        do {
+            result = try await NativeWebLogin().run()
+        } catch NativeWebLoginError.cancelled {
+            // Backing out of the sheet is a decision, not a failure — same
+            // as GoogleSignInError.cancelled above.
+            return
+        } catch NativeWebLoginError.stateMismatch {
+            // A DIFFERENT fact from every other failure here: this callback
+            // does not prove it is answering the request this app made.
+            // Named distinctly so it never reads as an ordinary hiccup.
+            lastErrorMessage = "This sign-in attempt couldn't be verified and was blocked. Try again."
+            return
+        } catch {
+            // .sessionFailed / .malformedCallback — both mean the browser
+            // step itself never completed, before any code existed to
+            // exchange. A website-side LOGIN failure (wrong password, etc.)
+            // never reaches this catch at all: the website shows its own
+            // error inline and keeps the sheet open, so it does not need a
+            // branch here — see NativeWebLoginError.cancelled's own note.
+            lastErrorMessage = "Couldn't complete sign-in. Try again."
+            return
+        }
+
+        do {
+            apply(try await exchangeNativeAuthCode(result))
+        } catch APIError.unauthorized {
+            // The backend's OWN sentence for every exchange failure (expired,
+            // already used, wrong verifier, account deleted mid-flow) is
+            // this exact fixed string — native_auth_service.py's
+            // `_GENERIC_EXCHANGE_FAILURE`. It never varies by cause, so
+            // nothing is lost by not relaying a body here (contrast
+            // exchangeIdentityToken below, whose 401 detail genuinely does
+            // vary and is relayed verbatim for that reason).
+            lastErrorMessage = "This sign-in code is invalid, expired, or already used. Try again."
+        } catch APIError.server(let message) {
+            lastErrorMessage = message
+        } catch {
+            lastErrorMessage = "Couldn't finish signing in. Check your connection and try again."
+        }
+    }
+
+    /// `POST /auth/native/exchange` — deliberately through the ordinary
+    /// `APIClient.post`, unlike `exchangeIdentityToken` below. That route's
+    /// 401 body carries genuinely different messages per cause and losing
+    /// them would hide a real diagnosis; this route's 401 is always the
+    /// identical fixed sentence (see the catch above), so
+    /// `APIClient`'s blanket `.unauthorized` mapping loses nothing here.
+    private func exchangeNativeAuthCode(_ result: NativeWebLoginResult) async throws -> AuthPayload {
+        try await APIClient.shared.post("/auth/native/exchange", body: [
+            "code": result.code,
+            "code_verifier": result.codeVerifier,
+            "device_id": deviceId,
+            "device_name": APIConfig.deviceName,
+            "device_platform": APIConfig.devicePlatform,
+        ])
+    }
+
     /// `POST /auth/provider-login`, deliberately NOT through
     /// `APIClient.post`.
     ///

@@ -22,6 +22,7 @@ import {
   resolveHardwarePlacement,
   useWorkspaceGateways,
 } from "./gateway-box-picker";
+import { formatUsd } from "../../ui/money";
 
 const LAST_VIEWED_KEY = "fleet:list-last-viewed-agent";
 
@@ -59,7 +60,7 @@ function consumeLastViewedAgent(): string {
 // 4 decimal places, matching billing/page.tsx and FleetAgentDetail.tsx's cost
 // formatters — real per-turn costs are fractions of a cent (e.g. $0.0003),
 // which toFixed(2) always rounds down to a misleading "$0.00".
-const money = (n: number) => `$${n.toFixed(4)}`;
+const money = (n: number) => formatUsd(n);
 
 // model_config → short brand-family label. Keeps the Brain column readable at
 // a glance and identical width across rows ("Sonnet 5", "DeepSeek", "GPT-5") —
