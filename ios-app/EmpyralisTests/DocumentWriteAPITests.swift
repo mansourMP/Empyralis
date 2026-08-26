@@ -35,7 +35,7 @@ final class DocumentWriteAPITests: XCTestCase {
     "updated_by":"5badcccb-add2-4ff6-a542-ee523562cac4","metadata":{},\
     "created_at":"2026-08-26 10:20:53.009734+00:00",\
     "updated_at":"2026-08-26 10:21:18.418175+00:00","body":"theirs",\
-    "state_sha256":"c916dea4113dab3c85e4a0c519d5f90e565933614fb3281ed0f63538bb70830c"}}}
+    "state_sha256":"c916dea4113dab3c85e4a0c519d5f90e565933614fb3281ed0f63538bb70830c"}}}}
     """.data(using: .utf8)!
 
     /// Verbatim from a real 200 PATCH acknowledging a successful write.
