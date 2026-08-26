@@ -44,11 +44,28 @@ LOAD_CEILING=40
 
 load_now() { uptime | sed 's/.*load averages*: //' | awk '{print int($1)}'; }
 
+# A simulator BOOT alone was measured costing ~40 load on this machine
+# (2026-08-26). Load average is a rolling one-minute figure, so that burst
+# keeps inflating the number for up to a minute after the work is already
+# done — a single reading cannot tell "briefly busy starting up" from
+# "genuinely overloaded". So: read, and if it looks high, wait for it to
+# settle and read again. Only sustained pressure aborts.
 abort_if_busy() {
   local l; l=$(load_now)
   if [ "$l" -gt "$LOAD_CEILING" ]; then
-    echo "ABORT: load average is $l (ceiling $LOAD_CEILING) — $1"
-    echo "Something else is working the machine hard. Try again when it settles."
+    echo "  load is $l — letting it settle before judging ($1)"
+    local waited=0
+    while [ "$waited" -lt 90 ]; do
+      sleep 15; waited=$((waited + 15))
+      l=$(load_now)
+      if [ "$l" -le "$LOAD_CEILING" ]; then
+        echo "  load settled to $l after ${waited}s — $1"
+        return 0
+      fi
+      echo "    still $l after ${waited}s..."
+    done
+    echo "ABORT: load stayed at $l for 90s (ceiling $LOAD_CEILING) — $1"
+    echo "This is sustained, not a startup burst. Try again when the machine is free."
     xcrun simctl shutdown "$UDID" >/dev/null 2>&1
     exit 1
   fi
