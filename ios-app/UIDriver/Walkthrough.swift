@@ -210,20 +210,25 @@ final class Walkthrough: XCTestCase {
 
         // --- Welcome + Login ------------------------------------------------
         //
-        // Every tap here is a COORDINATE tap with a retry that waits for the
-        // destination. A plain `.tap()` on "Get started" resolved, reported
-        // hittable, and left the welcome screen on screen — the same silent
-        // no-op the tab buttons and the list rows both had.
+        // "Get started" now opens the system Safari sheet
+        // (ASWebAuthenticationSession) instead of the in-app form — this
+        // harness cannot and must not try to drive that system UI (see
+        // NativeWebLogin.swift). SignInFlow.reachEmailForm is the one place
+        // that knows the resulting tri-state landing (already signed in /
+        // welcome screen / login form directly) and, on the welcome screen,
+        // taps the secondary "Sign in with email instead" link instead of
+        // "Get started". Every tap it makes is a COORDINATE tap with a
+        // retry: a plain `.tap()` has repeatedly resolved, reported
+        // hittable, and silently done nothing in this harness.
         //
         // Note `simctl erase` does NOT clear the simulator keychain, so a
         // device that was signed in before may restore its session and skip
         // this whole block. That is handled, not assumed.
-        let getStarted = app.buttons["Get started"]
-        if getStarted.waitForExistence(timeout: 8) {
+        if app.buttons["Get started"].waitForExistence(timeout: 8) {
             shot("welcome")
-            tapUntil(getStarted, name: "Get started") {
-                self.app.textFields.firstMatch.exists || self.app.tabBars.firstMatch.exists
-            }
+        }
+        if !SignInFlow.reachEmailForm(app) {
+            miss("could not reach the login form from the welcome screen")
         }
 
         let email = app.textFields.firstMatch

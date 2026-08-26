@@ -122,46 +122,48 @@ final class CloseoutVerification: XCTestCase {
     private func fillLoginForm() -> Bool {
         app.launch()
         sleep(2)
-        if app.tabBars.firstMatch.waitForExistence(timeout: 3) {
+        // "Get started" now opens the system Safari sheet
+        // (ASWebAuthenticationSession) rather than the in-app form — this
+        // harness cannot and must not try to drive that system UI (see
+        // NativeWebLogin.swift). SignInFlow.reach is the one place that
+        // knows the resulting tri-state landing (already signed in /
+        // welcome screen / login form directly) and, on the welcome
+        // screen, taps the secondary "Sign in with email instead" link
+        // instead of "Get started".
+        switch SignInFlow.reach(app) {
+        case .alreadySignedIn:
             note("already signed in on launch (Keychain session survived) — skipping the login form")
             return false
-        }
-        let getStarted = app.buttons["Get started"]
-        if getStarted.waitForExistence(timeout: 8) {
-            for _ in 0..<3 {
-                getStarted.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-                if app.textFields.firstMatch.waitForExistence(timeout: 5) || app.tabBars.firstMatch.exists { break }
-            }
-        }
-        if app.tabBars.firstMatch.exists { return false }
-        let email = app.textFields.firstMatch
-        if email.waitForExistence(timeout: 6) {
-            type(into: email, "ios.verify@example.com")
-            let pw = app.secureTextFields.firstMatch
-            if pw.waitForExistence(timeout: 4) { type(into: pw, "iosVerify-2026!") }
-
-            // BOTH fields, re-verified, with a retry — not a courtesy check.
-            // The cold-launch path hit this for real: the simulator's first
-            // launch attempt raced an internal relaunch (an FBSApplication-
-            // Library "returned nil" hiccup right after a fresh reinstall,
-            // which XCUITest silently retried), the retry handed back a
-            // FRESH set of fields, and the password this function had
-            // already typed landed on the instance that had just been
-            // replaced — so the tap that followed submitted a real email
-            // against an EMPTY password and got the app's own honest "That
-            // email and password don't match." This is not a UI bug: it is
-            // exactly what a real wrong password looks like, produced here
-            // by a harness race rather than a person mistyping.
-            for _ in 0..<3 {
-                let emailFilled = hasRealValue(email, placeholder: "Email")
-                let pwFilled = hasRealValue(app.secureTextFields.firstMatch, placeholder: "Password")
-                if emailFilled && pwFilled { break }
-                note("login field verification: email='\(emailFilled)' password='\(pwFilled)' — retyping")
-                if !emailFilled { type(into: email, "ios.verify@example.com") }
-                if !pwFilled { type(into: app.secureTextFields.firstMatch, "iosVerify-2026!") }
-            }
-        } else if !app.tabBars.firstMatch.exists {
+        case .neither:
             miss("login email field never appeared")
+            return true
+        case .emailFormReady:
+            break
+        }
+        let email = app.textFields.firstMatch
+        type(into: email, "ios.verify@example.com")
+        let pw = app.secureTextFields.firstMatch
+        if pw.waitForExistence(timeout: 4) { type(into: pw, "iosVerify-2026!") }
+
+        // BOTH fields, re-verified, with a retry — not a courtesy check.
+        // The cold-launch path hit this for real: the simulator's first
+        // launch attempt raced an internal relaunch (an FBSApplication-
+        // Library "returned nil" hiccup right after a fresh reinstall,
+        // which XCUITest silently retried), the retry handed back a
+        // FRESH set of fields, and the password this function had
+        // already typed landed on the instance that had just been
+        // replaced — so the tap that followed submitted a real email
+        // against an EMPTY password and got the app's own honest "That
+        // email and password don't match." This is not a UI bug: it is
+        // exactly what a real wrong password looks like, produced here
+        // by a harness race rather than a person mistyping.
+        for _ in 0..<3 {
+            let emailFilled = hasRealValue(email, placeholder: "Email")
+            let pwFilled = hasRealValue(app.secureTextFields.firstMatch, placeholder: "Password")
+            if emailFilled && pwFilled { break }
+            note("login field verification: email='\(emailFilled)' password='\(pwFilled)' — retyping")
+            if !emailFilled { type(into: email, "ios.verify@example.com") }
+            if !pwFilled { type(into: app.secureTextFields.firstMatch, "iosVerify-2026!") }
         }
         return true
     }

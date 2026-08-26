@@ -96,12 +96,12 @@ final class VerificationGaps: XCTestCase {
     private func signIn() {
         app.launch()
         sleep(2)
-        let getStarted = app.buttons["Get started"]
-        if getStarted.waitForExistence(timeout: 8) {
-            for _ in 0..<3 {
-                getStarted.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-                if app.textFields.firstMatch.waitForExistence(timeout: 5) || app.tabBars.firstMatch.exists { break }
-            }
+        // "Get started" now opens the system Safari sheet
+        // (ASWebAuthenticationSession) rather than the in-app form — see
+        // SignInFlow.swift. The in-app door is the secondary "Sign in with
+        // email instead" link, which SignInFlow.reachEmailForm taps.
+        if !SignInFlow.reachEmailForm(app) {
+            miss("could not reach the login form from the welcome screen")
         }
         let email = app.textFields.firstMatch
         if email.waitForExistence(timeout: 6) {

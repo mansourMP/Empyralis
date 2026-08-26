@@ -9,8 +9,11 @@ final class Diagnose: XCTestCase {
         app.launch()
         sleep(2)
 
-        let getStarted = app.buttons["Get started"]
-        if getStarted.waitForExistence(timeout: 6) { getStarted.tap(); sleep(1) }
+        // "Get started" now opens the system Safari sheet
+        // (ASWebAuthenticationSession) rather than the in-app form — see
+        // SignInFlow.swift. The in-app door is the secondary "Sign in with
+        // email instead" link, which SignInFlow.reachEmailForm taps.
+        SignInFlow.reachEmailForm(app)
 
         let email = app.textFields.firstMatch
         if email.waitForExistence(timeout: 8) {
