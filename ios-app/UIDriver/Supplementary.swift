@@ -105,11 +105,12 @@ final class Supplementary: XCTestCase {
 
     private func signIn() {
         app.launch(); sleep(2)
-        let getStarted = app.buttons["Get started"]
-        if getStarted.waitForExistence(timeout: 8) {
-            tapUntil(getStarted, name: "Get started") {
-                self.app.textFields.firstMatch.exists || self.app.tabBars.firstMatch.exists
-            }
+        // "Get started" now opens the system Safari sheet
+        // (ASWebAuthenticationSession) rather than the in-app form — see
+        // SignInFlow.swift. The in-app door is the secondary "Sign in with
+        // email instead" link, which SignInFlow.reachEmailForm taps.
+        if !SignInFlow.reachEmailForm(app) {
+            miss("could not reach the login form from the welcome screen")
         }
         let email = app.textFields.firstMatch
         if email.waitForExistence(timeout: 6) {

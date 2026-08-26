@@ -25,8 +25,11 @@ final class FailureStates: XCTestCase {
     }
 
     private func signInScreen(_ app: XCUIApplication) {
-        let getStarted = app.buttons["Get started"]
-        if getStarted.waitForExistence(timeout: 8) { getStarted.tap(); sleep(1) }
+        // "Get started" now opens the system Safari sheet
+        // (ASWebAuthenticationSession) rather than the in-app form — see
+        // SignInFlow.swift. The in-app door is the secondary "Sign in with
+        // email instead" link, which SignInFlow.reachEmailForm taps.
+        SignInFlow.reachEmailForm(app)
     }
 
     /// Wrong password must say so, and must not look like a network problem.
