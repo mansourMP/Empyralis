@@ -90,6 +90,7 @@ struct ProjectDetailView: View {
 
     @Environment(\.colorScheme) private var scheme
     @State private var section: Section = .tasks
+    @State private var showTaskComposer = false
 
     /// Mirrors PROJECT_TAB_VIEWS / PROJECT_TAB_LABEL. Deliberately not a
     /// third member — Agents were removed from a project's tab bar on the
@@ -133,6 +134,25 @@ struct ProjectDetailView: View {
         }
         .navigationTitle(project.name)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            // Only on Tasks — creating a document isn't part of this
+            // change, and a "+" that always creates a task while the
+            // Documents segment is showing would be doing something the
+            // screen in front of the person doesn't say.
+            if section == .tasks {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showTaskComposer = true
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                    .accessibilityLabel("New task")
+                }
+            }
+        }
+        .sheet(isPresented: $showTaskComposer) {
+            NewTaskSheet(projectId: project.id, parentTask: nil)
+        }
     }
 }
 
