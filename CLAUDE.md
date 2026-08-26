@@ -9010,3 +9010,80 @@ sheet.** It is out-of-process and system-owned, so no XCUITest can read it,
 type into it, or assert on the page it loaded. Signing in THROUGH it is a
 human's job forever — but "does the app start the flow correctly" is no
 longer part of that, and should not be re-listed as unverified.
+
+## Web↔iPhone parity, measured (2026-08-26)
+
+**Verdict: the phone is a READER that can edit five task PROPERTIES. It
+cannot create anything at all — no task, sub-task, project, document, agent
+or label — and cannot edit a task's own title or description.** Measured by
+enumerating both surfaces independently and diffing, not by reading either
+one's own claims about itself.
+
+```
+iOS write call sites, ENTIRE APP:  15
+  9  task/notification data   status · priority · due · assign→agent ·
+                              assign→member · attach label · detach label ·
+                              comment · mark notification read
+  1  settings                 send workspace invite
+  3  auth                     email · Google · Safari native-web exchange
+  2  background               token refresh · push-device registration
+```
+
+**THE COMPANION LINE IS WHERE THE JUDGEMENT LIVES, and most absences are
+CORRECT.** The founder's ask was "everything in the web platform must be in
+the phone app"; the bar he named was Linear, whose own iOS positioning is
+*"a companion… purpose-designed for away-from-keyboard workflows"*, and this
+file already records his *"a phone is not where someone configures an
+agent."* So the test applied to each gap was **"is this away-from-keyboard
+work, or is it desk work"** — not "does the web have it."
+
+```
+BUILT (2026-08-26)   create task · create sub-task · edit title ·
+                     edit description · stop/resume all agents
+                     ── the kill switch is the sharpest phone-native case in
+                        the whole list: agents misbehaving while you are OUT
+                        is exactly when you cannot reach a laptop
+
+DESK WORK, correctly absent — do NOT file these as gaps
+  create agent       a 4-step wizard: placement, brain, channels, apps
+  create project     structural, rare, done once
+  hardware pairing   a `curl | bash` on a machine. not a phone task.
+  MCP / channels     paste tokens, scan QRs, approve tool lists
+  billing / top-up   desk work, and Apple's IAP rules make in-app credit
+                     purchase legally fraught — do not reach for it casually
+  talk to an agent   platform law. conversation is the CHANNEL's job.
+
+NOT A PARITY GAP — THE WEB CANNOT DO THESE EITHER. Verified in the web
+source, and each one reads like an iOS hole until you check:
+  delete a task · change a member's role · remove a member ·
+  revoke a pending invite · upload an image into a document
+```
+
+**Two live-path facts worth not re-deriving.** `PATCH .../fleet/tasks/{id}`
+ALREADY accepts `title` and `description` (`FleetPatchTaskRequest`,
+routes_fleet.py:901) — the phone was simply never sending them, so editing a
+task's words was a one-field addition, not a feature. And `POST
+.../fleet/stop-all` / `/resume-all` (routes_fleet.py:2258/2280) already
+existed. **Every gap closed here was pure iOS; zero backend work.** Check the
+route before scoping phone work as "needs an endpoint."
+
+**Found by LOOKING at the running app, not by reading it** — the discipline
+this file already demands, paying out again:
+- The Agents tab's "No agents yet" was suspected to be the `Agent.id`
+  decode bug resurfacing (a decode throw eaten by `try?` presents
+  IDENTICALLY to an empty list). Queried the database directly: exactly one
+  install, `Sage`, flagged `hidden_from_agents_dashboard`. The empty state
+  was TRUE. **Confirm an empty state against the data before "fixing" it.**
+- **Open, not fixed:** in the document reader the header scrolls up and
+  collides with the status bar — the title ghosts behind the clock with no
+  blur material behind it. Project views PIN their header, so this is
+  specific to that one screen.
+
+**`WelcomeView`'s only button was the NEUTRAL pill while `LoginView` — the
+fallback door behind its own quiet link — had the accent one.** The
+hierarchy was exactly inverted. The accent law has a positive half: exactly
+one accent-filled button per view, and a view with ZERO accent uses has no
+primary action at all. Read as an oversight rather than a decision because
+that file's header documents every OTHER choice on the screen at length and
+says nothing about the button style; in a file that thorough, the silence is
+the tell.
