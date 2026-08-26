@@ -58,7 +58,13 @@ struct PrimaryButtonStyle: ButtonStyle {
             // it isn't ready.
             .foregroundStyle(isEnabled ? Theme.accentContrast : Theme.textMuted(scheme))
             .frame(maxWidth: .infinity)
-            .frame(height: 44)
+            // minHeight, not a fixed height: 44pt is Apple's minimum tap
+            // target and stays the visible height at the default text size,
+            // but a fixed frame here clips `configuration.label`'s own text
+            // once Dynamic Type scaling (Font.empBodyMedium) pushes it taller
+            // than 44pt at large accessibility sizes — SwiftUI's .frame()
+            // proposes a size, it does not clip to it.
+            .frame(minHeight: 44)
             .background(
                 isEnabled
                     ? Theme.accent(scheme).opacity(configuration.isPressed ? 0.85 : 1)
@@ -83,7 +89,8 @@ struct SecondaryButtonStyle: ButtonStyle {
             .font(.empBodyMedium)
             .foregroundStyle(Theme.textPrimary(scheme))
             .frame(maxWidth: .infinity)
-            .frame(height: 44)
+            // minHeight — see PrimaryButtonStyle's identical note above.
+            .frame(minHeight: 44)
             .background(Theme.bgCard(scheme), in: RoundedRectangle(cornerRadius: Radius.control))
             .overlay(
                 RoundedRectangle(cornerRadius: Radius.control)
@@ -194,7 +201,17 @@ struct AuthPrimaryPillStyle: ButtonStyle {
             .font(.system(size: 16, weight: .medium))
             .foregroundStyle(isEnabled ? Theme.accentContrast : Theme.textMuted(scheme))
             .frame(maxWidth: .infinity)
-            .frame(height: 52)
+            // minHeight, not fixed — same clipping reasoning as
+            // PrimaryButtonStyle above. NOTE: the font on this line is
+            // .system(size:weight:), which per Apple's own documentation does
+            // NOT scale with Dynamic Type at all (unlike Font.empBodyMedium
+            // above) — so this frame cannot actually overflow today. Left as
+            // minHeight anyway as a zero-cost hardening: if this font is ever
+            // migrated to Theme's scaling tokens (Font.empScaled) without
+            // this frame being revisited, minHeight is what keeps that future
+            // change from reintroducing the exact clipping bug this pass is
+            // about. See the audit report for the non-scaling-font finding.
+            .frame(minHeight: 52)
             .background(
                 isEnabled
                     ? Theme.accent(scheme).opacity(configuration.isPressed ? 0.86 : 1)
@@ -214,7 +231,9 @@ struct AuthSecondaryPillStyle: ButtonStyle {
             .font(.system(size: 16, weight: .regular))
             .foregroundStyle(Theme.textPrimary(scheme))
             .frame(maxWidth: .infinity)
-            .frame(height: 52)
+            // minHeight — see AuthPrimaryPillStyle's identical note above
+            // (this font is also non-scaling .system(size:weight:) today).
+            .frame(minHeight: 52)
             .background(Theme.bgField(scheme), in: Capsule())
             .overlay(
                 Capsule().stroke(Theme.border(scheme), lineWidth: 1)

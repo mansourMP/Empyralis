@@ -178,7 +178,13 @@ struct LoginView: View {
         .foregroundStyle(Theme.textPrimary(scheme))
         .multilineTextAlignment(.center)
         .padding(.horizontal, Space.x5)
-        .frame(height: 52)
+        // minHeight, not fixed — same reasoning as AuthPrimaryPillStyle in
+        // Components.swift, which this field is styled to match. The font
+        // above is non-scaling .system(size:) today, so this cannot actually
+        // overflow yet; minHeight is zero-cost hardening against that being
+        // fixed later without this frame being revisited. See the audit
+        // report's non-scaling-font finding.
+        .frame(minHeight: 52)
         .background(Theme.bgField(scheme), in: Capsule())
         .overlay(Capsule().stroke(Theme.border(scheme), lineWidth: 1))
     }

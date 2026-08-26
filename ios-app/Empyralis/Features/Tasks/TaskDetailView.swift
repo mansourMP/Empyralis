@@ -213,7 +213,13 @@ struct TaskDetailView: View {
                         .foregroundStyle(actor == .lookupFailed
                                          ? Theme.textMuted(scheme)
                                          : Theme.textPrimary(scheme))
-                        .lineLimit(1)
+                        // 2 lines, not 1 — this is a real agent/member name,
+                        // not fixed vocabulary. PropertyRow's own row is
+                        // minHeight (not fixed), so a wrapped second line
+                        // never clips; it just gives a long name somewhere to
+                        // go instead of an ellipsis at large accessibility
+                        // sizes.
+                        .lineLimit(2)
                 }
             } else if store.identityLookupFailed && !canAssign {
                 Text("Couldn't load who")
@@ -522,7 +528,8 @@ struct TaskDetailView: View {
             Text(actor.name)
                 .font(.empSecondary)
                 .foregroundStyle(Theme.textPrimary(scheme))
-                .lineLimit(1)
+                // 2 lines — see the identical note on assigneeRow above.
+                .lineLimit(2)
             if let when = stamp, !when.isEmpty {
                 Text("· \(TaskDates.timeAgo(when))")
                     .font(.empCaption)

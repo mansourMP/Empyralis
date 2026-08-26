@@ -325,7 +325,16 @@ struct PickerRow<Leading: View>: View {
                 }
             }
             .padding(.horizontal, Space.x4)
-            .frame(height: 48)
+            // minHeight, not fixed: `title` here is agent names, member
+            // names and label names in the assignee/labels sheets — real
+            // user data, not fixed vocabulary — set in Font.empBody(Medium),
+            // which DOES scale. With no lineLimit on Text(title), a long name
+            // wraps rather than truncates once it no longer fits one line at
+            // large accessibility sizes; a fixed 48pt frame would not grow to
+            // hold the second line, and this sheet stacks rows in a plain
+            // VStack(spacing: 0) with no per-row clipping, so an overflowing
+            // row would visually overlap the row below it.
+            .frame(minHeight: 48)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
