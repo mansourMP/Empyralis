@@ -145,6 +145,21 @@ final class TaskAuthoring: XCTestCase {
 
     private func rows() -> XCUIElementQuery { app.collectionViews.buttons }
 
+    /// ROOT CAUSE, found live on iPhone 13 (a crash, not a miss): the
+    /// previous body here re-tapped `e.coordinate(...)` inside a 3x retry
+    /// loop. When the FIRST tap already navigated away successfully, `e` —
+    /// a row from the LIST screen — no longer exists on the new screen, and
+    /// a slow render (device- or backend-load-dependent) can make the
+    /// post-tap wait outlast its timeout even on a tap that worked. The next
+    /// loop iteration then re-resolves `e.coordinate(...)` against a query
+    /// that matches nothing and XCUITest THROWS
+    /// ("Failed to get matching snapshot") instead of the miss() this
+    /// function is supposed to report — exactly the rename-mid-tap class of
+    /// bug `tapFrameOf`/`settledFrame` were built to close elsewhere in this
+    /// file, just never applied here. Fixed the same way: ONE tap via a
+    /// settled, captured frame, then a genuinely generous wait. A retry is
+    /// still allowed, but ONLY when the row still exists — i.e. the tap
+    /// genuinely missed, not merely a slow transition after a real hit.
     @discardableResult
     private func tapRow(_ text: String, expect navBar: String? = nil) -> Bool {
         let e = rows().matching(NSPredicate(format: "label CONTAINS[c] %@", text)).firstMatch
@@ -158,18 +173,20 @@ final class TaskAuthoring: XCTestCase {
             }
             if !found && !e.exists { miss("no row '\(text)'"); return false }
         }
-        for _ in 0..<3 {
-            e.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        for attempt in 0..<2 {
+            tapFrameOf(e)
             guard let navBar else { sleep(2); return true }
-            if app.navigationBars[navBar].waitForExistence(timeout: 8) { sleep(1); return true }
-            sleep(1)
+            if app.navigationBars[navBar].waitForExistence(timeout: 15) { sleep(1); return true }
+            if attempt == 0 && !e.exists { break } // navigated away; a slow render, not a miss
         }
-        miss("row '\(text)' never reached '\(navBar ?? "")'")
+        miss("row '\(text)' never reached '\(navBar ?? "")'", probe: e)
         return false
     }
 
     /// Task detail has no navigation title of its own; the comment composer
-    /// (present nowhere else) is the proof of arrival.
+    /// (present nowhere else) is the proof of arrival. See `tapRow`'s header
+    /// comment — this had the identical re-resolve-a-gone-element crash risk
+    /// and is fixed the same way.
     @discardableResult
     private func openTask(_ text: String) -> Bool {
         let e = rows().matching(NSPredicate(format: "label CONTAINS[c] %@", text)).firstMatch
@@ -183,12 +200,12 @@ final class TaskAuthoring: XCTestCase {
             }
             if !found && !e.exists { miss("no task row '\(text)'"); return false }
         }
-        for _ in 0..<3 {
-            e.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-            if app.textFields["Comment"].waitForExistence(timeout: 8) { sleep(2); return true }
-            sleep(1)
+        for attempt in 0..<2 {
+            tapFrameOf(e)
+            if app.textFields["Comment"].waitForExistence(timeout: 15) { sleep(2); return true }
+            if attempt == 0 && !e.exists { break } // navigated away; a slow render, not a miss
         }
-        miss("task '\(text)' never opened")
+        miss("task '\(text)' never opened", probe: e)
         return false
     }
 
