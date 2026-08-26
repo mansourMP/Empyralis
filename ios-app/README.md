@@ -289,3 +289,16 @@ can. The guard now aborts only if load stops falling.
 - **A simulator's permission state persists across installs.** After testing a
   "denied" notification path, erase the device (`xcrun simctl erase <udid>`)
   or the next run inherits the refusal.
+- **`XCUIElement.typeText()` in one call can silently truncate on a field with
+  autocorrection ENABLED.** Confirmed live testing `WorkspaceSettingsView`'s
+  Emergency Stop reason field (autocorrect deliberately left on there — it's
+  free text a person is composing, unlike the invite email field, which
+  disables it): a single `typeText("iOS UIDriver verification…")` call left
+  only "iO" in the field, screenshot-confirmed BEFORE any other code ran —
+  iOS's predictive-text bar intercepted synthesized keystrokes arriving
+  faster than it can settle. The app was not at fault. Fix is in the test,
+  not the field: type in small chunks (`EmergencyStop.swift`'s
+  `String.chunked(into:)`) with a short pause between them, giving the
+  predictive bar time to resolve. Do not disable autocorrect on a field just
+  to make automated typing easier — that would be optimizing the product for
+  the test harness.
