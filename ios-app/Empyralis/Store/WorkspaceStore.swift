@@ -527,6 +527,43 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
+    /// PATCH /fleet/tasks/{id}. TITLE IS NEVER SENT EMPTY — refused here
+    /// rather than server-side, because `project_tasks_service.update_task`'s
+    /// own SQL is `title = COALESCE(NULLIF($4, ''), title)`: an empty string
+    /// is silently IGNORED, not applied, so a caller that sent one and
+    /// treated the 200 as success would be lying about what changed.
+    /// TaskDetailView's own edit sheet already disables Save on a blank
+    /// trimmed title (TaskAuthoring.canSaveEdit(requiresNonEmpty: true)) —
+    /// this is the second, independent floor for any future caller.
+    func setTaskTitle(_ task: EmpTask, to title: String) async -> String? {
+        guard let workspaceId else { return "No workspace." }
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "Title can't be empty." }
+        return await commit(taskId: task.id) { $0.title = trimmed } write: {
+            let ack: TaskWriteAck = try await APIClient.shared.patch(
+                "/w/\(workspaceId)/fleet/tasks/\(task.id)", body: ["title": trimmed]
+            )
+            return (ack.ok, ack.error)
+        }
+    }
+
+    /// Same PATCH route. Unlike title, an empty description is a REAL, valid
+    /// value — `description = COALESCE($5, description)` treats only an
+    /// OMITTED field as "leave alone", and this app always sends the field,
+    /// never omits it — so clearing the box really does clear the task.
+    func setTaskDescription(_ task: EmpTask, to description: String) async -> String? {
+        guard let workspaceId else { return "No workspace." }
+        let trimmed = description.trimmingCharacters(in: .whitespacesAndNewlines)
+        return await commit(taskId: task.id) {
+            $0.description = trimmed.isEmpty ? nil : trimmed
+        } write: {
+            let ack: TaskWriteAck = try await APIClient.shared.patch(
+                "/w/\(workspaceId)/fleet/tasks/\(task.id)", body: ["description": trimmed]
+            )
+            return (ack.ok, ack.error)
+        }
+    }
+
     // MARK: - Reads
 
     func task(_ id: String) -> EmpTask? {
