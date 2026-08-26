@@ -366,8 +366,17 @@ final class DocumentEditBranches: XCTestCase {
 
     @discardableResult
     private func openEditor() -> Bool {
+        // 25s, not 10s: `canWrite` (and therefore whether the pencil
+        // renders at all) depends on WorkspaceStore.members finishing its
+        // own fetch, which races a cold relaunch -- measured live taking
+        // longer than 10s specifically right after back-to-back
+        // background+terminate+relaunch cycles on a loaded shared machine
+        // (other agents' own xcodebuild runs were active at the time). This
+        // is the "no dead controls, never render before both facts are
+        // known" design working as intended, just slower than this
+        // harness's original patience allowed for.
         let editButton = app.buttons["Edit document"]
-        guard editButton.waitForExistence(timeout: 10) else {
+        guard editButton.waitForExistence(timeout: 25) else {
             miss("no 'Edit document' pencil — canWrite resolved false, or the document never finished loading")
             return false
         }
