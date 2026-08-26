@@ -45,6 +45,7 @@ from server_modules.channel_pairing_service import (
     revoke_authenticated_channel_link,
 )
 from server_modules.channel_user_acquisition_service import CHANNEL_ATTRIBUTION_QUERY_PARAM
+from server_modules.native_auth_service import exchange_native_auth_code, mint_native_auth_handoff
 from server_modules.profile_api import register_profile_routes
 from server_modules import control_plane_repository, pilot_invite_service
 from server_modules import email_provider_service, email_verification_service
@@ -103,6 +104,35 @@ class AuthProviderLoginRequest(BaseModel):
 
 class MobileBetaBootstrapRequest(BaseModel):
     device_id: str = Field(min_length=1, max_length=180)
+    device_name: Optional[str] = Field(default=None, max_length=120)
+    device_platform: Optional[str] = Field(default=None, max_length=120)
+    workspace_id: Optional[str] = Field(default=None, max_length=120)
+    session_ttl_seconds: Optional[int] = None
+
+
+class AuthNativeHandoffRequest(BaseModel):
+    """The already-authenticated web session (cookie or bearer, via
+    get_current_user) asks for a single-use code to hand off to a native
+    app. See native_auth_service.py's own header comment for the full
+    design; `native` selects a HARDCODED server-side redirect target, never
+    a caller-supplied URL."""
+
+    native: str = Field(min_length=1, max_length=32)
+    code_challenge: str = Field(min_length=1, max_length=256)
+    code_challenge_method: Optional[str] = Field(default="S256", max_length=16)
+    state: Optional[str] = Field(default=None, max_length=512)
+
+
+class AuthNativeExchangeRequest(BaseModel):
+    """No user identity of any kind is accepted here on purpose -- the code
+    alone (bound server-side to a user_id at mint time) decides who this
+    session is for. device_* mirror AuthLoginRequest's own fields, since
+    they are the calling device's own metadata, not something carried over
+    from the web session that minted the code."""
+
+    code: str = Field(min_length=1, max_length=512)
+    code_verifier: str = Field(min_length=1, max_length=256)
+    device_id: Optional[str] = Field(default=None, max_length=180)
     device_name: Optional[str] = Field(default=None, max_length=120)
     device_platform: Optional[str] = Field(default=None, max_length=120)
     workspace_id: Optional[str] = Field(default=None, max_length=120)
@@ -236,6 +266,44 @@ async def provider_login(body: AuthProviderLoginRequest, request: Request, respo
 @router.post("/auth/mobile-beta-bootstrap", dependencies=[Depends(limit_login_requests)])
 async def mobile_beta_bootstrap(body: MobileBetaBootstrapRequest):
     return login_mobile_beta_user(
+        device_id=body.device_id,
+        device_name=body.device_name,
+        device_platform=body.device_platform,
+        workspace_id=body.workspace_id,
+        session_ttl_seconds=body.session_ttl_seconds,
+    )
+
+
+@router.post("/auth/native/handoff")
+async def native_handoff(
+    body: AuthNativeHandoffRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    # Authenticated by the caller's own already-live web session (cookie or
+    # bearer) -- this never logs anyone in, it only mints a short-lived
+    # ticket naming whoever is already signed in here. No `limit_login_
+    # requests` dependency: get_current_user already applies this session's
+    # own per-user rate limit, and unlike /auth/login there is no
+    # unauthenticated brute-force surface to add a second IP-keyed limiter
+    # for.
+    return mint_native_auth_handoff(
+        current_user,
+        native=body.native,
+        code_challenge=body.code_challenge,
+        code_challenge_method=body.code_challenge_method,
+        state=body.state,
+    )
+
+
+@router.post("/auth/native/exchange", dependencies=[Depends(limit_login_requests)])
+async def native_exchange(body: AuthNativeExchangeRequest):
+    # Deliberately unauthenticated -- the code + code_verifier pair IS the
+    # credential, exactly like /auth/login's email + password pair is. Rate
+    # limited the same way for the same reason: no session exists yet to
+    # rate-limit by.
+    return exchange_native_auth_code(
+        code=body.code,
+        code_verifier=body.code_verifier,
         device_id=body.device_id,
         device_name=body.device_name,
         device_platform=body.device_platform,

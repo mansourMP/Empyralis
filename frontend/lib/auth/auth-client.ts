@@ -33,8 +33,28 @@ export type AuthProviderOptions = {
 const EXTERNAL_AUTH_PENDING_STORAGE_KEY = 'empyralis.external-auth.pending';
 const EXTERNAL_AUTH_COMPLETION_STORAGE_KEY = 'empyralis.external-auth.complete';
 
+// A native-app handoff request (?native=ios&code_challenge=...&state=...)
+// survives on /login for the whole email/password flow -- it's the same
+// page, the query string never moves. It does NOT survive the Google flow:
+// googleLogin() below full-page-navigates AWAY from /login, through
+// accounts.google.com, and the round trip lands on /auth/complete, a
+// DIFFERENT route, carrying only what /api/auth/google/callback chose to
+// put on that URL (see that route's own comment -- it does not know about
+// native handoffs and this file deliberately does not teach it to). So this
+// key is how /login hands the request to /auth/complete across that gap:
+// sessionStorage is tab-scoped and origin-scoped, but genuinely survives a
+// same-tab navigation through a third-party origin and back, which is
+// exactly the shape of an OAuth redirect. See native-login-handoff.ts's own
+// header for why this matters at all (a real ASWebAuthenticationSession
+// Google flow never returns to /login in the tab that started it).
+const NATIVE_LOGIN_HANDOFF_STORAGE_KEY = 'empyralis.native-login-handoff.pending';
+
 function hasWindowStorage(): boolean {
   return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
+}
+
+function hasWindowSessionStorage(): boolean {
+  return typeof window !== 'undefined' && typeof window.sessionStorage !== 'undefined';
 }
 
 function parseExternalAuthProvider(value: unknown): ExternalAuthProvider | null {
@@ -128,6 +148,44 @@ export function watchExternalAuthCompletion(onReady: () => void): () => void {
     window.removeEventListener('focus', handleFocus);
     document.removeEventListener('visibilitychange', handleVisibilityChange);
   };
+}
+
+export type PendingNativeLoginHandoff = {
+  native: string;
+  codeChallenge: string;
+  state: string;
+};
+
+/** Deliberately no validation here -- this is raw storage plumbing. Whether
+ * a record is well-formed is native-login-handoff.ts's own question
+ * (planNativeLoginHandoffFromRecord), asked by whoever reads it back. */
+export function markPendingNativeLoginHandoff(record: PendingNativeLoginHandoff): void {
+  if (!hasWindowSessionStorage()) {
+    return;
+  }
+  try {
+    window.sessionStorage.setItem(NATIVE_LOGIN_HANDOFF_STORAGE_KEY, JSON.stringify(record));
+  } catch {
+    // Best-effort: a lost record just means /auth/complete falls back to an
+    // ordinary web landing instead of handing off to the app -- the person
+    // is still signed in, never worse than that.
+  }
+}
+
+/** Read-and-clear, single-use like the code it stands in for -- a stale
+ * record left behind after one handoff must never be replayed against a
+ * later, unrelated sign-in in the same tab. */
+export function consumePendingNativeLoginHandoff(): unknown {
+  if (!hasWindowSessionStorage()) {
+    return null;
+  }
+  try {
+    const raw = window.sessionStorage.getItem(NATIVE_LOGIN_HANDOFF_STORAGE_KEY);
+    window.sessionStorage.removeItem(NATIVE_LOGIN_HANDOFF_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
 }
 
 function channelAttributionToken(): string | undefined {
@@ -404,8 +462,17 @@ export async function resendVerificationEmail(): Promise<Record<string, unknown>
   });
 }
 
-export function googleLogin(): void {
+export function googleLogin(nativeHandoff?: PendingNativeLoginHandoff): void {
   markExternalAuthPending('google');
+  if (nativeHandoff) {
+    // Stashed here, not appended to the /api/auth/google URL: that route's
+    // own query string already overloads `state` as a channel_attribution
+    // fallback (a pre-existing convention, unrelated to this feature), so
+    // reusing `state` for our own PKCE state would collide with it. The
+    // sessionStorage relay (see NATIVE_LOGIN_HANDOFF_STORAGE_KEY's own
+    // comment above) sidesteps that without touching the OAuth route at all.
+    markPendingNativeLoginHandoff(nativeHandoff);
+  }
   const params = new URLSearchParams();
   const attribution = channelAttributionToken();
   if (attribution) {
@@ -461,4 +528,34 @@ export async function refresh(): Promise<Record<string, unknown> | null> {
   } finally {
     if (refreshInFlight === run) refreshInFlight = null;
   }
+}
+
+export type NativeAuthHandoffMintResult = {
+  code: string;
+  redirect_uri: string;
+  expires_in: number;
+};
+
+/**
+ * Asks for a single-use handoff code, authenticated by THIS browser
+ * session's own cookies (credentials: 'include', via requestAuth) -- never
+ * anything the caller passes in. See server_modules/native_auth_service.py
+ * for the full design: the code is worthless without the code_verifier only
+ * the native app holds, and the redirect target it resolves to is decided
+ * entirely server-side.
+ */
+export async function mintNativeAuthHandoff(params: {
+  native: string;
+  codeChallenge: string;
+  state: string;
+}): Promise<NativeAuthHandoffMintResult | null> {
+  return requestAuth<NativeAuthHandoffMintResult | null>('/api/auth/native/handoff', {
+    method: 'POST',
+    body: {
+      native: params.native,
+      code_challenge: params.codeChallenge,
+      code_challenge_method: 'S256',
+      state: params.state,
+    },
+  });
 }

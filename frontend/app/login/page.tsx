@@ -13,12 +13,14 @@ import {
   listAuthProviders,
   login,
   me,
+  mintNativeAuthHandoff,
   type AuthProviderOptions,
   watchExternalAuthCompletion,
 } from '@/lib/auth/auth-client';
 import { GoogleProviderIcon } from '@/lib/auth/auth-provider-icons';
 import { classifyLoginOutcome } from '@/lib/auth/auth-error-copy';
 import { safeNextPath } from '@/lib/auth/login-next';
+import { nativeHandoffRedirectUrl, planNativeLoginHandoff } from '@/lib/auth/native-login-handoff';
 import {
   accountInitials,
   forgetAccount,
@@ -44,6 +46,25 @@ function AuthErrorNotice({ title, message }: { title: string; message: string })
   );
 }
 
+// A security review of this feature flagged that, without this, a native
+// handoff visit (?native=ios&code_challenge=...&state=...) renders BYTE-
+// IDENTICAL to an ordinary login — so a crafted link carrying an ATTACKER'S
+// OWN code_challenge would look completely unremarkable to whoever logs in
+// on it. This does not close that gap by itself (the real protection is
+// that ASWebAuthenticationSession only ever hands its redirect back to the
+// app that started that specific session — a link opened outside the app
+// never reaches this page as a genuine app-initiated flow at all), but it
+// gives a real person a visible reason to notice a login page that should
+// not be app-flavoured, which nothing here rendered before this.
+function NativeHandoffBanner() {
+  return (
+    <div role="status" className="app-auth-notice">
+      <strong>Signing in for the Empyralis app</strong>
+      <span>You&rsquo;ll be returned to the app once this finishes.</span>
+    </div>
+  );
+}
+
 
 function LoginPageContent() {
   const searchParams = useSearchParams();
@@ -51,6 +72,13 @@ function LoginPageContent() {
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A DIFFERENT fact from `error` above, on purpose (CLAUDE.md's outcome-
+  // honesty law): `error` means the SIGN-IN itself failed. This means the
+  // sign-in succeeded and only the handoff back to the native app did not
+  // -- collapsing the two would render "Couldn't sign in" about a login
+  // that actually worked, on the exact account this file's own header
+  // comment (AuthErrorNotice) exists to prevent.
+  const [nativeHandoffError, setNativeHandoffError] = useState<string | null>(null);
   const [isHydrated, setIsHydrated] = useState(false);
   const [providersLoaded, setProvidersLoaded] = useState(false);
   const [authRuntimeError, setAuthRuntimeError] = useState<string | null>(null);
@@ -76,6 +104,15 @@ function LoginPageContent() {
   const pilotCode = String(searchParams.get('pilot_code') || '').trim();
   const providerError = String(searchParams.get('error') || '').trim();
   const loginRedirectTarget = safeNextPath(String(searchParams.get('next') || ''));
+  // A native app opened this page with ?native=ios&code_challenge=...&
+  // state=... (MAN-native-ios-login). Computed fresh every render straight
+  // off the URL, exactly like loginRedirectTarget above -- the query string
+  // never changes while this page is up, so there is nothing to memoize.
+  const nativeHandoffPlan = planNativeLoginHandoff({
+    native: searchParams.get('native'),
+    codeChallenge: searchParams.get('code_challenge'),
+    state: searchParams.get('state'),
+  });
   const signupSearchParams = new URLSearchParams();
   if (sourceParam) {
     signupSearchParams.set('source', sourceParam);
@@ -98,6 +135,61 @@ function LoginPageContent() {
   const signupHref = signupSearchParams.size > 0
     ? `/signup?${signupSearchParams.toString()}`
     : '/signup';
+
+  // The ONE place either successful-login path is allowed to decide where
+  // this browser goes next. Both handleSubmit (below) and recoverGoogleAuth
+  // (the next effect) call this instead of redirecting directly — the exact
+  // "guard called once in a large function is a guard the next branch will
+  // skip" trap CLAUDE.md documents, except the branches here are two
+  // separate code paths in one component rather than two returns in one
+  // function. A REAL ASWebAuthenticationSession Google flow does not
+  // actually return here at all (see /auth/complete/page.tsx's own header
+  // comment) -- this covers the email/password path fully and the narrower
+  // same-tab-refocus case of the Google path; /auth/complete carries the
+  // identical logic for the realistic single-session Google round trip.
+  async function completeAuthenticatedRedirect(): Promise<void> {
+    if (nativeHandoffPlan.kind !== 'native') {
+      window.location.replace(loginRedirectTarget);
+      return;
+    }
+    try {
+      const handoff = await mintNativeAuthHandoff({
+        native: nativeHandoffPlan.target,
+        codeChallenge: nativeHandoffPlan.codeChallenge,
+        state: nativeHandoffPlan.state,
+      });
+      const redirectUrl = handoff
+        ? nativeHandoffRedirectUrl(handoff.redirect_uri, handoff.code, nativeHandoffPlan.state)
+        : null;
+      if (!redirectUrl) {
+        // The mint call answered (no network/server error) but returned
+        // nothing a redirect could be built from -- an honest "we minted
+        // nothing usable" fact, distinct from the thrown-error branch below,
+        // but reported the same way: the person IS signed in here.
+        setNativeHandoffError('The app did not receive a usable code. Try again.');
+        setSubmitting(false);
+        return;
+      }
+      window.location.replace(redirectUrl);
+    } catch (handoffError) {
+      setNativeHandoffError(
+        handoffError instanceof Error ? handoffError.message : 'Could not hand off to the app.',
+      );
+      setSubmitting(false);
+    }
+  }
+
+  function startGoogleLogin(): void {
+    googleLogin(
+      nativeHandoffPlan.kind === 'native'
+        ? {
+            native: nativeHandoffPlan.target,
+            codeChallenge: nativeHandoffPlan.codeChallenge,
+            state: nativeHandoffPlan.state,
+          }
+        : undefined,
+    );
+  }
 
   useEffect(() => {
     setIsHydrated(true);
@@ -173,7 +265,7 @@ function LoginPageContent() {
         } catch {
           /* the sign-in itself succeeded; only the convenience is lost */
         }
-        window.location.replace(loginRedirectTarget);
+        await completeAuthenticatedRedirect();
       } catch {
         // keep waiting for the callback tab or focus handoff
       } finally {
@@ -251,7 +343,7 @@ function LoginPageContent() {
       setSubmitting(false);
       return;
     }
-    window.location.replace(loginRedirectTarget);
+    await completeAuthenticatedRedirect();
     setSubmitting(false);
   }
 
@@ -272,7 +364,7 @@ function LoginPageContent() {
       // Showing a password field to someone who has only ever used Google
       // would be a control they cannot satisfy — send them down the door
       // they actually came through.
-      void googleLogin();
+      void startGoogleLogin();
       return;
     }
     setChosen(account);
@@ -296,6 +388,54 @@ function LoginPageContent() {
     setShowChooser(false);
   }
 
+  // Takes priority over the chooser and the form below: this state is only
+  // reachable AFTER a real, already-succeeded sign-in (see
+  // completeAuthenticatedRedirect's own comment) -- there is no form left to
+  // show, and re-showing one would ask this person to sign in a second time
+  // for a session that already exists.
+  if (nativeHandoffError) {
+    return (
+      <main className="app-auth-page">
+        <div className="app-auth-shell app-auth-shell--centered">
+          <div className="app-auth-card">
+            <div className="app-auth-header">
+              <img
+                src="/brand-assets/empyralis/empyralis-mark.svg"
+                alt=""
+                aria-hidden="true"
+                width={64}
+                height={64}
+                className="app-auth-brand-mark"
+              />
+              <h1 className="app-auth-title">Signed in</h1>
+              <p className="app-auth-subtitle">
+                Your account is signed in here — the app just did not hear back.
+              </p>
+            </div>
+            <div role="alert" className="app-auth-error">
+              <strong>Couldn&rsquo;t return to the app</strong>
+              <span>{nativeHandoffError}</span>
+            </div>
+            <AppButton
+              type="button"
+              tone="primary"
+              disabled={submitting}
+              onClick={() => {
+                setNativeHandoffError(null);
+                setSubmitting(true);
+                void completeAuthenticatedRedirect().finally(() => setSubmitting(false));
+              }}
+              className="app-auth-submit"
+            >
+              <span>{submitting ? 'Trying again…' : 'Try again'}</span>
+              <ArrowRight size={16} aria-hidden="true" />
+            </AppButton>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
   if (showChooser && remembered.length > 0) {
     return (
       <main className="app-auth-page">
@@ -313,6 +453,8 @@ function LoginPageContent() {
               <h1 className="app-auth-title">Choose an account</h1>
               <p className="app-auth-subtitle">to continue to Empyralis</p>
             </div>
+
+            {nativeHandoffPlan.kind === 'native' ? <NativeHandoffBanner /> : null}
 
             <ul className="app-auth-account-list">
               {remembered.map((account) => (
@@ -432,6 +574,7 @@ function LoginPageContent() {
               </button>
             </div>
           ) : null}
+          {nativeHandoffPlan.kind === 'native' ? <NativeHandoffBanner /> : null}
           {authRuntimeError ? (
             <AuthErrorNotice title="Auth unavailable" message={authRuntimeError} />
           ) : null}
@@ -452,7 +595,7 @@ function LoginPageContent() {
                 type="button"
                 tone="secondary"
                 className="app-auth-social"
-                onClick={() => googleLogin()}
+                onClick={() => startGoogleLogin()}
                 disabled={submitting || !googleAuthEnabled}
               >
                 <GoogleProviderIcon className="app-auth-provider-mark" />
