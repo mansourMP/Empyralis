@@ -28,6 +28,16 @@
 			<key>CFBundleURLSchemes</key>
 			<array/>
 		</dict>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>ai.empyralis.app.native-login</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>empyralis</string>
+			</array>
+		</dict>
 	</array>
 	<key>CFBundleVersion</key>
 	<string>1</string>

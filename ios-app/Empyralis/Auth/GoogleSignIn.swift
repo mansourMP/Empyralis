@@ -1,8 +1,5 @@
 import AuthenticationServices
-import CryptoKit
 import Foundation
-import Security
-import UIKit
 
 // MARK: - Why this is a hand-rolled OAuth client and not an SDK
 //
@@ -149,10 +146,11 @@ final class GoogleSignIn: NSObject {
         // PKCE. An iOS OAuth client is PUBLIC — it ships inside an app
         // anyone can unzip, so it has no secret. The verifier is what proves
         // the app redeeming the code is the app that asked for it.
-        let verifier = Self.randomURLSafeToken()
-        let challenge = Self.s256(verifier)
-        let state = Self.randomURLSafeToken(byteCount: 32)
-        let nonce = Self.randomURLSafeToken(byteCount: 32)
+        // (PKCE is shared with NativeWebLogin — see AuthWebSession.swift.)
+        let verifier = PKCE.randomURLSafeToken()
+        let challenge = PKCE.s256(verifier)
+        let state = PKCE.randomURLSafeToken(byteCount: 32)
+        let nonce = PKCE.randomURLSafeToken(byteCount: 32)
 
         var authorize = URLComponents(string: "https://accounts.google.com/o/oauth2/v2/auth")!
         authorize.queryItems = [
@@ -204,7 +202,9 @@ final class GoogleSignIn: NSObject {
                 }
                 continuation.resume(returning: callbackURL)
             }
-            session.presentationContextProvider = self
+            // Shared across every ASWebAuthenticationSession in this app —
+            // see AuthPresentationContextProvider's own comment.
+            session.presentationContextProvider = AuthPresentationContextProvider.shared
             // FALSE, deliberately: sharing Safari's cookie jar is what makes
             // an already-signed-in Google account one tap instead of a
             // password. Ephemeral would re-ask for credentials every time,
@@ -287,38 +287,5 @@ final class GoogleSignIn: NSObject {
             throw GoogleSignInError.malformedResponse
         }
         return idToken
-    }
-
-    // MARK: - PKCE primitives
-
-    private static func randomURLSafeToken(byteCount: Int = 64) -> String {
-        var bytes = [UInt8](repeating: 0, count: byteCount)
-        _ = SecRandomCopyBytes(kSecRandomDefault, byteCount, &bytes)
-        return base64URL(Data(bytes))
-    }
-
-    private static func s256(_ verifier: String) -> String {
-        base64URL(Data(SHA256.hash(data: Data(verifier.utf8))))
-    }
-
-    /// RFC 7636 wants base64**url** with the padding removed. Plain base64
-    /// contains `+` and `/`, which a query string re-encodes — the challenge
-    /// then no longer matches the verifier and every exchange fails with
-    /// `invalid_grant`.
-    private static func base64URL(_ data: Data) -> String {
-        data.base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-    }
-}
-
-extension GoogleSignIn: ASWebAuthenticationPresentationContextProviding {
-    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .flatMap(\.windows)
-            .first { $0.isKeyWindow }
-            ?? ASPresentationAnchor()
     }
 }

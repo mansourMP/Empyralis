@@ -70,6 +70,46 @@ The reasoning, the measured contrast targets, and why `bgInset` has to invert
 direction on black all live in `Theme.swift`'s own header. Read it before
 changing a dark value.
 
+## Signing in: Safari opens the real website
+
+Founder, looking at Linear's iOS app: pressing the button "just goes to
+open... a page that seems like a Safari." That is the primary path here too.
+`WelcomeView`'s "Get started" runs `SessionStore.loginWithNativeWebFlow()`,
+which opens `https://empyralis.ai/login?native=ios&code_challenge=...&
+state=...` in an `ASWebAuthenticationSession` (`NativeWebLogin.swift`) —
+every login method the *website* offers (email/password, Google, whatever it
+grows later) works here for free, with no form of our own. The website
+redirects to `empyralis://auth?code=...&state=...` on success; the app
+exchanges that single-use, 90-second code at `POST /auth/native/exchange`
+for the same payload a `channel: "mobile"` login returns. Full design —
+authorization-code + PKCE, RFC 7636 — is in
+`server_modules/native_auth_service.py`'s own header comment; read that
+before touching either side.
+
+**The email/password screen (`LoginView`) is still real, reachable behind
+"Sign in with email instead"** on the welcome screen — the seeded local test
+backend and anyone who can't reach the live website still need a door in,
+and it was not deleted.
+
+**Which website this opens is `APIConfig.webOrigin`, a SEPARATE knob from
+`APIConfig.baseURL`.** In production the two share a host but not a path
+(`empyralis.ai/api` vs `empyralis.ai`); in DEBUG they are two different
+processes on two different ports — the backend's disposable stack
+(`frontend/scripts/start-e2e-backend.sh`, port 8001) and the frontend's own
+dev server (`npm run dev` / `npm run dev:e2e`, port 3000) are separate things
+to start. Override either independently with `EMPYRALIS_API_BASE_URL` /
+`EMPYRALIS_WEB_ORIGIN` on the scheme.
+
+**PKCE and the `ASWebAuthenticationPresentationContextProviding` window
+lookup are shared** (`Auth/AuthWebSession.swift`'s `PKCE` enum and
+`AuthPresentationContextProvider` singleton) — both `GoogleSignIn` and
+`NativeWebLogin` run an `ASWebAuthenticationSession` and need the identical
+math and the identical answer to "which window presents the sheet."
+
+**The `empyralis` URL scheme is registered in `project.yml`, not empty like
+Google's entry** — it needs no operator setup step, it is fixed and already
+live on the backend (`native_auth_service.NATIVE_REDIRECT_TARGETS["ios"]`).
+
 ## Sign in with Google
 
 **Built, and deliberately OFF until someone does the two operator steps
