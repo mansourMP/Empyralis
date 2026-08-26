@@ -3845,9 +3845,13 @@ def google_cloud_operator_credentials_configured() -> bool:
 def _google_operator_identity() -> str:
     identity = (os.getenv(GOOGLE_CLOUD_OPERATOR_CLIENT_EMAIL_ENV) or "").strip()
     if not identity:
+        _LOGGER.error(
+            "Google Cloud operator identity is not configured (%s unset).",
+            GOOGLE_CLOUD_OPERATOR_CLIENT_EMAIL_ENV,
+        )
         raise VPSProvisioningError(
-            f"Empyralis's Google Cloud operator identity is not configured "
-            f"({GOOGLE_CLOUD_OPERATOR_CLIENT_EMAIL_ENV} unset)."
+            "Google Cloud provisioning is not available on this deployment right now. "
+            "Try again later or contact support."
         )
     return identity
 
@@ -3855,9 +3859,13 @@ def _google_operator_identity() -> str:
 def _google_operator_access_token() -> str:
     refresh_token = (os.getenv(GOOGLE_CLOUD_OPERATOR_REFRESH_TOKEN_ENV) or "").strip()
     if not refresh_token:
+        _LOGGER.error(
+            "Google Cloud operator identity is not configured (%s unset).",
+            GOOGLE_CLOUD_OPERATOR_REFRESH_TOKEN_ENV,
+        )
         raise VPSProvisioningError(
-            f"Empyralis's Google Cloud operator identity is not configured "
-            f"({GOOGLE_CLOUD_OPERATOR_REFRESH_TOKEN_ENV} unset)."
+            "Google Cloud provisioning is not available on this deployment right now. "
+            "Try again later or contact support."
         )
     token_payload = _http_form_json(
         "POST",
