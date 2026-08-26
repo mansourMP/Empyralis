@@ -105,9 +105,18 @@ struct ProjectRow: View {
 struct ProjectDetailView: View {
     let project: Project
 
+    @EnvironmentObject private var store: WorkspaceStore
+    @EnvironmentObject private var session: SessionStore
     @Environment(\.colorScheme) private var scheme
     @State private var section: Section = .tasks
     @State private var showTaskComposer = false
+
+    /// Same gate as TaskDetailView's own `canWrite` — `fleet_create_task`
+    /// requires `member` too (routes_fleet.py), so a viewer must not see a
+    /// "+" that only ever comes back with a refusal.
+    private var canWrite: Bool {
+        TaskAuthoring.canWrite(members: store.members, ownUserId: session.user?.id)
+    }
 
     /// Mirrors PROJECT_TAB_VIEWS / PROJECT_TAB_LABEL. Deliberately not a
     /// third member — Agents were removed from a project's tab bar on the
@@ -155,8 +164,10 @@ struct ProjectDetailView: View {
             // Only on Tasks — creating a document isn't part of this
             // change, and a "+" that always creates a task while the
             // Documents segment is showing would be doing something the
-            // screen in front of the person doesn't say.
-            if section == .tasks {
+            // screen in front of the person doesn't say. Only for a WRITER
+            // — a viewer's "+" would submit a create-task call the server
+            // refuses on role alone.
+            if section == .tasks && canWrite {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         showTaskComposer = true

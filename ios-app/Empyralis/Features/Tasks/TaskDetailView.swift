@@ -50,6 +50,15 @@ struct TaskDetailView: View {
 
     private var task: EmpTask? { store.task(taskId) }
 
+    /// Whether write controls on this screen should render at all — see
+    /// TaskAuthoring.canWrite's own header for the routes and the
+    /// reasoning. NOT RENDERED, never disabled: a viewer who opens a task
+    /// must see exactly what they can do here, not a working-looking
+    /// control that reverts with "Couldn't save" the moment they try it.
+    private var canWrite: Bool {
+        TaskAuthoring.canWrite(members: store.members, ownUserId: session.user?.id)
+    }
+
     var body: some View {
         ZStack {
             Theme.bgPage(scheme).ignoresSafeArea()
@@ -101,33 +110,46 @@ struct TaskDetailView: View {
     /// Tappable, like every other editable field on this screen — a pencil
     /// glyph rather than PropertyRow's chevron, because this opens an edit
     /// sheet for the title ITSELF rather than navigating to something else.
+    /// The pencil and the tap target both disappear for a viewer — the
+    /// title stays fully readable, it simply stops looking like a control.
+    @ViewBuilder
     private func header(_ task: EmpTask) -> some View {
-        Button {
-            activeSheet = .title
-        } label: {
-            HStack(alignment: .top, spacing: Space.x2) {
-                VStack(alignment: .leading, spacing: Space.x2) {
-                    if let displayId = task.displayId, !displayId.isEmpty {
-                        Text(displayId)
-                            .font(.empMono)
-                            .foregroundStyle(Theme.textMuted(scheme))
-                    }
-                    Text(task.title)
-                        .font(.empTitle)
-                        .foregroundStyle(Theme.textPrimary(scheme))
-                        .fixedSize(horizontal: false, vertical: true)
-                        .multilineTextAlignment(.leading)
+        if canWrite {
+            Button {
+                activeSheet = .title
+            } label: {
+                headerContent(task, editable: true)
+            }
+            .buttonStyle(.plain)
+        } else {
+            headerContent(task, editable: false)
+        }
+    }
+
+    private func headerContent(_ task: EmpTask, editable: Bool) -> some View {
+        HStack(alignment: .top, spacing: Space.x2) {
+            VStack(alignment: .leading, spacing: Space.x2) {
+                if let displayId = task.displayId, !displayId.isEmpty {
+                    Text(displayId)
+                        .font(.empMono)
+                        .foregroundStyle(Theme.textMuted(scheme))
                 }
-                Spacer(minLength: Space.x2)
+                Text(task.title)
+                    .font(.empTitle)
+                    .foregroundStyle(Theme.textPrimary(scheme))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.leading)
+            }
+            Spacer(minLength: Space.x2)
+            if editable {
                 Image(systemName: "pencil")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(Theme.textMuted(scheme))
                     .padding(.top, 4)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
     }
 
     /// MAN-294's honesty row. A task can read "In progress" while the wake
@@ -174,7 +196,11 @@ struct TaskDetailView: View {
 
     private func propertiesCard(_ task: EmpTask) -> some View {
         DetailCard {
-            PropertyRow(title: "Status", action: { activeSheet = .status }) {
+            PropertyRow(
+                title: "Status",
+                isInteractive: canWrite,
+                action: canWrite ? { activeSheet = .status } : nil
+            ) {
                 HStack(spacing: Space.x2) {
                     StatusDot(status: task.status)
                     Text(task.statusLabel)
@@ -183,7 +209,11 @@ struct TaskDetailView: View {
                 }
             }
             RowDivider()
-            PropertyRow(title: "Priority", action: { activeSheet = .priority }) {
+            PropertyRow(
+                title: "Priority",
+                isInteractive: canWrite,
+                action: canWrite ? { activeSheet = .priority } : nil
+            ) {
                 HStack(spacing: Space.x2) {
                     PriorityGlyph(priority: task.priorityValue)
                     Text(task.priorityValue.label)
@@ -196,7 +226,11 @@ struct TaskDetailView: View {
             RowDivider()
             assigneeRow(task)
             RowDivider()
-            PropertyRow(title: "Due", action: { activeSheet = .due }) {
+            PropertyRow(
+                title: "Due",
+                isInteractive: canWrite,
+                action: canWrite ? { activeSheet = .due } : nil
+            ) {
                 dueValue(task)
             }
             RowDivider()
@@ -224,7 +258,15 @@ struct TaskDetailView: View {
     /// claiming the task is unassigned — those are different facts.
     @ViewBuilder
     private func assigneeRow(_ task: EmpTask) -> some View {
-        let canAssign = !store.realAgents.isEmpty || !store.members.isEmpty
+        // Kept separate from `canAssign` below on purpose: this is the
+        // ORIGINAL "is there anyone to offer" fact that decides whether an
+        // unresolved assignee reads as "Couldn't load who" vs plain
+        // "Unassigned" — folding `canWrite` into it would make a viewer's
+        // genuinely-unassigned task say "Couldn't load who" whenever the
+        // identity fetch also happened to be down, which is a display bug
+        // this screen already guards against for a different reason.
+        let hasAssignableOptions = !store.realAgents.isEmpty || !store.members.isEmpty
+        let canAssign = canWrite && hasAssignableOptions
         PropertyRow(
             title: "Assignee",
             isInteractive: canAssign,
@@ -246,7 +288,7 @@ struct TaskDetailView: View {
                         // sizes.
                         .lineLimit(2)
                 }
-            } else if store.identityLookupFailed && !canAssign {
+            } else if store.identityLookupFailed && !hasAssignableOptions {
                 Text("Couldn't load who")
                     .font(.empBody)
                     .foregroundStyle(Theme.textMuted(scheme))
@@ -274,14 +316,21 @@ struct TaskDetailView: View {
     /// only fail. Same rule the web states for its own Labels row.
     @ViewBuilder
     private func labelsRow(_ task: EmpTask) -> some View {
-        let canEdit = !store.labelVocabulary.isEmpty
+        // Same split as assigneeRow above: `hasVocabulary` alone still
+        // decides "None" (there IS a vocabulary, this task just has none
+        // attached) vs "No labels" (nothing to attach in the first place)
+        // — a viewer's read-only row should not start saying "No labels"
+        // about a workspace that genuinely has label vocabulary, merely
+        // because they cannot edit it.
+        let hasVocabulary = !store.labelVocabulary.isEmpty
+        let canEdit = canWrite && hasVocabulary
         PropertyRow(
             title: "Labels",
             isInteractive: canEdit,
             action: canEdit ? { activeSheet = .labels } : nil
         ) {
             if task.labels.isEmpty {
-                Text(canEdit ? "None" : "No labels")
+                Text(hasVocabulary ? "None" : "No labels")
                     .font(.empBody)
                     .foregroundStyle(Theme.textMuted(scheme))
             } else {
@@ -311,28 +360,40 @@ struct TaskDetailView: View {
     /// ALWAYS renders, unlike the version this replaced — which rendered
     /// NOTHING at all when a task had no description, so there was no way
     /// to add one from this screen: the section itself was the dead end,
-    /// not just a missing control on it. Tappable either way, with an
-    /// honest "Add a description…" placeholder standing in for empty text.
+    /// not just a missing control on it. Tappable either way FOR A WRITER,
+    /// with an honest "Add a description…" placeholder standing in for
+    /// empty text. A viewer gets the same text with no pencil and no tap
+    /// target — and an empty description reads as "No description" rather
+    /// than an invitation to add one they cannot act on.
+    @ViewBuilder
     private func descriptionSection(_ task: EmpTask) -> some View {
         let text = task.description ?? ""
-        return VStack(alignment: .leading, spacing: Space.x2) {
+        VStack(alignment: .leading, spacing: Space.x2) {
             SectionHeader(title: "Description")
-            Button {
-                activeSheet = .description
-            } label: {
-                HStack(alignment: .top, spacing: Space.x2) {
-                    Text(text.isEmpty ? "Add a description…" : text)
-                        .font(.empBody)
-                        .foregroundStyle(text.isEmpty ? Theme.textMuted(scheme) : Theme.textSecondary(scheme))
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    Image(systemName: "pencil")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Theme.textMuted(scheme))
+            if canWrite {
+                Button {
+                    activeSheet = .description
+                } label: {
+                    HStack(alignment: .top, spacing: Space.x2) {
+                        Text(text.isEmpty ? "Add a description…" : text)
+                            .font(.empBody)
+                            .foregroundStyle(text.isEmpty ? Theme.textMuted(scheme) : Theme.textSecondary(scheme))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Image(systemName: "pencil")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(Theme.textMuted(scheme))
+                    }
+                    .contentShape(Rectangle())
                 }
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+            } else {
+                Text(text.isEmpty ? "No description" : text)
+                    .font(.empBody)
+                    .foregroundStyle(text.isEmpty ? Theme.textMuted(scheme) : Theme.textSecondary(scheme))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .buttonStyle(.plain)
         }
     }
 
@@ -346,41 +407,64 @@ struct TaskDetailView: View {
     /// is hidden on a sub-task's own detail page rather than rendering a
     /// control that could only ever fail — "no dead controls" applied to a
     /// whole section, not just one row.
+    ///
+    /// A VIEWER gets the identical treatment when there are zero sub-tasks:
+    /// the only reason this section renders with none is to be a creation
+    /// entry point (see addSubtaskRow's own comment), and a viewer has no
+    /// creation to enter — so with nothing to read and nothing to add, the
+    /// whole section is absent rather than an empty card. With one or more
+    /// EXISTING sub-tasks the section still renders for a viewer — reading
+    /// and navigating into them is not a write — with only "Add sub-task"
+    /// itself missing.
     @ViewBuilder
     private func subtasksSection(_ task: EmpTask) -> some View {
         if (task.parentTaskId ?? "").isEmpty {
             let children = store.subtasks(of: task.id)
             let totalCount = TaskAuthoring.subtaskTotal(rollup: task.subtaskCount, synced: children.count)
-            VStack(alignment: .leading, spacing: Space.x2) {
-                SectionHeader(
-                    title: "Sub-tasks",
-                    trailing: totalCount > 0 ? "\(task.subtaskDoneCount)/\(totalCount)" : nil
-                )
-                DetailCard {
-                    ForEach(Array(children.enumerated()), id: \.element.id) { _, child in
-                        NavigationLink {
-                            TaskDetailView(taskId: child.id)
-                        } label: {
-                            subtaskRow(child)
+            if totalCount > 0 || canWrite {
+                VStack(alignment: .leading, spacing: Space.x2) {
+                    SectionHeader(
+                        title: "Sub-tasks",
+                        trailing: totalCount > 0 ? "\(task.subtaskDoneCount)/\(totalCount)" : nil
+                    )
+                    DetailCard {
+                        // A RowDivider used to trail EVERY child unconditionally,
+                        // because addSubtaskRow always followed to absorb it.
+                        // Now that addSubtaskRow can be absent, a divider is only
+                        // drawn where something actually follows it — otherwise a
+                        // viewer with no sync notice and no add-row would be left
+                        // with a dangling divider under the last child.
+                        let hasSyncNotice = children.count < totalCount
+                        let somethingTrailsChildren = hasSyncNotice || canWrite
+                        ForEach(Array(children.enumerated()), id: \.element.id) { index, child in
+                            NavigationLink {
+                                TaskDetailView(taskId: child.id)
+                            } label: {
+                                subtaskRow(child)
+                            }
+                            .buttonStyle(.plain)
+                            if index < children.count - 1 || somethingTrailsChildren {
+                                RowDivider()
+                            }
                         }
-                        .buttonStyle(.plain)
-                        RowDivider()
+                        // The parent's rollup is authoritative; this list is only
+                        // what has synced. Saying so beats showing a short list
+                        // as if it were the whole set.
+                        if hasSyncNotice {
+                            Text(children.isEmpty
+                                 ? "\(totalCount) sub-task\(totalCount == 1 ? "" : "s") haven't synced yet. Pull to refresh."
+                                 : "\(totalCount - children.count) more haven't synced yet. Pull to refresh.")
+                                .font(.empCaption)
+                                .foregroundStyle(Theme.textMuted(scheme))
+                                .padding(.horizontal, Space.x3)
+                                .padding(.vertical, Space.x3)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            if canWrite { RowDivider() }
+                        }
+                        if canWrite {
+                            addSubtaskRow
+                        }
                     }
-                    // The parent's rollup is authoritative; this list is only
-                    // what has synced. Saying so beats showing a short list
-                    // as if it were the whole set.
-                    if children.count < totalCount {
-                        Text(children.isEmpty
-                             ? "\(totalCount) sub-task\(totalCount == 1 ? "" : "s") haven't synced yet. Pull to refresh."
-                             : "\(totalCount - children.count) more haven't synced yet. Pull to refresh.")
-                            .font(.empCaption)
-                            .foregroundStyle(Theme.textMuted(scheme))
-                            .padding(.horizontal, Space.x3)
-                            .padding(.vertical, Space.x3)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        RowDivider()
-                    }
-                    addSubtaskRow
                 }
             }
         }
@@ -649,7 +733,18 @@ struct TaskDetailView: View {
     /// THE ONE PRIMARY ACTION ON THIS SCREEN, and therefore the only place
     /// `Theme.accent` appears. Every picker above selects with weight and a
     /// checkmark; nothing else here is tinted.
+    ///
+    /// Absent entirely for a viewer — `fleet_comment_task` requires
+    /// `member` exactly like every other write on this screen — rather
+    /// than rendered and refused, matching the rest of this file.
+    @ViewBuilder
     private func composer(_ task: EmpTask) -> some View {
+        if canWrite {
+            composerBar(task)
+        }
+    }
+
+    private func composerBar(_ task: EmpTask) -> some View {
         let trimmed = commentDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         let canSend = !trimmed.isEmpty && !isPostingComment
 
