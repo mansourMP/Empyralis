@@ -33,6 +33,15 @@ enum DiskCache {
         return try? JSONDecoder().decode(type, from: data)
     }
 
+    /// Drops one key. Added for the document editor's local draft (see
+    /// `DocumentDraftStore`) — a draft that has been saved, discarded, or
+    /// superseded must not keep reappearing on the next open. `try?`
+    /// swallows "the file was never there", which is the common case and
+    /// not an error.
+    static func remove(_ key: String) {
+        try? FileManager.default.removeItem(at: directory.appendingPathComponent("\(key).json"))
+    }
+
     /// Called on sign-out. A cache that outlives its session is a data leak
     /// on a shared or resold device — the tokens are already gone from the
     /// Keychain by then, but the content would still be sitting here.
