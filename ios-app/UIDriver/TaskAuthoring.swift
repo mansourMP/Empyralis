@@ -212,6 +212,34 @@ final class TaskAuthoring: XCTestCase {
     }
 
 
+
+    /// An element's frame, once it has STOPPED MOVING.
+    ///
+    /// `tapFrameOf` captures a frame and taps that screen point, which is what
+    /// made it immune to the rename-mid-tap race. But it introduced a second,
+    /// subtler one: a frame captured while a navigation push is still
+    /// animating is where the control WAS, not where it is, so the tap lands
+    /// on empty space and the control silently never fires.
+    ///
+    /// That is precisely the failure that made the device matrix look like a
+    /// layout bug — the toolbar "+" is animating in from the right when a
+    /// project pushes, so whether the tap lands depends on how fast the
+    /// device finishes the transition. iPhone 16 and 17 Pro were reliably
+    /// quick enough; 13 and 14 Pro were not, intermittently, and the symptom
+    /// (a sheet that never opens) is indistinguishable from a dead button.
+    ///
+    /// So: sample until two consecutive reads agree, then tap.
+    private func settledFrame(of element: XCUIElement) -> CGRect {
+        var previous = element.frame
+        for _ in 0..<10 {
+            usleep(200_000)
+            let current = element.frame
+            if current == previous && current.width > 0 { return current }
+            previous = current
+        }
+        return previous
+    }
+
     /// Tap an element by CAPTURING ITS FRAME FIRST, then hitting that
     /// absolute screen point — never by re-resolving the element query at
     /// tap time.
@@ -229,7 +257,7 @@ final class TaskAuthoring: XCTestCase {
     /// defect — the harness is what has to accommodate it. A screen point
     /// needs no element to still be there.
     private func tapFrameOf(_ element: XCUIElement) {
-        let f = element.frame
+        let f = settledFrame(of: element)
         guard f.width > 0, f.height > 0 else {
             element.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
             return
