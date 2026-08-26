@@ -260,25 +260,41 @@ struct SectionHeader: View {
 /// action renders no chevron and takes no tap — the difference between
 /// "displayed" and "editable" has to be visible, or the screen is lying
 /// about what it can do.
+///
+/// THE LABEL COLUMN REFLOWS TO A VERTICAL STACK AT ACCESSIBILITY TEXT SIZES.
+/// The fixed 88pt label column (sized for "Assignee"/"Completed by" at the
+/// default text size) does not grow with Dynamic Type — `Text` inside a
+/// hard-pinned `.frame(width:)` has no room to wrap at word boundaries once
+/// the scaled glyphs alone exceed 88pt, so it wraps MID-WORD instead
+/// ("Statu" / "s"), confirmed live on iPhone 14 Pro at
+/// `accessibility-extra-extra-extra-large`. Widening the column would only
+/// move the problem onto the value at every size below AX5, which is worse
+/// — it starves the actual content to fix one label at one size.
+///
+/// `ViewThatFits` was considered and rejected: it cannot express "wrap the
+/// label," only "pick between whole pre-built layouts," so it would still
+/// need this same accessibility-vs-standard split to decide which two
+/// layouts to offer — no simpler, and it evaluates every candidate's
+/// geometry per update rather than branching on a value SwiftUI already
+/// tracks for us. Reflowing to a vertical stack — label on top, value plus
+/// chevron below, still one shared tap target — is the same shape Apple's
+/// own Settings rows take at these sizes, and it costs nothing at the
+/// default size: `dynamicTypeSize.isAccessibilitySize` is false there, so
+/// the standard fixed-column layout below is completely unchanged.
 struct PropertyRow<Value: View>: View {
     let title: String
     var isInteractive: Bool = true
     var action: (() -> Void)?
     @ViewBuilder let value: Value
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
-        let content = HStack(spacing: Space.x3) {
-            Text(title)
-                .font(.empSecondary)
-                .foregroundStyle(Theme.textMuted(scheme))
-                .frame(width: 88, alignment: .leading)
-            value
-                .frame(maxWidth: .infinity, alignment: .leading)
-            if isInteractive && action != nil {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Theme.textMuted(scheme).opacity(0.7))
+        let content = Group {
+            if dynamicTypeSize.isAccessibilitySize {
+                accessibilityLayout
+            } else {
+                standardLayout
             }
         }
         .padding(.horizontal, Space.x3)
@@ -291,6 +307,46 @@ struct PropertyRow<Value: View>: View {
         } else {
             content
         }
+    }
+
+    private var standardLayout: some View {
+        HStack(spacing: Space.x3) {
+            Text(title)
+                .font(.empSecondary)
+                .foregroundStyle(Theme.textMuted(scheme))
+                .frame(width: 88, alignment: .leading)
+            value
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if isInteractive && action != nil {
+                chevron
+            }
+        }
+    }
+
+    /// Label on its own line — full row width, so it wraps at word
+    /// boundaries like any other text — with value and chevron sharing the
+    /// line below. Kept as ONE tap target: this whole `VStack` is still what
+    /// `body` wraps in the row's `Button` above, never a nested control.
+    private var accessibilityLayout: some View {
+        VStack(alignment: .leading, spacing: Space.x1) {
+            Text(title)
+                .font(.empSecondary)
+                .foregroundStyle(Theme.textMuted(scheme))
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: Space.x3) {
+                value
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if isInteractive && action != nil {
+                    chevron
+                }
+            }
+        }
+    }
+
+    private var chevron: some View {
+        Image(systemName: "chevron.right")
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(Theme.textMuted(scheme).opacity(0.7))
     }
 }
 
