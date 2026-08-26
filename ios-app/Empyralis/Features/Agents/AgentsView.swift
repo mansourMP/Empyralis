@@ -13,12 +13,31 @@ struct AgentsView: View {
                 Theme.bgPage(scheme).ignoresSafeArea()
 
                 if !store.hasLoadedOnce {
-                    List {
-                        ForEach(0..<4, id: \.self) { _ in
-                            SkeletonRow().listRowBackground(Theme.bgPage(scheme))
+                    if let error = store.loadError {
+                        // Nothing known AND the read failed. This is
+                        // distinct from `agentsLookupFailed` below, which
+                        // fires once we DO have a workspace but the agents
+                        // lookup specifically came back empty/undecodable —
+                        // here we have nothing at all yet.
+                        ScrollView {
+                            EmptyStateView(
+                                title: "Couldn't load agents",
+                                message: error,
+                                systemImage: "wifi.exclamationmark"
+                            )
+                            .padding(.top, Space.x10)
                         }
+                        .refreshable { await store.refresh() }
+                    } else {
+                        // The ONLY state that may show a skeleton: nothing
+                        // known yet, and no failure to report either.
+                        List {
+                            ForEach(0..<4, id: \.self) { _ in
+                                SkeletonRow().listRowBackground(Theme.bgPage(scheme))
+                            }
+                        }
+                        .listStyle(.plain)
                     }
-                    .listStyle(.plain)
                 } else if store.realAgents.isEmpty {
                     ScrollView {
                         // "None" and "couldn't find out" are different facts.

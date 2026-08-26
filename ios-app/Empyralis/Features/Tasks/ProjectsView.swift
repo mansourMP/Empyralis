@@ -10,12 +10,29 @@ struct ProjectsView: View {
                 Theme.bgPage(scheme).ignoresSafeArea()
 
                 if !store.hasLoadedOnce {
-                    List {
-                        ForEach(0..<5, id: \.self) { _ in
-                            SkeletonRow().listRowBackground(Theme.bgPage(scheme))
+                    if let error = store.loadError {
+                        // Nothing known AND the read failed. "Empty" and
+                        // "couldn't load" are different facts — a permanent
+                        // skeleton here was the collapse.
+                        ScrollView {
+                            EmptyStateView(
+                                title: "Couldn't load projects",
+                                message: error,
+                                systemImage: "wifi.exclamationmark"
+                            )
+                            .padding(.top, Space.x10)
                         }
+                        .refreshable { await store.refresh() }
+                    } else {
+                        // The ONLY state that may show a skeleton: nothing
+                        // known yet, and no failure to report either.
+                        List {
+                            ForEach(0..<5, id: \.self) { _ in
+                                SkeletonRow().listRowBackground(Theme.bgPage(scheme))
+                            }
+                        }
+                        .listStyle(.plain)
                     }
-                    .listStyle(.plain)
                 } else if store.projects.isEmpty {
                     ScrollView {
                         EmptyStateView(
