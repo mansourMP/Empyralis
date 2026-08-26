@@ -9087,3 +9087,94 @@ primary action at all. Read as an oversight rather than a decision because
 that file's header documents every OTHER choice on the screen at length and
 says nothing about the button style; in a file that thorough, the silence is
 the tell.
+
+## The three phone parity gaps are CLOSED (2026-08-26)
+
+**All three shipped, merged, and verified against a real server rather than
+against the UI's own feedback. 157/157 unit tests on the merged tree.**
+
+```
+create a task · create a sub-task · edit title · edit description   fb66ae2b
+stop / resume every agent in the workspace                          abf64149
+edit a document, with the 409 stale-write refusal                   abc6f26a
+```
+
+**ZERO BACKEND WORK. Every one of these was pure iOS**, and the reason is
+worth checking before scoping any future phone feature as "needs an
+endpoint": `PATCH .../fleet/tasks/{id}` already accepted `title` and
+`description`, and `stop-all`/`resume-all` already existed. The phone simply
+never sent them.
+
+**THREE PLACES A WRITE COULD HAVE LIED, all found by asking the real server
+rather than reading the schema:**
+
+```
+title        COALESCE(NULLIF($4,''), title)   an empty title is SILENTLY
+                                              IGNORED — never cleared
+description  COALESCE($5, description)        an empty description DOES clear
+   ─▶ Save is refused on a blank title and allowed on a blank description.
+      Two fields that look symmetrical, opposite rules. Saving a blank title
+      would have reported success for a write the server discards.
+
+stop-all / resume-all answer HTTP 200 EVEN ON REFUSAL — they catch their own
+exceptions and return {ok: false, error}. `ok` is read explicitly and never
+inferred from the status code; the alternative is telling someone their
+agents are stopped while they are still running.
+
+create-task is deliberately NOT optimistic, unlike every other write here —
+there is no id to hang a fake row on. TaskCreateOutcome carries three states
+(created / createdUnconfirmed / failed) so "worked", "probably worked but I
+lost track of it" and "failed" can never share one message.
+```
+
+**THE DOCUMENT 409 IS THE FEATURE, NOT THE TEXT FIELD.** `stateSha256` was
+already decoded on the iOS model and used by nothing; it is the precondition
+token it was always for. On refusal the phone does what the web does and
+declines to pick a winner: two explicitly labelled ways out carrying their
+real consequences ("saves yours; theirs stays in history" / "discards what
+you typed; never saved, cannot be recovered") plus a real LCS diff. **No
+automatic merge, deliberately** — a merge that silently picks wrong
+reintroduces the destroyed-edit bug in a form nobody can see. Proven live by
+PATCHing a conflicting edit server-side with the editor open: 4 real Postgres
+revisions, the conflicting edit preserved as rev 3, the phone's write rev 4.
+
+**Explicit Save, not autosave, and the argument is phone-specific:** a
+suspended iOS app cannot finish a pending debounce the way a browser tab can,
+and flaky off-desk network would turn per-keystroke autosave into 409 storms
+against a stale base. A disk-backed draft flushed on `scenePhase ==
+.background` is the safety net under it.
+
+## A visible control that no query can match is a HARNESS bug — suspect the query (2026-08-26)
+
+Driving task authoring took FOUR runs and **every failure was in the test
+while the app was correct.** Each presented exactly like a product defect,
+and looking at the SCREENSHOT is what separated them every time.
+
+```
+1  app.buttons["Create task"]  matched nothing, button plainly on screen
+     the subscript resolves against IDENTIFIERS; it carries only a label
+
+2  the CONTAINS query then threw on the TAP, not the lookup:
+     Create task ──pressed──▶ "Creating…"      the label RENAMES ITSELF
+     a blind 3x retry re-resolved a label that no longer existed and
+     reported failure for a tap that had ALREADY LANDED. An .exists guard
+     still races — .exists and .coordinate() resolve the query twice.
+     FIX: tapFrameOf — capture the frame once, tap that absolute point,
+     never re-resolve. A screen point needs no element to still be there.
+
+3  "the new sub-task never appeared" fired against a sub-task that WAS on
+     screen with its own MOB-20 key. rows() is app.collectionViews.buttons
+     and TaskDetailView is a ScrollView, so it can never match there.
+```
+
+**A control that renames itself while it works is honest UI — the harness is
+what has to accommodate it.** Any button with a progress label needs
+`tapFrameOf`, not a retry loop.
+
+**Still open, reported not fixed:** in the document reader the header scrolls
+up and collides with the status bar — the title ghosts behind the clock with
+no blur material. Project views PIN their header, so it is specific to that
+screen. And on the document feature, four branches were never exercised live
+and are flagged in its merge commit rather than glossed: "Use theirs
+instead", the background-and-restore draft path, viewer gating when
+`canWrite` is false, and the `.decoding`/`.unauthorized` save branches.
