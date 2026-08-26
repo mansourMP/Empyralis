@@ -205,6 +205,74 @@ Backend env for push (see `server_modules/apns_service.py`):
 Until those are set, `apns_service.send_push` reports `not_configured` — which
 is a distinct state from `failed`, deliberately, and is the honest state today.
 
+## Driving the real app: the UIDriver harness
+
+Unit tests here have repeatedly agreed the app was fine while it was visibly
+broken on a screen — one pass driving it against a real backend found **11
+defects** the suite was happy with. So the harness exists, and it is the thing
+to reach for before believing a UI claim.
+
+It is **opt-in**, and that is deliberate: `project.yml` has no UI-test target,
+so an ordinary build carries none. `project.uidriver.yml` *includes*
+`project.yml` and adds one:
+
+```bash
+cd ios-app
+xcodegen generate --spec project.uidriver.yml     # adds the UIDriver target
+SHOT_LABEL=whatever xcodebuild test \
+  -project Empyralis.xcodeproj -scheme UIDriver \
+  -destination 'platform=iOS Simulator,id=<UDID>' \
+  -only-testing:UIDriver/Walkthrough/testWalk
+xcodegen generate                                  # PUT THE PROJECT BACK
+```
+
+**That last line matters.** Both specs write the same `Empyralis.xcodeproj`,
+so a run leaves the UI-test target in place until you regenerate from
+`project.yml`. Screenshots land in `/tmp/emp-shots/$SHOT_LABEL/`.
+
+The specs, and what each is for:
+
+| spec | what it proves |
+| --- | --- |
+| `Walkthrough` | the full sweep — sign-in through every surface |
+| `Supplementary` | the surfaces Walkthrough does not reach |
+| `FailureStates` | offline, refusal, and empty — the states that lie most |
+| `VerificationGaps` | a real write and its rollback, Inbox with data, a live trace |
+| `SafariHandoff` | that "Get started" genuinely starts the Safari session |
+| `SettingsCheck` / `GoogleButton` / `Diagnose` | narrower, named for their subject |
+
+Three things that read as app bugs and are not:
+
+- **A plain `.tap()` silently does nothing** on many SwiftUI controls in this
+  harness — it resolves, reports hittable, and no-ops. Use
+  `coordinate(withNormalizedOffset:).tap()`. `SignInFlow.reachEmailForm` is
+  the shared, retrying way in and already handles the tri-state landing
+  (already signed in / welcome screen / login form directly).
+- **`simctl erase` does NOT clear the simulator keychain.** A device that was
+  signed in before can restore its session and skip the whole login block.
+- **`WelcomeState.hasSeen` is sticky**, so "Get started" does not exist at all
+  on a device that has been past the welcome screen once. Erase first if that
+  button is what you are testing.
+
+### One device at a time — `./verify-on-device.sh`
+
+```bash
+./verify-on-device.sh 13 ax5    # 13 | 14pro | 16 | 17pro   ·   default | ax5
+```
+
+Four simulators plus parallel builds plus one hung build drove this machine's
+load average to **868** and made it unusable (2026-08-26). The script boots
+one device, checks load between every step, and aborts rather than pushing a
+machine that is already busy.
+
+**Its load guard judges the TREND, not a threshold, and that correction is the
+point of it.** A simulator boot alone costs ~40 load here, and load average is
+a rolling one-minute figure — so a single reading cannot tell "briefly busy
+starting up" from "genuinely overloaded." An earlier fixed 90-second deadline
+gave up while the number was still clearly falling (120 → 110 → 95 → 78) and
+produced the wrong conclusion that this machine cannot run simulator work. It
+can. The guard now aborts only if load stops falling.
+
 ## Traps worth not re-discovering
 
 - **`agent_traces.root_agent_id` is never a bare install id.** It is
