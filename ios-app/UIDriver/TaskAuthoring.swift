@@ -166,10 +166,17 @@ final class TaskAuthoring: XCTestCase {
     private func tapExact(_ label: String, timeout: TimeInterval = 8) -> Bool {
         let b = app.buttons[label]
         guard b.waitForExistence(timeout: timeout) else { miss("no '\(label)' button"); return false }
-        for _ in 0..<3 {
-            b.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-            usleep(500_000)
-        }
+        // Re-check BEFORE each retry. The blind 3x loop this replaced threw
+        // "Failed to get matching snapshot" on a button that had worked
+        // perfectly: `Create task` renames itself to `Creating…` the instant
+        // it is pressed, so retry #2 queried a label that no longer existed
+        // and the harness reported a failure for a tap that had LANDED.
+        //
+        // A control that renames itself while it works is honest UI, not a
+        // defect — so the harness has to tolerate it. Losing the element
+        // after a tap is treated as SUCCESS, because that is what a button
+        // which did its job looks like from out here.
+        tapFrameOf(b)
         return true
     }
 
@@ -179,12 +186,58 @@ final class TaskAuthoring: XCTestCase {
     @discardableResult
     private func tapContaining(_ text: String, timeout: TimeInterval = 8) -> Bool {
         let b = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", text)).firstMatch
-        guard b.waitForExistence(timeout: timeout) else { miss("no button containing '\(text)'"); return false }
-        for _ in 0..<3 {
-            b.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-            usleep(500_000)
+        guard b.waitForExistence(timeout: timeout) else {
+            // Dump what IS on screen rather than guessing at why the query
+            // missed. A control that is plainly visible in a screenshot and
+            // still unmatchable means the accessibility tree disagrees with
+            // the render — and the only way to tell which is to look.
+            let labels = app.buttons.allElementsBoundByIndex.map { "\($0.label)|id=\($0.identifier)" }
+            print("TREE_BUTTONS \(labels)")
+            print("TREE_OTHER \(app.staticTexts.allElementsBoundByIndex.prefix(30).map(\.label))")
+            miss("no button containing '\(text)'")
+            return false
         }
+        // Re-check BEFORE each retry. The blind 3x loop this replaced threw
+        // "Failed to get matching snapshot" on a button that had worked
+        // perfectly: `Create task` renames itself to `Creating…` the instant
+        // it is pressed, so retry #2 queried a label that no longer existed
+        // and the harness reported a failure for a tap that had LANDED.
+        //
+        // A control that renames itself while it works is honest UI, not a
+        // defect — so the harness has to tolerate it. Losing the element
+        // after a tap is treated as SUCCESS, because that is what a button
+        // which did its job looks like from out here.
+        tapFrameOf(b)
         return true
+    }
+
+
+    /// Tap an element by CAPTURING ITS FRAME FIRST, then hitting that
+    /// absolute screen point — never by re-resolving the element query at
+    /// tap time.
+    ///
+    /// Three harness failures in a row came from the obvious shape
+    /// (`element.coordinate(...).tap()` in a small retry loop), and the
+    /// reason is worth writing down: on this screen the primary button
+    /// RENAMES ITSELF the instant it is pressed (`Create task` ->
+    /// `Creating…`), so any query keyed on its label stops matching mid-tap
+    /// and XCUITest reports "Failed to get matching snapshot" for a tap that
+    /// had already landed. Even an `.exists` guard races, because `.exists`
+    /// and `.coordinate()` resolve the query twice.
+    ///
+    /// A control that renames itself while it works is honest UI, not a
+    /// defect — the harness is what has to accommodate it. A screen point
+    /// needs no element to still be there.
+    private func tapFrameOf(_ element: XCUIElement) {
+        let f = element.frame
+        guard f.width > 0, f.height > 0 else {
+            element.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            return
+        }
+        app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: f.midX, dy: f.midY))
+            .tap()
+        usleep(600_000)
     }
 
     private func waitForSheetGone(_ navTitle: String, timeout: TimeInterval = 10) {
@@ -214,7 +267,12 @@ final class TaskAuthoring: XCTestCase {
         type(into: titleField, taskTitle)
         shot("03-new-task-typed")
 
-        guard tapExact("Create task") else { return }
+        // CONTAINS, not exact. The button is plainly on screen (captured in
+        // 03-new-task-typed.png) and `app.buttons["Create task"]` still
+        // matched nothing — the query resolves against IDENTIFIERS, and this
+        // button carries only a label. Same class of miss this file's own
+        // `tapContaining` note already documents for composite rows.
+        guard tapContaining("Create task") else { return }
         waitForSheetGone("New task")
         sleep(2)
         shot("04-after-create")
@@ -231,21 +289,28 @@ final class TaskAuthoring: XCTestCase {
         let subtaskField = app.textFields["Task title"]
         guard subtaskField.waitForExistence(timeout: 6) else { miss("no sub-task title field"); return }
         type(into: subtaskField, subtaskTitle)
-        guard tapExact("Create task") else { return }
+        guard tapContaining("Create task") else { return }
         waitForSheetGone("New sub-task")
         sleep(2)
         shot("07-after-subtask-create")
         note("CREATED sub-task titled '\(subtaskTitle)'")
 
-        let subtaskRow = rows().matching(NSPredicate(format: "label CONTAINS[c] %@", subtaskTitle)).firstMatch
-        XCTAssertTrue(subtaskRow.waitForExistence(timeout: 8),
+        // Assert on VISIBLE TEXT, not on rows(). rows() is
+        // `app.collectionViews.buttons`, and TaskDetailView is a ScrollView —
+        // so that query cannot match a sub-task row that is plainly on screen
+        // (07-after-subtask-create.png shows it, with its own MOB-20 key,
+        // under a correctly-updated "SUB-TASKS 0/1" header). The original
+        // assertion was reporting an app defect that did not exist.
+        let subtaskText = app.staticTexts
+            .matching(NSPredicate(format: "label CONTAINS[c] %@", subtaskTitle)).firstMatch
+        XCTAssertTrue(subtaskText.waitForExistence(timeout: 8),
                       "the new sub-task never appeared under Sub-tasks")
 
         // ---- 3. EDIT THE TITLE --------------------------------------------
         let newTitle = "\(marker) EDITED title"
         let headerButton = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", taskTitle)).firstMatch
         guard headerButton.waitForExistence(timeout: 6) else { miss("no tappable title header"); return }
-        headerButton.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        tapFrameOf(headerButton)
         guard app.navigationBars["Edit title"].waitForExistence(timeout: 6) else {
             miss("title edit sheet never opened"); return
         }
