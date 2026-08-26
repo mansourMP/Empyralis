@@ -60,9 +60,13 @@ either.
 
 ## Higgsfield needs no console at all
 
-Higgsfield is the one provider on this list wired for RFC 7591 Dynamic
-Client Registration (`registration_endpoint` set on its config,
-`connection_oauth_service.py:1232-1248`). There is no developer console for
+Higgsfield is the only provider **on this ten-item list** wired for RFC 7591
+Dynamic Client Registration (`registration_endpoint` set on its config,
+`connection_oauth_service.py:1232-1248`) — 62 other connectors in the
+catalogue use DCR too, which is exactly why they are NOT on this list and
+need nothing from you. Higgsfield is here only because it additionally sets
+`dynamic_registration_opt_in_required`, so unlike the other 62 it stays
+inert until one env var turns it on. There is no developer console for
 its MCP OAuth app to register in — the app self-registers the first time a
 real connect happens, and Empyralis's code caches the resulting client
 id/secret in the credential vault automatically. The only thing required is
