@@ -62,7 +62,21 @@ final class TaskAuthoring: XCTestCase {
         let texts = app.staticTexts.allElementsBoundByIndex.prefix(25).map(\.label)
         note("TREE[\(label)] staticTexts=\(texts)")
         if let probe {
-            note("TREE[\(label)] PROBE exists=\(probe.exists) hittable=\(probe.isHittable) frame=\(probe.frame)")
+            // `.exists` ALONE, as its own statement, before touching anything
+            // else on `probe`. Reproduced live TWICE: a `probe` that has been
+            // held across a prior tap-and-poll sequence (settledFrame reads,
+            // multiple retries) can make `.isHittable`/`.frame` THROW even
+            // though `.exists` itself resolves safely — the exact class of
+            // crash `tapFrameOf`'s own history already documents for a
+            // freshly-queried element, now confirmed for a STALE one too.
+            // General enumeration above (line ~60) is fine because those are
+            // freshly re-queried elements, not a reference held across time.
+            let stillExists = probe.exists
+            if stillExists {
+                note("TREE[\(label)] PROBE exists=true hittable=\(probe.isHittable) frame=\(probe.frame)")
+            } else {
+                note("TREE[\(label)] PROBE exists=false (gone)")
+            }
         }
         let full = app.debugDescription
         let file = shotDir.appendingPathComponent("\(label)-tree.txt")
@@ -472,11 +486,19 @@ final class TaskAuthoring: XCTestCase {
         // button carries only a label. Same class of miss this file's own
         // `tapContaining` note already documents for composite rows.
         //
-        // landed: the button renaming to "Creating…" — synchronous, before
-        // any network await (NewTaskSheet.create() sets isCreating = true
-        // immediately), so this is a fast, reliable, positive signal that
-        // does not need to wait on the network the way sheet-dismissal does.
-        guard tapContaining("Create task", landedTimeout: 5, landed: { self.app.buttons["Creating…"].exists }) else { return }
+        // landed: "Creating…" appearing OR the sheet already gone — NOT
+        // "Creating…" alone. Reproduced live: on a fast create (the common
+        // case on a lightly-loaded backend), the rename-then-dismiss
+        // sequence can complete inside one 200ms poll window, so a check for
+        // "Creating…" alone MISSES it entirely and reports a false failure
+        // for a task that was already created on the server — confirmed by
+        // querying Postgres directly after a reported "miss" and finding the
+        // row. Checking "the sheet is already gone" as a second, OR'd signal
+        // catches the fast case; "Creating…" still catches the slow one.
+        guard tapContaining(
+            "Create task", landedTimeout: 5,
+            landed: { self.app.buttons["Creating…"].exists || !self.app.navigationBars["New task"].exists }
+        ) else { return }
         // NewTaskSheet is deliberately NOT optimistic (its own header
         // comment: "waits for a real, server-minted task") — dismissal
         // waits on a real network round trip, which is genuinely slower on
@@ -498,7 +520,11 @@ final class TaskAuthoring: XCTestCase {
         let subtaskField = app.textFields["Task title"]
         guard subtaskField.waitForExistence(timeout: 6) else { miss("no sub-task title field"); return }
         type(into: subtaskField, subtaskTitle)
-        guard tapContaining("Create task", landedTimeout: 5, landed: { self.app.buttons["Creating…"].exists }) else { return }
+        // Same fast-completion-safe landed check as the top-level create.
+        guard tapContaining(
+            "Create task", landedTimeout: 5,
+            landed: { self.app.buttons["Creating…"].exists || !self.app.navigationBars["New sub-task"].exists }
+        ) else { return }
         // Same non-optimistic create path as above.
         waitForSheetGone("New sub-task", timeout: 20)
         sleep(2)
