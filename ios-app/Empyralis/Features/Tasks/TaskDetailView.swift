@@ -561,6 +561,15 @@ struct TaskDetailView: View {
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(Theme.accentContrast)
                     .frame(width: 36, height: 36)
+                    // THE ONE PRIMARY BUTTON ON THIS SCREEN (see the doc
+                    // comment above) had no accessibility label at all — an
+                    // icon-only Button synthesizes nothing from an SF Symbol
+                    // by name alone in a way VoiceOver users can act on, so
+                    // this read as "arrow up, button" with no indication it
+                    // sends the comment. The label tracks the same state the
+                    // glyph already does, so a VoiceOver user hears "Sending"
+                    // rather than a stale "Send comment" while it's in flight.
+                    .accessibilityLabel(isPostingComment ? "Sending" : "Send comment")
                     .background(
                         Circle().fill(canSend
                                       ? Theme.accent(scheme)

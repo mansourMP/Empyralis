@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// The single source of colour truth. LIGHT mode is ported verbatim from the
 /// web app's lib/ui/theme-tokens.css so the two products read as ONE product.
@@ -173,15 +174,68 @@ enum Theme {
 
 // MARK: - Type scale (mirrors --text-* — 14pt body, an operator-tool density)
 
+/// `Font.system(size:weight:design:)` — the initializer every token below
+/// used until this pass — is FIXED: Apple's own documentation for it states
+/// it does not adjust for Dynamic Type, unlike the semantic style-based
+/// overload (`Font.system(.body)`). Verified live, not just read: an
+/// accessibility-size screenshot of the pre-fix build was PIXEL-IDENTICAL
+/// to the default-size one on every screen — the whole app was ignoring the
+/// reader's text-size setting completely, not "clipping at large sizes" but
+/// never growing past the default at all.
+///
+/// `UIFontMetrics(forTextStyle:).scaledValue(for:)` is Apple's documented
+/// mechanism for a CUSTOM base size that still rides one of the built-in
+/// scaling curves — `relativeTo` only picks the curve, the base size stays
+/// exactly what each token below already specified, so nothing renders
+/// differently at the system default size than it did before this fix.
+///
+/// `static var`, not `static let`: a `let` would compute the scaled value
+/// ONCE per process (correct for this pass's own test, which sets the size
+/// category as a launch argument, but wrong for a real reader who changes
+/// Settings while the app stays open) and never update again. A computed
+/// property re-reads the current trait environment on every access, which
+/// is what lets it follow a live change the same way the rest of iOS does.
 extension Font {
-    static let empBody = Font.system(size: 15, weight: .regular)
-    static let empBodyMedium = Font.system(size: 15, weight: .medium)
-    static let empSecondary = Font.system(size: 13, weight: .regular)
-    static let empCaption = Font.system(size: 12, weight: .regular)
-    static let empCaptionMedium = Font.system(size: 12, weight: .medium)
-    static let empMono = Font.system(size: 12, weight: .medium, design: .monospaced)
-    static let empTitle = Font.system(size: 24, weight: .semibold)
-    static let empSectionHeader = Font.system(size: 12, weight: .semibold)
+    static func empScaled(
+        _ size: CGFloat,
+        weight: Weight,
+        design: Design = .default,
+        relativeTo style: TextStyle = .body
+    ) -> Font {
+        let scaled = UIFontMetrics(forTextStyle: style.uiKitTextStyle).scaledValue(for: size)
+        return .system(size: scaled, weight: weight, design: design)
+    }
+
+    static var empBody: Font { empScaled(15, weight: .regular, relativeTo: .body) }
+    static var empBodyMedium: Font { empScaled(15, weight: .medium, relativeTo: .body) }
+    static var empSecondary: Font { empScaled(13, weight: .regular, relativeTo: .subheadline) }
+    static var empCaption: Font { empScaled(12, weight: .regular, relativeTo: .caption) }
+    static var empCaptionMedium: Font { empScaled(12, weight: .medium, relativeTo: .caption) }
+    static var empMono: Font { empScaled(12, weight: .medium, design: .monospaced, relativeTo: .caption) }
+    static var empTitle: Font { empScaled(24, weight: .semibold, relativeTo: .title) }
+    static var empSectionHeader: Font { empScaled(12, weight: .semibold, relativeTo: .caption2) }
+}
+
+private extension Font.TextStyle {
+    /// `UIFontMetrics` speaks `UIFont.TextStyle`, not SwiftUI's own
+    /// `Font.TextStyle` — the two enums are not interchangeable despite the
+    /// identical case names.
+    var uiKitTextStyle: UIFont.TextStyle {
+        switch self {
+        case .largeTitle: return .largeTitle
+        case .title: return .title1
+        case .title2: return .title2
+        case .title3: return .title3
+        case .headline: return .headline
+        case .body: return .body
+        case .callout: return .callout
+        case .subheadline: return .subheadline
+        case .footnote: return .footnote
+        case .caption: return .caption1
+        case .caption2: return .caption2
+        @unknown default: return .body
+        }
+    }
 }
 
 // MARK: - Spacing (4pt grid, mirrors --space-*)
