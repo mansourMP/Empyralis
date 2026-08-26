@@ -9218,3 +9218,38 @@ surfaced a REAL defect the deliberate AX5 sweep had missed:
 `Statu/s`, `Priori/ty`, `Assi/gnee`. The earlier sweep confirmed the HEADING
 ladder by eye and never looked at the property rows. **A sweep that "passed"
 only proves what it actually looked at.**
+
+## NEVER PRUNE WORKTREES WHILE AN AGENT IS LIVE — merged is not the same as finished (2026-08-26)
+
+**I destroyed a running agent's worktree with
+`scripts/prune-merged-worktrees.sh`, and the script did nothing wrong.** Its
+safety rule is "the branch has zero commits not on main, and nothing is
+uncommitted" — both were TRUE, because I had merged that agent's branch
+minutes earlier. It has no way to know a process is still working there.
+
+```
+17ae8afb   merge the agent's branch        ← its commits are now on main
+           run prune-merged-worktrees.sh   ← branch is merged + tree clean
+                                             ⇒ qualifies, removed
+           …the agent was still running    ← Bash died under it mid-task
+```
+
+**No work was lost — the merge came first — but the agent lost its
+environment mid-verification**, could not run a single command afterwards,
+and spent its remaining turns doing forensics on the primary checkout with
+`Read` alone. It then reported a possible repo-corruption incident that had
+not happened: three of its five concerns (a missing fix, an uncommitted diff
+on main, a project left in UIDriver state) were already resolved before it
+wrote them, because I had done that cleanup while it was blinded.
+
+**"Merged" answers a question about GIT. "Finished" answers a question about
+a PROCESS, and only the orchestrator knows it.** So: prune only when no
+agent is live, or filter out worktrees belonging to agents still running.
+This is the same class as the worktree-isolation rule already in this file —
+both are the orchestrator's obligation, and neither can be delegated to the
+subagent or to a script.
+
+**The corollary worth keeping: a distressed report from an agent that lost
+its tooling is EVIDENCE, not truth.** Check each claim against the repo
+before acting — every one of its file-level claims was checkable in seconds,
+and most were already stale.
