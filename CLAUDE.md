@@ -8956,10 +8956,33 @@ TEST SUCCEEDED. The heading hierarchy was confirmed by eye on 13 and 14 Pro;
 the two larger screens carry strictly more room than the smallest, which is
 the one that already passed.
 
-**STILL UNVERIFIED, and it is permanently unautomatable:** the Safari
-sign-in sheet actually opening and handing back. It needs a frontend running
-alongside the seeded backend (`npm run dev` — the seeded backend alone leaves
-`/login` non-existent), and no XCUITest can ever drive it, because
-`ASWebAuthenticationSession` is out-of-process and system-owned. Every future
-change to that flow needs a human to look once. That is the platform, not a
-gap in the tests.
+**THE SAFARI HANDOFF IS VERIFIED AS FAR AS AUTOMATION CAN REACH, and the
+boundary is now a test rather than a caveat.** `UIDriver/SafariHandoff.swift`
+runs it: tapping "Get started" makes iOS raise its own
+
+    "Empyralis" Wants to Use "127.0.0.1" to Sign In
+
+alert, and the Safari sheet then opens on the frontend. That alert is raised
+by `ASWebAuthenticationSession` ITSELF and only once the authorize URL and
+the callback scheme are BOTH well-formed — so it is evidence the session
+really started, not that a button merely responded. This matters because
+every other test in the suite reaches the email form through the SECONDARY
+link, so the button could have been wired to nothing and the suite would
+still have been green.
+
+Running it needs a frontend alongside the seeded backend (`npm run dev`; the
+seeded backend alone leaves `/login` non-existent) and an ERASED device,
+since `WelcomeState.hasSeen` is sticky and the button does not exist at all
+on a device that has been past the welcome screen once.
+
+Two traps that read as false failures: the consent alert is a SpringBoard
+alert, NOT an app view — looking for it on `app` finds nothing and looks
+exactly like "the button did nothing". And no-alert is not a failure: the
+consent is shown once per install per domain, so a device that already
+granted it goes straight to the sheet.
+
+**WHAT REMAINS PERMANENTLY UNAUTOMATABLE is only what happens INSIDE the
+sheet.** It is out-of-process and system-owned, so no XCUITest can read it,
+type into it, or assert on the page it loaded. Signing in THROUGH it is a
+human's job forever — but "does the app start the flow correctly" is no
+longer part of that, and should not be re-listed as unverified.
