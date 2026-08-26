@@ -274,3 +274,61 @@ func mcpServerStatusLabel(_ server: McpServerRecord) -> String {
 func mcpServerHost(_ endpoint: String) -> String {
     URL(string: endpoint)?.host ?? endpoint
 }
+
+// MARK: - Emergency stop — Settings ▸ Workspace
+//
+// Ported from frontend/lib/workspace/fleet/EmergencyStopSection.tsx +
+// fleet-data.ts's `StoppedState`/`stopFleetWorkspace`/`resumeFleetWorkspace`
+// — same fields, same semantics. Backend contract
+// (server_modules/routes_fleet.py:2258/2280, owner-gated via
+// `enforce_workspace_access(..., minimum_role="owner")`):
+//
+//   GET  /w/{id}/fleet/workspace          -> {"ok", "workspace": {"stopped": StoppedState, ...}}
+//   POST /w/{id}/fleet/stop-all  {reason} -> {"ok", "workspace_id", "stopped"} | {"ok":false, "error"}
+//   POST /w/{id}/fleet/resume-all {}      -> {"ok", "workspace_id", "stopped"} | {"ok":false, "error"}
+//
+// Both mutation routes answer HTTP 200 even on refusal — `fleet_stop_
+// workspace_route`/`fleet_resume_workspace_route` catch every exception
+// themselves and return `{"ok": false, "error": str(exc)}` rather than
+// raising, so `ok` must be read explicitly rather than trusted from the
+// HTTP status, exactly like `TaskWriteAck` elsewhere in this app. A 403
+// from `enforce_workspace_access` (non-owner caller) IS a real non-2xx and
+// surfaces through APIClient's own `.server(message)` case instead, with
+// the server's own "Owner role required for workspace '…'." — this screen
+// does not gate on role client-side (neither does EmergencyStopSection.tsx),
+// so a non-owner sees the same control and a real, honest refusal reason
+// rather than a control quietly hidden out from under them.
+//
+// `{active:false}` (no other fields set) once resumed — reason/who/at only
+// ever carry meaning while `active` is true, matching the web type exactly.
+struct StoppedState: Decodable, Equatable {
+    let active: Bool
+    let reason: String?
+    let stoppedByLabel: String?
+    let at: String?
+
+    enum CodingKeys: String, CodingKey {
+        case active, reason, at
+        case stoppedByLabel = "stopped_by_label"
+    }
+}
+
+/// Narrower than the web's full `FleetWorkspace` (drops `id`/`name`, which
+/// this screen already has from `session`/`store`) — same "decode only what
+/// is rendered" discipline as `GatewayRegistration` above.
+struct FleetWorkspaceStopStateResponse: Decodable {
+    struct Workspace: Decodable {
+        let stopped: StoppedState?
+    }
+    let ok: Bool
+    let workspace: Workspace?
+}
+
+/// Shared response shape for both stop-all and resume-all — mirrors the
+/// web's own single `StopMutationResult` type, and `TaskWriteAck`'s
+/// `{ok, error, ...}` convention already established in this app.
+struct FleetStopControlAck: Decodable {
+    let ok: Bool
+    let error: String?
+    let stopped: StoppedState?
+}
