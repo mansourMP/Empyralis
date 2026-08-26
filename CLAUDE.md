@@ -8948,8 +8948,18 @@ simulators at once plus parallel builds plus a build that HUNG and never
 released** — not a simulator as such. Do not over-correct from that incident
 into refusing to boot one; measure instead, and let it settle before judging.
 
-**STILL UNVERIFIED, and one of them permanently unautomatable:** the Safari
-sign-in sheet actually opening and handing back (needs a frontend running
-alongside the seeded backend — `npm run dev`, since the seeded backend alone
-leaves `/login` non-existent), and iPhone 14 Pro / 16 / 17 Pro at AX5, which
-have only been seen at default text size.
+**ALL FOUR DEVICES ARE NOW VERIFIED AT AX5** — iPhone 13, 14 Pro, 16 and
+17 Pro each ran the full `Supplementary/testSupplementary` sweep (22 screens
+apiece, sign-in through documents, search, a real write and its rollback,
+sign-out and back in) at `accessibility-extra-extra-extra-large`, all
+TEST SUCCEEDED. The heading hierarchy was confirmed by eye on 13 and 14 Pro;
+the two larger screens carry strictly more room than the smallest, which is
+the one that already passed.
+
+**STILL UNVERIFIED, and it is permanently unautomatable:** the Safari
+sign-in sheet actually opening and handing back. It needs a frontend running
+alongside the seeded backend (`npm run dev` — the seeded backend alone leaves
+`/login` non-existent), and no XCUITest can ever drive it, because
+`ASWebAuthenticationSession` is out-of-process and system-owned. Every future
+change to that flow needs a human to look once. That is the platform, not a
+gap in the tests.
