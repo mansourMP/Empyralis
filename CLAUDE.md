@@ -7937,7 +7937,31 @@ the box, in a mark the same size as every logo beside it — which is MAN-145's
 own requirement that a fallback not read as broken. Restored immediately
 after; `git checkout --`, never `git stash`.
 
-## Agent creation is THREE steps, and placement is first (2026-08-21)
+## Agent creation is FOUR steps, and placement is first (2026-08-21, corrected 2026-08-26)
+
+**CORRECTION FIRST, because the heading below said THREE and the founder
+reversed that the day after it shipped.** Channels and Apps were merged into
+one "Reach" screen for exactly one day; his words: *"channels and application
+must be separated, do you understand?"* The live shape is FOUR:
+
+```
+1 Identity & placement   name · what it does · where it runs
+2 Brain                  who pays ▸ provider ▸ model
+      └── "Create agent" ──▶ the agent becomes real here
+3 Channels               how people reach it, optional
+4 Apps                   what it can reach, optional
+      └── "Finish" / "Skip for now" ──▶ into the agent
+```
+
+The merge's own argument — that two optional screens read as ceremony — is
+answered by the ONE-PRESS SKIP on each, never by fusing two different
+questions. Source of truth is `AGENT_CREATE_STEPS`
+(`agent-create-wizard.ts:120`); `AgentCreateCard.tsx`'s own header carries
+the reasoning. Everything below about placement-first, the honest PATCH
+failure, and the framed dialog height is unchanged and still correct — only
+the step COUNT was wrong.
+
+
 
 **The founder compared the shipped one-card creation surface against the
 wizard deleted on 2026-08-20 and found two whole questions missing.**
