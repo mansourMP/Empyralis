@@ -336,7 +336,11 @@ final class TaskAuthoring: XCTestCase {
         let descText = "\(marker) description body"
         let descButton = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Add a description")).firstMatch
         guard descButton.waitForExistence(timeout: 6) else { miss("no description row"); return }
-        descButton.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        // tapFrameOf, like every other tap in this file — this was the last
+        // surviving `element.coordinate(...).tap()`, and it is exactly the
+        // one that intermittently missed on iPhone 13 while the row was
+        // plainly on screen (10-after-title-save.png).
+        tapFrameOf(descButton)
         guard app.navigationBars["Edit description"].waitForExistence(timeout: 6) else {
             miss("description edit sheet never opened"); return
         }
