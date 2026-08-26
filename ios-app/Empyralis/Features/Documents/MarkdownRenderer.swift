@@ -150,12 +150,19 @@ struct MarkdownRenderer: View {
         .background(Theme.bgInset(scheme), in: RoundedRectangle(cornerRadius: Radius.card))
     }
 
+    // Scales via Theme's empHeading1-4 (UIFontMetrics, same mechanism as
+    // .empBody below) rather than the old raw .system(size:weight:), which
+    // Apple documents as NOT participating in Dynamic Type at all — that
+    // let a real H1 render smaller than its own paragraph text at large
+    // accessibility sizes. See empHeading1-4's own doc comment in Theme.swift
+    // for why H3/H4 deliberately share a curve rather than each level
+    // getting its "obviously matching" title-class style.
     private func headingFont(_ level: Int) -> Font {
         switch level {
-        case 1: return .system(size: 22, weight: .semibold)
-        case 2: return .system(size: 18, weight: .semibold)
-        case 3: return .system(size: 16, weight: .semibold)
-        default: return .system(size: 15, weight: .semibold)
+        case 1: return .empHeading1
+        case 2: return .empHeading2
+        case 3: return .empHeading3
+        default: return .empHeading4
         }
     }
 

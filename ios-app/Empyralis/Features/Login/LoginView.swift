@@ -41,7 +41,15 @@ struct LoginView: View {
                     BrandMark(size: 64)
 
                     Text("Log in to Empyralis")
-                        .font(.system(size: 26, weight: .semibold))
+                        // UIFontMetrics via Theme's empScaled, relativeTo:
+                        // .title (UIKit .title1) — a screen headline with
+                        // nothing else on this screen it needs to stay
+                        // proportioned against, so the natural title curve
+                        // is safe here (unlike the H3/H4 case in
+                        // MarkdownRenderer). Raw .system(size:weight:) never
+                        // grew past its default size at all under a larger
+                        // accessibility setting.
+                        .font(Font.empScaled(26, weight: .semibold, relativeTo: .title))
                         .foregroundStyle(Theme.textPrimary(scheme))
                         .padding(.top, Space.x5)
 
