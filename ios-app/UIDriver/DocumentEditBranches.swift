@@ -268,9 +268,12 @@ final class DocumentEditBranches: XCTestCase {
     /// EXISTS is part of what several of these tests check.
     @discardableResult
     private func navigateToVerifyDocument() -> Bool {
-        guard tab(2, expect: "Projects") else { return false }
-        guard tapRow("General") else { miss("no 'General' project row"); return false }
+        guard tab(2, expect: "Projects") else { dumpTree("nav-no-projects-tab"); return false }
+        guard tapRow("General") else {
+            miss("no 'General' project row"); dumpTree("nav-no-general-row"); return false
+        }
         sleep(1)
+        dumpTree("nav-after-general")
         let documentsSegment = app.buttons["Documents"]
         if documentsSegment.waitForExistence(timeout: 6) {
             reliableTap(documentsSegment)
@@ -278,8 +281,10 @@ final class DocumentEditBranches: XCTestCase {
         } else {
             miss("no Documents segment on the project screen")
         }
+        dumpTree("nav-after-documents-segment")
         guard tapRow("iOS Edit Verify") else {
             miss("seeded verify document not found in General/Documents")
+            dumpTree("nav-no-verify-doc-row")
             return false
         }
         sleep(2)
@@ -327,12 +332,12 @@ final class DocumentEditBranches: XCTestCase {
             miss("no 'Edit document' pencil — canWrite resolved false, or the document never finished loading")
             return false
         }
-        reliableTap(editButton)
-        guard app.navigationBars["Edit document"].waitForExistence(timeout: 8) else {
-            miss("the editor sheet never opened")
-            return false
+        for _ in 0..<3 {
+            reliableTap(editButton)
+            if app.navigationBars["Edit document"].waitForExistence(timeout: 5) { return true }
         }
-        return true
+        miss("the editor sheet never opened")
+        return false
     }
 
     // MARK: - direct API calls (host-side test code, real network access —
@@ -507,10 +512,16 @@ final class DocumentEditBranches: XCTestCase {
         }
 
         // Nothing is left dirty, so Cancel must close with NO discard
-        // confirmation.
+        // confirmation. Retried the same way tapSaveAndWaitForOutcome
+        // retries Save -- a single un-retried tap on this exact toolbar
+        // shape has already shown it can be swallowed once (see that
+        // helper's own header note).
         let cancelButton = app.navigationBars.buttons["Cancel"]
         guard cancelButton.waitForExistence(timeout: 5) else { miss("no Cancel button"); return }
-        reliableTap(cancelButton)
+        for _ in 0..<3 {
+            reliableTap(cancelButton)
+            if waitUntilGone(app.navigationBars["Edit document"], timeout: 5) { break }
+        }
         sleep(1)
         shot("05-closed")
         XCTAssertFalse(app.navigationBars["Edit document"].exists, "Cancel after adopting the incoming version did not close the sheet")

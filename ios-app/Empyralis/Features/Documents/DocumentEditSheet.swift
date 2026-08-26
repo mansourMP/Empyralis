@@ -64,10 +64,18 @@ struct DocumentEditSheet: View {
     /// only offers the edit affordance once it holds this shape.
     let document: EmpDocument
     @Binding var isPresented: Bool
-    /// Fired exactly once, the moment a write is CONFIRMED (a real 2xx with
-    /// a decodable body, a 2xx whose body could not be decoded but which we
-    /// know landed, or an identical-content "conflict" silently adopted) —
-    /// never on a real conflict awaiting a decision, never on failure.
+    /// Fired the moment this sheet has a document state the caller's own
+    /// cache does not yet have and KNOWS to be current — that is usually a
+    /// CONFIRMED WRITE (a real 2xx with a decodable body, a 2xx whose body
+    /// could not be decoded but which we know landed, or an identical-
+    /// content "conflict" silently adopted), and exactly once for those.
+    /// The one exception is `resolveTakeTheirs` — "Use theirs instead"
+    /// writes nothing, but the incoming document it adopts is itself a
+    /// just-fetched read of server truth (it arrived on the 409), so
+    /// relaying it here is what keeps the caller from showing a body the
+    /// person has already looked at and moved past as if it were still
+    /// current. Never fired on a real conflict AWAITING a decision, never
+    /// on failure.
     let onSaved: (EmpDocument) -> Void
 
     @EnvironmentObject private var session: SessionStore
@@ -610,6 +618,20 @@ struct DocumentEditSheet: View {
         DocumentDraftStore.clear(for: document.id)
         draftPersistTask?.cancel()
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        // Found live (2026-08-26): without this, DocumentDetailView's own
+        // `loaded` — captured whenever the page first appeared — stays
+        // exactly that stale after Cancel closes this sheet, so the reader
+        // sees an OLDER body than the one they just looked at and chose to
+        // adopt. `incoming` is not a write confirmation (`onSaved`'s own
+        // doc comment is otherwise right to require one) but it IS a real,
+        // just-fetched read of current server truth — the 409 response is
+        // where it came from — so relaying it is correct on the same
+        // "never show what is known to be stale" grounds as everywhere
+        // else in this app, not a loosening of the write-confirmed
+        // contract. Deliberately no `isPresented = false` alongside it —
+        // this file's own header is explicit that "Use theirs instead"
+        // must leave the sheet OPEN, unlike Keep-mine.
+        onSaved(incoming)
     }
 
     // MARK: - Cancel / dismiss
