@@ -95,6 +95,58 @@ struct DocumentDetailView: View {
         // navigation-bar copy was also the one that truncated first, since
         // it is the narrowest of the three.
         .navigationBarTitleDisplayMode(.inline)
+        //
+        // THAT DECISION HAS A COST: `header` scrolls WITH the body (it
+        // lives inside the ScrollView, not above it), so as a reader
+        // scrolls down, the title+path pair passes directly under the
+        // status bar and the nav bar's own toolbar (the edit pencil) — and
+        // it used to ghost through there with no backdrop, unlike every
+        // other titled screen in the app (ProjectDetailView, AgentDetailView,
+        // TaskDetailComponents…), which never has content reach that zone
+        // in the first place (their own headers sit OUTSIDE the scroll
+        // area, pinned).
+        //
+        // Three fixes were weighed:
+        //   1. Give the nav bar an explicit, OPAQUE background
+        //      (`.toolbarBackground(Theme.bgPage(scheme), for:
+        //      .navigationBar)`) — chosen, see the measurement below.
+        //   2. PIN `header` above the ScrollView, the way ProjectDetailView
+        //      pins its section Picker. Rejected: a Picker is a CONTROL
+        //      that must stay reachable while scrolling; a document's
+        //      title is not — a reader already knows what they opened.
+        //      Spending a permanent ~70pt+ of THIS screen (`displayTitle`
+        //      has no `.lineLimit`, so at large Dynamic Type it can wrap
+        //      to two lines) is the wrong trade on the one screen where
+        //      vertical room is the whole point.
+        //   3. A native collapsing large title (`.navigationTitle` +
+        //      `.large`, shrinking to compact-inline on scroll — the
+        //      Apple/Linear idiom). Genuinely attractive, since it buys a
+        //      backdrop AND reading room back — but it reopens the exact
+        //      tripling defect the comment above already fixed on
+        //      purpose: a real title duplicates `displayTitle` a second
+        //      time (it already renders in `header` and again as the
+        //      document's leading `# H1`), and a collapsing title shows
+        //      that duplicate AT REST, before any scrolling — worse than
+        //      the original bug, not better.
+        //
+        // WHY THE STYLE MUST BE AN EXPLICIT COLOR, NOT JUST
+        // `.toolbarBackground(.visible, for: .navigationBar)` — measured,
+        // not assumed. On this build, a scrolled bar ALREADY shows a
+        // background by default with no code at all (this is iOS 26's own
+        // "Liquid Glass" behaviour, confirmed by giving this screen a real
+        // `.navigationTitle` for a same-scroll-position A/B and seeing
+        // zero change) — but that default is a thin, translucent material,
+        // not an opaque one, so scrolled text still ghosts through it
+        // legibly. `.toolbarBackground(.visible, for:)` alone changes
+        // NOTHING: pixel-diffed against doing nothing at the identical
+        // scroll offset, the two screenshots were identical but for the
+        // status-bar clock. Passing `Theme.bgPage(scheme)` as the style
+        // (kept paired with `.visible` so it also applies unconditionally
+        // rather than only once the automatic scroll threshold trips)
+        // produces a fully opaque backdrop instead — screenshotted, the
+        // ghosting is completely gone, in both themes.
+        .toolbarBackground(Theme.bgPage(scheme), for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
         .toolbar {
             // Only once BOTH facts are known: this app can vouch for write
             // access, AND the full document (with a real precondition
