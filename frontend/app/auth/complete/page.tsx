@@ -7,7 +7,15 @@ import {
   announceExternalAuthCompletion,
   awaitBrowserAuthReady,
   clearExternalAuthPending,
+  consumePendingNativeLoginHandoff,
+  mintNativeAuthHandoff,
 } from '@/lib/auth/auth-client';
+import {
+  nativeHandoffRedirectUrl,
+  planNativeLoginHandoffFromRecord,
+  type NativeHandoffPlan,
+} from '@/lib/auth/native-login-handoff';
+import { AppButton } from '@/lib/ui/primitives';
 
 function resolveNextPath(value: string | null): string {
   const normalized = String(value || '').trim();
@@ -17,6 +25,8 @@ function resolveNextPath(value: string | null): string {
   return normalized;
 }
 
+type NativePlan = Extract<NativeHandoffPlan, { kind: 'native' }>;
+
 function AuthCompleteContent() {
   const searchParams = useSearchParams();
   const provider = 'google' as const;
@@ -25,6 +35,36 @@ function AuthCompleteContent() {
     [searchParams],
   );
   const [error, setError] = useState<string | null>(null);
+  // A DIFFERENT fact from `error` above (CLAUDE.md's outcome-honesty law,
+  // and the identical distinction login/page.tsx's own nativeHandoffError
+  // makes): `error` means the Google sign-in itself never finished. This
+  // means it finished and only the handoff back to the app did not -- the
+  // person is genuinely signed in here.
+  const [nativeHandoffError, setNativeHandoffError] = useState<string | null>(null);
+  const [nativePlan, setNativePlan] = useState<NativePlan | null>(null);
+  const [retrying, setRetrying] = useState(false);
+
+  async function attemptNativeHandoff(plan: NativePlan): Promise<void> {
+    try {
+      const handoff = await mintNativeAuthHandoff({
+        native: plan.target,
+        codeChallenge: plan.codeChallenge,
+        state: plan.state,
+      });
+      const redirectUrl = handoff
+        ? nativeHandoffRedirectUrl(handoff.redirect_uri, handoff.code, plan.state)
+        : null;
+      if (!redirectUrl) {
+        setNativeHandoffError('The app did not receive a usable code. Try again.');
+        return;
+      }
+      window.location.replace(redirectUrl);
+    } catch (handoffError) {
+      setNativeHandoffError(
+        handoffError instanceof Error ? handoffError.message : 'Could not hand off to the app.',
+      );
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -37,6 +77,25 @@ function AuthCompleteContent() {
         }
         clearExternalAuthPending();
         announceExternalAuthCompletion(provider);
+
+        // A native app's Google sign-in relays its handoff request through
+        // sessionStorage (auth-client.ts's markPendingNativeLoginHandoff,
+        // called from login/page.tsx's startGoogleLogin) because the
+        // /api/auth/google -> accounts.google.com -> /api/auth/google/
+        // callback round trip lands HERE, not back on /login -- a real
+        // ASWebAuthenticationSession Google flow never revisits the page
+        // that started it. Read-and-clear: a later ordinary sign-in in the
+        // same tab must never replay a stale handoff request.
+        const plan = planNativeLoginHandoffFromRecord(consumePendingNativeLoginHandoff());
+        if (plan.kind === 'native') {
+          if (cancelled) {
+            return;
+          }
+          setNativePlan(plan);
+          await attemptNativeHandoff(plan);
+          return;
+        }
+
         window.location.replace(nextPath);
       } catch {
         if (cancelled) {
@@ -58,7 +117,45 @@ function AuthCompleteContent() {
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nextPath, provider]);
+
+  if (nativeHandoffError) {
+    return (
+      <main className="app-auth-page">
+        <div className="app-auth-shell app-auth-shell--centered">
+          <div className="app-auth-card">
+            <div className="app-auth-header">
+              <h1 className="app-auth-title">Signed in</h1>
+              <p className="app-auth-subtitle">
+                Your account is signed in here — the app just did not hear back.
+              </p>
+            </div>
+            <div role="alert" className="app-auth-error">
+              <strong>Couldn&rsquo;t return to the app</strong>
+              <span>{nativeHandoffError}</span>
+            </div>
+            <AppButton
+              type="button"
+              tone="primary"
+              disabled={retrying}
+              onClick={() => {
+                if (!nativePlan) {
+                  return;
+                }
+                setNativeHandoffError(null);
+                setRetrying(true);
+                void attemptNativeHandoff(nativePlan).finally(() => setRetrying(false));
+              }}
+              className="app-auth-submit"
+            >
+              <span>{retrying ? 'Trying again…' : 'Try again'}</span>
+            </AppButton>
+          </div>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="app-auth-page">
