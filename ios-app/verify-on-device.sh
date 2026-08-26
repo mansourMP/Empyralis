@@ -54,18 +54,32 @@ abort_if_busy() {
   local l; l=$(load_now)
   if [ "$l" -gt "$LOAD_CEILING" ]; then
     echo "  load is $l — letting it settle before judging ($1)"
-    local waited=0
-    while [ "$waited" -lt 90 ]; do
-      sleep 15; waited=$((waited + 15))
+    # 240s, not 90s. Measured 2026-08-26: a boot peaks around 120 and decays
+    # 120 -> 110 -> 95 -> 78 over the first 90 seconds, i.e. still clearly
+    # FALLING when a 90s window gives up. Aborting there diagnoses a machine
+    # that is recovering normally as one that is overloaded. What actually
+    # distinguishes the two is whether the number is coming DOWN, so that is
+    # what this checks — it gives up only if load stops falling, or is still
+    # over the ceiling after four minutes.
+    local waited=0 prev=$l
+    while [ "$waited" -lt 240 ]; do
+      sleep 20; waited=$((waited + 20))
       l=$(load_now)
       if [ "$l" -le "$LOAD_CEILING" ]; then
         echo "  load settled to $l after ${waited}s — $1"
         return 0
       fi
-      echo "    still $l after ${waited}s..."
+      if [ "$l" -ge "$prev" ] && [ "$waited" -ge 60 ]; then
+        echo "ABORT: load is $l and no longer falling (was $prev) — $1"
+        echo "That is sustained pressure, not a startup burst."
+        xcrun simctl shutdown "$UDID" >/dev/null 2>&1
+        exit 1
+      fi
+      echo "    $l after ${waited}s (falling)..."
+      prev=$l
     done
-    echo "ABORT: load stayed at $l for 90s (ceiling $LOAD_CEILING) — $1"
-    echo "This is sustained, not a startup burst. Try again when the machine is free."
+    echo "ABORT: load still $l after 240s (ceiling $LOAD_CEILING) — $1"
+    echo "Try again when the machine is free."
     xcrun simctl shutdown "$UDID" >/dev/null 2>&1
     exit 1
   fi
