@@ -243,11 +243,20 @@ final class DocumentEditBranches: XCTestCase {
         guard tab(0, expect: "Inbox") else { return }
         let gear = app.buttons["Account and settings"]
         guard gear.waitForExistence(timeout: 8) else { miss("no settings gear to sign out through"); return }
-        reliableTap(gear)
-        guard app.navigationBars["Settings"].waitForExistence(timeout: 8) else { miss("Settings did not open"); return }
+        var settingsOpen = false
+        for _ in 0..<3 {
+            reliableTap(gear)
+            if app.navigationBars["Settings"].waitForExistence(timeout: 6) { settingsOpen = true; break }
+            sleep(1)
+        }
+        guard settingsOpen else { miss("Settings did not open"); return }
         let signOut = app.buttons["Sign Out"]
         guard signOut.waitForExistence(timeout: 5) else { miss("no Sign Out button"); return }
-        reliableTap(signOut)
+        for _ in 0..<3 {
+            reliableTap(signOut)
+            if !app.tabBars.firstMatch.exists { break }
+            sleep(1)
+        }
         sleep(2)
     }
 
@@ -275,6 +284,40 @@ final class DocumentEditBranches: XCTestCase {
         }
         sleep(2)
         return true
+    }
+
+    /// Taps Save and waits for ANY of the three real outcomes (the sheet
+    /// dismissing, the conflict banner appearing, or the "Couldn't save"
+    /// alert) — retrying the TAP ITSELF up to 3 times if none appears.
+    ///
+    /// MEASURED, NOT GUESSED: the first cut of this file tapped Save once
+    /// and polled only for the conflict banner. It failed live — the
+    /// keyboard was still up (a screenshot at the failure caught the caret
+    /// still blinking), and the server's own revision history afterward
+    /// showed ZERO new writes, proving the tap never reached the network
+    /// layer at all. The likely cause is an ordinary iOS gesture-priority
+    /// quirk (a toolbar tap while a text view is first responder can
+    /// resign the keyboard instead of activating the button) rather than
+    /// anything wrong with `performSave()` itself — but rather than guess
+    /// further, this just retries the tap and checks for a real outcome
+    /// each time, the same defensive shape `VerificationGaps.pick(_:
+    /// inSheet:)` already uses for a different flaky-tap symptom.
+    @discardableResult
+    private func tapSaveAndWaitForOutcome(timeout: TimeInterval = 15) -> Bool {
+        let saveButton = app.navigationBars.buttons["Save"]
+        guard saveButton.waitForExistence(timeout: 6) else { miss("no Save button"); return false }
+        for attempt in 1...3 {
+            reliableTap(saveButton)
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                if !app.navigationBars["Edit document"].exists { return true }
+                if staticText(containing: "changed this document while you were editing").exists { return true }
+                if app.staticTexts["Couldn't save"].exists { return true }
+                usleep(300_000)
+            }
+            note("Save tap attempt \(attempt) produced no visible outcome within \(Int(timeout))s -- retrying")
+        }
+        return false
     }
 
     @discardableResult
@@ -423,13 +466,14 @@ final class DocumentEditBranches: XCTestCase {
         note("host-side conflicting edit landed, marker=\(theirMarker)")
         let revisionsBeforeChoice = apiRevisionCount(token: ownerToken)
 
-        let saveButton = app.navigationBars.buttons["Save"]
-        guard saveButton.waitForExistence(timeout: 6) else { miss("no Save button"); return }
-        reliableTap(saveButton)
-
+        guard tapSaveAndWaitForOutcome() else {
+            miss("Save produced no outcome at all after 3 attempts")
+            dumpTree("save-no-outcome")
+            return
+        }
         let headline = staticText(containing: "changed this document while you were editing")
-        guard headline.waitForExistence(timeout: 15) else {
-            miss("the 409 conflict never rendered as the conflict banner")
+        guard headline.waitForExistence(timeout: 5) else {
+            miss("Save produced an outcome, but it was not the 409 conflict banner")
             dumpTree("no-conflict-rendered")
             return
         }
@@ -531,13 +575,10 @@ final class DocumentEditBranches: XCTestCase {
                       "the restored draft does not contain what was typed before backgrounding")
 
         // ---- THE REVERSE: a SAVED draft must not resurrect as stale -----
-        let saveButton = app.navigationBars.buttons["Save"]
-        guard saveButton.waitForExistence(timeout: 6) else { miss("no Save button"); return }
-        reliableTap(saveButton)
-        let dismissed = waitUntilGone(app.navigationBars["Edit document"], timeout: 15)
+        guard tapSaveAndWaitForOutcome() else { miss("Save produced no outcome after 3 attempts"); return }
         sleep(1)
         shot("05-saved")
-        XCTAssertTrue(dismissed, "saving the restored draft did not dismiss the editor")
+        XCTAssertFalse(app.navigationBars["Edit document"].exists, "saving the restored draft did not dismiss the editor")
 
         backgroundTerminateRelaunch()
         guard app.tabBars.firstMatch.waitForExistence(timeout: 20) else {
@@ -653,8 +694,18 @@ final class DocumentEditBranches: XCTestCase {
         setProxyMode("force_401")
         let saveButton = app.navigationBars.buttons["Save"]
         guard saveButton.waitForExistence(timeout: 6) else { miss("no Save button"); return }
+        // Two taps, deliberately NOT the shared tapSaveAndWaitForOutcome
+        // helper: a swallowed first tap (keyboard resign competing with the
+        // toolbar button) and a genuinely-handled 401 look IDENTICAL on
+        // screen -- nothing visibly changes either way, which is the whole
+        // point of .unauthorized being silent. Both taps are safe here:
+        // force_401 refuses every attempt identically, and doc-fault-
+        // proxy.py's own log (captured separately) is the definitive record
+        // of how many requests actually arrived.
         reliableTap(saveButton)
-        sleep(4)
+        sleep(2)
+        reliableTap(saveButton)
+        sleep(3)
         shot("03-after-401-save")
 
         XCTAssertFalse(app.staticTexts["Couldn't save"].exists,
@@ -671,11 +722,10 @@ final class DocumentEditBranches: XCTestCase {
         // genuinely still usable after a silent refresh, not just visually
         // present.
         setProxyMode("normal")
-        reliableTap(saveButton)
-        let dismissedAfterRetry = waitUntilGone(app.navigationBars["Edit document"], timeout: 15)
+        guard tapSaveAndWaitForOutcome() else { miss("Save produced no outcome after 3 attempts, post-401"); return }
         sleep(1)
         shot("04-retry-after-401-cleared")
-        XCTAssertTrue(dismissedAfterRetry, "retrying Save after the fault cleared did not succeed — the sheet was left unusable by the 401")
+        XCTAssertFalse(app.navigationBars["Edit document"].exists, "retrying Save after the fault cleared did not succeed — the sheet was left unusable by the 401")
         XCTAssertTrue(staticText(containing: unauthMarker).waitForExistence(timeout: 8), "the retried save did not land")
 
         // ---- .decoding ---------------------------------------------------
@@ -690,15 +740,11 @@ final class DocumentEditBranches: XCTestCase {
         shot("05-decoding-typed")
 
         setProxyMode("force_decoding")
-        let saveButton2 = app.navigationBars.buttons["Save"]
-        guard saveButton2.waitForExistence(timeout: 6) else { miss("no Save button"); return }
-        reliableTap(saveButton2)
-
-        let dismissedOnDecoding = waitUntilGone(app.navigationBars["Edit document"], timeout: 15)
+        guard tapSaveAndWaitForOutcome() else { miss("Save produced no outcome after 3 attempts, decoding case"); return }
         sleep(1)
         shot("06-after-decoding-save")
-        XCTAssertTrue(dismissedOnDecoding,
-                      "a 2xx with an undecodable body did NOT dismiss the editor — .decoding must be treated as success, per DocumentEditSheet's own documented posture")
+        XCTAssertFalse(app.navigationBars["Edit document"].exists,
+                       "a 2xx with an undecodable body did NOT dismiss the editor — .decoding must be treated as success, per DocumentEditSheet's own documented posture")
         XCTAssertFalse(app.staticTexts["Couldn't save"].exists, "an undecodable-but-2xx response showed a failure alert")
         XCTAssertTrue(staticText(containing: decodingMarker).waitForExistence(timeout: 8),
                       "the quietly-successful edit is not rendered back in the document view")
