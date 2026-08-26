@@ -34,6 +34,7 @@ struct TaskDetailView: View {
     @EnvironmentObject private var store: WorkspaceStore
     @EnvironmentObject private var session: SessionStore
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     @State private var writeError: String?
     @State private var activeSheet: DetailSheet?
@@ -422,16 +423,7 @@ struct TaskDetailView: View {
                     .foregroundStyle(Theme.textPrimary(scheme))
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
-                HStack(spacing: Space.x2) {
-                    if let displayId = child.displayId {
-                        Text(displayId)
-                            .font(.empMono)
-                            .foregroundStyle(Theme.textMuted(scheme))
-                    }
-                    Text(child.statusLabel)
-                        .font(.empCaption)
-                        .foregroundStyle(Theme.textMuted(scheme))
-                }
+                subtaskMetaLine(child)
             }
             Spacer()
             Image(systemName: "chevron.right")
@@ -441,6 +433,44 @@ struct TaskDetailView: View {
         .padding(.horizontal, Space.x3)
         .padding(.vertical, Space.x3)
         .contentShape(Rectangle())
+    }
+
+    /// `displayId` ("MOB-11") is a short, atomic token that must never wrap —
+    /// same category of thing as PropertyRow's own labels. Side-by-side with
+    /// `statusLabel` in a plain HStack it shared this file's AX5 defect
+    /// exactly: squeezed into a fraction of the row once the combined text
+    /// (e.g. "MOB-11" + "In progress") outgrew the available width, SwiftUI
+    /// wrapped the IDENTIFIER ITSELF ("MOB-1" / "1"), confirmed live on
+    /// iPhone 14 Pro at accessibility-extra-extra-extra-large. Reflowing to
+    /// a vertical stack at accessibility sizes — identical rule to
+    /// PropertyRow — gives each piece the full row width, so neither ever
+    /// needs to break mid-token; below that threshold this is byte-identical
+    /// to the original single HStack.
+    @ViewBuilder
+    private func subtaskMetaLine(_ child: EmpTask) -> some View {
+        if dynamicTypeSize.isAccessibilitySize {
+            VStack(alignment: .leading, spacing: 2) {
+                if let displayId = child.displayId {
+                    Text(displayId)
+                        .font(.empMono)
+                        .foregroundStyle(Theme.textMuted(scheme))
+                }
+                Text(child.statusLabel)
+                    .font(.empCaption)
+                    .foregroundStyle(Theme.textMuted(scheme))
+            }
+        } else {
+            HStack(spacing: Space.x2) {
+                if let displayId = child.displayId {
+                    Text(displayId)
+                        .font(.empMono)
+                        .foregroundStyle(Theme.textMuted(scheme))
+                }
+                Text(child.statusLabel)
+                    .font(.empCaption)
+                    .foregroundStyle(Theme.textMuted(scheme))
+            }
+        }
     }
 
     // MARK: - Activity
