@@ -227,11 +227,18 @@ final class TaskAuthoring: XCTestCase {
         // after a tap is treated as SUCCESS, because that is what a button
         // which did its job looks like from out here.
         //
-        // tapFrameOfVerified, not tapFrameOf: a settled, accurate,
-        // hittable frame can STILL produce a synthetic tap that simply
-        // never registers (reproduced live — see tapFrameOfVerified's own
-        // header). One retry, conditioned on the button being unchanged.
-        tapFrameOfVerified(b)
+        // Plain tapFrameOf, deliberately — an attempt to add a generic
+        // retry-if-unchanged wrapper here (tapFrameOfVerified) was tried and
+        // REVERTED: `.exists` on "New task"/"Create task" still read true
+        // in the ~400ms right after a tap that had ALREADY succeeded (the
+        // sheet takes a moment to register in the accessibility snapshot),
+        // so the wrapper fired an UNWANTED second tap at the same screen
+        // coordinate — now landing on whatever the NEW screen has there —
+        // and that phantom tap is what caused a real crash two runs later.
+        // These two functions already have downstream waits (waitForSheetGone
+        // etc.) that report a genuine miss without needing an internal
+        // retry that can corrupt state by tapping the wrong thing.
+        tapFrameOf(b)
         return true
     }
 
@@ -270,8 +277,9 @@ final class TaskAuthoring: XCTestCase {
         // after a tap is treated as SUCCESS, because that is what a button
         // which did its job looks like from out here.
         //
-        // tapFrameOfVerified, not tapFrameOf — see tapExact's own note.
-        tapFrameOfVerified(b)
+        // Plain tapFrameOf, deliberately — see tapExact's own note on why
+        // an internal retry-if-unchanged wrapper was tried and reverted.
+        tapFrameOf(b)
         return true
     }
 
@@ -357,41 +365,23 @@ final class TaskAuthoring: XCTestCase {
         usleep(600_000)
     }
 
-    /// `tapFrameOf`, but retried ONCE if the tap plainly did nothing.
-    ///
-    /// Reproduced live on iPhone 13, run 2: a task's title-header button —
-    /// accurate frame, `hittable == true`, nothing overlapping it — was
-    /// tapped via `tapFrameOf` and NOTHING happened. Confirmed by MD5: the
-    /// screenshot taken immediately after the failed wait was byte-for-byte
-    /// identical to the one taken before the tap. `tapFrameOf` itself has no
-    /// retry — one settled-frame tap, once — so a synthetic touch that
-    /// simply doesn't register (an XCUITest-level flake, not an app bug: the
-    /// same tap mechanism worked for every other button in the same run)
-    /// fails the whole test with no second attempt.
-    ///
-    /// The retry condition mirrors `tapRow`/`openTask`'s own fix, and
-    /// DELIBERATELY checks only `.exists`, never `.isHittable` — a second
-    /// crash, found immediately after fixing the first: calling
-    /// `.isHittable` on a button that is mid-rename (e.g. "Create task" ->
-    /// "Creating…", the exact transition this whole file's tapFrameOf
-    /// comment already documents) can itself THROW —
-    /// "Failed to determine hittability... Activation point invalid and no
-    /// suggested hit points based on element frame" — where `.exists`
-    /// alone answers safely. `.exists` is also sufficient: a button that
-    /// renamed no longer matches ITS OWN original query, so `.exists`
-    /// already reads false the moment the tap actually landed and changed
-    /// something.
-    private func tapFrameOfVerified(_ element: XCUIElement) {
-        for attempt in 0..<2 {
-            tapFrameOf(element)
-            usleep(400_000)
-            if attempt == 0 && element.exists {
-                note("tap on '\(element.label)' left it unchanged (still exists) — retrying once")
-                continue
-            }
-            return
-        }
-    }
+    /// TRIED AND REVERTED: a generic `tapFrameOfVerified` wrapper that
+    /// retried whenever the tapped element was still `.exists` shortly
+    /// after. It fixed one real, reproduced miss (a header-title tap whose
+    /// screenshot was byte-identical before and after — nothing happened)
+    /// but then caused a NEW crash two runs later: `.exists` on "New
+    /// task"/"Create task" still read true in the ~400ms right after a tap
+    /// that had ALREADY succeeded (the sheet/rename takes a moment to
+    /// register), so the wrapper fired an UNWANTED second tap at the same
+    /// screen coordinate — now landing on whatever the CHANGED screen had
+    /// there — and that phantom tap is what broke the run. A blind
+    /// re-tap-if-unchanged heuristic is only safe when "unchanged" can be
+    /// checked against the ACTUAL expected outcome (a specific nav bar
+    /// appearing, as `tapRow`/`openTask` already do against a real
+    /// destination), never against a generic, timing-sensitive proxy like
+    /// `.exists` on the tapped element itself. See the two call sites
+    /// below (title/description edit) for the outcome-based version that
+    /// replaced it.
 
     /// Waits for a sheet's own nav bar to disappear. Previously silent on
     /// timeout — a sheet that never dismissed (e.g. a create request that
@@ -490,8 +480,21 @@ final class TaskAuthoring: XCTestCase {
         // scroll on a slow device. Cheap insurance, same as every other tap
         // in this file now gets.
         if !headerButton.isHittable { scrollIntoView(headerButton) }
-        tapFrameOfVerified(headerButton)
-        guard app.navigationBars["Edit title"].waitForExistence(timeout: 6) else {
+        // Retry ONLY against the REAL outcome (the sheet's own nav bar), not
+        // against a generic "is the element unchanged" proxy — that shape
+        // was tried, and reverted, at tapFrameOf's own definition after it
+        // caused a worse crash elsewhere. Confirmed live once already
+        // (iPhone 13): an accurate, settled, hittable frame can still
+        // produce a tap that does nothing (screenshot byte-identical
+        // before/after), so ONE retry is real insurance here — conditioned
+        // on the button still existing, exactly like tapRow/openTask.
+        var titleSheetOpened = false
+        for attempt in 0..<2 {
+            tapFrameOf(headerButton)
+            if app.navigationBars["Edit title"].waitForExistence(timeout: 6) { titleSheetOpened = true; break }
+            if attempt == 0 && !headerButton.exists { break }
+        }
+        guard titleSheetOpened else {
             miss("title edit sheet never opened", probe: headerButton); return
         }
         shot("08-edit-title-sheet")
@@ -526,8 +529,14 @@ final class TaskAuthoring: XCTestCase {
             note("description row exists but not hittable (frame=\(descButton.frame)) — scrolling into view")
             scrollIntoView(descButton)
         }
-        tapFrameOfVerified(descButton)
-        guard app.navigationBars["Edit description"].waitForExistence(timeout: 6) else {
+        // Same outcome-based retry as the title header, above.
+        var descriptionSheetOpened = false
+        for attempt in 0..<2 {
+            tapFrameOf(descButton)
+            if app.navigationBars["Edit description"].waitForExistence(timeout: 6) { descriptionSheetOpened = true; break }
+            if attempt == 0 && !descButton.exists { break }
+        }
+        guard descriptionSheetOpened else {
             miss("description edit sheet never opened", probe: descButton); return
         }
         shot("11-edit-description-sheet")
