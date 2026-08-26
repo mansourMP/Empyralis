@@ -101,7 +101,20 @@ final class DocumentEditBranches: XCTestCase {
         print("SHOT \(file.path)")
     }
 
-    private func miss(_ s: String) { misses.append(s); print("DOCB_MISS \(s)") }
+    /// Every call site here is a genuinely blocking condition (a step the
+    /// rest of the test depends on did not happen) — so this also fails the
+    /// test, not just logs. Without this, a `guard ... else { miss(...);
+    /// return }` early-return let a real navigation failure end the test
+    /// with NO assertion ever having run, and XCTest reported the whole
+    /// thing "passed" — a false "worked" is worse than a red test, per this
+    /// codebase's own standing outcome-honesty law. `continueAfterFailure =
+    /// true` means this does not stop execution, so later diagnostics still
+    /// run; it only stops the run from being reported clean when it wasn't.
+    private func miss(_ s: String) {
+        misses.append(s)
+        print("DOCB_MISS \(s)")
+        XCTFail(s)
+    }
     private func note(_ s: String) { print("DOCB_NOTE \(s)") }
 
     private func dumpTree(_ label: String) {
@@ -269,17 +282,43 @@ final class DocumentEditBranches: XCTestCase {
     @discardableResult
     private func navigateToVerifyDocument() -> Bool {
         guard tab(2, expect: "Projects") else { dumpTree("nav-no-projects-tab"); return false }
-        guard tapRow("General") else {
-            miss("no 'General' project row"); dumpTree("nav-no-general-row"); return false
+
+        // `tapRow` (this file's own copy of the house pattern) taps ONCE and
+        // reports success unconditionally -- it never confirms the tap
+        // actually navigated anywhere. That has now shown the same
+        // swallowed-tap flakiness as Save/Cancel/the pencil, and it is WORSE
+        // here: a run right after `backgroundTerminateRelaunch()` hit it,
+        // `navigateToVerifyDocument` returned false, the caller's own
+        // `guard ... else { return }` ended the test right there, and
+        // XCTest reported the whole test "passed" -- no assertion ever ran
+        // to FAIL, so a real gap in coverage looked like a clean result.
+        // This loop verifies the nav bar actually changed before trusting
+        // the tap, retrying the tap itself rather than `tapRow`'s own
+        // swipe-and-hope retry (which never re-checks the nav bar either).
+        var enteredGeneral = false
+        for _ in 0..<4 {
+            tapRow("General")
+            if app.navigationBars["General"].waitForExistence(timeout: 4) { enteredGeneral = true; break }
+        }
+        guard enteredGeneral else {
+            miss("tapping 'General' never actually navigated into the project")
+            dumpTree("nav-general-tap-did-not-navigate")
+            return false
         }
         sleep(1)
         dumpTree("nav-after-general")
+
         let documentsSegment = app.buttons["Documents"]
-        if documentsSegment.waitForExistence(timeout: 6) {
-            reliableTap(documentsSegment)
-            sleep(1)
-        } else {
+        guard documentsSegment.waitForExistence(timeout: 6) else {
             miss("no Documents segment on the project screen")
+            dumpTree("nav-no-documents-segment")
+            return false
+        }
+        let verifyDocRow = rows().matching(NSPredicate(format: "label CONTAINS[c] %@", "iOS Edit Verify")).firstMatch
+        for _ in 0..<3 {
+            reliableTap(documentsSegment)
+            if verifyDocRow.waitForExistence(timeout: 4) { break }
+            sleep(1)
         }
         dumpTree("nav-after-documents-segment")
         guard tapRow("iOS Edit Verify") else {
