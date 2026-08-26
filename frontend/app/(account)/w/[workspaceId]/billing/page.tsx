@@ -12,6 +12,7 @@ import { MultiSeriesChart, type ChartSeries } from "@/lib/workspace/fleet/fleet-
 import { FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import { HeaderAction } from "@/lib/workspace/fleet/Breadcrumbs";
 import { CreditsPanel } from "@/lib/workspace/fleet/CreditsPanel";
+import { formatUsd } from "@/lib/ui/money";
 
 /**
  * Billing page: credit balance + top-up (2026-07-20 credit-system
@@ -41,7 +42,7 @@ const PERIODS = [
 ] as const;
 type PeriodDays = (typeof PERIODS)[number]["value"];
 
-const money = (n: number) => `$${n.toFixed(4)}`;
+const money = (n: number) => formatUsd(n);
 
 /**
  * Reuses the real `.fleet-stat-grid`/`.fleet-stat-card`,

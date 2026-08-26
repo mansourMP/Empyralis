@@ -80,6 +80,7 @@ import { FleetToggleRowsSkeleton, FleetCardGridSkeleton } from "./fleet-states";
 
 import "./agent-configure-sheet.css";
 import "./agent-profile-sheet.css";
+import { formatUsd } from "../../ui/money";
 
 // Properties panel's Placement row used to render placement.label with no
 // tone at all — the one row on that panel that never went red/green, even
@@ -1351,7 +1352,7 @@ export function FleetAgentDetail({
             <span>{costPeriodLabel(costPeriod)}</span>
             <CostPeriodToggle period={costPeriod} onChange={setCostPeriod} />
           </span>
-          <span className="fleet-panel-row-value">${costToday.toFixed(4)}</span>
+          <span className="fleet-panel-row-value">{formatUsd(costToday)}</span>
         </div>
       )}
       {/* Full attribution, not just a total: every real model/source this
@@ -1367,7 +1368,7 @@ export function FleetAgentDetail({
           key={row.key}
           label={row.label}
           hint={row.hint}
-          value={row.pricing_known ? `$${row.usd_cost.toFixed(4)}` : "Not priced"}
+          value={row.pricing_known ? formatUsd(row.usd_cost) : "Not priced"}
           tone={row.pricing_known ? "default" : "muted"}
         />
       ))}
@@ -4512,7 +4513,7 @@ function AgentModelSummary({ workspaceId, agentId, agent }: { workspaceId: strin
           {costPeriodLabel(costPeriod)}
           <CostPeriodToggle period={costPeriod} onChange={setCostPeriod} />
         </span>
-        <span className="fleet-config-value">{cost === null ? "…" : `$${cost.toFixed(4)}`}</span>
+        <span className="fleet-config-value">{cost === null ? "…" : formatUsd(cost)}</span>
       </div>
     </div>
   );
