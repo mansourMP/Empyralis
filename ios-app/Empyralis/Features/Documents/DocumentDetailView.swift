@@ -95,6 +95,55 @@ struct DocumentDetailView: View {
         // navigation-bar copy was also the one that truncated first, since
         // it is the narrowest of the three.
         .navigationBarTitleDisplayMode(.inline)
+        //
+        // THAT DECISION HAS A COST THIS SCREEN WAS PAYING FOR FREE UNTIL
+        // NOW: `header` scrolls WITH the body (it lives inside the
+        // ScrollView, not above it), so as a reader scrolls down, the
+        // title+path pair passes directly under the status bar and the nav
+        // bar's own toolbar (the edit pencil). This is the ONLY
+        // `.inline`-mode screen in the app with no `.navigationTitle`
+        // (grepped) — every other one (ProjectDetailView, AgentDetailView,
+        // TaskDetailComponents, DocumentEditSheet…) gets a permanent bar
+        // background for free, because SwiftUI paints a TITLED `.inline`
+        // bar's chrome unconditionally but a TITLELESS one fully
+        // transparent. So the title ghosted straight through behind the
+        // clock/wifi/battery icons with nothing behind it — a real
+        // collision, not a cosmetic one, and the exact defect reported
+        // (and left open) after the 2026-08-26 parity sweep.
+        //
+        // Three fixes, weighed against this being the app's core READING
+        // surface:
+        //   1. Force the nav bar's own background material on
+        //      (`.toolbarBackground(.visible, for: .navigationBar)`) — the
+        //      choice below.
+        //   2. PIN `header` above the ScrollView, the way ProjectDetailView
+        //      pins its section Picker. Rejected: a Picker is a CONTROL
+        //      that must stay reachable while scrolling; a document's
+        //      title is not — a reader already knows what they opened.
+        //      Spending a permanent ~70pt+ of THIS screen (`displayTitle`
+        //      has no `.lineLimit`, so at large Dynamic Type it can wrap to
+        //      two lines) is the wrong trade on the one screen where
+        //      vertical room is the whole point.
+        //   3. A native collapsing large title (`.navigationTitle` +
+        //      `.large`, shrinking to compact-inline on scroll — the
+        //      Apple/Linear idiom, and genuinely attractive: it buys a
+        //      material AND reading room back). Rejected because it
+        //      reopens the exact tripling defect the comment above already
+        //      fixed on purpose: a real title here duplicates
+        //      `displayTitle` a second time (it already renders in
+        //      `header` and again as the document's leading `# H1`), and a
+        //      collapsing title shows that duplicate AT REST, before any
+        //      scrolling — worse than today's bug, not better.
+        // (1) adds no text anywhere, so it cannot reintroduce the tripling
+        // problem — it only supplies the backdrop every other titled
+        // screen already gets automatically. Checked against the
+        // pure-black dark theme specifically, since a translucent material
+        // over `#000000` is exactly where a "grey band" would show up: the
+        // system bar material composites to black here (screenshotted,
+        // both themes — see the fix's own report), matching the material
+        // this app already trusts for TaskDetailView/TaskComposerView's
+        // own pinned composer bar (`.background(.bar)`).
+        .toolbarBackground(.visible, for: .navigationBar)
         .toolbar {
             // Only once BOTH facts are known: this app can vouch for write
             // access, AND the full document (with a real precondition
