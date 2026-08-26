@@ -117,12 +117,31 @@ final class DocumentEditVerify: XCTestCase {
             miss("tab bar missing for index \(index)"); return false
         }
         for _ in 0..<3 {
-            bar.buttons.element(boundBy: index).tap()
+            reliableTap(bar.buttons.element(boundBy: index))
             if app.navigationBars[navBar].waitForExistence(timeout: 8) { sleep(2); return true }
             sleep(2)
         }
         miss("tab \(index) did not reach '\(navBar)'")
+        dumpTree("tab-\(index)-failure")
         return false
+    }
+
+    /// Prints every nav bar / static text / button label currently on
+    /// screen, and saves the raw accessibility tree to a scratch file — the
+    /// fastest way to see what a failed navigation actually landed on
+    /// without re-running the whole test for one more screenshot.
+    private func dumpTree(_ label: String) {
+        shot(label)
+        let navBars = app.navigationBars.allElementsBoundByIndex.map(\.identifier)
+        note("TREE[\(label)] navBars=\(navBars)")
+        let texts = app.staticTexts.allElementsBoundByIndex.prefix(20).map(\.label)
+        note("TREE[\(label)] staticTexts(first 20)=\(texts)")
+        let buttons = app.buttons.allElementsBoundByIndex.prefix(20).map(\.label)
+        note("TREE[\(label)] buttons(first 20)=\(buttons)")
+        let full = app.debugDescription
+        let file = shotDir.appendingPathComponent("\(label)-tree.txt")
+        try? full.write(to: file, atomically: true, encoding: .utf8)
+        note("TREE[\(label)] full dump at \(file.path)")
     }
 
     private func rows() -> XCUIElementQuery { app.collectionViews.buttons }
@@ -161,18 +180,22 @@ final class DocumentEditVerify: XCTestCase {
     private func tapButton(containing text: String, label: String) -> Bool {
         let b = button(containing: text)
         guard b.waitForExistence(timeout: 8) else { miss("no '\(label)' button"); return false }
-        for _ in 0..<3 {
-            b.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-            sleep(1)
-            return true
-        }
-        return false
+        reliableTap(b)
+        return true
+    }
+
+    /// A plain `.tap()` has repeatedly resolved, reported hittable, and
+    /// silently done nothing in this harness (README's own documented
+    /// gotcha) — every tap in this file goes through this instead.
+    private func reliableTap(_ e: XCUIElement) {
+        e.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
     }
 
     // MARK: - The proof
 
     func testDocumentEditAndConflict() throws {
         signIn()
+        dumpTree("after-signin")
 
         // ── Reach the seeded verify document ────────────────────────────
         guard tab(2, expect: "Projects") else { return }
@@ -181,7 +204,7 @@ final class DocumentEditVerify: XCTestCase {
         // ProjectDetailView's segmented Tasks/Documents picker.
         let documentsSegment = app.buttons["Documents"]
         if documentsSegment.waitForExistence(timeout: 6) {
-            documentsSegment.tap()
+            reliableTap(documentsSegment)
             sleep(1)
         } else {
             miss("no Documents segment on the project screen")
@@ -200,7 +223,7 @@ final class DocumentEditVerify: XCTestCase {
             miss("no 'Edit document' pencil — canWrite must have resolved false, or the document never finished loading")
             return
         }
-        editButton.tap()
+        reliableTap(editButton)
         sleep(1)
         guard app.navigationBars["Edit document"].waitForExistence(timeout: 8) else {
             miss("the editor sheet never opened"); return
@@ -217,7 +240,7 @@ final class DocumentEditVerify: XCTestCase {
 
         let saveButton = app.navigationBars.buttons["Save"]
         guard saveButton.waitForExistence(timeout: 6) else { miss("no Save button"); return }
-        saveButton.tap()
+        reliableTap(saveButton)
 
         // The sheet dismisses on a confirmed save.
         let dismissed = waitUntilGone(app.navigationBars["Edit document"], timeout: 15)
@@ -237,7 +260,7 @@ final class DocumentEditVerify: XCTestCase {
         guard hostDo("conflict-edit", timeout: 60) else { return }
         sleep(1)
 
-        editButton.tap()
+        reliableTap(editButton)
         sleep(1)
         guard app.navigationBars["Edit document"].waitForExistence(timeout: 8) else {
             miss("the editor did not reopen for the conflict scenario"); return
@@ -253,7 +276,7 @@ final class DocumentEditVerify: XCTestCase {
 
         let saveButton2 = app.navigationBars.buttons["Save"]
         guard saveButton2.waitForExistence(timeout: 6) else { miss("no Save button on reopen"); return }
-        saveButton2.tap()
+        reliableTap(saveButton2)
 
         // ── What the person actually sees on a refusal ──────────────────
         let headline = app.staticTexts.matching(
