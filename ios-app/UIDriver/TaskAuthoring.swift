@@ -226,7 +226,12 @@ final class TaskAuthoring: XCTestCase {
         // defect — so the harness has to tolerate it. Losing the element
         // after a tap is treated as SUCCESS, because that is what a button
         // which did its job looks like from out here.
-        tapFrameOf(b)
+        //
+        // tapFrameOfVerified, not tapFrameOf: a settled, accurate,
+        // hittable frame can STILL produce a synthetic tap that simply
+        // never registers (reproduced live — see tapFrameOfVerified's own
+        // header). One retry, conditioned on the button being unchanged.
+        tapFrameOfVerified(b)
         return true
     }
 
@@ -264,7 +269,9 @@ final class TaskAuthoring: XCTestCase {
         // defect — so the harness has to tolerate it. Losing the element
         // after a tap is treated as SUCCESS, because that is what a button
         // which did its job looks like from out here.
-        tapFrameOf(b)
+        //
+        // tapFrameOfVerified, not tapFrameOf — see tapExact's own note.
+        tapFrameOfVerified(b)
         return true
     }
 
@@ -348,6 +355,36 @@ final class TaskAuthoring: XCTestCase {
             .withOffset(CGVector(dx: f.midX, dy: f.midY))
             .tap()
         usleep(600_000)
+    }
+
+    /// `tapFrameOf`, but retried ONCE if the tap plainly did nothing.
+    ///
+    /// Reproduced live on iPhone 13, run 2: a task's title-header button —
+    /// accurate frame, `hittable == true`, nothing overlapping it — was
+    /// tapped via `tapFrameOf` and NOTHING happened. Confirmed by MD5: the
+    /// screenshot taken immediately after the failed wait was byte-for-byte
+    /// identical to the one taken before the tap. `tapFrameOf` itself has no
+    /// retry — one settled-frame tap, once — so a synthetic touch that
+    /// simply doesn't register (an XCUITest-level flake, not an app bug: the
+    /// same tap mechanism worked for every other button in the same run)
+    /// fails the whole test with no second attempt.
+    ///
+    /// The retry condition mirrors `tapRow`/`openTask`'s own fix: if the
+    /// tapped element is STILL hittable shortly after, nothing changed as a
+    /// result of the tap (no sheet covered it, no navigation occurred, no
+    /// label change) — that is the generic signal a miss actually happened,
+    /// as opposed to a slow transition after a tap that DID land, where the
+    /// element would already be covered/gone.
+    private func tapFrameOfVerified(_ element: XCUIElement) {
+        for attempt in 0..<2 {
+            tapFrameOf(element)
+            usleep(400_000)
+            if attempt == 0 && element.exists && element.isHittable {
+                note("tap on '\(element.label)' left it unchanged (still hittable) — retrying once")
+                continue
+            }
+            return
+        }
     }
 
     /// Waits for a sheet's own nav bar to disappear. Previously silent on
@@ -447,7 +484,7 @@ final class TaskAuthoring: XCTestCase {
         // scroll on a slow device. Cheap insurance, same as every other tap
         // in this file now gets.
         if !headerButton.isHittable { scrollIntoView(headerButton) }
-        tapFrameOf(headerButton)
+        tapFrameOfVerified(headerButton)
         guard app.navigationBars["Edit title"].waitForExistence(timeout: 6) else {
             miss("title edit sheet never opened", probe: headerButton); return
         }
@@ -483,7 +520,7 @@ final class TaskAuthoring: XCTestCase {
             note("description row exists but not hittable (frame=\(descButton.frame)) — scrolling into view")
             scrollIntoView(descButton)
         }
-        tapFrameOf(descButton)
+        tapFrameOfVerified(descButton)
         guard app.navigationBars["Edit description"].waitForExistence(timeout: 6) else {
             miss("description edit sheet never opened", probe: descButton); return
         }
