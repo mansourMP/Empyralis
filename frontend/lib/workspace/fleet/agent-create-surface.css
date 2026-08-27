@@ -177,17 +177,32 @@
      Inside the frame the worst case is 40px per edge, and the common
      Identity -> Brain press is 13.
 
-     THE COST IS VOID, and it is paid deliberately: Brain on a cloud
-     placement holds 333px of content in a 560px frame. Lowering the floor
-     to fit it exactly would hand back the jump the frame exists to remove,
-     which is the thing that was actually complained about.
+     THE FLOOR WAS 560 AND IS NOW 480 — founder's call, 2026-08-26, after
+     seeing it on his own screen: the card was "very tall" for its contents,
+     and his instruction was that these cards keep the same SHAPE but take
+     their LENGTH from what is in them — "not overly taking space, just
+     enough, normal."
+
+     480 is not a compromise number, it is the measured NATURAL height of
+     Brain on a cloud placement (see the table above). So that step now sits
+     at exactly its own size with no void at all, rather than being grown
+     227px to meet a floor.
+
+     What this costs, stated plainly rather than hidden: the Identity ->
+     Brain press now moves 106px instead of 26px. That is the jump the frame
+     exists to damp, and it is deliberately paid down — not away — because
+     it is still well under half the 271px jump that caused the original
+     complaint. The floor still exists precisely so a short step can never
+     collapse; it is simply set to the shortest real step instead of above
+     it. If a step is ever authored SHORTER than 480 it still grows to this
+     floor, which is the "not too short" half of the same instruction.
 
      Between them the BODY scrolls and nothing else does: head and stepper
      stay put at the top, the footer stays put at the bottom, on every step.
      That is the whole mechanism — `overflow: hidden` here, `overflow-y:
      auto` on .agent-create-body, and `flex-shrink: 0` on the two chrome
      rows so a long body can never squeeze them. */
-  min-height: min(560px, 88vh);
+  min-height: min(480px, 88vh);
   max-height: min(88vh, 640px);
   overflow: hidden;
 }
