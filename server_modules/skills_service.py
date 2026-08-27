@@ -4475,12 +4475,20 @@ def _format_hardware_action_result(payload: Dict[str, Any]) -> str:
     # at all.
     gateway_id = str(runtime_session.get("gateway_id") or "").strip()
     service_statuses: Dict[str, str] = {}
+    # Same evidence, one level down: WHICH Docker app to name once Docker
+    # actually is the confirmed cause (gateway_reason_messages._docker_not_
+    # running_message) — "darwin"/"linux"/"win32", the registration's own
+    # `platform` field. Empty/unreachable degrades to the platform-neutral
+    # wording, never a guess.
+    platform = ""
     if gateway_id:
         try:
             registration = gateway_state_repository.get_gateway_registration(gateway_id)
             service_statuses = gateway_registry_service.capability_service_statuses(registration)
+            platform = str((registration or {}).get("platform") or "").strip()
         except Exception:
             service_statuses = {}
+            platform = ""
     summary = {
         "status": str(payload.get("status") or "").strip(),
         "reason": reason,
@@ -4495,6 +4503,7 @@ def _format_hardware_action_result(payload: Dict[str, Any]) -> str:
                 reason,
                 capability_id=runtime_session.get("capability_id"),
                 service_statuses=service_statuses,
+                platform=platform,
             )
             if reason
             else None

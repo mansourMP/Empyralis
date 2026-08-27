@@ -135,12 +135,60 @@ def _docker_confirmed_not_ready(service_statuses: Dict[str, str]) -> bool:
     return service_statuses.get("docker", "") in _DOCKER_CONFIRMED_NOT_READY_STATUSES
 
 
-def _capability_missing_message(capability_id: str, service_statuses: Optional[Dict[str, str]] = None) -> str:
+# The registration's own `platform` field (empyralis-gateway/src/runtime/
+# runtime-metadata.ts's os.platform() — "darwin"/"linux"/"win32"). Docker
+# Desktop is a real, correctly-named product on macOS AND Windows — it is
+# LINUX that has no such app; a headless VPS runs the `docker` daemon
+# directly (e.g. via systemd), never "Docker Desktop". CLAUDE.md's own
+# record of this message ("DOCKER CHOOSES HOW A COMMAND RUNS, NEVER
+# WHETHER") kept it deliberately in place for boxes still on a pre-fix
+# gateway build that genuinely gates shell_sandbox on Docker — but never
+# checked whether its WORDING was platform-correct. "Start Docker Desktop"
+# handed to a Linux VPS owner is an instruction that cannot be followed, on
+# any box, old build or new.
+_LINUX_PLATFORM_TOKENS = {"linux"}
+_MACOS_PLATFORM_TOKENS = {"darwin", "macos", "mac", "osx"}
+_WINDOWS_PLATFORM_TOKENS = {"win32", "windows", "win"}
+
+
+def _normalize_platform(platform: object) -> str:
+    """"" for anything unrecognized/absent — never guessed. A caller with no
+    evidence of which OS this box runs gets the platform-neutral message
+    below, the same "no evidence, don't guess a specific claim" discipline
+    _docker_confirmed_not_ready already applies to WHETHER Docker is the
+    cause; this applies it to WHICH APP NAME to say."""
+    token = _text(platform).lower()
+    if token in _MACOS_PLATFORM_TOKENS:
+        return "macos"
+    if token in _WINDOWS_PLATFORM_TOKENS:
+        return "windows"
+    if token in _LINUX_PLATFORM_TOKENS:
+        return "linux"
+    return ""
+
+
+def _docker_not_running_message(platform: object) -> str:
+    normalized = _normalize_platform(platform)
+    if normalized == "linux":
+        return (
+            "Docker isn't running on this machine. Start the Docker service "
+            "(for example, `sudo systemctl start docker`), then retry."
+        )
+    if normalized in {"macos", "windows"}:
+        return "Docker isn't running on this machine. Start Docker Desktop, then retry."
+    # Unknown platform: never name a specific app we have no evidence this
+    # box even has installed.
+    return "Docker isn't running on this machine. Start Docker, then retry."
+
+
+def _capability_missing_message(
+    capability_id: str, service_statuses: Optional[Dict[str, str]] = None, platform: object = None
+) -> str:
     normalized = _text(capability_id)
     statuses = service_statuses or {}
     if normalized in _DOCKER_GATED_CAPABILITIES:
         if _docker_confirmed_not_ready(statuses):
-            return "Docker isn't running on this machine. Start Docker Desktop, then retry."
+            return _docker_not_running_message(platform)
         # Docker being ready (or simply unreported) means the real cause of
         # gateway_capability_missing is something else entirely — the
         # capability was never advertised as requested at all (see
@@ -180,7 +228,14 @@ def _capability_missing_message(capability_id: str, service_statuses: Optional[D
     return "This machine hasn't advertised the capability this action needs. Reconnect the gateway, then retry."
 
 
-def _capability_not_ready_message(capability_id: str, service_statuses: Optional[Dict[str, str]] = None) -> str:
+def _capability_not_ready_message(
+    capability_id: str, service_statuses: Optional[Dict[str, str]] = None, platform: object = None
+) -> str:
+    # `platform` is accepted (never used) only so this builder shares one
+    # call signature with _capability_missing_message — its own Docker
+    # message ("...isn't ready yet. Wait a moment...") never names an app,
+    # so there is nothing here to get platform-wrong.
+    del platform
     normalized = _text(capability_id)
     statuses = service_statuses or {}
     if normalized in _DOCKER_GATED_CAPABILITIES:
@@ -236,7 +291,7 @@ _STATIC_REASON_MESSAGES: Dict[str, str] = {
 
 # Reasons whose message depends on WHICH capability was being requested —
 # see _capability_missing_message / _capability_not_ready_message above.
-_DYNAMIC_REASON_MESSAGE_BUILDERS: Dict[str, Callable[[str, Dict[str, str]], str]] = {
+_DYNAMIC_REASON_MESSAGE_BUILDERS: Dict[str, Callable[[str, Dict[str, str], object], str]] = {
     "gateway_capability_missing": _capability_missing_message,
     "gateway_capability_not_ready": _capability_not_ready_message,
 }
@@ -261,7 +316,7 @@ KNOWN_REASON_TOKENS: frozenset[str] = frozenset(_STATIC_REASON_MESSAGES) | froze
 
 
 def gateway_reason_message(
-    reason: object, *, capability_id: object = None, service_statuses: object = None,
+    reason: object, *, capability_id: object = None, service_statuses: object = None, platform: object = None,
 ) -> str:
     """Translates a gateway/hardware-action reason token into one plain-
     language, actionable sentence — the single boundary where an internal
@@ -279,6 +334,16 @@ def gateway_reason_message(
     closes: a gateway that had already reported Docker "ready" was still
     told, across several days, to go start Docker Desktop).
 
+    `platform` is the SAME kind of evidence, one level down: WHICH Docker
+    app to name once Docker actually is the confirmed cause. It is the
+    registration's own `platform` field ("darwin"/"linux"/"win32") — a
+    caller who has it should pass it (see gateway_adapter.py's/skills_
+    service.py's call sites, which already have `registration` in scope for
+    the service_statuses lookup above). Omitting it does not make the
+    message wrong either — the Docker sentence degrades to a platform-
+    neutral "Start Docker" rather than guessing "Desktop" on a box that
+    might be a headless Linux VPS.
+
     Never raises. An unrecognized or empty token degrades to a safe, still-
     actionable generic message rather than surfacing the raw token or
     blowing up the caller — this function sits on a failure path, so it
@@ -292,12 +357,12 @@ def gateway_reason_message(
         return static_message
     builder = _DYNAMIC_REASON_MESSAGE_BUILDERS.get(normalized_reason)
     if builder:
-        return builder(_text(capability_id), _service_statuses(service_statuses))
+        return builder(_text(capability_id), _service_statuses(service_statuses), platform)
     return _FALLBACK_MESSAGE
 
 
 def humanize_if_reason_token(
-    raw_message: object, *, capability_id: object = None, service_statuses: object = None,
+    raw_message: object, *, capability_id: object = None, service_statuses: object = None, platform: object = None,
 ) -> str:
     """Like gateway_reason_message() above, but for a caller that caught an
     exception whose message MIGHT be one of this module's internal snake_case
@@ -318,5 +383,7 @@ def humanize_if_reason_token(
     """
     text = _text(raw_message)
     if text in KNOWN_REASON_TOKENS:
-        return gateway_reason_message(text, capability_id=capability_id, service_statuses=service_statuses)
+        return gateway_reason_message(
+            text, capability_id=capability_id, service_statuses=service_statuses, platform=platform
+        )
     return text

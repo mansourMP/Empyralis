@@ -156,6 +156,79 @@ async def test_viewer_can_submit_a_report() -> None:
 
 
 @pytest.mark.anyio
+async def test_a_submitted_report_notifies_the_operator() -> None:
+    """The wiring this test exists for: a saved report must reach a human,
+    not just a row -- see bug_report_notification_service's own header for
+    why. Asserted as a call COUNT with real kwargs, not just "it ran"."""
+    app = _build_app()
+    app.dependency_overrides[routes_fleet.auth_module.get_current_user] = _viewer_user
+
+    with (
+        patch("server_modules.routes_fleet._resolve_tenant", new=AsyncMock(return_value="tenant-1")),
+        patch(
+            "server_modules.bug_report_service.create_report",
+            new=AsyncMock(return_value={"id": "bugreport-1", "title": "Something broke"}),
+        ),
+        patch(
+            "server_modules.control_plane_repository.get_workspace_by_id",
+            new=AsyncMock(return_value={"name": "Mobile App"}),
+        ),
+        patch(
+            "server_modules.bug_report_notification_service.deliver_bug_report_notification",
+            new=AsyncMock(return_value={"status": "sent", "to": "mansurao886@gmail.com"}),
+        ) as notify_mock,
+    ):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/w/ws-1/fleet/bug-reports",
+                json={"title": "Something broke"},
+            )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    notify_mock.assert_awaited_once()
+    kwargs = notify_mock.await_args.kwargs
+    assert kwargs["report"]["id"] == "bugreport-1"
+    assert kwargs["workspace_name"] == "Mobile App"
+    assert kwargs["reporter_label"] == "viewer@example.com"
+
+
+@pytest.mark.anyio
+async def test_a_notification_failure_never_fails_the_saved_report() -> None:
+    """The report row above is already committed by the time the
+    notification runs -- a mailer defect (or a workspace-lookup defect)
+    must cost the reporter nothing."""
+    app = _build_app()
+    app.dependency_overrides[routes_fleet.auth_module.get_current_user] = _viewer_user
+
+    with (
+        patch("server_modules.routes_fleet._resolve_tenant", new=AsyncMock(return_value="tenant-1")),
+        patch(
+            "server_modules.bug_report_service.create_report",
+            new=AsyncMock(return_value={"id": "bugreport-1", "title": "Something broke"}),
+        ),
+        patch(
+            "server_modules.control_plane_repository.get_workspace_by_id",
+            new=AsyncMock(side_effect=RuntimeError("db unavailable")),
+        ),
+        patch(
+            "server_modules.bug_report_notification_service.deliver_bug_report_notification",
+            new=AsyncMock(side_effect=RuntimeError("mailer exploded")),
+        ),
+    ):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/w/ws-1/fleet/bug-reports",
+                json={"title": "Something broke"},
+            )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["report"]["id"] == "bugreport-1"
+
+
+@pytest.mark.anyio
 async def test_blank_title_is_rejected_by_validation() -> None:
     app = _build_app()
     app.dependency_overrides[routes_fleet.auth_module.get_current_user] = _viewer_user

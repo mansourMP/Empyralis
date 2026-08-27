@@ -50,11 +50,14 @@ class GatewayReasonMessagesTests(unittest.TestCase):
     def test_capability_missing_with_docker_confirmed_offline_names_it_specifically(self) -> None:
         # The positive case: when the gateway's own reported status
         # actually confirms Docker is the cause, the specific, actionable
-        # sentence is correct and should still be used.
+        # sentence is correct and should still be used. Platform evidence
+        # supplied (macOS), matching how the real call sites pass it —
+        # see the platform-awareness tests below for what happens without it.
         message = gateway_reason_messages.gateway_reason_message(
             "gateway_capability_missing",
             capability_id="shell.execute",
             service_statuses={"docker": "offline"},
+            platform="darwin",
         )
         self.assertEqual(message, "Docker isn't running on this machine. Start Docker Desktop, then retry.")
 
@@ -64,8 +67,68 @@ class GatewayReasonMessagesTests(unittest.TestCase):
                     "gateway_capability_missing",
                     capability_id=capability_id,
                     service_statuses={"docker": "missing"},
+                    platform="darwin",
                 )
                 self.assertIn("Docker", message)
+
+    def test_capability_missing_docker_message_is_platform_aware(self) -> None:
+        """A Linux VPS owner cannot follow "Start Docker Desktop" — Docker
+        Desktop is a macOS/Windows app and does not exist on Linux. The
+        founder's own report: "Production Gateway", a Linux VPS, told to
+        start an app that isn't there. Reported live in Configure ▸ Hardware
+        / relayed verbatim to the person by an agent over Telegram."""
+        cases = {
+            "darwin": "Docker isn't running on this machine. Start Docker Desktop, then retry.",
+            "macos": "Docker isn't running on this machine. Start Docker Desktop, then retry.",
+            "win32": "Docker isn't running on this machine. Start Docker Desktop, then retry.",
+            "windows": "Docker isn't running on this machine. Start Docker Desktop, then retry.",
+            "linux": (
+                "Docker isn't running on this machine. Start the Docker service "
+                "(for example, `sudo systemctl start docker`), then retry."
+            ),
+        }
+        for platform, expected in cases.items():
+            with self.subTest(platform=platform):
+                message = gateway_reason_messages.gateway_reason_message(
+                    "gateway_capability_missing",
+                    capability_id="shell.execute",
+                    service_statuses={"docker": "offline"},
+                    platform=platform,
+                )
+                self.assertEqual(message, expected)
+                # Never named on Linux — that's the whole defect.
+                if platform == "linux":
+                    self.assertNotIn("Desktop", message)
+
+    def test_capability_missing_docker_message_with_no_platform_evidence_names_no_app(self) -> None:
+        """Omitting platform is not the same mistake as guessing wrong —
+        it degrades to the honest, platform-neutral sentence rather than
+        asserting "Desktop" on a box that might be a headless Linux VPS."""
+        message = gateway_reason_messages.gateway_reason_message(
+            "gateway_capability_missing",
+            capability_id="shell.execute",
+            service_statuses={"docker": "offline"},
+        )
+        self.assertEqual(message, "Docker isn't running on this machine. Start Docker, then retry.")
+        self.assertNotIn("Desktop", message)
+
+    def test_capability_not_ready_docker_message_names_no_app_on_any_platform(self) -> None:
+        """The "still starting up, wait" message never names an app at all
+        — platform evidence has nothing to change here, on any platform."""
+        for platform in ("darwin", "linux", "win32", None):
+            with self.subTest(platform=platform):
+                message = gateway_reason_messages.gateway_reason_message(
+                    "gateway_capability_not_ready",
+                    capability_id="shell.execute",
+                    # "degraded" is a real _DOCKER_CONFIRMED_NOT_READY_STATUSES
+                    # member — this drives the Docker-specific "starting up"
+                    # branch, not the generic capability-not-ready fallback.
+                    service_statuses={"docker": "degraded"},
+                    platform=platform,
+                )
+                self.assertIn("Wait a moment", message)
+                self.assertIn("Docker is starting up", message)
+                self.assertNotIn("Desktop", message)
 
     def test_capability_missing_with_docker_status_unknown_never_blames_docker(self) -> None:
         # "unknown" is not evidence of anything — the gateway hasn't

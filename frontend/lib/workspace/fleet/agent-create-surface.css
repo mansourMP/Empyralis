@@ -743,6 +743,13 @@
   color: var(--text-muted);
 }
 
+/* An offline machine is still selectable (it may reconnect before the
+   agent's first turn), so this is the one honest line rather than a
+   disabled control — never an alarm tone, just the fact. */
+.agent-create-note--warning {
+  color: var(--warning-text);
+}
+
 /* ── Foot ─────────────────────────────────────────────────────────────────
    THE LAST RULE IN THE CARD, and it is now drawn ONLY where a rule is doing a
    rule's job. The founder's instruction was "remove any horizontal rule that

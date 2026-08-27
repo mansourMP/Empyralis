@@ -142,9 +142,17 @@ class ExecutionBlockedConnectionStatusTests(unittest.TestCase):
         session = self._online_session(
             {"requested": ["shell.execute", "filesystem.read_write"], "ready": ["shell.execute", "filesystem.read_write"], "blocked": []}
         )
-        with patch(
-            "server_modules.gateway_state_repository.get_latest_gateway_session",
-            return_value=session,
+        with (
+            patch(
+                "server_modules.gateway_state_repository.get_latest_gateway_session",
+                return_value=session,
+            ),
+            # A DB-fresh heartbeat alone is no longer enough to read "online"
+            # — the picker/turn-time mismatch fix demotes to "offline" unless
+            # this same-process backend is actually holding a live socket for
+            # this gateway_id right now. This test is about capability
+            # readiness, not connectivity, so it asserts a genuinely live box.
+            patch("server_modules.gateway_protocol_service.gateway_connection_is_live", return_value=True),
         ):
             payload = gateway_registry_service.gateway_registration_public_payload(
                 self._online_registration()
@@ -160,9 +168,15 @@ class ExecutionBlockedConnectionStatusTests(unittest.TestCase):
         from server_modules import gateway_registry_service
 
         session = self._online_session(None)
-        with patch(
-            "server_modules.gateway_state_repository.get_latest_gateway_session",
-            return_value=session,
+        with (
+            patch(
+                "server_modules.gateway_state_repository.get_latest_gateway_session",
+                return_value=session,
+            ),
+            # See test_online_box_with_ready_shell_execute_stays_online's own
+            # comment — connectivity is a separate fact from capability
+            # readiness, and this test is only about the latter.
+            patch("server_modules.gateway_protocol_service.gateway_connection_is_live", return_value=True),
         ):
             payload = gateway_registry_service.gateway_registration_public_payload(
                 self._online_registration()
@@ -348,6 +362,114 @@ class FleetWideServiceReadinessTests(unittest.TestCase):
             payload = gateway_registry_service.gateway_registration_public_payload(registration)
         self.assertTrue(payload["service_readiness"]["docker"]["ready"])
 
+
+
+class StaleSnapshotVsLiveSocketConnectionStatusTests(unittest.TestCase):
+    """The picker/turn-time mismatch, reported live: Configure ▸ Hardware
+    read "Production Gateway ... online" while the SAME gateway, asked to
+    run a tool moments later, reported itself offline. Two readers, two
+    different sources — connection_status here was computed purely from
+    gateway_sessions/gateway_registrations rows (a DB snapshot, refreshed
+    only on a connect/heartbeat frame), while the dispatch gate
+    (skills_service._resolve_direct_tool_gateway_id) checks
+    gateway_protocol_service.gateway_connection_is_live — a pure in-process
+    check of whether THIS backend currently holds a live WebSocket object
+    for that gateway_id. A hard backend restart wipes the live map to empty
+    instantly while a box's last-known-good heartbeat sits in the DB, fresh,
+    for up to DEFAULT_GATEWAY_FRESH_HEARTBEAT_SECONDS (45s) — exactly the
+    window this closes, demote-only, same shape as the execution_blocked
+    check directly above it in gateway_registry_service.py."""
+
+    @staticmethod
+    def _fresh_online_session():
+        from datetime import datetime, timezone
+
+        return {
+            "session_id": "session-1",
+            "status": "connected",
+            "last_heartbeat_at": datetime.now(timezone.utc).isoformat(),
+            "metadata": {},
+        }
+
+    @staticmethod
+    def _registration():
+        return {
+            "gateway_id": "gateway-production-1",
+            "device_id": "device-1",
+            "tenant_id": "tenant-1",
+            "workspace_id": "workspace-1",
+            "user_id": "user-1",
+            "status": "active",
+            "device_trust_state": "verified",
+            "metadata": {},
+            "capabilities": [],
+        }
+
+    def test_db_fresh_heartbeat_with_no_live_socket_reads_offline_not_online(self) -> None:
+        """The exact founder scenario: a DB-fresh "connected" session row,
+        but this process holds no live connection for that gateway_id —
+        the honest answer is offline, not the stronger "online" claim the
+        picker made live."""
+        from unittest.mock import patch
+
+        from server_modules import gateway_registry_service
+
+        with (
+            patch(
+                "server_modules.gateway_state_repository.get_latest_gateway_session",
+                return_value=self._fresh_online_session(),
+            ),
+            patch("server_modules.gateway_protocol_service.gateway_connection_is_live", return_value=False),
+        ):
+            payload = gateway_registry_service.gateway_registration_public_payload(self._registration())
+        self.assertEqual(payload["connection_status"], "offline")
+
+    def test_db_fresh_heartbeat_with_a_real_live_socket_stays_online(self) -> None:
+        """The two readers now agree in the ordinary case too — a genuinely
+        connected box (DB-fresh AND a real in-process socket) still reads
+        online, so this is a demotion, never a new false negative."""
+        from unittest.mock import patch
+
+        from server_modules import gateway_registry_service
+
+        with (
+            patch(
+                "server_modules.gateway_state_repository.get_latest_gateway_session",
+                return_value=self._fresh_online_session(),
+            ),
+            patch("server_modules.gateway_protocol_service.gateway_connection_is_live", return_value=True),
+        ):
+            payload = gateway_registry_service.gateway_registration_public_payload(self._registration())
+        self.assertEqual(payload["connection_status"], "online")
+
+    def test_the_live_check_is_only_consulted_when_the_db_snapshot_says_online(self) -> None:
+        """A box the DB already knows is degraded/reconnecting/revoked/
+        offline must not have that honest, more urgent reason overwritten by
+        this check — gateway_connection_is_live is never even called for a
+        non-"online" starting point (mirrors execution_blocked's own
+        "only demotes an otherwise-online box" invariant one block above)."""
+        from unittest.mock import patch
+
+        from server_modules import gateway_registry_service
+
+        stale_session = {
+            "session_id": "session-1",
+            "status": "connected",
+            # far older than DEFAULT_GATEWAY_FRESH_HEARTBEAT_SECONDS (45s) —
+            # this alone already computes "degraded", never "online".
+            "last_heartbeat_at": "2020-01-01T00:00:00+00:00",
+            "metadata": {},
+        }
+        with (
+            patch(
+                "server_modules.gateway_state_repository.get_latest_gateway_session",
+                return_value=stale_session,
+            ),
+            patch("server_modules.gateway_protocol_service.gateway_connection_is_live") as live_check,
+        ):
+            payload = gateway_registry_service.gateway_registration_public_payload(self._registration())
+        self.assertEqual(payload["connection_status"], "degraded")
+        live_check.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()

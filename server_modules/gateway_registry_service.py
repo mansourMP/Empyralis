@@ -128,6 +128,51 @@ def _gateway_connection_payload(registration: Dict[str, Any]) -> Dict[str, Any]:
         # agent on.
         if blocked_capabilities & {"shell.execute", "filesystem.read_write"}:
             connection_status = "execution_blocked"
+    # THE STORED SNAPSHOT VS. THE LIVE SOCKET. Everything above this line is
+    # computed from gateway_sessions/gateway_registrations rows -- a DB
+    # snapshot, refreshed only when a connect/heartbeat frame was last
+    # processed. It answers "when did we last hear from this box", not "can
+    # a tool call reach it right now". Those are the SAME two facts CLAUDE.md
+    # already warns about for a gateway-published health snapshot: it "goes
+    # stale the moment the gateway itself goes offline and keeps asserting
+    # whatever it last said... a reader must check the gateway is online
+    # FIRST or it can paint 'Connected' over a machine that's down."
+    #
+    # Found live: the Hardware picker read "online" (a recent, DB-fresh
+    # heartbeat -- up to DEFAULT_GATEWAY_FRESH_HEARTBEAT_SECONDS/45s old)
+    # while the SAME gateway_id, asked to run a tool moments later, reported
+    # itself offline. The two readers were never disagreeing about the same
+    # fact -- skills_service._resolve_direct_tool_gateway_id's dispatch gate
+    # is gateway_protocol_service.gateway_connection_is_live(gateway_id), a
+    # PURE IN-PROCESS check of whether this backend is currently holding a
+    # live WebSocket object for this gateway -- no DB read at all. A hard
+    # backend restart (pm2 restart, a crash) wipes that in-memory map to
+    # empty instantly while leaving the box's last-known-good heartbeat
+    # sitting in the DB, fresh, for up to another 45s -- exactly the window
+    # the founder hit. Production runs uvicorn with no --workers (server.py's
+    # uvicorn.run has no workers= at all, i.e. one process), so this
+    # in-process check IS authoritative for "can I dispatch right now" in
+    # this deployment, and it costs nothing to consult here: both modules
+    # already run in the same process, this is a plain function call, not an
+    # RPC.
+    #
+    # DEMOTE-ONLY, same shape as execution_blocked directly above: this can
+    # only ever pull a box DOWN from "online" to "offline", never the other
+    # way -- degraded/reconnecting/revoked/execution_blocked already carry a
+    # more urgent, honest reason, and folding a second fact in there would
+    # obscure which one is true. A genuinely tiny window exists where this
+    # can read "offline" for a box mid-handshake (touch_gateway_session's DB
+    # write lands microseconds before _register_live_connection does, both
+    # inside the same request) -- an unavoidable ordering cost of checking
+    # the truer signal, and immeasurably smaller than the up-to-45-second
+    # stale-"online" window this closes.
+    if connection_status == "online":
+        from server_modules import gateway_protocol_service as _gateway_protocol_service
+
+        if not _gateway_protocol_service.gateway_connection_is_live(
+            str(registration.get("gateway_id") or "").strip()
+        ):
+            connection_status = "offline"
     # Same staleness gap as capability_readiness above, same fix: the
     # gateway's passive service_inventory (Docker, Ollama, the CLIs, GPU,
     # ...) is reported on every heartbeat tick but gateway_protocol_
