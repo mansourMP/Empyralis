@@ -178,14 +178,40 @@ function resolvePlatformStartCommand(
   commandExists: (command: string) => string | null,
 ): PlatformStartCommand | null {
   if (platform === "darwin") {
-    // Launches the Docker Desktop app bundle by macOS's registered
-    // application name — the same mechanism a user double-clicking it in
-    // Finder/Spotlight triggers. Does not require the app to already be
-    // running; does require it to be INSTALLED (see the not_installed
-    // handling below, which is keyed off the `docker` CLI rather than this
-    // command, since `open -a` failing is ambiguous between "no such app"
-    // and "already running").
-    return { command: "open", args: ["-a", "Docker"], description: "Docker Desktop" };
+    // MACOS NEVER LAUNCHES DOCKER. Founder's decision, 2026-08-26, after
+    // watching Docker Desktop open itself on his own laptop when he had
+    // merely opened his app: *"this agent thing, the menu application must
+    // be running without Docker… Docker is shit, it should be removed."*
+    //
+    // This used to `open -a Docker`, which is why the app appeared
+    // unbidden and then began downloading an update. On a personal Mac that
+    // is a heavyweight GUI application hijacking the machine to buy an
+    // optimisation the customer never asked for — and it is only ever an
+    // OPTIMISATION, because the 2026-08-22 ruling already guarantees a host
+    // run when the sandbox is unavailable. Nothing breaks by not starting
+    // it; the command simply runs on the computer instead.
+    //
+    // Returning null here means `ensureDockerReady` reports
+    // `unsupported_platform`, `ensureDockerAvailable` reports not-ready, and
+    // `resolveRun` falls through to the host path that already exists and is
+    // already labelled honestly to the customer. Docker that is ALREADY
+    // running is still used — `probeDockerInfo` runs before this and returns
+    // `already_ready` — so someone who wants the sandbox just leaves Docker
+    // open. What is removed is the DEPENDENCY, not the capability.
+    //
+    // STATE THE CONSEQUENCE, do not soften it: on a Mac with Docker closed,
+    // an agent's commands now run directly on that Mac. What still
+    // constrains them is shell/command-policy.ts — the hard-blocked command
+    // list and the protected paths (vault, ~/.ssh, ~/.gnupg, /etc/empyralis,
+    // the agent's own state dir) — which is checked in EVERY mode, before
+    // the isolation decision, and is not bypassable. The founder was told
+    // this trade-off explicitly and chose it twice.
+    //
+    // Linux is UNCHANGED: `systemctl start docker` starts a background
+    // daemon nobody sees, on a box whose whole purpose is to run the agent.
+    // The objection was to a GUI app taking over a personal computer, and
+    // that objection does not transfer to a VPS.
+    return null;
   }
   if (platform === "linux") {
     if (!commandExists("systemctl")) {

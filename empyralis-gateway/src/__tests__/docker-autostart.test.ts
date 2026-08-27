@@ -64,7 +64,12 @@ function fakeRunCommand(options: {
 function deps(overrides: Partial<EnsureDockerReadyDeps> & { calls?: FakeCall[] } = {}): EnsureDockerReadyDeps {
   const { calls, ...rest } = overrides;
   return {
-    platform: "darwin",
+    // LINUX is the default here since 2026-08-26, because macOS no longer
+    // starts Docker at all (founder's decision — see resolvePlatformStartCommand).
+    // The start MECHANISM still exists and is still worth testing; Linux is
+    // where it now lives. macOS's own guarantee — that nothing is ever
+    // launched — has its own explicit tests at the bottom of this file.
+    platform: "linux",
     commandExists: (command: string) => (command === "docker" ? "/usr/local/bin/docker" : `/usr/bin/${command}`),
     runCommand: fakeRunCommand({ calls: calls ?? [] }),
     sleep: INSTANT_SLEEP,
@@ -120,8 +125,8 @@ test("start command fails (nonzero exit): reports start_command_failed with the 
   assert.match(outcome.detail, /Unable to find application named "Docker"/);
   // one readiness probe, one start attempt (open -a Docker) — no poll
   // attempts, since the start command itself failed.
-  const openCalls = calls.filter((c) => c.command === "open");
-  assert.equal(openCalls.length, 1);
+  const startCalls = calls.filter((c) => c.command === "systemctl");
+  assert.equal(startCalls.length, 1);
 });
 
 test("start command times out: reports start_command_failed naming the timeout, not a silent hang", async () => {
@@ -218,16 +223,16 @@ test("cooldown: a second call while still within the window does not spawn anoth
 
   const first = await ensureDockerReady(sharedDeps);
   assert.equal(first.kind, "start_timed_out");
-  const openCallsAfterFirst = calls.filter((c) => c.command === "open").length;
-  assert.equal(openCallsAfterFirst, 1);
+  const startCallsAfterFirst = calls.filter((c) => c.command === "systemctl").length;
+  assert.equal(startCallsAfterFirst, 1);
 
   clock += 1_000; // still well inside the cooldown window
   const second = await ensureDockerReady(sharedDeps);
   assert.equal(second.kind, "cooldown");
   if (second.kind !== "cooldown") throw new Error("unreachable");
   assert.equal(second.previous.kind, "start_timed_out");
-  const openCallsAfterSecond = calls.filter((c) => c.command === "open").length;
-  assert.equal(openCallsAfterSecond, 1, "cooldown must not trigger a second start command");
+  const startCallsAfterSecond = calls.filter((c) => c.command === "systemctl").length;
+  assert.equal(startCallsAfterSecond, 1, "cooldown must not trigger a second start command");
 });
 
 test("cooldown: once the window elapses, the next call attempts a fresh start", async () => {
@@ -243,8 +248,8 @@ test("cooldown: once the window elapses, the next call attempts a fresh start", 
   clock += 120_000; // comfortably past the cooldown window
   const outcome = await ensureDockerReady(sharedDeps);
   assert.equal(outcome.kind, "start_timed_out");
-  const openCalls = calls.filter((c) => c.command === "open").length;
-  assert.equal(openCalls, 2, "a fresh window must allow a fresh start attempt");
+  const startCalls = calls.filter((c) => c.command === "systemctl").length;
+  assert.equal(startCalls, 2, "a fresh window must allow a fresh start attempt");
 });
 
 // ── Single-flight: concurrent callers share one in-flight attempt ──
@@ -259,8 +264,8 @@ test("single-flight: two concurrent calls while an attempt is running share the 
   const [a, b] = await Promise.all([ensureDockerReady(sharedDeps), ensureDockerReady(sharedDeps)]);
   assert.deepEqual(a, { kind: "started" });
   assert.deepEqual(b, { kind: "started" });
-  const openCalls = calls.filter((c) => c.command === "open").length;
-  assert.equal(openCalls, 1, "concurrent callers must share one in-flight attempt");
+  const startCalls = calls.filter((c) => c.command === "systemctl").length;
+  assert.equal(startCalls, 1, "concurrent callers must share one in-flight attempt");
 });
 
 // ── A successful start invalidates the passive inventory cache ──
@@ -317,4 +322,75 @@ test("describeDockerAutostartOutcome on cooldown surfaces the previous outcome's
   const message = describeDockerAutostartOutcome(outcome);
   assert.match(message, /permission denied/);
   assert.match(message, /retry in about 13s/);
+});
+
+// ── macOS NEVER LAUNCHES DOCKER ──────────────────────────────────────────
+//
+// Founder's decision, 2026-08-26, after Docker Desktop opened itself on his
+// own laptop when he had merely opened his app: "the menu application must be
+// running without Docker… it should be removed."
+//
+// These are the tests that fail if `open -a Docker` is ever put back. They
+// assert the two halves separately, because only together do they mean
+// "the dependency is gone but the capability is not":
+//   1. nothing is EVER spawned on darwin, and
+//   2. Docker that is already running is still used.
+
+test("macOS never starts Docker: no process is spawned, whatever the state", async () => {
+  const calls: FakeCall[] = [];
+  const outcome = await ensureDockerReady({
+    platform: "darwin",
+    commandExists: (command: string) =>
+      command === "docker" ? "/usr/local/bin/docker" : `/usr/bin/${command}`,
+    // Docker is installed but NOT responding — the exact case that used to
+    // trigger `open -a Docker` and take over the machine.
+    runCommand: fakeRunCommand({ readyAfterDockerInfoCalls: 999, calls }),
+    sleep: INSTANT_SLEEP,
+    now: () => 0,
+  });
+
+  assert.equal(outcome.kind, "unsupported_platform");
+  const started = calls.filter((c) => c.command === "open");
+  assert.equal(
+    started.length,
+    0,
+    "macOS must never run `open -a Docker` — a GUI app taking over a personal computer was the whole complaint",
+  );
+});
+
+test("macOS still USES Docker when it is already running — the dependency is removed, not the capability", async () => {
+  const calls: FakeCall[] = [];
+  const outcome = await ensureDockerReady({
+    platform: "darwin",
+    commandExists: (command: string) =>
+      command === "docker" ? "/usr/local/bin/docker" : `/usr/bin/${command}`,
+    runCommand: fakeRunCommand({ readyAfterDockerInfoCalls: 0, calls }),
+    sleep: INSTANT_SLEEP,
+    now: () => 0,
+  });
+
+  assert.deepEqual(
+    outcome,
+    { kind: "already_ready" },
+    "someone who wants the sandbox just leaves Docker open, and it is used exactly as before",
+  );
+  assert.equal(calls.filter((c) => c.command === "open").length, 0);
+});
+
+test("Linux is UNCHANGED — a headless daemon on a box that exists to run the agent is not the complaint", async () => {
+  const calls: FakeCall[] = [];
+  const outcome = await ensureDockerReady({
+    platform: "linux",
+    commandExists: (command: string) =>
+      command === "docker" ? "/usr/local/bin/docker" : `/usr/bin/${command}`,
+    runCommand: fakeRunCommand({ readyAfterDockerInfoCalls: 1, calls }),
+    sleep: INSTANT_SLEEP,
+    now: () => 0,
+  });
+
+  assert.equal(outcome.kind, "started");
+  assert.ok(
+    calls.some((c) => c.command === "systemctl" && c.args.join(" ") === "start docker"),
+    "Linux still starts the docker service",
+  );
 });
