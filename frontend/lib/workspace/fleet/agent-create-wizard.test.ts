@@ -33,6 +33,16 @@
  *    live, still-editable screen one press away — the rule is "no Back to a
  *    screen that can no longer change anything", not "no Back after the
  *    commit". Both halves asserted separately.
+ * 5. "the head's exit defers rather than cancels [...] once the agent is
+ *    saved" and "closing AFTER the commit opens the agent". REVERSED,
+ *    2026-08-27, PART B: `created` alone is no longer enough to say
+ *    "defer"/"open_agent" — a real agent nobody can message yet must not be
+ *    silently opened OR silently left behind. `dismiss` now also takes
+ *    `reachable` (STICKY — see agent-create-wizard.ts's header) and reads
+ *    Cancel, not Finish-later, until a channel has actually connected;
+ *    pressing it asks (`confirm_delete`) rather than acting on its own.
+ *    Asserted below for both the created-and-reachable case (unchanged) and
+ *    the created-but-not-yet-reachable case (new).
  */
 
 import { readFileSync } from "node:fs";
@@ -77,6 +87,13 @@ function state(patch: Partial<AgentCreateWizardState> = {}): AgentCreateWizardSt
     channelsKnown: false,
     connectedChannelCount: 0,
     connectedAppCount: 0,
+    // Defaults to the conservative case — nothing has ever connected. Every
+    // block below that means to describe a REAL Apps-step state (only
+    // reachable once Channels' own forward-block has already cleared, see
+    // Part A) sets this explicitly, so the fixture never invents an
+    // impossible combination — CLAUDE.md: "a fixture that invents its own
+    // input cannot notice the real input is shaped differently."
+    reachable: false,
     ...patch,
   };
 }
@@ -205,7 +222,7 @@ assert(agentCreateStepIsPostCommit("apps"), "apps operates on a real agent");
   );
 
   const none = planAgentCreateFooter(
-    state({ step: "channels", created: true, channelsKnown: true, connectedChannelCount: 0 }),
+    state({ step: "channels", created: true, channelsKnown: true, connectedChannelCount: 0, reachable: false }),
   );
   assert(
     none.forward.disabled,
@@ -224,17 +241,27 @@ assert(agentCreateStepIsPostCommit("apps"), "apps operates on a real agent");
     none.blockedReason.split(/[.!?]\s/).filter((part) => part.trim()).length <= 2,
     "at most two short sentences — a professional tool labels, it does not lecture",
   );
+  // INVERTED, 2026-08-27, PART B (see this file's header (5)). Was: "the
+  // head's exit defers rather than cancels — the agent is saved and its
+  // page carries the same step forward." That silently opened a real,
+  // permanently unreachable agent — the founder's own complaint. Pressing
+  // dismiss here is still always one press (REQUIRED IS NOT CAGED, above);
+  // what it does now is ask, never open the agent on its own.
   assert(
-    none.dismiss.kind === "defer",
-    "the head's exit defers rather than cancels — the agent is saved and its page carries the same step forward",
+    none.dismiss.kind === "cancel",
+    "with nothing connected, the head's exit still reads Cancel — pressing it must ask before an unreachable agent is left behind, never silently open it",
   );
 
   const some = planAgentCreateFooter(
-    state({ step: "channels", created: true, channelsKnown: true, connectedChannelCount: 1 }),
+    state({ step: "channels", created: true, channelsKnown: true, connectedChannelCount: 1, reachable: true }),
   );
   assert(some.forward.label === "Next", "one real connected channel earns the ordinary forward word");
   assert(some.blockedReason === "", "and nothing is left to explain");
   assert(some.forward.action === "next", "channels is not the last step — it advances, it does not finish");
+  assert(
+    some.dismiss.kind === "defer",
+    "once a channel is actually connected, the exit goes back to deferring — leaving strands nothing now",
+  );
 }
 
 // ── Footer: apps — the same one-press rule, and NOTHING to explain ────────
@@ -244,7 +271,10 @@ assert(agentCreateStepIsPostCommit("apps"), "apps operates on a real agent");
 // agent with no apps just cannot open Notion yet, which is not.
 
 {
-  const none = planAgentCreateFooter(state({ step: "apps", created: true, connectedAppCount: 0 }));
+  // `reachable: true` throughout — real reachability by the time Apps is
+  // ever shown, since Part A's own forward-block on Channels guarantees
+  // nobody arrives here without a channel already connected.
+  const none = planAgentCreateFooter(state({ step: "apps", created: true, connectedAppCount: 0, reachable: true }));
   assert(!none.forward.disabled, "apps moves in one press too");
   // "Do it later", not "Skip" — founder, 2026-08-26: *"'do it later' is much
   // better."* Skipping sounds like the step is thrown away; the agent's Apps
@@ -274,33 +304,58 @@ assert(agentCreateStepIsPostCommit("apps"), "apps operates on a real agent");
     "and it is a Back, never a Cancel — there is nothing left to cancel",
   );
 
-  const some = planAgentCreateFooter(state({ step: "apps", created: true, connectedAppCount: 1 }));
+  const some = planAgentCreateFooter(
+    state({ step: "apps", created: true, connectedAppCount: 1, reachable: true }),
+  );
   assert(some.forward.label === "Finish", "one real connected app earns the word Finish");
 
-  const busy = planAgentCreateFooter(state({ step: "apps", created: true, busy: true }));
+  const busy = planAgentCreateFooter(state({ step: "apps", created: true, busy: true, reachable: true }));
   assert(busy.back?.disabled === true, "and the Back is not walkable mid-flight");
 }
 
-// ── Nothing claims to cancel something that already happened ──────────────
+// ── Nothing claims to cancel something that already happened —
+//    but nothing silently opens or strands one either ─────────────────────
 
 {
   for (const step of ALL_STEPS) {
     const created = agentCreateStepIsPostCommit(step);
-    const plan = planAgentCreateFooter(state({ step, created }));
     if (created) {
-      assert(plan.dismiss.kind === "defer", `step "${step}" is post-commit, so dismissing defers rather than cancels`);
+      // Once a channel has actually connected, this is unchanged: the exit
+      // defers, and never labels itself a cancel — there is nothing left to
+      // cancel, and nothing to strand by leaving.
+      const reachablePlan = planAgentCreateFooter(state({ step, created, reachable: true }));
       assert(
-        !/cancel|discard|close/i.test(plan.dismiss.label),
-        `step "${step}" never labels its dismiss control as a cancel — the agent exists`,
+        reachablePlan.dismiss.kind === "defer",
+        `step "${step}", reachable, is post-commit, so dismissing defers rather than cancels`,
       );
       assert(
-        plan.back === null || plan.back.action !== "cancel",
-        `step "${step}" offers no Cancel in the footer either`,
+        !/cancel|discard|close/i.test(reachablePlan.dismiss.label),
+        `step "${step}", reachable, never labels its dismiss control as a cancel — the agent exists and can be reached`,
+      );
+      assert(
+        reachablePlan.back === null || reachablePlan.back.action !== "cancel",
+        `step "${step}", reachable, offers no Cancel in the footer either`,
+      );
+      assert(reachablePlan.dismiss.label.trim().length > 0, `step "${step}", reachable, always names its dismiss control`);
+
+      // NEW, PART B — while nothing has EVER connected, the exit still
+      // reads Cancel even though the agent already exists, because pressing
+      // it must ask rather than silently open (or silently keep) an agent
+      // nobody can message.
+      const unreachablePlan = planAgentCreateFooter(state({ step, created, reachable: false }));
+      assert(
+        unreachablePlan.dismiss.kind === "cancel",
+        `step "${step}", unreachable, still reads Cancel — leaving must not silently strand an agent nobody can message`,
+      );
+      assert(
+        unreachablePlan.dismiss.label.trim().length > 0,
+        `step "${step}", unreachable, always names its dismiss control`,
       );
     } else {
+      const plan = planAgentCreateFooter(state({ step, created }));
       assert(plan.dismiss.kind === "cancel", `step "${step}" precedes the commit, so dismissing genuinely discards`);
+      assert(plan.dismiss.label.trim().length > 0, `step "${step}" always names its dismiss control`);
     }
-    assert(plan.dismiss.label.trim().length > 0, `step "${step}" always names its dismiss control`);
   }
 }
 
@@ -309,10 +364,12 @@ assert(agentCreateStepIsPostCommit("apps"), "apps operates on a real agent");
 {
   for (const step of ALL_STEPS) {
     const created = agentCreateStepIsPostCommit(step);
-    const open = planAgentCreateFooter(state({ step, created, channelsKnown: true, connectedChannelCount: 1 }));
+    const open = planAgentCreateFooter(
+      state({ step, created, channelsKnown: true, connectedChannelCount: 1, reachable: true }),
+    );
     assert(open.forward.accent, `step "${step}" spends the accent on the move that is actually available`);
     const blocked = planAgentCreateFooter(
-      state({ step, created, busy: true, channelsKnown: true, connectedChannelCount: 0 }),
+      state({ step, created, busy: true, channelsKnown: true, connectedChannelCount: 0, reachable: false }),
     );
     assert(!blocked.forward.accent, `step "${step}" drops the fill the moment the move is unavailable`);
     assert(blocked.forward.label.trim().length > 0, `step "${step}" still names it — losing the fill is not going dark`);
@@ -348,10 +405,26 @@ assert(agentCreateStepStatus("channels", "apps") === "done", "and the newly spli
 
 // ── Closing is honest about what already happened ─────────────────────────
 
-assert(agentCreateCloseIntent(false) === "discard", "closing before the commit discards — nothing exists");
 assert(
-  agentCreateCloseIntent(true) === "open_agent",
-  "closing AFTER the commit opens the agent — 'I stopped early' is not 'nothing happened'",
+  agentCreateCloseIntent(false, false) === "discard",
+  "closing before the commit discards — nothing exists",
+);
+assert(
+  agentCreateCloseIntent(false, true) === "discard",
+  "reachability means nothing before anything has been created",
+);
+assert(
+  agentCreateCloseIntent(true, true) === "open_agent",
+  "closing AFTER the commit, once reachable, opens the agent — 'I stopped early' is not 'nothing happened'",
+);
+// INVERTED, 2026-08-27, PART B (see this file's header (5)). Was:
+// `agentCreateCloseIntent(true) === "open_agent"` unconditionally — that
+// silently opened a real agent nobody could message yet, which is the
+// founder's own complaint: *"Agents cannot exist if they have no way to
+// receive any message."*
+assert(
+  agentCreateCloseIntent(true, false) === "confirm_delete",
+  "closing AFTER the commit but BEFORE a channel ever connects asks first — an unreachable agent may not be left behind silently",
 );
 
 assert(agentCreateSurfaceTitle(false, "Ridge") === "New agent", "before the commit the surface is still 'New agent'");
