@@ -1019,17 +1019,16 @@ class RuntimeRunsApiCanonicalRouteTests(unittest.TestCase):
             runtime_runs_api.thread_service.list_threads = original_list_threads
             runtime_runs_api.thread_service.get_thread = original_get_thread
 
-    def _non_privileged_current_user(self, *, user_id="member-1", email="member@example.com"):
-        # MAN-368: a real, non-admin, non-api_key workspace owner viewing
-        # their own agent's Work tab in a browser — the exact caller shape
-        # the owner_user_id-scoping bug affected. `is_admin` False and
-        # `auth_type` "bearer" (never "api_key") is what makes
-        # _current_user_is_privileged return False here; the module-level
+    def _non_privileged_current_user(self, *, user_id, email=None):
+        # A real, non-admin, non-api_key workspace member in a browser — the
+        # caller shape both MAN-368 routes gate on. is_admin False and
+        # auth_type "bearer" (never "api_key") is what makes
+        # _current_user_is_privileged return False; the module-level
         # ORION_ADMIN_USER_IDS/ORION_ADMIN_EMAILS allowlists are empty by
-        # default, so this user_id/email never gets swept in by accident.
+        # default, so these never get swept in by accident.
         return {
             "user_id": user_id,
-            "email": email,
+            "email": email or f"{user_id}@example.com",
             "auth_type": "bearer",
             "role": "owner",
             "is_admin": False,
@@ -1055,57 +1054,104 @@ class RuntimeRunsApiCanonicalRouteTests(unittest.TestCase):
             },
         }
 
-    def test_list_threads_agent_scoped_ignores_viewer_owner_filter(self):
-        # MAN-368 repro: a real channel-originated conversation (Telegram/
-        # WhatsApp/etc.) is durably stored with owner_user_id "sage" — see
-        # agent_turn_runtime_service.py's ensure_master_thread call, which
-        # falls back to that literal because there is no current_user on a
-        # channel turn. Before the fix, a non-privileged, non-admin
-        # workspace owner viewing THEIR OWN agent's Work tab
-        # (GET /threads?agent_id=...) got owner_user_id filtered to their
-        # own browser session's user_id, which never matches "sage" — so
-        # the query always returned zero rows despite a real, billed
-        # conversation existing. This is why the agent's own detail page
-        # said "No conversations yet" while the Agents grid card for the
-        # very same agent showed real recent activity.
-        captured_calls = []
+    # MAN-368 fixture set. Three real agent_threads shapes, exactly as
+    # production writes them:
+    #   - a SPECIALIST's channel thread: owner_user_id is the literal "sage"
+    #     (agent_turn_runtime_service's `actor_user_id or "sage"` — a channel
+    #     turn has no current_user), master_agent_install_id = the specialist.
+    #   - TWO per-person MASTER (Ask AI) threads, one each for member A and
+    #     member B. agent_registry_api.py builds one per member via
+    #     build_master_thread_id(workspace_id, owner_user_id) and stamps the
+    #     master install's own id into master_agent_install_id — so a Sage
+    #     thread carries that column SET, which is exactly why it cannot be
+    #     used as the specialist discriminator.
+    _MAN368_ROWS = [
+        {
+            "id": "thread_agent_ainstall_grove",
+            "owner_user_id": "sage",
+            "master_agent_install_id": "ainstall_grove",
+            "channel": "telegram",
+            "title": "Telegram conversation",
+        },
+        {
+            "id": "master_thread_member_a",
+            "owner_user_id": "member-a",
+            "master_agent_install_id": "ainstall_master",
+            "channel": "web",
+            "title": "Member A's Ask AI",
+        },
+        {
+            "id": "master_thread_member_b",
+            "owner_user_id": "member-b",
+            "master_agent_install_id": "ainstall_master",
+            "channel": "web",
+            "title": "Member B's Ask AI",
+        },
+    ]
+
+    @staticmethod
+    def _man368_row(row, *, tenant_id="default", workspace_id="default"):
+        return {
+            "id": row["id"],
+            "tenant_id": tenant_id,
+            "workspace_id": workspace_id,
+            "owner_user_id": row["owner_user_id"],
+            "master_agent_install_id": row["master_agent_install_id"],
+            "channel": row["channel"],
+            "title": row["title"],
+            "status": "active",
+            "metadata": {},
+            "created_at": "2026-08-27T00:00:00Z",
+            "updated_at": "2026-08-27T00:00:00Z",
+            "last_turn_at": "2026-08-27T00:00:00Z",
+            "turns": [],
+        }
+
+    @staticmethod
+    def _man368_install_bundles():
+        """The REAL agent_kind discriminator's data source.
+
+        Patched at agent_registry_repository.get_workspace_agent_install_bundle
+        — the function agent_reachability_service.lookup_agent_install_bundle
+        actually calls — so these tests drive the real
+        agent_install_is_specialist/_agent_kind_of logic rather than stubbing
+        the decision itself out. "ainstall_ghost" is deliberately absent, to
+        exercise the fail-closed unresolvable branch.
+        """
+        bundles = {
+            "ainstall_grove": {"id": "ainstall_grove", "agent_kind": "specialist"},
+            "ainstall_master": {"id": "ainstall_master", "agent_kind": "master"},
+        }
+
+        async def _fake_bundle(agent_id, *, tenant_id=None, workspace_id=None):
+            return bundles.get(str(agent_id or "").strip())
+
+        return _fake_bundle
+
+    def _run_man368_list(self, *, agent_id, current_user):
+        """Drive the real GET /threads handler against the fixture rows.
+
+        The fake list_threads mirrors control_plane_repository's OWN WHERE
+        clause (equality on owner_user_id when set, equality on
+        master_agent_install_id when set), so what these tests assert is the
+        filtering the database would really do.
+        """
+        captured = {}
 
         async def _fake_list_threads(
-            *,
-            workspace_id,
-            tenant_id=None,
-            owner_user_id=None,
-            active_agent_install_id=None,
-            include_turns=False,
-            limit=50,
+            *, workspace_id, tenant_id=None, owner_user_id=None,
+            active_agent_install_id=None, include_turns=False, limit=50,
         ):
-            captured_calls.append(
-                {
-                    "owner_user_id": owner_user_id,
-                    "active_agent_install_id": active_agent_install_id,
-                }
-            )
-            if owner_user_id and owner_user_id != "sage":
-                return []
-            if active_agent_install_id and active_agent_install_id != "ainstall_grove":
-                return []
-            return [
-                {
-                    "id": "thread_agent_ainstall_grove",
-                    "tenant_id": tenant_id or "default",
-                    "workspace_id": workspace_id,
-                    "owner_user_id": "sage",
-                    "master_agent_install_id": "ainstall_grove",
-                    "channel": "telegram",
-                    "title": "Telegram conversation",
-                    "status": "active",
-                    "metadata": {},
-                    "created_at": "2026-08-27T00:00:00Z",
-                    "updated_at": "2026-08-27T00:00:00Z",
-                    "last_turn_at": "2026-08-27T00:00:00Z",
-                    "turns": [],
-                }
-            ]
+            captured["owner_user_id"] = owner_user_id
+            captured["active_agent_install_id"] = active_agent_install_id
+            out = []
+            for row in self._MAN368_ROWS:
+                if owner_user_id and row["owner_user_id"] != owner_user_id:
+                    continue
+                if active_agent_install_id and row["master_agent_install_id"] != active_agent_install_id:
+                    continue
+                out.append(self._man368_row(row, tenant_id=tenant_id or "default", workspace_id=workspace_id))
+            return out
 
         fake_server = types.ModuleType("server")
         fake_server.require_api_key = object()
@@ -1121,7 +1167,7 @@ class RuntimeRunsApiCanonicalRouteTests(unittest.TestCase):
         original_refresh = runtime_runs_api._refresh_server_exports
         original_list_threads = runtime_runs_api.thread_service.list_threads
         try:
-            runtime_runs_api.runtime_route_registration_service.register_runtime_run_routes_from_api = lambda *args, **kwargs: None
+            runtime_runs_api.runtime_route_registration_service.register_runtime_run_routes_from_api = lambda *a, **k: None
             runtime_runs_api._refresh_server_exports = lambda: fake_server
             runtime_runs_api.thread_service.list_threads = _fake_list_threads
 
@@ -1130,25 +1176,21 @@ class RuntimeRunsApiCanonicalRouteTests(unittest.TestCase):
             list_handler = app.routes[("GET", "/threads")]
 
             with unittest.mock.patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=self._man368_install_bundles(),
+            ), unittest.mock.patch(
                 "server_modules.runtime_runs_api.entitlements_service.workspace_entitlement_payload_for_workspace_id",
                 return_value={"capabilities": {"history_window_days": 7}},
             ), unittest.mock.patch(
                 "server_modules.runtime_runs_api._utc_now",
-                return_value=runtime_runs_api.datetime(2026, 8, 27, tzinfo=runtime_runs_api.timezone.utc),
+                return_value=runtime_runs_api.datetime(2026, 8, 27, 12, tzinfo=runtime_runs_api.timezone.utc),
             ):
-                agent_scoped = self._run_async(
+                payload = self._run_async(
                     list_handler(
                         workspace_id="default",
-                        agent_id="ainstall_grove",
+                        agent_id=agent_id,
                         include_turns=False,
-                        current_user=self._non_privileged_current_user(),
-                    )
-                )
-                personal = self._run_async(
-                    list_handler(
-                        workspace_id="default",
-                        include_turns=False,
-                        current_user=self._non_privileged_current_user(),
+                        current_user=current_user,
                     )
                 )
         finally:
@@ -1159,58 +1201,14 @@ class RuntimeRunsApiCanonicalRouteTests(unittest.TestCase):
                 sys.modules["server"] = previous_server
             else:
                 sys.modules.pop("server", None)
+        return payload, captured
 
-        # The real bug: an agent-scoped request from an ordinary owner must
-        # see the channel conversation, and the call underneath must not be
-        # filtered by the viewer's own user_id.
-        self.assertEqual([item["id"] for item in agent_scoped["items"]], ["thread_agent_ainstall_grove"])
-        self.assertIsNone(captured_calls[0]["owner_user_id"])
-        self.assertEqual(captured_calls[0]["active_agent_install_id"], "ainstall_grove")
-        # The personal (agent_id-less) request — Sage's own Ask AI console —
-        # keeps its privacy scoping exactly as before: filtered to the
-        # viewer's own user_id, so it (correctly) finds nothing here.
-        self.assertEqual(personal["items"], [])
-        self.assertEqual(captured_calls[1]["owner_user_id"], "member-1")
-        self.assertIsNone(captured_calls[1]["active_agent_install_id"])
-
-    def test_get_thread_specialist_thread_ignores_owner_scoping(self):
-        # Same root cause as the list test above, at the single-thread route
-        # ProfileFilesSection.tsx uses for the agent's own "Files" pane.
-        records = {
-            "thread_agent_ainstall_grove": {
-                "id": "thread_agent_ainstall_grove",
-                "tenant_id": "default",
-                "workspace_id": "default",
-                "owner_user_id": "sage",
-                "master_agent_install_id": "ainstall_grove",
-                "channel": "telegram",
-                "title": "Telegram conversation",
-                "status": "active",
-                "metadata": {},
-                "created_at": "2026-08-27T00:00:00Z",
-                "updated_at": "2026-08-27T00:00:00Z",
-                "last_turn_at": "2026-08-27T00:00:00Z",
-                "turns": [],
-            },
-            "sage-personal-thread": {
-                "id": "sage-personal-thread",
-                "tenant_id": "default",
-                "workspace_id": "default",
-                "owner_user_id": "someone-else",
-                "master_agent_install_id": None,
-                "channel": "web",
-                "title": "Someone else's Sage chat",
-                "status": "active",
-                "metadata": {},
-                "created_at": "2026-08-27T00:00:00Z",
-                "updated_at": "2026-08-27T00:00:00Z",
-                "last_turn_at": "2026-08-27T00:00:00Z",
-                "turns": [],
-            },
-        }
-
-        async def _fake_get_thread(thread_id, *, tenant_id, workspace_id, include_turns=True):
-            return records.get(thread_id)
+    def _run_man368_detail(self, *, thread_id, current_user):
+        async def _fake_get_thread(tid, *, tenant_id, workspace_id, include_turns=True):
+            for row in self._MAN368_ROWS:
+                if row["id"] == tid:
+                    return self._man368_row(row, tenant_id=tenant_id, workspace_id=workspace_id)
+            return None
 
         fake_server = types.ModuleType("server")
         fake_server.require_api_key = object()
@@ -1226,7 +1224,7 @@ class RuntimeRunsApiCanonicalRouteTests(unittest.TestCase):
         original_refresh = runtime_runs_api._refresh_server_exports
         original_get_thread = runtime_runs_api.thread_service.get_thread
         try:
-            runtime_runs_api.runtime_route_registration_service.register_runtime_run_routes_from_api = lambda *args, **kwargs: None
+            runtime_runs_api.runtime_route_registration_service.register_runtime_run_routes_from_api = lambda *a, **k: None
             runtime_runs_api._refresh_server_exports = lambda: fake_server
             runtime_runs_api.thread_service.get_thread = _fake_get_thread
 
@@ -1235,32 +1233,19 @@ class RuntimeRunsApiCanonicalRouteTests(unittest.TestCase):
             detail_handler = app.routes[("GET", "/threads/{thread_id}")]
 
             with unittest.mock.patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=self._man368_install_bundles(),
+            ), unittest.mock.patch(
                 "server_modules.runtime_runs_api.entitlements_service.workspace_entitlement_payload_for_workspace_id",
                 return_value={"capabilities": {"history_window_days": 7}},
             ), unittest.mock.patch(
                 "server_modules.runtime_runs_api._utc_now",
-                return_value=runtime_runs_api.datetime(2026, 8, 27, tzinfo=runtime_runs_api.timezone.utc),
+                return_value=runtime_runs_api.datetime(2026, 8, 27, 12, tzinfo=runtime_runs_api.timezone.utc),
             ):
-                # A specialist's own channel thread is reachable by any
-                # workspace owner with viewer access — it is not personal
-                # to whichever browser session created the record's
-                # owner_user_id="sage" stamp.
-                specialist_thread = self._run_async(
-                    detail_handler(
-                        "thread_agent_ainstall_grove",
-                        current_user=self._non_privileged_current_user(),
-                    )
-                )
-                # Sage's own personal thread (no master_agent_install_id)
-                # keeps its privacy: a different member 404s, exactly as
-                # before this fix.
-                with self.assertRaises(HTTPException) as exc:
-                    self._run_async(
-                        detail_handler(
-                            "sage-personal-thread",
-                            current_user=self._non_privileged_current_user(),
-                        )
-                    )
+                try:
+                    return self._run_async(detail_handler(thread_id, current_user=current_user)), None
+                except HTTPException as exc:
+                    return None, exc
         finally:
             runtime_runs_api.runtime_route_registration_service.register_runtime_run_routes_from_api = original_register
             runtime_runs_api._refresh_server_exports = original_refresh
@@ -1270,8 +1255,86 @@ class RuntimeRunsApiCanonicalRouteTests(unittest.TestCase):
             else:
                 sys.modules.pop("server", None)
 
-        self.assertEqual(specialist_thread["id"], "thread_agent_ainstall_grove")
-        self.assertEqual(exc.exception.status_code, 404)
+    def test_list_threads_specialist_agent_ignores_viewer_owner_filter(self):
+        # MAN-368 repro. A specialist's channel conversation is stored with
+        # owner_user_id "sage", so filtering by the VIEWER's own user_id
+        # returned zero rows for every non-privileged workspace member —
+        # "No conversations yet" beside an Agents card showing real, billed
+        # activity for the same agent.
+        payload, captured = self._run_man368_list(
+            agent_id="ainstall_grove",
+            current_user=self._non_privileged_current_user(user_id="member-a"),
+        )
+        self.assertEqual([i["id"] for i in payload["items"]], ["thread_agent_ainstall_grove"])
+        self.assertIsNone(
+            captured["owner_user_id"],
+            "a SPECIALIST's work stream must not be filtered by the viewing person's own user id",
+        )
+        self.assertEqual(captured["active_agent_install_id"], "ainstall_grove")
+
+    def test_list_threads_master_agent_never_leaks_another_members_ask_ai(self):
+        # THE NEGATIVE THAT MUST NOT REGRESS. Sage's threads are PER PERSON
+        # and carry master_agent_install_id SET, so an exemption keyed on
+        # "an agent_id was requested" — or on "master_agent_install_id is
+        # set" — hands any member who passes the master install id every
+        # other member's private Ask AI history. That id is readable: MAN-201
+        # deliberately returns the master install to ordinary members from
+        # GET /fleet/agents, and that was only safe BECAUSE this filter
+        # existed. "Conversations are private. Work is shared."
+        payload, captured = self._run_man368_list(
+            agent_id="ainstall_master",
+            current_user=self._non_privileged_current_user(user_id="member-a"),
+        )
+        ids = [i["id"] for i in payload["items"]]
+        self.assertNotIn(
+            "master_thread_member_b", ids,
+            "member A must NEVER receive member B's private Ask AI thread",
+        )
+        self.assertEqual(ids, ["master_thread_member_a"])
+        self.assertEqual(
+            captured["owner_user_id"], "member-a",
+            "the per-person owner filter must SURVIVE for the workspace master",
+        )
+
+    def test_list_threads_unresolvable_agent_fails_closed(self):
+        # An install that cannot be resolved at all is not provably a
+        # specialist, so the per-person filter STAYS rather than being
+        # dropped on an unknown.
+        _payload, captured = self._run_man368_list(
+            agent_id="ainstall_ghost",
+            current_user=self._non_privileged_current_user(user_id="member-a"),
+        )
+        self.assertEqual(captured["owner_user_id"], "member-a")
+
+    def test_get_thread_specialist_thread_ignores_owner_scoping(self):
+        # Same fix at the single-thread route ProfileFilesSection.tsx reads.
+        record, exc = self._run_man368_detail(
+            thread_id="thread_agent_ainstall_grove",
+            current_user=self._non_privileged_current_user(user_id="member-a"),
+        )
+        self.assertIsNone(exc)
+        self.assertEqual(record["id"], "thread_agent_ainstall_grove")
+
+    def test_get_thread_master_thread_of_another_member_is_refused(self):
+        # The detail-route half of the leak: a Sage thread has
+        # master_agent_install_id SET, so keying the exemption on that column
+        # skipped the owner check for exactly the threads needing it most.
+        record, exc = self._run_man368_detail(
+            thread_id="master_thread_member_b",
+            current_user=self._non_privileged_current_user(user_id="member-a"),
+        )
+        self.assertIsNone(record, "member B's private Ask AI thread must not be returned to member A")
+        self.assertIsNotNone(exc)
+        self.assertEqual(exc.status_code, 404)
+
+    def test_get_thread_own_master_thread_still_reachable(self):
+        # …and the fix must not take a member's OWN Ask AI history away.
+        record, exc = self._run_man368_detail(
+            thread_id="master_thread_member_a",
+            current_user=self._non_privileged_current_user(user_id="member-a"),
+        )
+        self.assertIsNone(exc)
+        self.assertEqual(record["id"], "master_thread_member_a")
 
     def test_create_thread_turn_route_persists_user_turn(self):
         fake_server = types.ModuleType("server")

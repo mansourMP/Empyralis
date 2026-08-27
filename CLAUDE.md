@@ -9408,11 +9408,50 @@ Telegram/WhatsApp turn), so an ordinary workspace owner's real `user_id`
 never matched, and the query returned zero rows for every non-privileged
 viewer, on every channel-bound agent, forever — "No conversations yet"
 beside an Agents-grid card showing real, billed activity for the same agent.
-Fixed by skipping the `owner_user_id` filter whenever an `agent_id` is
-requested (list route) or whenever the resolved thread carries a
-`master_agent_install_id` (single-thread route) — that column already
-bounds the request to one agent, and Sage's own threads never carry a
-non-empty one, so this cannot leak Sage's private history.
+**THE FIRST FIX FOR THIS WAS A PRIVACY LEAK, and its own safety claim was
+false — the correction is the part worth reading.** That fix dropped the
+`owner_user_id` filter whenever an `agent_id` was requested (list) or
+whenever the thread carried a `master_agent_install_id` (detail), on the
+written grounds that *"Sage's own threads never carry a non-empty one."*
+
+```
+CLAIMED   a Sage thread has master_agent_install_id NULL
+ACTUAL    agent_registry_api.py builds ONE SAGE THREAD PER MEMBER —
+            build_master_thread_id(workspace_id, owner_user_id)
+            owner_user_id = current_user["user_id"]
+            master_agent_install_id = the master install's own id   ← SET
+          and list_agent_threads maps active_agent_install_id straight onto
+          that column. So `GET /threads?agent_id=<master install id>` from
+          any member returned EVERY OTHER MEMBER'S PRIVATE ASK AI HISTORY.
+```
+
+Fully reachable, not theoretical: the MAN-201 entry above records that the
+workspace master install IS returned to ordinary members by
+`GET /fleet/agents` — and says that exposure was only safe BECAUSE
+"/threads is already scoped server-side by `owner_user_id`", i.e. the exact
+filter that fix removed. Measured against the leaky build: member A asking
+for the master install id got `['master_thread_member_a',
+'master_thread_member_b']`.
+
+**The discriminator is `agent_kind`, and nothing else will do.**
+`agent_reachability_service.agent_install_is_specialist` (shared by both
+routes) resolves the install and answers True ONLY for a provable
+non-master; a master keeps its per-person filter, and an UNRESOLVABLE
+install keeps it too (fail closed — never drop a privacy filter on an
+unknown). An empty `agent_kind` resolves to specialist, which is the
+codebase's own settled convention (`COALESCE(ad.agent_kind, 'specialist')`)
+and safe because the master is the one install that always writes its kind
+explicitly.
+
+**This is the SAME shape as MAN-201's own rule, and it was re-broken
+anyway:** *"Keyed on `agent_kind == 'master'`, NEVER on an empty
+`project_id`… that negative is asserted directly, because every other
+assertion in that file passes under the naive fix too."* Both statements
+were true here word for word — all three original specialist tests passed
+happily under the leaky version. **A permission exemption needs a test that
+fails when the exemption is too WIDE**, or it only ever proves the feature
+works. The negative now asserted: member B has a private Sage thread,
+member A requests the master install id, and gets zero of B's rows.
 
 **MAN-370 verdict: NOT a shared root cause, and NOT a data bug at all.**
 Two real, live layouts existed on the same Agents page: the intended
