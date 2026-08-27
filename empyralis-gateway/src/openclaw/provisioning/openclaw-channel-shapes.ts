@@ -748,3 +748,59 @@ export function resolveOpenClawChannelToolFlags(
 
   return { disable, findings };
 }
+
+/**
+ * Every channel id the schema-audit / plugin-hook / tool-flag discovery
+ * passes must scan (MAN-367).
+ *
+ * THE GAP THIS CLOSES
+ * -------------------
+ * `auditOpenClawChannelShapes`, `resolveOpenClawPluginHookFlags` and
+ * `resolveOpenClawChannelToolFlags` all take a `channelIds` list and were
+ * built, tested and wired against exactly one source of it: the curated
+ * `plan.channels` (the ~20-27 channels this codebase authors a
+ * `EmpyralisChannelPolicy` for). That was every channel plugin that existed
+ * when tool-flag discovery shipped.
+ *
+ * The REGISTRY (ClawHub) channel-plugin install path shipped later and is a
+ * second way for a channel's plugin to land on a box — `ensureRegistryPluginsInstalled`
+ * (./openclaw-plugin-install.ts) resolves a channel id ONLY AFTER install,
+ * because a third-party plugin's channel id is not knowable in advance
+ * (`OpenClawRegistryPluginState.revealedChannelIds`). Nothing threaded those
+ * revealed ids into the `channelIds` passed to the three functions above, so
+ * a ClawHub-installed channel's `channels.<id>.tools.*` node — the exact
+ * per-channel tool surface `resolveOpenClawChannelToolFlags`'s own docstring
+ * says the global `tools.*` lockdown does not reach — was never discovered
+ * and never forced off, on any run, forever (the curated list never grows to
+ * include a registry channel; there is no "next run picks it up").
+ *
+ * Of the 112 community ClawHub plugins the derived manifest carries as of
+ * this writing, 44 (39%) are flagged `scan_status: "suspicious"` by
+ * OpenClaw's own trust scanner — installing one is a real, sanctioned
+ * product action (`POST .../openclaw/gateways/{id}/provision` with
+ * `install_plugins`, "member" role) even though nothing in the frontend
+ * calls it today. This function is the fix: union the curated ids with every
+ * id a registry install revealed this run, so the SAME discovery this
+ * codebase already trusts for Feishu et al. runs against a ClawHub-sourced
+ * channel too. `auditOpenClawChannelShapes` is safe to widen this way
+ * without new false refusals — it silently `continue`s past any channelId
+ * absent from `OPENCLAW_CHANNEL_POLICY_SHAPES`, which every registry channel
+ * is, so it gains no new failure mode; the tool/hook flag functions have no
+ * such gate and discover generically from the live schema, which is exactly
+ * the coverage that was missing.
+ *
+ * Deliberately NOT a trust filter and does not touch which plugins may be
+ * installed or listed — that catalog is intentionally uncurated
+ * (`test_community_plugins_are_carried_not_filtered_out`, the founder's own
+ * "whatever OpenClaw offers as a channel, Empyralis offers" rule). This only
+ * makes the tool-authority lockdown this codebase already claims to run
+ * actually reach every channel that lands on the box, curated or not.
+ */
+export function schemaAuditChannelIds(
+  planChannelIds: readonly string[],
+  registryStates: readonly { revealedChannelIds: readonly string[] }[],
+): string[] {
+  return [
+    ...new Set([...planChannelIds, ...registryStates.flatMap((state) => state.revealedChannelIds)]),
+  ];
+}

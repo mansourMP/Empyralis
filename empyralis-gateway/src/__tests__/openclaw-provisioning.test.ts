@@ -19,6 +19,7 @@ import {
   resolveOpenClawChannelKeySupport,
   resolveOpenClawChannelToolFlags,
   resolveOpenClawPluginHookFlags,
+  schemaAuditChannelIds,
   type OpenClawChannelKeySupport,
 } from "../openclaw/provisioning/openclaw-channel-shapes";
 import {
@@ -2355,6 +2356,58 @@ test("plugin install: a channel tool surface we cannot switch off REFUSES the wh
   assert.equal(result.status, "refused");
   assert.equal(result.refusal?.code, "openclaw_channel_shape_drift");
   assert.match(result.refusal?.detail ?? "", /unhandled_channel_tool/);
+});
+
+test("MAN-367: a registry (ClawHub) install's revealed channels are scanned for tool authority too", () => {
+  // The gap: `auditOpenClawChannelShapes` / `resolveOpenClawPluginHookFlags` /
+  // `resolveOpenClawChannelToolFlags` were wired against ONLY the curated
+  // `plan.channels` ids. A channel a registry (ClawHub) plugin install
+  // reveals — `OpenClawRegistryPluginState.revealedChannelIds`, resolved
+  // AFTER install because a third-party plugin's channel id is unknowable in
+  // advance — never reached them, so a community plugin's own
+  // `channels.<id>.tools.*` surface (the exact thing the global `tools.*`
+  // lockdown does not reach — see the Feishu test above) was never
+  // discovered and never forced off, on any run, for any registry-installed
+  // channel, ever.
+  const planIds = ["feishu", "line"];
+  const registryStates = [
+    { revealedChannelIds: ["agentchat"] },
+    { revealedChannelIds: ["line", "bricks"] }, // "line" overlaps a curated id
+    { revealedChannelIds: [] as string[] },
+  ];
+
+  const merged = schemaAuditChannelIds(planIds, registryStates);
+  assert.deepEqual(new Set(merged), new Set(["feishu", "line", "agentchat", "bricks"]));
+  // No duplicate "line" from the overlap.
+  assert.equal(merged.filter((id) => id === "line").length, 1);
+
+  // No registry installs this run: identical to the curated list, in order.
+  assert.deepEqual(schemaAuditChannelIds(planIds, []), planIds);
+
+  // The merged set is what actually closes the gap: a community plugin's own
+  // tools node is discovered and forced off exactly like Feishu's is.
+  const schema = {
+    properties: {
+      channels: {
+        properties: {
+          feishu: { properties: {} },
+          // "agentchat" is not one of the curated channels at all — it only
+          // exists on the box because a registry install revealed it.
+          agentchat: {
+            properties: { tools: { properties: { sendAsAgent: { type: "boolean" } } } },
+          },
+        },
+      },
+    },
+  };
+  const withoutTheFix = resolveOpenClawChannelToolFlags(schema, planIds);
+  assert.deepEqual(withoutTheFix.disable, [], "the curated-only list must not see agentchat's tools");
+
+  const withTheFix = resolveOpenClawChannelToolFlags(
+    schema,
+    schemaAuditChannelIds(planIds, [{ revealedChannelIds: ["agentchat"] }]),
+  );
+  assert.deepEqual(withTheFix.disable, [{ channelId: "agentchat", flag: "sendAsAgent" }]);
 });
 
 test("the profile state dir is locked to 0700 on EVERY run, not just at creation", async () => {
