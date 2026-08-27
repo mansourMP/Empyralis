@@ -183,9 +183,15 @@ assert(agentCreateStepIsPostCommit("apps"), "apps operates on a real agent");
 
 // ── Footer: channels — skippable in ONE press, honest in the LABEL ────────
 //
-// INVERTED from "the channel step is REQUIRED". See this file's header (2):
-// the brief makes this step skippable, so the guarantee that an unreachable
-// agent is never called finished moved into the button's word.
+// RE-INVERTED 2026-08-26 back to "the channel step is REQUIRED", on the
+// founder's own instruction, restated twice: "you cannot have an agent
+// without channel… it's not optional." These assertions are deliberately
+// kept rather than deleted — they are now what FAILS if a skippable channel
+// step is reintroduced, which is this repo's standing discipline for a
+// reversed decision.
+//
+// The constraint the skippable version existed to protect is still tested
+// below: `dismiss` is never blocked, so REQUIRED never becomes CAGED.
 
 {
   const unknown = planAgentCreateFooter(state({ step: "channels", created: true, channelsKnown: false }));
@@ -193,7 +199,6 @@ assert(agentCreateStepIsPostCommit("apps"), "apps operates on a real agent");
     unknown.back === null,
     "no Back from Channels — the step behind it is the committed, saved Brain",
   );
-  assert(!unknown.forward.disabled, "channels always moves in one press — skipping is one action, not a fight");
   assert(
     unknown.blockedReason === "",
     "and it SAYS NOTHING while unknown — 'not asked yet' may never be reported as 'nothing connected'",
@@ -202,10 +207,17 @@ assert(agentCreateStepIsPostCommit("apps"), "apps operates on a real agent");
   const none = planAgentCreateFooter(
     state({ step: "channels", created: true, channelsKnown: true, connectedChannelCount: 0 }),
   );
-  assert(!none.forward.disabled, "nothing is connected, and the way on is still one press");
   assert(
-    /skip/i.test(none.forward.label) && !/next|finish/i.test(none.forward.label),
-    'a step that connected nothing is never "Next"ed past — the button says Skip, which is what it does',
+    none.forward.disabled,
+    "a channel is REQUIRED — the forward button does not move until one connects",
+  );
+  assert(
+    !/skip/i.test(none.forward.label),
+    'and it never offers to "Skip" what cannot be skipped — chat left the platform, so a channel is the only way anyone reaches this agent',
+  );
+  assert(
+    !none.dismiss.disabled,
+    "REQUIRED IS NOT CAGED — the exit is always one press, which is the whole reason the block was once removed",
   );
   assert(none.blockedReason.trim().length > 0, "and the one fact about what stays undone is stated");
   assert(
@@ -234,9 +246,17 @@ assert(agentCreateStepIsPostCommit("apps"), "apps operates on a real agent");
 {
   const none = planAgentCreateFooter(state({ step: "apps", created: true, connectedAppCount: 0 }));
   assert(!none.forward.disabled, "apps moves in one press too");
+  // "Do it later", not "Skip" — founder, 2026-08-26: *"'do it later' is much
+  // better."* Skipping sounds like the step is thrown away; the agent's Apps
+  // tab is one click away afterwards and the setup band carries it forward.
+  // Either way it must never claim completion it has not earned.
   assert(
-    /skip/i.test(none.forward.label) && !/finish/i.test(none.forward.label),
-    "nothing connected on this step, so the last button says Skip rather than claiming completion",
+    /later/i.test(none.forward.label) && !/finish/i.test(none.forward.label),
+    'nothing connected here, so the last button says "Do it later" rather than claiming completion',
+  );
+  assert(
+    !/skip/i.test(none.forward.label),
+    'and not "Skip" — the step is deferred, not discarded',
   );
   assert(
     none.blockedReason === "",

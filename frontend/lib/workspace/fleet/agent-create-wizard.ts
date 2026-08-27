@@ -11,10 +11,10 @@
  *        ▼  placement decides what step 2 may honestly offer
  *  2 Brain                  who pays ▸ provider ▸ model
  *        └── "Create agent" ──▶ the agent becomes real here
- *  3 Channels               how people reach it        optional
- *        └── "Next" / "Skip for now"
+ *  3 Channels               how people reach it        REQUIRED
+ *        └── "Next" — blocked until one connects
  *  4 Apps                   what it can reach          optional
- *        └── "Finish" / "Skip for now" ──▶ into the agent
+ *        └── "Finish" / "Do it later" ──▶ into the agent
  * ```
  *
  * **Placement is first because step 2 cannot be honest without it.** "Your
@@ -64,7 +64,21 @@
  * exactly what it says. The rule is not "no Back after the commit", it is
  * "no Back to a screen that can no longer change anything".
  *
- * ── "SKIP" AND "FINISH" ARE DIFFERENT WORDS FOR A REASON ─────────────────
+ * ── SUPERSEDED 2026-08-26: CHANNELS ARE REQUIRED AGAIN ───────────────────
+ *
+ * Everything in the section below describes a design that no longer ships.
+ * It is kept because it records WHY the block was removed, and that reason
+ * still constrains the current one — but its conclusion is dead. The founder
+ * overruled it, restating what he had already said on 2026-08-21: *"you
+ * cannot have a fucking agent without channel… it's not optional."* Channels
+ * now block the forward button; Apps say "Do it later".
+ *
+ * What survives from it is the constraint, not the verdict: the objection
+ * was to a sequence that TRAPS you, and that is still honoured — `dismiss`
+ * is never blocked, so leaving is always one press and lands you in the
+ * agent. Required is not the same as caged.
+ *
+ * ── (historical) "SKIP" AND "FINISH" ARE DIFFERENT WORDS FOR A REASON ────
  *
  * An earlier pass BLOCKED the forward button until a channel connected, on
  * the founder's own words that day (*"channels cannot be skipped, because
@@ -257,33 +271,66 @@ export function planAgentCreateFooter(state: AgentCreateWizardState): AgentCreat
   }
 
   if (step === "channels") {
-    // Always movable in one press — see this file's header on why the block
-    // was removed and the LABEL carries the honesty instead.
+    // A CHANNEL IS REQUIRED. Founder, 2026-08-26, restating what he had
+    // already said on 2026-08-21: *"you cannot have a fucking agent without
+    // channel — how do you expect customers to speak with their agents
+    // without channel? So it's not optional."*
+    //
+    // This REVERSES the "Skip for now" behaviour documented in this file's
+    // header, and the reversal is deliberate rather than a regression: the
+    // header's compromise ("the button moves either way, the LABEL carries
+    // the honesty") was reached from a later brief that called both steps
+    // optional. He has now overruled that twice, and the reasoning is the
+    // product's own: chat left the platform, so a channel is the ONLY way a
+    // person reaches an agent. An agent with none is not a partly-configured
+    // agent, it is an unreachable one.
+    //
+    // WHY THIS DOES NOT TRAP ANYONE, which was the real objection behind the
+    // earlier removal: the FORWARD button is blocked, but `dismiss` is not.
+    // The agent already exists by this point (Brain committed it, because
+    // ChannelsTab needs a real agent id to attach to), so leaving is always
+    // possible in one press and lands you IN the agent, where its own setup
+    // band carries the unfinished channel forward. Blocking the forward path
+    // makes the sequence say "this is required"; leaving the exit open means
+    // it never becomes a cage.
     const reachable = connectedChannelCount > 0;
     return {
       // No Back: the only step behind this one is Brain, which is already
       // committed and saved. A Back that silently changed nothing is a lie.
       back: null,
-      forward: forwardButton(reachable ? "Next" : "Skip for now", "next", busy),
+      forward: forwardButton("Next", "next", busy || !reachable),
       dismiss,
-      // Stated ONLY once we actually know, and never as a block — it is not
-      // one. A person skipping a step deserves to know what stays undone;
-      // a person who has not been told anything yet deserves silence.
+      // Only once we actually know. "Nothing is connected" and "I have not
+      // asked yet" are different facts, so an unknown channel list says
+      // nothing rather than accusing the person of skipping something.
       blockedReason:
         channelsKnown && !reachable
-          ? "Nobody can reach this agent until a channel is connected. You can do it later."
+          ? "Pick how people will reach this agent. Telegram needs no computer."
           : "",
     };
   }
 
-  // Apps — the last step. Same one-press rule, and NO reason line: an agent
-  // with no apps connected is not a broken agent, so there is no fact here
-  // worth a sentence. A professional tool labels; it does not lecture.
+  // Apps — the last step, and the one that genuinely IS optional. Founder,
+  // 2026-08-26, drawing the line himself: *"this application connector is
+  // also something that could be skipped… 'do it later' is much better."*
+  //
+  // So the two steps are no longer treated alike, and that asymmetry is the
+  // point: an agent with no CHANNEL cannot be reached at all, while an agent
+  // with no APPS is simply an agent that has not been given extra reach yet.
+  // One is broken, the other is unfinished — and they should not share a
+  // word.
+  //
+  // "Do it later" rather than "Skip for now": skipping sounds like the step
+  // is being thrown away, when in fact the agent's own Apps tab is sitting
+  // one click away afterwards and the setup band carries it forward. NO
+  // reason line either — an agent with no apps is not broken, so there is no
+  // fact worth a sentence here. A professional tool labels; it does not
+  // lecture.
   return {
     // Channels is live and still editable one press back, so this Back does
     // exactly what it says — see this file's header.
     back: { label: "Back", action: "back", disabled: busy },
-    forward: forwardButton(connectedAppCount > 0 ? "Finish" : "Skip for now", "finish", busy),
+    forward: forwardButton(connectedAppCount > 0 ? "Finish" : "Do it later", "finish", busy),
     dismiss,
     blockedReason: "",
   };
