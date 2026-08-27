@@ -1,7 +1,19 @@
 import SwiftUI
+import UIKit
 
 /// Renders the same markdown subset the web app's `markdown-lite.tsx`
-/// supports, minus images (which come with the next pass).
+/// supports, INCLUDING images — see `.image` below and `DocumentImageView`.
+///
+/// IMAGES ARE A STANDALONE-LINE BLOCK, NOT AN INLINE RUN. The web renders
+/// `![alt](url)` inline (`markdown-lite.tsx`'s `renderInline`) because a
+/// browser's `<img>` can sit inside a `<p>`. SwiftUI's `Text` has no
+/// equivalent for an async-loaded image mixed into styled text, so an image
+/// that stands alone on its own line (the overwhelming real-world shape —
+/// this is how every markdown author/agent actually embeds a picture) is
+/// promoted to its own block, exactly like a heading or a rule. An image
+/// written mid-paragraph, mixed with other prose on the same line, is not
+/// specially handled and falls through to plain inline text — a narrower
+/// scope than the web, never a wider one.
 ///
 /// TABLES ARE STACKED, NOT GRIDDED. A markdown table has no width budget on
 /// a phone: three columns of prose either truncate to uselessness or force
@@ -110,6 +122,9 @@ struct MarkdownRenderer: View {
                 .fill(Theme.border(scheme))
                 .frame(height: 1)
                 .padding(.vertical, Space.x1)
+
+        case let .image(alt, url):
+            DocumentImageView(alt: alt, url: url)
         }
     }
 
@@ -205,6 +220,7 @@ enum MarkdownBlock: Equatable {
     case list(items: [MarkdownListItem], ordered: Bool)
     case table(header: [String], rows: [[String]])
     case rule
+    case image(alt: String, url: String)
 
     static func parse(_ markdown: String) -> [MarkdownBlock] {
         let lines = markdown
@@ -258,6 +274,18 @@ enum MarkdownBlock: Equatable {
             if let heading = matchHeading(trimmed) {
                 flushParagraph()
                 blocks.append(.heading(level: heading.0, text: heading.1))
+                index += 1
+                continue
+            }
+
+            // An image ALONE on its own line — see the file header for why
+            // this is a block and not an inline run. Checked before
+            // quote/table/list: none of those markers ("#", ">", "-", "*",
+            // "+", a digit, "|") can appear first on a line starting "![",
+            // so this can never shadow them.
+            if let image = matchImageOnly(trimmed) {
+                flushParagraph()
+                blocks.append(.image(alt: image.alt, url: image.url))
                 index += 1
                 continue
             }
@@ -321,6 +349,31 @@ enum MarkdownBlock: Equatable {
         }
         guard level > 0, rest.first == " " else { return nil }
         return (level, String(rest).trimmingCharacters(in: .whitespaces))
+    }
+
+    /// `![alt](url)`, and the WHOLE trimmed line — nothing before or after
+    /// it. Mirrors the web's own `IMAGE_RE = /^!\[([^\]]*)\]\(([^)\s]+)\)$/`
+    /// exactly: alt cannot contain `]`, url cannot contain `)` or
+    /// whitespace, and the match must reach the end of the line. Does NOT
+    /// apply the URL policy — that is `DocumentImageURLPolicy`'s job, run at
+    /// render/load time so a refused image still keeps its alt text as
+    /// data (parsing must never decide security).
+    private static func matchImageOnly(_ line: String) -> (alt: String, url: String)? {
+        guard line.hasPrefix("![") else { return nil }
+        let afterBang = line.index(line.startIndex, offsetBy: 2)
+        guard let closeBracket = line[afterBang...].firstIndex(of: "]") else { return nil }
+        let alt = String(line[afterBang..<closeBracket])
+
+        let afterBracket = line.index(after: closeBracket)
+        guard afterBracket < line.endIndex, line[afterBracket] == "(" else { return nil }
+        let urlStart = line.index(after: afterBracket)
+        guard let closeParen = line[urlStart...].firstIndex(of: ")") else { return nil }
+        let url = String(line[urlStart..<closeParen])
+        guard !url.isEmpty, !url.contains(where: { $0.isWhitespace }) else { return nil }
+
+        // The image must be the ENTIRE line — nothing trails the ")".
+        guard line.index(after: closeParen) == line.endIndex else { return nil }
+        return (alt, url)
     }
 
     private static func matchQuote(_ line: String) -> String? {
@@ -412,4 +465,204 @@ func matchTable(_ lines: [String], _ start: Int) -> MarkdownTableMatch? {
         index += 1
     }
     return MarkdownTableMatch(header: header, rows: rows, next: index)
+}
+
+// MARK: - Image URL policy
+
+/// Mirrors the web app's `safeMarkdownLiteImageSrc`
+/// (`frontend/lib/workspace/markdown-lite.tsx`) EXACTLY: same allowed
+/// schemes, same `.svg` refusal, same "clean control characters, trim, then
+/// decide" order. A URL the web would refuse must never render as an image
+/// here either — this policy is a SECURITY decision, not a feature gap, so
+/// do not widen it.
+///
+/// Deliberately NARROWER than the web on one point: the web also allows a
+/// same-origin relative path (`cleaned.startsWith("/")`), because a browser
+/// resolves that against the page's own origin. This app has no document
+/// base URL to resolve one against, so a relative path is refused rather
+/// than guessed at — narrowing, never widening, of the same policy.
+enum DocumentImageURLPolicy {
+    private static let allowedSchemes: Set<String> = ["http", "https"]
+
+    /// Strips characters browsers ignore when sniffing a scheme (tab,
+    /// newline, carriage return — "java\tscript:" is a classic filter-bypass
+    /// trick), then trims surrounding whitespace. Byte-for-byte the same
+    /// operation as the web's own `cleanUrl`.
+    static func clean(_ raw: String) -> String {
+        var cleaned = raw
+        cleaned.removeAll { $0 == "\t" || $0 == "\n" || $0 == "\r" }
+        return cleaned.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// True if `url`'s path — ignoring query and fragment — ends in `.svg`,
+    /// case-insensitively. An SVG is a program, not just a picture; see
+    /// CLAUDE.md's upload-policy note, which this mirrors: attachments are
+    /// served straight back from the workspace's own origin, so this
+    /// renderer must never give one a path to execute as an image.
+    /// Structurally identical to the web's own `hasSvgExtension`: split on
+    /// "#" first, then "?", and test only the remaining path.
+    static func hasSvgExtension(_ url: String) -> Bool {
+        let withoutFragment = url.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false).first
+            .map(String.init) ?? url
+        let path = withoutFragment.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first
+            .map(String.init) ?? withoutFragment
+        return path.lowercased().hasSuffix(".svg")
+    }
+
+    /// The URL to actually fetch, or nil if policy refuses it. Only an
+    /// absolute `http:`/`https:` URL with a real host is ever returned —
+    /// never `data:`, `javascript:`, a bare scheme-less string, or a `.svg`
+    /// path of any scheme.
+    static func resolvedImageURL(_ raw: String) -> URL? {
+        let cleaned = clean(raw)
+        guard !cleaned.isEmpty else { return nil }
+        guard !hasSvgExtension(cleaned) else { return nil }
+        guard let colonIndex = cleaned.firstIndex(of: ":") else { return nil }
+        let scheme = cleaned[cleaned.startIndex..<colonIndex]
+        guard let first = scheme.first, first.isLetter,
+              scheme.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "+" || $0 == "." || $0 == "-" })
+        else { return nil }
+        guard allowedSchemes.contains(scheme.lowercased()) else { return nil }
+        guard let url = URL(string: cleaned), let host = url.host, !host.isEmpty else { return nil }
+        return url
+    }
+}
+
+// MARK: - Image rendering
+
+/// One document image: loading, loaded, or failed — the outcome-honesty law
+/// applied to pictures. A silently blank space (the pre-existing defect —
+/// `![alt](url)` fell through to plain text with the picture simply gone)
+/// and a generically-blank "couldn't load" box are DIFFERENT lies; this view
+/// draws a real state for each of the three, and a refused-by-policy image
+/// (a `.svg`, or a non-http(s) scheme) is presented as its own distinct
+/// reason rather than folded into a network failure.
+///
+/// A CUSTOM loader, not `AsyncImage`: this view also has to answer "how big
+/// is this on screen" — a document image must shrink to fit the reading
+/// column on the smallest device but never be stretched past its own
+/// natural size to fill a wider one — and `AsyncImage`'s `.success` phase
+/// hands back an opaque SwiftUI `Image` with no size to read. Fetching into
+/// a `UIImage` first gives `.size` to constrain the frame against. Zero SPM
+/// dependencies either way: `URLSession` + `UIImage(data:)`, both already
+/// Foundation/UIKit.
+struct DocumentImageView: View {
+    let alt: String
+    let url: String
+    @Environment(\.colorScheme) private var scheme
+
+    private enum Phase {
+        case loading
+        case loaded(UIImage)
+        case failed(reason: String)
+    }
+
+    @State private var phase: Phase = .loading
+
+    var body: some View {
+        content
+            // Keyed on the url: if the same rendered view is ever reused for
+            // a different image (should not happen given block identity is
+            // the array offset, but this is the honest guard), the fetch
+            // restarts rather than showing the previous image's result.
+            .task(id: url) { await load() }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch phase {
+        case .loading:
+            placeholder {
+                HStack(spacing: Space.x2) {
+                    ProgressView()
+                        .tint(Theme.textMuted(scheme))
+                    Text("Loading image…")
+                        .font(.empSecondary)
+                        .foregroundStyle(Theme.textMuted(scheme))
+                }
+            }
+
+        case let .loaded(image):
+            // `.resizable()` + `.aspectRatio(.fit)` lets the image SHRINK to
+            // fit a narrower parent; capping `maxWidth`/`maxHeight` at the
+            // image's own natural size is what stops it being STRETCHED UP
+            // to fill a column wider than the picture itself. `image.size`
+            // is already in points (UIImage factors in `.scale`), so this
+            // is the same unit the parent's own layout works in.
+            Image(uiImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(maxWidth: image.size.width, maxHeight: image.size.height)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .clipShape(RoundedRectangle(cornerRadius: Radius.card, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Radius.card, style: .continuous)
+                        .stroke(Theme.border(scheme), lineWidth: 1)
+                )
+                .accessibilityLabel(alt.isEmpty ? "Image" : alt)
+
+        case let .failed(reason):
+            placeholder {
+                VStack(alignment: .leading, spacing: Space.x1) {
+                    HStack(spacing: Space.x2) {
+                        Image(systemName: "photo")
+                            .foregroundStyle(Theme.textMuted(scheme))
+                        Text(reason)
+                            .font(.empSecondary)
+                            .foregroundStyle(Theme.textSecondary(scheme))
+                    }
+                    // The alt text is what makes this a "something exists
+                    // here" state rather than a bare error box — never
+                    // rendered as nothing, per the outcome-honesty law.
+                    if !alt.isEmpty {
+                        Text(alt)
+                            .font(.empSecondary)
+                            .foregroundStyle(Theme.textMuted(scheme))
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func placeholder<Content: View>(@ViewBuilder _ inner: () -> Content) -> some View {
+        HStack {
+            inner()
+            Spacer(minLength: 0)
+        }
+        .padding(Space.x3)
+        .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+        .background(Theme.bgInset(scheme), in: RoundedRectangle(cornerRadius: Radius.card))
+        .overlay(
+            RoundedRectangle(cornerRadius: Radius.card, style: .continuous)
+                .stroke(Theme.border(scheme), lineWidth: 1)
+        )
+    }
+
+    /// Policy is checked FIRST, synchronously, before any network attempt —
+    /// a refused URL never makes a request, matching the web's own
+    /// sanitize-before-render order. A network/decode failure is reported
+    /// with a distinct sentence from a policy refusal, because they are
+    /// different facts: one is "this could not be shown to you", the other
+    /// is "this could not be reached."
+    private func load() async {
+        guard let resolvedURL = DocumentImageURLPolicy.resolvedImageURL(url) else {
+            phase = .failed(reason: "This image can't be shown")
+            return
+        }
+        do {
+            let (data, response) = try await URLSession.shared.data(from: resolvedURL)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                phase = .failed(reason: "Couldn't load this image")
+                return
+            }
+            guard let uiImage = UIImage(data: data) else {
+                phase = .failed(reason: "Couldn't load this image")
+                return
+            }
+            phase = .loaded(uiImage)
+        } catch {
+            phase = .failed(reason: "Couldn't load this image")
+        }
+    }
 }
