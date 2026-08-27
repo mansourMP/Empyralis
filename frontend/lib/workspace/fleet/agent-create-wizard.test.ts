@@ -241,8 +241,16 @@ assert(agentCreateStepIsPostCommit("apps"), "apps operates on a real agent");
   // type-errored AND passed vacuously — `undefined` is falsy, so it asserted
   // nothing at all while looking like the guarantee was covered. Exactly the
   // shape this repo warns about: a green test that checks nothing.
+  // Asserts the GUARANTEE, not one spelling of it. An earlier version pinned
+  // kind === "defer"; Part B then correctly made this case read "Cancel",
+  // because an agent nobody can reach yet must not be offered as something to
+  // "finish later". The invariant that matters is unchanged and is what is
+  // checked here: on the blocked step there is ALWAYS a labelled way out.
+  // AgentCreateDismissPlan is {kind, label} with no disabled field, so the
+  // exit cannot be removed without a type change that fails right here.
   assert(
-    none.dismiss.kind === "defer" && none.dismiss.label.trim().length > 0,
+    (none.dismiss.kind === "cancel" || none.dismiss.kind === "defer") &&
+      none.dismiss.label.trim().length > 0,
     "REQUIRED IS NOT CAGED — a labelled exit is always present on the blocked step",
   );
   assert(none.blockedReason.trim().length > 0, "and the one fact about what stays undone is stated");
