@@ -179,22 +179,34 @@ async def _send_one_chunk(
     *,
     reply_to_id: Optional[str] = None,
 ) -> bool:
-    """Send a single chunk — formatted first, plain-text on failure — with
-    bounded retry so a transient send failure (5xx / dropped socket) is retried
-    in-band instead of silently dropping the reply. Returns False only after all
-    attempts fail, so the caller can decline to ACK the webhook."""
-    formatted = transport.format_text(text)
+    """Send a single chunk, with bounded retry so a transient send failure
+    (5xx / dropped socket) is retried in-band instead of silently dropping
+    the reply. Returns False only after all attempts fail, so the caller
+    can decline to ACK the webhook.
 
-    async def _attempt_once() -> bool:
-        if formatted != text:
-            if await transport.send_message(formatted, reply_to_id=reply_to_id):
-                return True
-        # Plain-text fallback
-        return await transport.send_message(text, reply_to_id=reply_to_id)
+    `text` is passed to transport.send_message() UNCHANGED — raw,
+    unformatted — and EXACTLY ONCE per attempt. Formatting (and the
+    formatted-vs-plain-text fallback on a parse-mode rejection) is owned
+    entirely by the transport: every ChannelTransport.send_message()
+    implementation is documented as a self-contained "try this channel's
+    native markup, fall back to plain text on rejection" unit (see
+    TelegramHostedTransport.send_message / AgentBotTransport.send_message).
 
+    This function used to ALSO call transport.format_text(text) here and
+    hand the already-formatted string into send_message() — which then
+    formatted it a second time internally. Escaping/converting markup
+    twice is not idempotent (Telegram MarkdownV2 turned "\\(" into
+    "\\\\(" — an escaped backslash followed by a now-bare, unescaped
+    paren), so the doubly-formatted send was rejected by Telegram and the
+    transport's own fallback then delivered the ONCE-formatted text as
+    literal plain text: visible backslashes in front of every '.', '(',
+    ')', '!' the model wrote, in production, on the hosted Telegram bot.
+    Formatting now happens exactly once, entirely inside the transport —
+    do not reintroduce a pre-format call here.
+    """
     for attempt in range(1, _SEND_MAX_ATTEMPTS + 1):
         try:
-            if await _attempt_once():
+            if await transport.send_message(text, reply_to_id=reply_to_id):
                 return True
         except Exception as exc:
             _logger.warning(

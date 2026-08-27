@@ -440,7 +440,17 @@ async def _telegram_api(method: str, body: dict) -> dict:
 
 
 async def send_message(chat_id: str, text: str, *, reply_to_message_id: Optional[int] = None) -> dict:
-    """Send a message via Telegram with MarkdownV2 formatting."""
+    """Send a message via Telegram with HTML formatting.
+
+    HTML, not MarkdownV2 — see _to_telegram_html's own docstring for why.
+    This function still has NO fallback to plain text on a parse-mode
+    rejection (pre-existing gap, not introduced here); it is used only for
+    fixed, code-authored strings (pairing/welcome messages), never for raw
+    LLM output, which is why that gap has not bitten in practice. Anything
+    reachable by model-generated text goes through send_message_safe /
+    dispatch_sage_reply instead, both of which do have a plain-text
+    fallback.
+    """
     import re as _re
     import sys as _sys
     safe_text = str(text or '')
@@ -451,11 +461,11 @@ async def send_message(chat_id: str, text: str, *, reply_to_message_id: Optional
     safe_text = safe_text.strip()
     if not safe_text:
         safe_text = "[SILENT]"  # Suppressed — empty LLM output, agent handles naturally
-    formatted_text = _to_telegram_markdown(safe_text)
+    formatted_text = _to_telegram_html(safe_text)
     body: dict = {
         "chat_id": chat_id,
         "text": formatted_text,
-        "parse_mode": "MarkdownV2",
+        "parse_mode": "HTML",
     }
     if reply_to_message_id is not None:
         body["reply_to_message_id"] = reply_to_message_id
@@ -469,7 +479,29 @@ async def send_message(chat_id: str, text: str, *, reply_to_message_id: Optional
 
 
 def _to_telegram_markdown(text: str) -> str:
-    """Convert common markdown to Telegram MarkdownV2 format with proper escaping."""
+    """Convert common markdown to Telegram MarkdownV2 format with proper escaping.
+
+    NOT ON ANY LIVE SEND PATH as of 2026-08-27 — every Telegram surface in
+    this file and in hosted_bot_provisioning_service.py now formats via
+    _to_telegram_html (below) instead. MarkdownV2's escaping requirement —
+    every one of '_*[]()~`{}.!' must be backslash-escaped or Telegram
+    rejects the whole message — is exactly what produced a real, reported
+    bug: a caller (agent_reply_dispatcher._send_one_chunk) formatted the
+    text via transport.format_text(), then handed that ALREADY-ESCAPED
+    string into transport.send_message(), which formatted it AGAIN
+    internally. Escaping twice turned "\\(" into "\\\\(" (an escaped
+    backslash followed by a bare, now-unescaped paren) — invalid
+    MarkdownV2, so Telegram's parse-mode send was rejected and the
+    per-transport fallback delivered the ONCE-escaped text as literal
+    PLAIN TEXT: visible backslashes in front of every '.', '(', ')', '!'
+    the model wrote. HTML has no equivalent failure mode — only '&','<','>'
+    are ever escaped, so ordinary prose punctuation can never trigger a
+    parse-mode rejection in the first place, double-application included.
+    See MarkdownFormattingTests in test_telegram_hosted_reliability.py,
+    which still pins this function's own (still-correct-in-isolation)
+    output — kept rather than deleted, per this codebase's standing rule
+    against deleting a test that pins real, working behavior.
+    """
     import re as _re
     if not text:
         return text
@@ -540,6 +572,107 @@ def _to_telegram_markdown(text: str) -> str:
     return text
 
 
+def _to_telegram_html(text: str) -> str:
+    """Convert common markdown to Telegram HTML (parse_mode="HTML").
+
+    This is the live formatter for every Telegram send path in this file
+    and in hosted_bot_provisioning_service.AgentBotTransport, as of
+    2026-08-27 — see the long comment on _to_telegram_markdown above for
+    the bug this replaced (MarkdownV2 required escaping '_*[]()~`{}.!'
+    everywhere, a double-formatting call escaped some of that twice, and
+    the resulting invalid MarkdownV2 got rejected by Telegram and then
+    delivered as literal plain text — visible backslashes in front of
+    every period and parenthesis the model wrote).
+
+    Telegram's HTML parse mode only ever treats three characters as
+    special: '&', '<', '>' (https://core.telegram.org/bots/api#html-style).
+    Every other character — '.', '!', '-', '(', ')', and so on — is
+    ordinary text and can NEVER trigger a parse-mode rejection, whether it
+    is escaped once, twice, or not at all. That is the whole reason this
+    replaces MarkdownV2 here: the bug class this function exists to close
+    (an escaping mismatch corrupting or rejecting a message) is structurally
+    smaller under HTML, not just fixed for today's specific double-call.
+
+    An UNBALANCED marker (a single stray '*' with no closing '*', for
+    example) also cannot produce a parse error here: the regex below only
+    ever converts a marker into a tag when it finds a genuine matching
+    pair, so an unpaired '*' is left as a literal, ordinary asterisk in the
+    output. Overlapping/crossed markers ("**bold *italic** still italic*")
+    are the one input shape this regex-based converter cannot represent
+    correctly — bold claims the first matching '**' pair before italic
+    runs, which can still leave stray markers or, rarely, mismatched tags.
+    That is exactly why every caller of this function must keep a
+    plain-text fallback (send the untouched original text, no parse_mode)
+    for when Telegram rejects the HTML anyway — never remove that fallback
+    on the assumption this converter is infallible.
+    """
+    import re as _re
+    import html as _html
+    if not text:
+        return text
+
+    _BOLD_OPEN, _BOLD_CLOSE = '\x01', '\x02'
+    _ITL_OPEN, _ITL_CLOSE = '\x03', '\x04'
+    _STRK_OPEN, _STRK_CLOSE = '\x05', '\x06'
+    _BLOCK_MARK = '\x07'
+
+    # 1. Protect code fences, inline code, and links FIRST — from the RAW
+    #    markdown, before any HTML-escaping or emphasis conversion touches
+    #    their content. Telegram requires '&'/'<'/'>' escaped INSIDE
+    #    <code>/<pre> too, so that happens right here rather than being
+    #    deferred to step 3's blanket escape (which never sees these
+    #    placeholders — see step 3's own note).
+    blocks: dict[str, str] = {}
+    def _save(html_snippet: str) -> str:
+        k = _BLOCK_MARK + str(len(blocks)) + _BLOCK_MARK
+        blocks[k] = html_snippet
+        return k
+
+    def _fence(m):
+        # Strip an opening ```lang line if present; Telegram has no syntax
+        # highlighting hook worth preserving it for here.
+        inner = m.group(1)
+        return _save(f'<pre>{_html.escape(inner)}</pre>')
+    text = _re.sub(r'```(?:[a-zA-Z0-9_+-]*\n)?([\s\S]*?)```', _fence, text)
+
+    def _inline_code(m):
+        return _save(f'<code>{_html.escape(m.group(1))}</code>')
+    text = _re.sub(r'`([^`\n]+)`', _inline_code, text)
+
+    def _link(m):
+        label, url = m.group(1), m.group(2)
+        return _save(f'<a href="{_html.escape(url, quote=True)}">{_html.escape(label)}</a>')
+    text = _re.sub(r'\[([^\]]+)\]\(([^)\s]+)\)', _link, text)
+
+    # 2. Convert **bold** / *italic* / ~~strike~~ to SENTINELS before
+    #    escaping the surrounding prose — mirrors _to_telegram_markdown's
+    #    own technique above, and for the same reason: consuming bold's
+    #    '**' pair before the italic regex runs is what keeps
+    #    "**bold *italic** still italic*" from cross-nesting into invalid
+    #    output (bold claims its pair first; italic only ever sees what's
+    #    left).
+    text = _re.sub(r'\*\*(.+?)\*\*', _BOLD_OPEN + r'\1' + _BOLD_CLOSE, text)
+    text = _re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', _ITL_OPEN + r'\1' + _ITL_CLOSE, text)
+    text = _re.sub(r'~~(.+?)~~', _STRK_OPEN + r'\1' + _STRK_CLOSE, text)
+
+    # 3. HTML-escape everything that is still plain prose. Safe to run over
+    #    the WHOLE string in one call — unlike MarkdownV2's escape set,
+    #    '&'/'<'/'>' escaping never touches the sentinel control bytes from
+    #    step 2 or the block-placeholder bytes from step 1, and both of
+    #    those already carry their final, correctly-escaped HTML.
+    text = _html.escape(text, quote=False)
+
+    # 4. Resolve sentinels to real tags.
+    text = text.replace(_BOLD_OPEN, '<b>').replace(_BOLD_CLOSE, '</b>')
+    text = text.replace(_ITL_OPEN, '<i>').replace(_ITL_CLOSE, '</i>')
+    text = text.replace(_STRK_OPEN, '<s>').replace(_STRK_CLOSE, '</s>')
+
+    # 5. Restore the protected code/link HTML.
+    for key, value in blocks.items():
+        text = text.replace(key, value)
+
+    return text
+
 
 async def send_chat_action(chat_id: str, action: str = "typing") -> dict:
     return await _telegram_api("sendChatAction", {"chat_id": chat_id, "action": action})
@@ -607,13 +740,17 @@ async def send_message_safe(chat_id: str, text: str, *, reply_to_message_id: Opt
 
 
 async def _send_chunk_markdown(chat_id: str, text: str, reply_to_message_id: Optional[int] = None) -> bool:
-    """Send a single chunk with MarkdownV2. Returns True on success."""
+    """Send a single chunk with Telegram HTML formatting. Returns True on
+    success. Name kept for the (unchanged) call site in send_message_safe
+    below — it is HTML now, not MarkdownV2; see _to_telegram_markdown's
+    own docstring for why every formatter in this file moved off
+    MarkdownV2."""
     try:
-        formatted = _to_telegram_markdown(text)
+        formatted = _to_telegram_html(text)
         result = await _telegram_api("sendMessage", {
             "chat_id": chat_id,
             "text": formatted,
-            "parse_mode": "MarkdownV2",
+            "parse_mode": "HTML",
             **( {
                 "reply_to_message_id": reply_to_message_id
             } if reply_to_message_id is not None else {}),
@@ -717,7 +854,20 @@ class TelegramHostedTransport(ChannelTransport):
 
     Implements the ChannelTransport contract so the shared-core dispatcher
     owns all reliability logic.  The transport only handles the Bot-API
-    primitives: send a chunk, typing start/stop, MarkdownV2 formatting.
+    primitives: send a chunk, typing start/stop, HTML formatting.
+
+    send_message() is a SELF-CONTAINED unit — it calls format_text() on
+    the raw `text` it is given EXACTLY ONCE, tries the formatted send, and
+    falls back to the original raw `text` as plain text on failure. The
+    dispatcher (agent_reply_dispatcher._send_one_chunk) must call this with
+    the ORIGINAL, unformatted text and must NOT pre-format it — doing so
+    was a real, reported bug: the dispatcher used to call
+    transport.format_text() itself and hand the ALREADY-FORMATTED string
+    in here, which then formatted it AGAIN, corrupting the escaping and
+    (once Telegram rejected the doubly-escaped result) delivering the
+    once-escaped text as literal plain text — visible backslashes in every
+    delivered reply. See _to_telegram_markdown's own docstring above for
+    the full trace.
     """
 
     max_message_length: int = _TELEGRAM_MAX_MESSAGE_LENGTH  # 4096
@@ -734,9 +884,11 @@ class TelegramHostedTransport(ChannelTransport):
         *,
         reply_to_id: Optional[str] = None,
     ) -> bool:
-        """Send a SINGLE pre-split chunk.  Never raises.
+        """Send a SINGLE pre-split chunk, given as RAW/unformatted text.
+        Never raises.
 
-        Tries MarkdownV2 first; falls back to plain text on parse error.
+        Tries HTML first; falls back to plain text (the original `text`,
+        untouched — never the formatted string) on parse error.
         """
         if not str(text or "").strip():
             return False
@@ -746,7 +898,7 @@ class TelegramHostedTransport(ChannelTransport):
         body: dict = {
             "chat_id": self.chat_id,
             "text": formatted,
-            "parse_mode": "MarkdownV2",
+            "parse_mode": "HTML",
         }
         if reply_to is not None:
             body["reply_to_message_id"] = reply_to
@@ -758,7 +910,9 @@ class TelegramHostedTransport(ChannelTransport):
         except Exception:
             pass
 
-        # Fallback: plain text (no parse_mode)
+        # Fallback: plain text (no parse_mode) — the ORIGINAL raw `text`,
+        # never `formatted`. Sending `formatted` here is exactly the bug
+        # this class's own docstring describes.
         try:
             body.pop("parse_mode", None)
             body["text"] = text[: self.max_message_length]
@@ -784,8 +938,8 @@ class TelegramHostedTransport(ChannelTransport):
     # ── Markdown conversion ──
 
     def format_text(self, text: str) -> str:
-        """Convert common markdown to Telegram MarkdownV2."""
-        return _to_telegram_markdown(text)
+        """Convert common markdown to Telegram HTML."""
+        return _to_telegram_html(text)
 
 
 async def set_webhook(*, base_url: str) -> dict:

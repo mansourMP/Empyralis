@@ -403,6 +403,19 @@ class AgentBotTransport(ChannelTransport):
 
     Sends via THAT bot's own token (resolved per-binding from the vault), so
     the reply genuinely comes from the bot the customer is messaging.
+
+    send_message() must be called with RAW/unformatted text, exactly once
+    per attempt — it calls format_text() on it itself. This transport used
+    to carry the identical bug TelegramHostedTransport's own docstring
+    describes (sage_telegram_hosted_service.py): the shared dispatcher
+    pre-formatted the text via transport.format_text() and then handed the
+    ALREADY-FORMATTED string in here, which formatted it AGAIN — escaping
+    twice, corrupting the MarkdownV2, and (once Telegram rejected it)
+    delivering the once-escaped text as literal plain text with visible
+    backslashes. Fixed the same way: the dispatcher no longer pre-formats,
+    and this class now formats via Telegram HTML rather than MarkdownV2 —
+    see sage_telegram_hosted_service._to_telegram_html's own docstring for
+    why HTML closes the whole bug class rather than only today's instance.
     """
 
     max_message_length: int = 4096
@@ -417,15 +430,15 @@ class AgentBotTransport(ChannelTransport):
             return False
         reply_to = int(reply_to_id) if reply_to_id else None
 
-        # Reuse the same MarkdownV2 conversion the shared hosted bot uses, so
+        # Reuse the same HTML conversion the shared hosted bot uses, so
         # per-agent replies get the same formatting fidelity — just via a
         # different bot token. Falls back to plain text on parse failure.
-        from server_modules.sage_telegram_hosted_service import _to_telegram_markdown
+        from server_modules.sage_telegram_hosted_service import _to_telegram_html
 
         body: Dict[str, Any] = {
             "chat_id": self.chat_id,
-            "text": _to_telegram_markdown(text),
-            "parse_mode": "MarkdownV2",
+            "text": _to_telegram_html(text),
+            "parse_mode": "HTML",
         }
         if reply_to is not None:
             body["reply_to_message_id"] = reply_to
@@ -435,6 +448,10 @@ class AgentBotTransport(ChannelTransport):
                 return True
         except Exception:
             pass
+        # Fallback: plain text (no parse_mode) — the ORIGINAL raw `text`,
+        # never the HTML-formatted string. Sending the formatted string
+        # here is exactly the double-escaping bug this class's own
+        # docstring describes.
         try:
             body.pop("parse_mode", None)
             body["text"] = text[: self.max_message_length]
@@ -457,9 +474,9 @@ class AgentBotTransport(ChannelTransport):
         return None
 
     def format_text(self, text: str) -> str:
-        from server_modules.sage_telegram_hosted_service import _to_telegram_markdown
+        from server_modules.sage_telegram_hosted_service import _to_telegram_html
 
-        return _to_telegram_markdown(text)
+        return _to_telegram_html(text)
 
 
 async def _maybe_send_first_contact_reply(

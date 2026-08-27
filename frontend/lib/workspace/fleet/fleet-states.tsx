@@ -94,11 +94,20 @@ export function FleetRowsSkeleton({ rows = 4, label = "Loading" }: { rows?: numb
 }
 
 /**
- * Card-grid skeleton matching `.fleet-channel-grid`/`.fleet-connector-grid`
- * — the square-card-per-platform grid (icon + label + one pill, 4 across,
- * 2 at <=900px per CLAUDE.md's "square-card grid" ruling). Reuses the real
+ * Card-grid skeleton matching `.fleet-channel-grid`/`.fleet-channel-card` —
+ * the square TILE grid (icon + label + one pill, 4 across, 2 at <=900px per
+ * CLAUDE.md's "square-card grid" ruling). Channels only. Reuses the real
  * grid/card classes so the placeholder is pixel-identical to what replaces
  * it — no separate width/columns math to keep in sync by hand.
+ *
+ * CORRECTION: this used to also claim to match `.fleet-connector-grid`, and
+ * ConnectorsTab/ConnectorPicker both reached for it while their own fetch
+ * was in flight. That was never true — Apps cards are `.fleet-connector-
+ * card--row` (icon + name … action, TWO per row), a different `flex-
+ * direction` entirely from this tile. The founder saw it live: a 3-across
+ * tile skeleton that snapped into 1-per-row wide cards the instant loading
+ * finished. See FleetConnectorRowSkeleton below for the shape Apps actually
+ * needs.
  */
 export function FleetCardGridSkeleton({ cards = 8, label = "Loading" }: { cards?: number; label?: string }) {
   return (
@@ -108,6 +117,44 @@ export function FleetCardGridSkeleton({ cards = 8, label = "Loading" }: { cards?
           <div className="fleet-skeleton-bar" style={{ width: 22, height: 22, borderRadius: 6 }} />
           <div className="fleet-skeleton-bar" style={{ width: "70%", height: 11 }} />
           <div className="fleet-skeleton-bar" style={{ width: 44, height: 16, borderRadius: 999 }} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Row-card grid skeleton matching `.fleet-connector-grid`/`.fleet-connector-
+ * card--row` — the APP card (40px icon + name … action, two per row; one
+ * per row at <=560px, both on the full-page Apps tab and inside the
+ * agent-create wizard's own dialog, which mirrors the same breakpoint).
+ * Distinct shape from FleetCardGridSkeleton's square tile above: Apps cards
+ * are `flex-direction: row`, not `column`, so a tile-shaped placeholder for
+ * them reflows into a visibly different layout the moment the real grid
+ * replaces it — exactly the "loading shape doesn't match the loaded shape"
+ * defect this exists to close. Reuses the real grid/card classes (including
+ * `.fleet-connector-card-icon`'s own `--bg-inset` fill, so the icon box
+ * needs no skeleton bar of its own) for the same reason FleetCardGridSkeleton
+ * does — no separate width/column math to keep in sync by hand.
+ */
+export function FleetConnectorRowSkeleton({ cards = 8, label = "Loading" }: { cards?: number; label?: string }) {
+  return (
+    <div className="fleet-connector-grid" aria-busy="true" aria-label={label}>
+      {Array.from({ length: cards }).map((_, i) => (
+        <div
+          key={i}
+          className="fleet-connector-card fleet-connector-card--row"
+          style={{ cursor: "default", pointerEvents: "none" }}
+        >
+          <div className="fleet-connector-card-open" style={{ cursor: "default" }}>
+            <div className="fleet-connector-card-icon" aria-hidden="true" />
+            <div className="fleet-skeleton-bar" style={{ width: "55%", height: 12 }} />
+          </div>
+          <div
+            className="fleet-skeleton-bar fleet-connector-card-action"
+            style={{ width: 72, borderRadius: 999 }}
+            aria-hidden="true"
+          />
         </div>
       ))}
     </div>

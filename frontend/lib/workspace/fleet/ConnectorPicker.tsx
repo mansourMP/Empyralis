@@ -88,7 +88,7 @@ import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { getErrorMessage } from "@/lib/ui/api-error";
 import { CONNECTOR_ICONS } from "./fleet-icons";
 import { connectorCardFace } from "./connector-card-face";
-import { FleetCardGridSkeleton } from "./fleet-states";
+import { FleetConnectorRowSkeleton } from "./fleet-states";
 import {
   useFleetAgentConnectors,
   useFleetAgents,
@@ -395,6 +395,11 @@ export function ConnectorPicker({
   if (agentLoading || projectLoading) {
     // The same grid, the same card box — a placeholder that reflows into a
     // different shape the instant the fetch lands is its own small lie.
+    // FleetConnectorRowSkeleton, not FleetCardGridSkeleton: this tab's real
+    // cards are `.fleet-connector-card--row` (a two-up ROW, icon + name …
+    // action), not the square tile grid Channels uses — the two used to
+    // share one skeleton despite rendering different `flex-direction`s,
+    // which is exactly the reflow the founder saw live.
     //
     // NO SEARCH FIELD HERE, deliberately: there is nothing to filter yet, and
     // a field that accepts typing and changes nothing is a dead control for
@@ -403,7 +408,7 @@ export function ConnectorPicker({
     return (
       <div>
         {heading}
-        <FleetCardGridSkeleton cards={9} label="Loading apps" />
+        <FleetConnectorRowSkeleton cards={9} label="Loading apps" />
       </div>
     );
   }

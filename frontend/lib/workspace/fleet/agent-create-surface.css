@@ -411,20 +411,38 @@
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
 }
 
-/* Apps are ROW cards (icon + name … Connect) rather than tiles, so this
-   column holds exactly ONE of them. At the old 478px two would have been
-   234px each; at 578px they would be 281px, which is still well under the
-   ~430px each the full-page Apps tab gives its own two-up grid — a 40px
-   logo, a name and a Connect button in 281px is the ellipsised face that
-   made this rule necessary in the first place. So the extra 100px goes into
-   ONE row card rather than into two cramped ones, and the two-per-row spec
-   is unchanged where it was measured: the full-page tab.
+/* REVERSED BY THE FOUNDER, 2026-08-27 — Apps go TWO per row in this dialog,
+   not one. Do not "restore" the one-per-row rule below this comment: it was
+   also his instruction at the time, and reasoned from real measurements, and
+   he still overrode it after seeing the result live.
+
+   What used to sit here: ROW cards (icon + name … Connect), so this column
+   held exactly ONE of them — at 578px a lone row card would have run 281px
+   wide against the ~430px the full-page Apps tab gives its own two-up grid,
+   which read as ellipsis-adjacent rather than cramped, so the extra width
+   went into one wide card instead of two. His objection was to what ONE
+   PER ROW then looks like, not to the width math: *"it's just one app in
+   long horizontal place, and half of the page looks empty because of it…
+   at the middle of Google Workspace, Notion, Linear, Stripe and ClickUp is
+   just empty because there is no information that is needed."* Explicit
+   on the fix too: *"do not change the shape of the card. Only... make it
+   two apps in one horizontal line."* Same call already made for the
+   Channels tiles just above (his own "seventy percent of that same line
+   completely empty" line, there about a phone) — a mostly-blank row reads
+   as unfinished regardless of what put the space there.
+
+   At 620px (dialog width, see `width` above) two columns are ~(578 - 16
+   gap) / 2 = 281px each — the exact width the deleted comment measured as
+   "still well under" the full page's 430px, i.e. tighter than the full-page
+   grid but not the cramped 234px the old 478px dialog would have produced.
+   The card's own shape/padding/icon size is UNCHANGED; only the column
+   count moves, which is the whole instruction.
 
    Selector tripled on purpose: connector-cards.css's own two-up rule is
    already doubled to survive bundle ordering, so matching it at (0,2,0)
    would leave which one wins up to the bundler. */
 .agent-create-embed .fleet-connector-grid.fleet-connector-grid {
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 /* REVERSED BY THE FOUNDER, 2026-08-26 — on a phone the channel tiles go TWO
@@ -445,6 +463,26 @@
 @media (max-width: 560px) {
   .agent-create-embed .fleet-channel-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  /* Apps are the ROW shape, not a tile, and this is the one place the two
+     surfaces deliberately DIVERGE on mobile rather than mirror each other.
+     The full-page Apps tab already carries the founder's own explicit
+     instruction for this exact card, from the same correction that produced
+     the two-up desktop rule above it: *"in one line there should be only
+     two horizontally, not four — only two. In mobile they're gonna be only
+     one."* (connector-cards.css). A row card is icon + name + a fixed-width
+     action button; at this dialog's ~330px inner width two columns are
+     ~157px each, and the icon (40px) plus the action button (72px) plus two
+     gaps already exceed that before a single character of the app's name
+     is drawn — a cramped tile just looks dense, but a cramped row card
+     loses its own label. So the desktop override two rules up (2 per row,
+     fixing the founder's actual complaint — a single row spanning the full
+     ~578px dialog with a hollow middle) reverts back to one per row here,
+     matching the full-page tab's own mobile behavior rather than the
+     Channels tile's. */
+  .agent-create-embed .fleet-connector-grid.fleet-connector-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

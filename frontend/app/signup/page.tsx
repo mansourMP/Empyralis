@@ -468,6 +468,10 @@ export default function SignupPage() {
               <AuthErrorNotice title="Couldn’t create the account" message={error} />
             )
           ) : null}
+          <p className="app-auth-provider-note">
+            By creating an account, you agree to our <Link href="/terms">Terms of Service</Link> and{' '}
+            <Link href="/privacy">Privacy Policy</Link>.
+          </p>
           <AppButton type="submit" disabled={submitting} className="app-auth-submit">
             <span>{submitting ? 'Creating account…' : 'Create account'}</span>
             <ArrowRight size={16} aria-hidden="true" />
