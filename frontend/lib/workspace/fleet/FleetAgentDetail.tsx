@@ -76,7 +76,7 @@ import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { getErrorMessage } from "@/lib/ui/api-error";
 import { RUNTIME_LABELS } from "./gateway-box-picker";
 import { resolveAgentModelSummary, platformCreditsTierLabel } from "./fleet-model-config";
-import { FleetToggleRowsSkeleton, FleetCardGridSkeleton } from "./fleet-states";
+import { FleetToggleRowsSkeleton, FleetCardGridSkeleton, FleetConnectorRowSkeleton } from "./fleet-states";
 
 import "./agent-configure-sheet.css";
 import "./agent-profile-sheet.css";
@@ -3769,15 +3769,16 @@ export function ConnectorsTab({
   const subtitle = <p className="fleet-tab-subtitle">Apps this agent can use</p>;
 
   if (!agent) {
-    // Matches ConnectorPicker's OWN loading shape below it. Both are now the
-    // square-card grid, so the two placeholders shown in sequence (this one,
-    // then ConnectorPicker's once `agent` resolves) are the same box — they
-    // used to change shape mid-load, and BOTH used to be the wide
-    // picker-item card the Apps grid no longer renders at all.
+    // Matches ConnectorPicker's OWN loading shape below it — FleetConnector
+    // RowSkeleton, the two-up ROW shape Apps cards actually render, not
+    // FleetCardGridSkeleton's square tile (that mismatch is what made the
+    // loading grid visibly snap into a different layout once the fetch
+    // resolved). Both placeholders shown in sequence (this one, then
+    // ConnectorPicker's once `agent` resolves) are the same box.
     return (
       <div>
         {subtitle}
-        <FleetCardGridSkeleton cards={9} label="Loading apps" />
+        <FleetConnectorRowSkeleton cards={9} label="Loading apps" />
       </div>
     );
   }

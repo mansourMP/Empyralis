@@ -658,6 +658,9 @@ function LoginPageContent() {
           <p className="app-auth-footer">
             No account? <Link href={signupHref}>Sign up</Link>
           </p>
+          <p className="app-auth-provider-note">
+            <Link href="/terms">Terms of Service</Link> · <Link href="/privacy">Privacy Policy</Link>
+          </p>
         </form>
       </div>
     </main>
