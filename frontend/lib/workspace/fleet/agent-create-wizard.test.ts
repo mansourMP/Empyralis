@@ -215,9 +215,18 @@ assert(agentCreateStepIsPostCommit("apps"), "apps operates on a real agent");
     !/skip/i.test(none.forward.label),
     'and it never offers to "Skip" what cannot be skipped — chat left the platform, so a channel is the only way anyone reaches this agent',
   );
+  // REQUIRED IS NOT CAGED — the whole reason the forward block was once
+  // removed. Asserted on what the type can actually express: an
+  // AgentCreateDismissPlan is {kind, label} with NO disabled field, so the
+  // exit cannot be taken away without a type change that would fail here.
+  //
+  // An earlier version of this assertion read `!none.dismiss.disabled`, which
+  // type-errored AND passed vacuously — `undefined` is falsy, so it asserted
+  // nothing at all while looking like the guarantee was covered. Exactly the
+  // shape this repo warns about: a green test that checks nothing.
   assert(
-    !none.dismiss.disabled,
-    "REQUIRED IS NOT CAGED — the exit is always one press, which is the whole reason the block was once removed",
+    none.dismiss.kind === "defer" && none.dismiss.label.trim().length > 0,
+    "REQUIRED IS NOT CAGED — a labelled exit is always present on the blocked step",
   );
   assert(none.blockedReason.trim().length > 0, "and the one fact about what stays undone is stated");
   assert(
