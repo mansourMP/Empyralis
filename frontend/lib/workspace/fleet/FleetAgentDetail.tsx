@@ -25,6 +25,7 @@ import {
   Plug,
   Radio,
   RefreshCw,
+  Settings,
   Smartphone,
   Sparkles,
   Square,
@@ -473,12 +474,29 @@ function StopAgentConfirmDialog({
 // with the composer removed there is only one thing left to look at, so
 // there is only one thing in the header pointing at it — the identity link
 // itself, exactly as Telegram's own chat header has no second "go to this
-// conversation" button beside the contact name. Configure, Stop/Resume, and
-// opening Properties (danger-styled and separated by a divider — a real but
+// conversation" button beside the contact name. Stop/Resume and opening
+// Properties (danger-styled and separated by a divider — a real but
 // occasionally-needed control that must never sit beside anything primary)
 // stay in the "⋯" menu. Reuses DocumentDetailView's own "⋯" menu shell
 // (.fleet-list-row-menu-wrap/.fleet-list-row-menu/-item, defined once in
 // fleet-theme.css) rather than inventing a fourth dropdown implementation.
+//
+// CONFIGURE IS ITS OWN VISIBLE BUTTON, NOT A MENU ITEM — MAN-369,
+// 2026-08-27/28, founder looking at this exact header on an agent named
+// "Grove": "there must be a thing that is related to configure, or
+// configure button itself should be a separated button, not under these
+// three dots." Configure is the one control almost every visit to this
+// page eventually reaches (model, capabilities, channels, connectors,
+// hardware all live there) — burying it under "⋯" beside Delete/Stop
+// made the page's single most-used action look like a rare, dangerous one.
+// It renders as a plain .fleet-btn (no accent hue): this page has no
+// creation/connection CTA of its own to reserve --accent-fill for (CLAUDE.md
+// "Purple only on primary buttons" — accent-fill is a curated set of
+// high-intent create/connect actions, and Configure is neither), and a
+// second accent-filled button here would be the exact "two accent-filled
+// buttons in one view" bug that file already treats as machine-enforced.
+// Properties/Stop/Delete stay exactly where they were — this promotes
+// Configure, it does not gut the menu.
 function AgentDetailHeader({
   workspaceId,
   agentId,
@@ -638,92 +656,96 @@ function AgentDetailHeader({
       >
         {identityInner}
       </Link>
-      <div className="fleet-list-row-menu-wrap fleet-chat-header-menu" ref={menuRef}>
-        <button
-          type="button"
-          className="fleet-icon-btn"
-          aria-haspopup="menu"
-          aria-expanded={menuOpen}
-          aria-label="More"
-          onClick={() => setMenuOpen((v) => !v)}
-        >
-          <MoreHorizontal size={16} strokeWidth={1.75} />
-        </button>
-        {menuOpen ? (
-          <div className="fleet-list-row-menu" role="menu">
-            <button
-              type="button"
-              role="menuitem"
-              className="fleet-list-row-menu-item"
-              onClick={() => {
-                setMenuOpen(false);
-                onOpenProperties();
-              }}
-            >
-              Properties
-            </button>
-            {!sheetOpen && (
-              <Link
-                href={configureHref}
-                replace
-                role="menuitem"
-                className="fleet-list-row-menu-item"
-                onClick={() => setMenuOpen(false)}
-              >
-                Configure
-              </Link>
-            )}
-            <div className="fleet-list-row-menu-divider" />
-            {stopControl.stopped?.active ? (
+      <div className="fleet-chat-header-actions">
+        {/* Its own visible button now — MAN-369, see AgentDetailHeader's
+            own block comment above. Guarded the same way the old menu item
+            was: nothing to open while the sheet this links to is already
+            the thing on screen (it renders behind that sheet's own
+            backdrop, so a dead second entry point there is worse than
+            none). */}
+        {!sheetOpen && (
+          <Link href={configureHref} replace className="fleet-btn fleet-chat-header-configure-btn">
+            <Settings size={14} strokeWidth={1.75} />
+            Configure
+          </Link>
+        )}
+        <div className="fleet-list-row-menu-wrap" ref={menuRef}>
+          <button
+            type="button"
+            className="fleet-icon-btn"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            aria-label="More"
+            onClick={() => setMenuOpen((v) => !v)}
+          >
+            <MoreHorizontal size={16} strokeWidth={1.75} />
+          </button>
+          {menuOpen ? (
+            <div className="fleet-list-row-menu" role="menu">
               <button
                 type="button"
                 role="menuitem"
                 className="fleet-list-row-menu-item"
-                disabled={stopControl.busy}
                 onClick={() => {
                   setMenuOpen(false);
-                  stopControl.handleResume();
+                  onOpenProperties();
                 }}
               >
-                <span>Resume agent</span>
-                {stopControl.stopped.stopped_by_label && (
-                  <span style={{ display: "block", fontSize: 11, color: "var(--text-muted)" }}>
-                    Stopped by {stopControl.stopped.stopped_by_label}
-                  </span>
-                )}
+                Properties
               </button>
-            ) : (
-              <button
-                type="button"
-                role="menuitem"
-                className="fleet-list-row-menu-item fleet-list-row-menu-item--danger"
-                onClick={() => {
-                  setMenuOpen(false);
-                  stopControl.openConfirm();
-                }}
-              >
-                Stop agent
-              </button>
-            )}
-            {/* Not rendered at all for the workspace operator —
-                fleet_delete_agent refuses it outright, and a menu item whose
-                only possible outcome is an error is a dead control. */}
-            {deletable && (
-              <button
-                type="button"
-                role="menuitem"
-                className="fleet-list-row-menu-item fleet-list-row-menu-item--danger"
-                onClick={() => {
-                  setMenuOpen(false);
-                  setDeleteError(null);
-                  setDeleteOpen(true);
-                }}
-              >
-                Delete agent
-              </button>
-            )}
-          </div>
-        ) : null}
+              <div className="fleet-list-row-menu-divider" />
+              {stopControl.stopped?.active ? (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="fleet-list-row-menu-item"
+                  disabled={stopControl.busy}
+                  onClick={() => {
+                    setMenuOpen(false);
+                    stopControl.handleResume();
+                  }}
+                >
+                  <span>Resume agent</span>
+                  {stopControl.stopped.stopped_by_label && (
+                    <span style={{ display: "block", fontSize: 11, color: "var(--text-muted)" }}>
+                      Stopped by {stopControl.stopped.stopped_by_label}
+                    </span>
+                  )}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="fleet-list-row-menu-item fleet-list-row-menu-item--danger"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    stopControl.openConfirm();
+                  }}
+                >
+                  Stop agent
+                </button>
+              )}
+              {/* Not rendered at all for the workspace operator —
+                  fleet_delete_agent refuses it outright, and a menu item
+                  whose only possible outcome is an error is a dead
+                  control. */}
+              {deletable && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="fleet-list-row-menu-item fleet-list-row-menu-item--danger"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setDeleteError(null);
+                    setDeleteOpen(true);
+                  }}
+                >
+                  Delete agent
+                </button>
+              )}
+            </div>
+          ) : null}
+        </div>
       </div>
       {stopControl.confirmOpen && (
         <StopAgentConfirmDialog
