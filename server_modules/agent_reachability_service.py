@@ -211,6 +211,52 @@ async def lookup_agent_install_bundle(
     return bundle if isinstance(bundle, dict) and bundle else None
 
 
+async def agent_install_is_specialist(
+    agent_id: str, *, tenant_id: str, workspace_id: str,
+) -> bool:
+    """True ONLY when `agent_id` PROVABLY resolves to a non-master install.
+
+    The discriminator for "is this agent's conversation shared work, or one
+    person's private Ask AI console" — MAN-368. Callers use it to decide
+    whether a per-person `owner_user_id` filter applies; read the name
+    literally, because both non-True cases are deliberate:
+
+    ```
+    resolves, agent_kind == "master"   -> False   Sage/the Operator. Its threads
+                                                  are PER-PERSON (agent_registry_
+                                                  api.py builds one per member via
+                                                  build_master_thread_id(ws, user)),
+                                                  so a caller must keep its own
+                                                  per-person scoping.
+    resolves, agent_kind is anything   -> True    a real specialist. Its channel
+    else (including EMPTY)                        conversations are shared work.
+    does not resolve at all            -> False   FAIL CLOSED. Nothing was
+                                                  established, so a caller must
+                                                  not drop a privacy filter on it.
+    ```
+
+    EMPTY agent_kind resolving to True is the codebase's own settled
+    convention, not a guess: `agent_registry_repository`'s queries read
+    `COALESCE(ad.agent_kind, 'specialist') <> 'master'`, and the workspace
+    master is the one install that ALWAYS writes its kind explicitly (its
+    seed definition hardcodes `"agent_kind": "master"`, and every master
+    lookup filters on `ad.agent_kind = 'master'`). So an absent kind cannot
+    be the master, and treating it as a specialist neither leaks nor
+    silently re-breaks a real specialist whose row predates the column.
+
+    Deliberately NOT keyed on "a master_agent_install_id is set" — that
+    column is set on Sage's own per-person threads too, so it cannot tell
+    the two apart. Same class of mistake as keying the MAN-201 exemption on
+    an empty `project_id` instead of on `agent_kind`.
+    """
+    bundle = await lookup_agent_install_bundle(
+        agent_id, tenant_id=tenant_id, workspace_id=workspace_id,
+    )
+    if bundle is None:
+        return False
+    return _agent_kind_of(bundle) != MASTER_AGENT_KIND
+
+
 async def enforce_resolved_agent_access(
     current_user: Optional[Dict[str, Any]],
     resolved_workspace_id: str,

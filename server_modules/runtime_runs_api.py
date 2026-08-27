@@ -36,6 +36,7 @@ from server_modules.api_contract import (
     normalize_session_record,
     request_body_to_turn_request,
 )
+from server_modules import agent_reachability_service
 from server_modules import turn_ingress_service
 from server_modules import session_service
 from server_modules import thread_service
@@ -1288,12 +1289,52 @@ def register_run_routes(app) -> None:
             minimum_role="viewer",
         )
         tenant_id = workspace_tenant_id(current_user, requested_workspace_id)
-        owner_user_id = None if _current_user_is_privileged(current_user) else str(current_user.get("user_id") or "").strip() or None
+        requested_agent_id = str(agent_id or "").strip() or None
+        # MAN-368: owner_user_id scoping keeps one person's OWN Ask AI
+        # conversation out of every other workspace member's reach. It is
+        # correct for the workspace MASTER and wrong for a SPECIALIST, and
+        # the discriminator is `agent_kind`, never anything else.
+        #
+        # Why it was wrong for a specialist: a channel-originated turn has no
+        # current_user, so ensure_master_thread stamps the literal
+        # owner_user_id "sage" (agent_turn_runtime_service.py's
+        # `actor_user_id or "sage"`). A real workspace owner's user_id never
+        # matches that, so a non-privileged viewer opening ANY channel-bound
+        # agent's Work tab got zero rows — "No conversations yet" beside an
+        # Agents-grid card showing real, billed activity for the same agent.
+        #
+        # Why it must STAY for the master, and why the obvious shortcut is a
+        # leak: Sage's threads are PER PERSON. agent_registry_api.py builds
+        # one per member (build_master_thread_id(workspace_id, owner_user_id),
+        # owner_user_id = current_user["user_id"]) and stamps
+        # master_agent_install_id = the master install's own id — so a Sage
+        # thread has that column SET, and list_agent_threads maps
+        # active_agent_install_id straight onto it. Exempting on "an agent_id
+        # was requested" (or on "master_agent_install_id is set") therefore
+        # hands any member who passes the master install id every other
+        # member's private Ask AI history. Fully reachable: GET /fleet/agents
+        # returns the master install to ordinary members (MAN-201), and that
+        # exposure was only ever safe BECAUSE this filter existed.
+        # "Conversations are private. Work is shared."
+        #
+        # agent_install_is_specialist fails CLOSED — an install that cannot
+        # be resolved at all keeps the per-person filter rather than dropping
+        # it on an unknown.
+        scoped_to_specialist = bool(requested_agent_id) and await agent_reachability_service.agent_install_is_specialist(
+            requested_agent_id,
+            tenant_id=tenant_id,
+            workspace_id=requested_workspace_id,
+        )
+        owner_user_id = (
+            None
+            if scoped_to_specialist or _current_user_is_privileged(current_user)
+            else str(current_user.get("user_id") or "").strip() or None
+        )
         records = await thread_service.list_threads(
             workspace_id=requested_workspace_id,
             tenant_id=tenant_id,
             owner_user_id=owner_user_id,
-            active_agent_install_id=str(agent_id or "").strip() or None,
+            active_agent_install_id=requested_agent_id,
             include_turns=bool(include_turns),
             limit=max(1, min(int(limit or 50), 200)),
         )
@@ -1361,7 +1402,26 @@ def register_run_routes(app) -> None:
             tenant_id=record.get("tenant_id"),
             minimum_role="viewer",
         )
-        if not _current_user_is_privileged(current_user):
+        # MAN-368, same root cause AND same discriminator as the /threads
+        # LIST route above — see its comment for the full reasoning. This
+        # per-user privacy check is correct for Sage's own per-person thread
+        # and wrong for a specialist's channel-facing work thread (e.g. the
+        # one ProfileFilesSection.tsx's Files pane reads from WorkTab's
+        # selection), whose owner_user_id is the literal "sage" rather than
+        # any real person's id.
+        #
+        # Keyed on agent_kind, NOT on "master_agent_install_id is set": a
+        # Sage thread carries that column set too (agent_registry_api.py
+        # stamps the master install's own id on each member's private
+        # thread), so keying on it would skip this check for exactly the
+        # threads that need it most.
+        thread_agent_install_id = str(record.get("master_agent_install_id") or "").strip()
+        thread_is_specialist = bool(thread_agent_install_id) and await agent_reachability_service.agent_install_is_specialist(
+            thread_agent_install_id,
+            tenant_id=str(record.get("tenant_id") or "").strip(),
+            workspace_id=str(record.get("workspace_id") or "").strip(),
+        )
+        if not _current_user_is_privileged(current_user) and not thread_is_specialist:
             request_user_id = str(current_user.get("user_id") or "").strip()
             owner_user_id = str(record.get("owner_user_id") or "").strip()
             if owner_user_id and request_user_id and owner_user_id != request_user_id:

@@ -9394,3 +9394,91 @@ change.
 Per this file's own standing rule, no automated call ever touches a device
 the founder personally uses; everything above is proven by driving the real
 dispatch/transport code with only the Telegram HTTP call mocked.
+
+## Two Agents-surface bugs, one shared verdict: a specialist agent's channel work is not personal (2026-08-28, MAN-368/370)
+
+**MAN-368 verdict: a channel agent's own conversations were invisible to its
+owner.** `GET /threads` (WorkTab.tsx) and `GET /threads/{id}`
+(ProfileFilesSection.tsx) both scoped results to `owner_user_id` for any
+non-privileged, non-admin caller — a scope built for Sage's own personal Ask
+AI console (`SageConsolePanels.tsx`, no `agent_id`). Every channel-originated
+turn stamps `owner_user_id="sage"` (`agent_turn_runtime_service`'s
+`owner_user_id=actor_user_id or "sage"` — there is no `current_user` on a
+Telegram/WhatsApp turn), so an ordinary workspace owner's real `user_id`
+never matched, and the query returned zero rows for every non-privileged
+viewer, on every channel-bound agent, forever — "No conversations yet"
+beside an Agents-grid card showing real, billed activity for the same agent.
+**THE FIRST FIX FOR THIS WAS A PRIVACY LEAK, and its own safety claim was
+false — the correction is the part worth reading.** That fix dropped the
+`owner_user_id` filter whenever an `agent_id` was requested (list) or
+whenever the thread carried a `master_agent_install_id` (detail), on the
+written grounds that *"Sage's own threads never carry a non-empty one."*
+
+```
+CLAIMED   a Sage thread has master_agent_install_id NULL
+ACTUAL    agent_registry_api.py builds ONE SAGE THREAD PER MEMBER —
+            build_master_thread_id(workspace_id, owner_user_id)
+            owner_user_id = current_user["user_id"]
+            master_agent_install_id = the master install's own id   ← SET
+          and list_agent_threads maps active_agent_install_id straight onto
+          that column. So `GET /threads?agent_id=<master install id>` from
+          any member returned EVERY OTHER MEMBER'S PRIVATE ASK AI HISTORY.
+```
+
+Fully reachable, not theoretical: the MAN-201 entry above records that the
+workspace master install IS returned to ordinary members by
+`GET /fleet/agents` — and says that exposure was only safe BECAUSE
+"/threads is already scoped server-side by `owner_user_id`", i.e. the exact
+filter that fix removed. Measured against the leaky build: member A asking
+for the master install id got `['master_thread_member_a',
+'master_thread_member_b']`.
+
+**The discriminator is `agent_kind`, and nothing else will do.**
+`agent_reachability_service.agent_install_is_specialist` (shared by both
+routes) resolves the install and answers True ONLY for a provable
+non-master; a master keeps its per-person filter, and an UNRESOLVABLE
+install keeps it too (fail closed — never drop a privacy filter on an
+unknown). An empty `agent_kind` resolves to specialist, which is the
+codebase's own settled convention (`COALESCE(ad.agent_kind, 'specialist')`)
+and safe because the master is the one install that always writes its kind
+explicitly.
+
+**This is the SAME shape as MAN-201's own rule, and it was re-broken
+anyway:** *"Keyed on `agent_kind == 'master'`, NEVER on an empty
+`project_id`… that negative is asserted directly, because every other
+assertion in that file passes under the naive fix too."* Both statements
+were true here word for word — all three original specialist tests passed
+happily under the leaky version. **A permission exemption needs a test that
+fails when the exemption is too WIDE**, or it only ever proves the feature
+works. The negative now asserted: member B has a private Sage thread,
+member A requests the master install id, and gets zero of B's rows.
+
+**MAN-370 verdict: NOT a shared root cause, and NOT a data bug at all.**
+Two real, live layouts existed on the same Agents page: the intended
+default card grid (`agent-card-face.ts`, "THE AGENTS SURFACE IS CARDS"),
+and `AgentsBoard`/`AgentsGroupedList` — a gear-icon opt-in view wired in by
+`78e3eabd` one day AFTER that settled, heavily-quoted redesign shipped. The
+grouped list's row rendered `agentActivityPreviewText` — the literal
+"Created"/"Configured" lifecycle-verb line the card-grid redesign exists to
+retire. No founder quote anywhere endorses that wiring (unlike nearly every
+other decision in this file); the best read is that it was built by analogy
+to Tasks' own view options and reintroduced exactly the pattern already
+rejected. Unwired again (`agents/page.tsx` reverted to its pre-`78e3eabd`
+shape, `primary-rail-space.test.ts`'s guard flipped back to banning the
+import) — components left dormant, not deleted, same "unlinked, not gone"
+treatment `/agents`/`/conversations` already get elsewhere in this file.
+**Judgment call, not certainty — flagged for founder review, one-line-import
+reversible either way.**
+
+The "Basalt shows real activity in the grouped list but 'No channel or
+tasks yet' on its card" detail that made MAN-370 look like it shared
+MAN-368's cause does NOT reproduce as a bug: `agent-card-face.ts`'s reach
+slot reads the identical `agent.channel` field via the identical
+`parseAgentChannelField` the grouped list uses (already covered by
+`agent-card-face.test.ts`). The card grid deliberately omits cost/last-active
+by design ("A CARD FACE IS TWO FACTS AND REFUSES A THIRD"); the grouped
+list's cost/last-active columns are independent, backward-looking facts
+that render regardless of current reachability. Two true, differently
+scoped answers about the same agent, not a wiring defect — check whether a
+"disagreement" between two views is a design difference before assuming a
+shared data-plumbing bug.
