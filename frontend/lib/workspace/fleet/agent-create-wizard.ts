@@ -102,12 +102,69 @@
  * The unfinished channel step is not lost by skipping: the agent's own setup
  * band (agent-setup-steps.ts) carries it forward on the page you land on.
  *
- * ── NOTHING SAYS "CANCEL" ONCE THE AGENT EXISTS ──────────────────────────
+ * ── NOTHING SAYS "CANCEL" ONCE THE AGENT EXISTS AND CAN BE REACHED ────────
  * The founder pressed the head's X on a post-commit step and found an agent
  * in his workspace afterwards. Rather than make X delete a real agent (a
  * destructive act behind a dismiss gesture, which is worse), the CONTROL
  * changes when the fact changes: `dismiss` is "Cancel" while nothing exists
- * and "Finish later" from the commit onward.
+ * and "Finish later" once the agent is real AND REACHABLE (see the next
+ * section — that second half is new).
+ *
+ * ── PART B, 2026-08-27: LEAVING MAY NOT STRAND AN UNREACHABLE AGENT ───────
+ * The founder saw the shape above ship and rejected it anyway: *"Halfway
+ * through, the agent is already created... So channels cannot be skipped,
+ * and BEFORE that step the agent cannot be created in this platform."*
+ * Blocking the forward button (above) was not the whole fix — `dismiss` on
+ * the Channels step still read "Finish later" and quietly opened a real,
+ * permanently unreachable agent the moment nothing was connected yet.
+ *
+ * The commit could not simply move to the END of the sequence: every real
+ * channel door (paste a token, an OAuth round trip, a pasted app credential,
+ * a paired computer) binds to an AGENT ID that has to already exist —
+ * `assign_byo_bot(agent_install_id=...)`, the OAuth callback's stored state,
+ * `PUT .../channels/{key}/credential` — and ChannelsTab itself (the REAL
+ * tab, reused rather than a fifth copy of a channel list) fetches by agent
+ * id. Building a "pending agent" shim so every one of those write paths
+ * could defer to a not-yet-real id would be a new concept threaded through
+ * Telegram/Discord/Slack/WeChat plus ~21 transported OpenClaw doors, each
+ * with their own per-agent binding writes — a large, separate body of work,
+ * and it would not even remove the risk: an OAuth round trip leaves the
+ * dialog and comes back, so a person who closes the tab mid-flow still
+ * leaves an orphan behind, just a differently-shaped one (an authorized
+ * connector wired to nothing, INSTEAD of an empty agent row).
+ *
+ * So the commit stays where it is (Brain), and what changes is what LEAVING
+ * before a channel connects actually DOES:
+ *
+ * ```
+ *   created, reachable       ─▶  dismiss defers, same as before — the
+ *                                agent can already be messaged, so nothing
+ *                                is stranded by leaving.
+ *   created, NOT reachable   ─▶  dismiss reads Cancel (same head control as
+ *                                before the commit), and PRESSING it asks —
+ *                                never silently opens the agent, never
+ *                                silently deletes it either. "Go back and
+ *                                connect one" or "Delete this agent" are
+ *                                both one press away, in the same
+ *                                Cancel + `.fleet-btn--danger` confirm shell
+ *                                AgentDeleteDialog already uses for the
+ *                                identical action taken later, from the
+ *                                agent's own page.
+ * ```
+ *
+ * REQUIRED IS STILL NOT CAGED: pressing dismiss is never blocked, in either
+ * state — a confirmation is one more press, not a wall. What changed is
+ * that the press can no longer end in an agent silently left behind with no
+ * way to receive a message, which is the exact complaint. `reachable` is a
+ * SEPARATE input from `connectedChannelCount`, deliberately: the live
+ * channel list resets to empty the instant the caller stops asking for it
+ * (fleet-data.ts's `useFleetAgentChannels` clears its array when handed a
+ * null agent id, which AgentCreateCard does the moment the person leaves
+ * the Channels step) — so "is this agent reachable" cannot be re-derived
+ * from that count once the person has moved on. The caller tracks it as a
+ * STICKY fact instead (true the moment a channel is ever observed connected
+ * on the Channels step, never cleared afterward) and hands it in here,
+ * exactly like `created`.
  *
  * ── THE FILL FOLLOWS THE MOVE THAT IS ACTUALLY AVAILABLE ─────────────────
  * `forward.accent` is the view's single accent fill (CLAUDE.md: "One accent
@@ -188,6 +245,13 @@ export type AgentCreateWizardState = {
    *  cannot open Notion yet, which needs no sentence). Unknown and zero both
    *  resolve to "Skip for now", which is the honest word in both cases. */
   connectedAppCount: number;
+  /** STICKY — true once a channel has EVER connected this session, and never
+   *  cleared afterward. See this file's header, "PART B, 2026-08-27": the
+   *  live `connectedChannelCount` cannot answer this by itself once the
+   *  person has moved past the Channels step (it resets to 0), so the caller
+   *  tracks this separately and hands it in, exactly like `created`. Decides
+   *  whether dismissing defers to the agent or must ask first. */
+  reachable: boolean;
 };
 
 export type AgentCreateFooterButton = {
@@ -230,8 +294,15 @@ function forwardButton(
   return { label, action, disabled, accent: !disabled };
 }
 
-function dismissPlan(created: boolean): AgentCreateDismissPlan {
-  return created ? { kind: "defer", label: "Finish later" } : { kind: "cancel", label: "Cancel" };
+/** `reachable` is not asked for before the commit — nothing exists yet, so
+ *  the question is meaningless and `created` alone decides. After the
+ *  commit it is the whole decision: a real, unreachable agent gets the SAME
+ *  Cancel-styled control it had before it existed, because pressing it must
+ *  ask rather than silently open (or silently keep) an agent nobody can
+ *  message. See this file's header, "PART B, 2026-08-27". */
+function dismissPlan(created: boolean, reachable: boolean): AgentCreateDismissPlan {
+  if (!created) return { kind: "cancel", label: "Cancel" };
+  return reachable ? { kind: "defer", label: "Finish later" } : { kind: "cancel", label: "Cancel" };
 }
 
 export function planAgentCreateFooter(state: AgentCreateWizardState): AgentCreateFooterPlan {
@@ -247,8 +318,9 @@ export function planAgentCreateFooter(state: AgentCreateWizardState): AgentCreat
     channelsKnown,
     connectedChannelCount,
     connectedAppCount,
+    reachable,
   } = state;
-  const dismiss = dismissPlan(created);
+  const dismiss = dismissPlan(created, reachable);
 
   if (step === "identity") {
     const ok = hasName && placementReady;
@@ -286,25 +358,33 @@ export function planAgentCreateFooter(state: AgentCreateWizardState): AgentCreat
     // agent, it is an unreachable one.
     //
     // WHY THIS DOES NOT TRAP ANYONE, which was the real objection behind the
-    // earlier removal: the FORWARD button is blocked, but `dismiss` is not.
-    // The agent already exists by this point (Brain committed it, because
-    // ChannelsTab needs a real agent id to attach to), so leaving is always
-    // possible in one press and lands you IN the agent, where its own setup
-    // band carries the unfinished channel forward. Blocking the forward path
+    // earlier removal: the FORWARD button is blocked, but `dismiss` is not —
+    // pressing it is always exactly one press. Blocking the forward path
     // makes the sequence say "this is required"; leaving the exit open means
-    // it never becomes a cage.
-    const reachable = connectedChannelCount > 0;
+    // it never becomes a cage. What PRESSING it now does is `dismiss`'s own
+    // decision (see dismissPlan / agentCreateCloseIntent, PART B): while
+    // nothing is connected yet it asks rather than silently opening a real,
+    // unreachable agent — asking is still one press, so this is not the cage
+    // that was rejected once already.
+    //
+    // `connectedNow` is deliberately a SEPARATE, live-only value from
+    // `state.reachable` above — it decides only whether THIS STEP's forward
+    // button may move, off the count this step is actually looking at right
+    // now. `reachable` (already folded into `dismiss`) is the caller's
+    // STICKY memory of whether a channel has EVER connected, because that
+    // live count resets to 0 the moment the person leaves this step.
+    const connectedNow = connectedChannelCount > 0;
     return {
       // No Back: the only step behind this one is Brain, which is already
       // committed and saved. A Back that silently changed nothing is a lie.
       back: null,
-      forward: forwardButton("Next", "next", busy || !reachable),
+      forward: forwardButton("Next", "next", busy || !connectedNow),
       dismiss,
       // Only once we actually know. "Nothing is connected" and "I have not
       // asked yet" are different facts, so an unknown channel list says
       // nothing rather than accusing the person of skipping something.
       blockedReason:
-        channelsKnown && !reachable
+        channelsKnown && !connectedNow
           ? "Pick how people will reach this agent. Telegram needs no computer."
           : "",
     };
@@ -348,17 +428,25 @@ export function agentCreatePreviousStep(step: AgentCreateStepId): AgentCreateSte
   return prev ? prev.id : null;
 }
 
+export type AgentCreateCloseIntent = "discard" | "open_agent" | "confirm_delete";
+
 /**
  * What closing the surface should DO.
  *
- * Before the commit there is nothing to keep, so closing discards. After it,
- * the agent is real and already saved — closing must take the person to it,
- * never quietly drop them back on a list as if the last screens had been
- * cancelled. That is the outcome-honesty law applied to a dismiss gesture:
- * "I stopped early" and "nothing happened" are different facts.
+ * Before the commit there is nothing to keep, so closing discards. After it
+ * AND once the agent is reachable, closing must take the person to it, never
+ * quietly drop them back on a list as if the last screens had been
+ * cancelled — the outcome-honesty law applied to a dismiss gesture: "I
+ * stopped early" and "nothing happened" are different facts.
+ *
+ * After it but BEFORE it is reachable, closing may do neither silently — see
+ * this file's header, "PART B, 2026-08-27". `confirm_delete` means: ask.
+ * Never open an agent nobody can message, and never delete one without
+ * saying so.
  */
-export function agentCreateCloseIntent(created: boolean): "discard" | "open_agent" {
-  return created ? "open_agent" : "discard";
+export function agentCreateCloseIntent(created: boolean, reachable: boolean): AgentCreateCloseIntent {
+  if (!created) return "discard";
+  return reachable ? "open_agent" : "confirm_delete";
 }
 
 /** The surface's own title. It names the thing once the thing exists —

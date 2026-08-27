@@ -848,6 +848,26 @@
   line-height: 1.45;
 }
 
+/* ── Leave-without-a-channel confirmation ──────────────────────────────────
+   Reuses the shared .fleet-small-dialog shell (AgentDeleteDialog /
+   StopAgentConfirmDialog already use it, so this adds no new dialog
+   vocabulary) but needs its OWN backdrop: .fleet-detail-backdrop is
+   z-index 50, and this has to render ABOVE .agent-create-backdrop
+   (z-index 90) above, not behind it. Same visual treatment as
+   .fleet-detail-backdrop otherwise. */
+.agent-create-confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 95;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(12px);
+  animation: fleet-fade var(--dur-2) var(--ease-out);
+}
+
 /* ── Phone ────────────────────────────────────────────────────────────────
    375x812 is a first-class width, not a graceful-degradation afterthought.
    The surface becomes the sheet: full width, top-anchored so the keyboard

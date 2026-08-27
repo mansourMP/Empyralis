@@ -74,9 +74,11 @@
  *
  * ```
  * X CREATED AN AGENT       the head's X is gone from the moment the commit
- *                          lands; the control becomes "Finish later", which
+ *                          lands AND the agent is REACHABLE (see PART B
+ *                          below); the control becomes "Finish later", which
  *                          is what it does. Nothing labelled cancel survives
- *                          the commit.
+ *                          the commit once the agent can actually be
+ *                          messaged.
  * "TOOLS" WAS THE WRONG    Configure has a separate, genuinely different
  * WORD                     "Tools" section. The connector picker is Apps.
  * A MODAL IS PORTALLED     `position: fixed` does not save an element whose
@@ -87,6 +89,52 @@
  *                          the forward button, and only when it can be
  *                          pressed (`forward.accent`).
  * ```
+ *
+ * ── PART B, 2026-08-27: LEAVING BEFORE A CHANNEL CONNECTS DOES NOT SILENTLY
+ * STRAND AN UNREACHABLE AGENT ──────────────────────────────────────────────
+ * The founder, having watched the "Create agent" commit land at Brain and
+ * the Channels-required block land at Channels, still rejected the result:
+ * *"Halfway through, the agent is already created... channels cannot be
+ * skipped, and BEFORE that step the agent cannot be created in this
+ * platform."* Blocking the forward button was not the whole fix — `dismiss`
+ * on the Channels step still read "Finish later" and quietly opened a real,
+ * permanently unreachable agent whenever nothing was connected yet.
+ *
+ * The commit could not simply move past Channels instead: every real
+ * channel door (a pasted token, an OAuth round trip, a pasted app
+ * credential, a paired computer) binds to an AGENT ID that must already
+ * exist, and ChannelsTab itself needs one to fetch by. Deferring the commit
+ * would mean inventing a "pending agent" concept threaded through every one
+ * of those write paths — a large, separate body of work, and one that would
+ * not even remove the risk (an OAuth round trip leaves the dialog and comes
+ * back; closing the tab mid-flow still orphans something, just a
+ * differently-shaped something). agent-create-wizard.ts's header, "PART B",
+ * has the full reasoning for why this was rejected as the fix.
+ *
+ * So the commit stays at Brain. What changed is `dismiss` itself:
+ *
+ * ```
+ * created, reachable        "Finish later" — unchanged. The agent can
+ *                           already be messaged, so leaving strands nothing.
+ * created, NOT reachable    reads "Cancel" again (same head control as
+ *                           before the commit exists at all), and pressing
+ *                           it opens a confirmation instead of silently
+ *                           doing either thing wrong: "Go back" (stay and
+ *                           connect a channel) or "Delete this agent" — the
+ *                           SAME `deleteFleetAgent` every other delete on
+ *                           this surface goes through, in the same
+ *                           Cancel + `.fleet-btn--danger` shell
+ *                           AgentDeleteDialog already uses.
+ * ```
+ *
+ * Leaving is still never blocked — a confirmation is one more press, not a
+ * wall, so REQUIRED still never becomes CAGED. `reachable` is tracked
+ * separately from the live `connectedChannelCount`: that count resets to 0
+ * the instant ChannelsTab is handed a null agent id (fleet-data.ts's
+ * `useFleetAgentChannels`), which happens the moment the person leaves the
+ * Channels step — so it cannot answer "has this agent ever been reachable"
+ * once they have moved on. `reachable` is set STICKY true the first time a
+ * connected channel is observed on the Channels step, and never cleared.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -135,6 +183,7 @@ import {
   type AgentCreateStepId,
 } from "./agent-create-wizard";
 import { createAgentQuickly } from "./agent-quick-create";
+import { deleteFleetAgent } from "./agent-delete";
 import { ChannelsTab, ConnectorsTab, isChannelConnected } from "./FleetAgentDetail";
 import {
   BYOK_PROVIDERS,
@@ -206,6 +255,93 @@ function useWorkspaceHardwareNodes(workspaceId: string) {
   return { nodes, known, refresh };
 }
 
+/**
+ * Shown only when leaving would abandon a real, unreachable agent — the
+ * founder's own rule, stated flatly: *"Agents cannot exist if they have no
+ * way to receive any message."* Leaving itself is never blocked (that cage
+ * was rejected once already, see agent-create-wizard.ts's header); what this
+ * adds is that the press no longer resolves to either wrong answer on its
+ * own — silently opening an agent nobody can message, or silently keeping
+ * one behind with no confirmation at all. It asks, in the same
+ * Cancel + `.fleet-btn--danger` shell every other confirm on this surface
+ * already uses (AgentDeleteDialog, StopAgentConfirmDialog — copied here
+ * rather than imported because both of those are scoped to an EXISTING
+ * agent's own detail page and carry that page's own copy; this one explains
+ * WHY, which neither of them has any reason to say). The actual delete goes
+ * through `deleteFleetAgent` — the one rule module for removing an agent —
+ * never a second implementation.
+ */
+function UnreachableAgentCloseDialog({
+  agentName,
+  busy,
+  error,
+  onCancel,
+  onConfirm,
+}: {
+  agentName: string;
+  busy: boolean;
+  error: string | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  useEffect(() => {
+    const onKeyDown = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) {
+        // Stopped so the wizard's own Escape handler doesn't also fire on
+        // the keypress that just dismissed this.
+        e.stopPropagation();
+        onCancel();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [busy, onCancel]);
+
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
+    <div
+      // Its own backdrop class, not `.fleet-detail-backdrop` — that one is
+      // z-index 50, and this has to render ABOVE `.agent-create-backdrop`
+      // (z-index 90), not behind it.
+      className="agent-create-confirm-backdrop"
+      onClick={() => {
+        if (!busy) onCancel();
+      }}
+    >
+      <div
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="agent-create-unreachable-title"
+        className="fleet-small-dialog"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="fleet-small-dialog-header">
+          <span id="agent-create-unreachable-title" className="fleet-title">
+            Leave without a channel?
+          </span>
+        </div>
+        <div className="fleet-small-dialog-body">
+          <p style={{ margin: 0, fontSize: 13, color: "var(--text-primary)", lineHeight: 1.5 }}>
+            <strong>{agentName}</strong> has no channel connected yet, so nobody can message it. Go
+            back and connect one, or delete this agent — that can&apos;t be undone.
+          </p>
+          {error && <p style={{ margin: 0, fontSize: 12, color: "var(--offline-text)" }}>{error}</p>}
+        </div>
+        <div className="fleet-small-dialog-footer">
+          <button type="button" className="fleet-btn" onClick={onCancel} disabled={busy}>
+            Go back
+          </button>
+          <button type="button" className="fleet-btn fleet-btn--danger" onClick={onConfirm} disabled={busy}>
+            {busy ? "Deleting…" : "Delete agent"}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 export function AgentCreateCard({
   workspaceId,
   currentProjectId,
@@ -257,6 +393,17 @@ export function AgentCreateCard({
 
   const [created, setCreated] = useState<{ agentId: string; projectId: string } | null>(null);
   const [createdAgent, setCreatedAgent] = useState<FleetAgent | null>(null);
+
+  // STICKY, never cleared once true — see agent-create-wizard.ts's header,
+  // "PART B, 2026-08-27". Decides whether dismissing may defer to the agent
+  // or must ask first. Not the same value as `connectedChannelCount`: that
+  // live count resets to 0 the moment ChannelsTab stops being fetched (see
+  // useFleetAgentChannels below), which happens on every step but Channels.
+  const [reachable, setReachable] = useState(false);
+  // Confirming a delete when leaving before a channel has ever connected.
+  const [confirmUnreachableClose, setConfirmUnreachableClose] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const nameRef = useRef<HTMLInputElement | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
@@ -378,6 +525,16 @@ export function AgentCreateCard({
     isChannelConnected(c, slackChannelBinding, telegramBotConnected),
   ).length;
 
+  // Latches `reachable` the first time a real connection is observed on the
+  // Channels step. Deliberately never resets to false — a channel connected
+  // and later disconnected is a normal state for a real agent to be in
+  // (nothing here should second-guess that), and Part A's own forward-block
+  // already guarantees nobody reaches the Apps step without having cleared
+  // this at least once.
+  useEffect(() => {
+    if (step === "channels" && connectedChannelCount > 0) setReachable(true);
+  }, [step, connectedChannelCount]);
+
   // …and the same for apps, so the last button can say "Finish" rather than
   // "Skip for now" when something actually got connected. This is a SECOND
   // read of the list ConnectorPicker fetches for itself one component down —
@@ -406,6 +563,7 @@ export function AgentCreateCard({
     channelsKnown: Boolean(created) && !channelsLoading,
     connectedChannelCount,
     connectedAppCount,
+    reachable,
   });
 
   // Suggested name — fleet_create_agent's own fallback pool, fetched once so
@@ -461,18 +619,57 @@ export function AgentCreateCard({
     else onClose();
   }, [created, onClose, onCreated]);
 
-  /** Dismiss. Before the commit that discards; after it, the agent is real
-   *  and already saved, so it opens the agent instead — "I stopped early" is
-   *  not "nothing happened". */
+  /** Dismiss. Before the commit that discards; after it AND once the agent
+   *  is reachable, it opens the agent instead — "I stopped early" is not
+   *  "nothing happened". Before it is reachable, pressing it asks first
+   *  rather than doing either — see agent-create-wizard.ts's header,
+   *  "PART B, 2026-08-27". */
   const requestClose = useCallback(() => {
     if (closing || busy) return;
+    const intent = agentCreateCloseIntent(Boolean(created), reachable);
+    if (intent === "confirm_delete") {
+      setDeleteError(null);
+      setConfirmUnreachableClose(true);
+      return;
+    }
     setClosing(true);
-    const intent = agentCreateCloseIntent(Boolean(created));
     closeTimer.current = window.setTimeout(
       () => (intent === "open_agent" ? finish() : onClose()),
       exitDurationMs(),
     );
-  }, [busy, closing, created, finish, onClose]);
+  }, [busy, closing, created, finish, onClose, reachable]);
+
+  /** Backs out of the delete-confirmation and returns to the wizard — the
+   *  agent is untouched, nothing has happened. */
+  const cancelUnreachableClose = useCallback(() => {
+    if (deleteBusy) return;
+    setConfirmUnreachableClose(false);
+  }, [deleteBusy]);
+
+  /** The other way out of the confirmation: actually delete the agent that
+   *  was created but never became reachable, then close the wizard exactly
+   *  like a pre-commit Cancel would have — nothing left behind, no
+   *  `onCreated` callback, because there is no agent to hand back. Goes
+   *  through `deleteFleetAgent` — the one rule module for removing an
+   *  agent, never a second implementation here — so the three real outcomes
+   *  (deleted / refused / unconfirmed) are handled exactly as they are
+   *  everywhere else this action exists. */
+  const confirmDeleteUnreachable = useCallback(async () => {
+    if (!created) return;
+    setDeleteBusy(true);
+    setDeleteError(null);
+    const outcome = await deleteFleetAgent(workspaceId, created.agentId, name.trim() || "This agent");
+    setDeleteBusy(false);
+    if (outcome.status === "deleted") {
+      setConfirmUnreachableClose(false);
+      onClose();
+      return;
+    }
+    // refused / unconfirmed — say so and leave the dialog open so they can
+    // retry or back out; a delete that may or may not have happened must
+    // never be reported, or silently acted on, as a definite success.
+    setDeleteError(outcome.message);
+  }, [created, name, onClose, workspaceId]);
 
   /** Best-effort — ChannelsTab and ConnectorsTab both tolerate a null agent,
    *  so a failed hydrate degrades to a slightly emptier panel rather than a
@@ -1172,6 +1369,15 @@ export function AgentCreateCard({
             void adoptNewestNode("cloud_vps");
           }}
         />
+        {confirmUnreachableClose && created ? (
+          <UnreachableAgentCloseDialog
+            agentName={name.trim() || "This agent"}
+            busy={deleteBusy}
+            error={deleteError}
+            onCancel={cancelUnreachableClose}
+            onConfirm={() => void confirmDeleteUnreachable()}
+          />
+        ) : null}
       </div>
     </div>
   );
