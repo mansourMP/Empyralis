@@ -38,6 +38,7 @@ import { AgentSigil, StatusDot } from "@/lib/workspace/fleet/fleet-indicators";
 import { ProjectIcon } from "@/lib/workspace/fleet/fleet-project-identity";
 import { UsageStat, bucketSeries, type UsageBucket } from "@/lib/workspace/fleet/fleet-sparkline";
 import { planAgentCountShape } from "@/lib/workspace/fleet/agent-count-shape";
+import { shouldRedirectToSoloAgent } from "@/lib/workspace/fleet/agent-solo-redirect";
 import { createButtonClass } from "@/lib/workspace/fleet/create-accent";
 import { FleetToolbar } from "@/lib/workspace/fleet/FleetToolbar";
 import { TaskViewOptions } from "@/lib/workspace/fleet/TaskViewOptions";
@@ -458,12 +459,22 @@ export default function ProjectDetailPage() {
   // instead of showing anything here. "fleet": this pane lists them.
   const agentCountMode = useMemo(() => planAgentCountShape(inProject.length), [inProject.length]);
   const soloAgent = agentCountMode === "solo" ? inProject[0] : null;
+  // MAN-374 — shares agent-solo-redirect.ts's rule with the workspace-level
+  // twin of this exact redirect (agents/page.tsx), rather than re-typing the
+  // condition a second time: that IS the bug this file used to carry. The
+  // full trace (AgentCreateCard.create() awaits createAgentQuickly(), which
+  // awaits a synchronous force-refetch of the shared agents cache this
+  // page's own list is built from, flipping the count to "solo" while the
+  // wizard is still on step 2) lives in agent-solo-redirect.ts's own header.
+  const redirectToSolo = shouldRedirectToSoloAgent({
+    loading,
+    hasSoloTarget: view === "agents" && Boolean(soloAgent),
+    cardOpen: agentCardOpen,
+  });
   useEffect(() => {
-    if (view === "agents" && !loading && soloAgent) {
-      router.replace(agentHref(soloAgent.agent_id));
-    }
+    if (redirectToSolo && soloAgent) router.replace(agentHref(soloAgent.agent_id));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, loading, soloAgent?.agent_id]);
+  }, [redirectToSolo, soloAgent?.agent_id]);
 
   // MAN-64/MAN-70: assignee is agent-or-human -- dispatch to whichever of
   // assignFleetTask/assignFleetTaskToUser matches the picker's selection.
