@@ -2,10 +2,14 @@
 Channel transport interface — the thin contract every channel implements.
 
 Each channel (Telegram, Discord, Slack, etc.) provides a ChannelTransport
-implementation.  The shared-core SageReplyDispatcher owns ALL reliability
-logic — guaranteed response, error classification, message splitting,
-typing lifecycle, formatting.  The channel only needs to implement the
-transport primitives below.
+implementation.  The shared-core SageReplyDispatcher owns the reliability
+logic that is genuinely channel-agnostic — guaranteed response, error
+classification, message splitting, typing lifecycle, and in-band retry on a
+transient send failure.  Formatting is NOT on that list: only the channel
+knows its own native markup dialect (MarkdownV2, mrkdwn, Discord markdown,
+plain text) and what a rejected/malformed send should fall back to, so
+send_message() owns formatting end to end — see its own docstring below.
+The channel only needs to implement the transport primitives below.
 
 Adding a new channel = implement this class (~30 lines) → inherit all R1
 guarantees automatically.  No reliability logic lives in the channel.
@@ -44,8 +48,29 @@ class ChannelTransport(ABC):
         """Deliver a text chunk to the user.  NEVER raise — return bool.
 
         The dispatcher has already split the message to fit within
-        max_message_length and applied format_text().  This method is
-        a pure transport concern: deliver the bytes.
+        max_message_length. `text` is the ORIGINAL, UNFORMATTED chunk —
+        the dispatcher does NOT call format_text() before invoking this
+        method, and never has a good reason to: only the transport knows
+        whether the string it is about to hand to the platform is meant to
+        be rendered as markup or as literal plain text.
+
+        This method therefore OWNS formatting end to end: call
+        format_text() on `text` yourself if you want native markup, attempt
+        that formatted send, and on a parse-mode rejection fall back to
+        sending the ORIGINAL `text` (never the formatted string) as plain
+        text with no parse mode. See TelegramHostedTransport.send_message
+        (sage_telegram_hosted_service.py) and AgentBotTransport.send_message
+        (hosted_bot_provisioning_service.py) for the reference shape.
+
+        Do not call format_text() a second time on a string this method
+        already formatted, and do not have a caller of send_message()
+        pre-format `text` before passing it in — either one double-applies
+        the transport's own formatting, which is not idempotent (Telegram's
+        MarkdownV2 escaping is a documented example: escaping "\\(" a
+        second time produces "\\\\(", invalid syntax that gets
+        rejected and then delivered as literal, backslash-visible plain
+        text). agent_reply_dispatcher._send_one_chunk's own docstring
+        records the real incident this caused.
 
         Returns True if the message was acknowledged by the platform.
         """

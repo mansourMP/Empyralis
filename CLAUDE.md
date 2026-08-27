@@ -9327,3 +9327,70 @@ The `401 invalid token` Telegram line in the log afterwards is the PROOF it
 worked — the fake token being rejected is what "no real bot was touched"
 looks like. And pin `EMPYRALIS_E2E_STATE_HOME` to an existing directory or
 the script mktemps a fresh one and silently invalidates every live session.
+
+## Telegram replies arrived with visible backslashes — a formatter called TWICE, and MarkdownV2 replaced with HTML (2026-08-28)
+
+**Verdict: `agent_reply_dispatcher._send_one_chunk` pre-formatted the reply
+via `transport.format_text()`, then handed the ALREADY-FORMATTED string into
+`transport.send_message()` — which formatted it AGAIN internally
+(`TelegramHostedTransport`/`AgentBotTransport`, both hosted and BYO Telegram
+bots). Formatting is not idempotent: MarkdownV2-escaping an already-escaped
+`\(` a second time produces `\\(` — an escaped backslash followed by a bare,
+now-unescaped `(` — invalid MarkdownV2. Telegram rejected the twice-escaped
+send, and the transport's own fallback then delivered the ONCE-escaped text
+(still carrying real backslashes) as literal PLAIN TEXT.** Reproduced
+byte-for-byte against the founder's own screenshots — `_to_telegram_markdown`
+applied ONCE to the obvious raw text is exact, character for character, what
+he saw delivered.
+
+```
+BEFORE                                    AFTER
+_send_one_chunk(transport, text)          _send_one_chunk(transport, text)
+  formatted = transport.format_text(text)   for attempt in range(...):
+  send_message(formatted)  ─▶ transport         transport.send_message(text)
+    formats AGAIN internally  ✗ DOUBLE           formats ONCE, owns its own
+  send_message(text)  ← 2nd attempt only         formatted→plain fallback
+    if the first one FAILED (rare)
+```
+
+**Fixed two ways, deliberately not one.** (1) The dispatcher no longer
+pre-formats — `transport.send_message()` is called with the RAW, original
+text, exactly once per retry attempt; formatting + the formatted-vs-plain
+fallback is owned entirely by the transport (matches what
+`channel_transport.py`'s own docstring already claimed, before this bug
+proved two of the three implementations didn't follow it). (2) Every live
+Telegram send — `TelegramHostedTransport`, `AgentBotTransport`, the
+standalone `send_message()`, `_send_chunk_markdown` (`send_message_safe`) —
+switched from MarkdownV2 (`_to_telegram_markdown`) to Telegram HTML
+(`_to_telegram_html`, new function, same file). HTML only ever treats `&`,
+`<`, `>` as special, so ordinary prose punctuation can never trigger a
+parse-mode rejection — the bug CLASS is gone, not just today's instance: an
+unbalanced `*` under HTML is just a literal asterisk, no exception, no 400,
+no fallback even needed (verified directly, both formatters, same input).
+
+**`_to_telegram_markdown` is UNCHANGED and kept, not deleted** — it was
+never wrong in isolation (its own `MarkdownFormattingTests` still pin its
+real behavior), the bug was calling it twice. Its docstring now explains why
+nothing calls it on a live send path anymore.
+`send_photo`/`send_document`'s captions are the two remaining MarkdownV2
+call sites — flagged, not fixed: **zero callers anywhere in the repo**,
+dead code, not implicated in the reported bug, not worth touching to keep
+this fix minimal.
+
+Guarded by `server_modules/tests/test_telegram_html_formatting.py` (29
+tests, all real strings reverse-engineered from the founder's own
+screenshot, verified byte-for-byte to reproduce it under the OLD single-call
+escaper): the formatter itself, the dispatcher-never-pre-formats invariant
+(a spy transport with a non-identity `format_text` makes a reintroduced
+pre-format immediately visible), both transports' wire bodies (`parse_mode:
+"HTML"`, zero backslashes), the fallback-uses-raw-not-formatted-text
+invariant, and the unbalanced-`*` case never needing the fallback at all.
+40 pre-existing, unrelated failures in the broader channel/telegram test
+surface were confirmed pre-existing by reverting the fix and re-running
+(same 40, same tests, before and after) — not caused by, not fixed by, this
+change.
+
+**Not verified: an actual message arriving on his real Telegram bot.**
+Per this file's own standing rule, no automated call ever touches a device
+the founder personally uses; everything above is proven by driving the real
+dispatch/transport code with only the Telegram HTTP call mocked.
