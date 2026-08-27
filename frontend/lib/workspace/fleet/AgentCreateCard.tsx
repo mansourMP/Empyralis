@@ -116,6 +116,7 @@ import {
 import {
   AGENT_CREATE_DEFAULT_PLACEMENT,
   AGENT_CREATE_PLACEMENTS,
+  dedupeHardwareNodeLabels,
   hardwareNodeId,
   hardwareNodeLabel,
   hardwareNodeOnline,
@@ -241,6 +242,17 @@ export function AgentCreateCard({
   const [sshPanelOpen, setSshPanelOpen] = useState(false);
   const [pairPanelOpen, setPairPanelOpen] = useState(false);
   const placementNodes = useMemo(() => nodesForPlacement(placement, nodes), [placement, nodes]);
+  // Two machines with the same computed label (both real hostnames that
+  // happen to match, or both genuinely nameless) must still read as two
+  // distinguishable options — this is the control that decides which
+  // computer an agent gets a shell on. See dedupeHardwareNodeLabels's own
+  // comment for why the disambiguator is always something real.
+  const placementNodeLabels = useMemo(() => dedupeHardwareNodeLabels(placementNodes), [placementNodes]);
+  const selectedPlacementNode = useMemo(
+    () => placementNodes.find((n) => hardwareNodeId(n) === nodeId),
+    [placementNodes, nodeId],
+  );
+  const selectedPlacementNodeOffline = Boolean(selectedPlacementNode && !hardwareNodeOnline(selectedPlacementNode));
 
   // ── Step 2: brain ───────────────────────────────────────────────────────
   const [brainMode, setBrainMode] = useState<AgentCreateBrainMode>(AGENT_CREATE_DEFAULT_BRAIN_MODE);
@@ -713,6 +725,7 @@ export function AgentCreateCard({
         <div className="agent-create-options">
           {placementNodes.map((n) => {
             const id = hardwareNodeId(n);
+            const online = hardwareNodeOnline(n);
             return (
               <button
                 key={id}
@@ -721,12 +734,23 @@ export function AgentCreateCard({
                 onClick={() => selectNode(id)}
                 aria-pressed={nodeId === id}
               >
-                <span className="agent-create-option-label">{hardwareNodeLabel(n)}</span>
-                <span className="agent-create-option-body">{hardwareNodeOnline(n) ? "Online" : "Offline"}</span>
+                <span className="agent-create-option-label">{placementNodeLabels.get(id) || hardwareNodeLabel(n)}</span>
+                <span className="agent-create-option-body">{online ? "Online" : "Offline"}</span>
               </button>
             );
           })}
         </div>
+      )}
+      {selectedPlacementNodeOffline && (
+        // A dead click, not a blocked one: an offline box can still be
+        // picked (it may come back before the agent's first turn), so this
+        // is the one honest line rather than a disabled state that would
+        // make an otherwise-legitimate choice unreachable.
+        <p className="agent-create-note agent-create-note--warning">
+          {placement === "vps"
+            ? "This server is offline right now — the agent will wait until it reconnects."
+            : "This computer is offline right now — the agent will wait until it reconnects."}
+        </p>
       )}
       <div className="agent-create-node-actions">{addControls}</div>
     </div>

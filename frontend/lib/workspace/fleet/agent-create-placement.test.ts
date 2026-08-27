@@ -6,6 +6,7 @@
 import {
   AGENT_CREATE_DEFAULT_PLACEMENT,
   AGENT_CREATE_PLACEMENTS,
+  dedupeHardwareNodeLabels,
   hardwareNodeId,
   hardwareNodeLabel,
   hardwareNodeOnline,
@@ -14,6 +15,7 @@ import {
   placementNeedsNode,
   planAgentCreatePlacement,
   type AgentCreatePlacement,
+  type HardwareNodeLike,
 } from "./agent-create-placement";
 
 let passed = 0;
@@ -60,8 +62,15 @@ assert(placementNeedsNode("vps") && placementNeedsNode("gateway"), "both machine
   assert(hardwareNodeId({ id: "gw_2" }) === "gw_2", "…and `id` is the fallback the same endpoint also uses");
   assert(hardwareNodeId({}) === "", "an unidentifiable node resolves to empty, never to undefined");
 
-  assert(hardwareNodeLabel({ hardware_label: "Mac mini" }) === "Mac mini", "the owner's own label wins");
-  assert(hardwareNodeLabel({ display_name: "box-a" }) === "box-a", "…then the display name");
+  // display_name FIRST — it is the real, gateway-reported hostname
+  // (empyralis-gateway/src/config.ts's displayName, os.hostname() by
+  // default). hardware_label is NOT an owner-chosen name: it is
+  // server-computed from hardware_kind alone, and for every non-VPS
+  // ("personal_device") registration it is the identical literal constant
+  // "This Device" — so checking it first is what made two real, distinctly
+  // named paired computers both render as "This Device" in the wizard.
+  assert(hardwareNodeLabel({ display_name: "box-a", hardware_label: "This Device" }) === "box-a", "display_name beats the generic hardware_label fallback");
+  assert(hardwareNodeLabel({ hardware_label: "DigitalOcean · SFO3" }) === "DigitalOcean · SFO3", "…falls back to hardware_label when there is no real name");
   assert(hardwareNodeLabel({ platform: "darwin" }) === "darwin", "…then the platform");
   assert(hardwareNodeLabel({ gateway_id: "gw_9" }) === "gw_9", "…then the raw id");
   assert(hardwareNodeLabel({}) === "Computer", "and a node with nothing at all still renders a word");
@@ -70,6 +79,51 @@ assert(placementNeedsNode("vps") && placementNeedsNode("gateway"), "both machine
   assert(hardwareNodeOnline({ status: "online" }), "either field can carry it");
   assert(!hardwareNodeOnline({ status: "offline" }), "and offline is not online");
   assert(!hardwareNodeOnline({}), "an unknown node is not reported as online");
+}
+
+// ── Two entries may never render the same label — the founder's own report ─
+
+{
+  // The exact reported scenario: two paired personal computers, the
+  // backend's generic "This Device" hardware_label on both, real distinct
+  // hostnames on both — must resolve to those hostnames, not collide.
+  const macbook: HardwareNodeLike = { gateway_id: "gw_1", display_name: "Mansurs-MacBook-Pro.local", hardware_label: "This Device", connection_status: "online" };
+  const vps: HardwareNodeLike = { gateway_id: "gw_2", display_name: "ubuntu-s-1vcpu-2gb-sfo2", hardware_label: "This Device", connection_status: "offline" };
+  const labels = dedupeHardwareNodeLabels([macbook, vps]);
+  assert(labels.get("gw_1") === "Mansurs-MacBook-Pro.local", "the online machine keeps its real hostname");
+  assert(labels.get("gw_2") === "ubuntu-s-1vcpu-2gb-sfo2", "the offline machine keeps its real hostname too");
+  assert(labels.get("gw_1") !== labels.get("gw_2"), "the two are never the same string");
+
+  // Two nodes that genuinely have no real name at all — both fall to the
+  // shared "This Device" fallback and MUST still be disambiguated, never
+  // shown identically.
+  const bare1: HardwareNodeLike = { gateway_id: "gw_a", hardware_label: "This Device", platform: "darwin" };
+  const bare2: HardwareNodeLike = { gateway_id: "gw_bcdef0", hardware_label: "This Device", platform: "linux" };
+  const bareLabels = dedupeHardwareNodeLabels([bare1, bare2]);
+  assert(bareLabels.get("gw_a") !== bareLabels.get("gw_bcdef0"), "two nameless nodes never collide either");
+  assert(bareLabels.get("gw_a") === "This Device (darwin)", "…disambiguated by platform when it actually differs");
+  assert(bareLabels.get("gw_bcdef0") === "This Device (linux)", "…both sides get the same treatment");
+  assert(!/\(\d+\)$/.test(bareLabels.get("gw_a") || ""), "never a bare ordinal — an order that means nothing");
+
+  // Same platform on both — the platform can't help, so a short id slice
+  // (a real, stable, already-server-assigned fact) is the disambiguator.
+  const same1: HardwareNodeLike = { gateway_id: "gw_1a2b3c", hardware_label: "This Device", platform: "linux" };
+  const same2: HardwareNodeLike = { gateway_id: "gw_4d5e6f", hardware_label: "This Device", platform: "linux" };
+  const sameLabels = dedupeHardwareNodeLabels([same1, same2]);
+  assert(sameLabels.get("gw_1a2b3c") === "This Device · 1a2b3c", "falls to an id slice when platform can't distinguish");
+  assert(sameLabels.get("gw_4d5e6f") === "This Device · 4d5e6f", "…and the slice is the node's own real id, not invented");
+  assert(sameLabels.get("gw_1a2b3c") !== sameLabels.get("gw_4d5e6f"), "still never the same string");
+
+  // A single node, or already-distinct labels, are left completely alone.
+  const solo = dedupeHardwareNodeLabels([{ gateway_id: "gw_1", display_name: "Only Box" }]);
+  assert(solo.get("gw_1") === "Only Box", "one node is never disambiguated for no reason");
+  const distinct = dedupeHardwareNodeLabels([
+    { gateway_id: "gw_1", display_name: "Mac mini" },
+    { gateway_id: "gw_2", display_name: "Ubuntu box" },
+  ]);
+  assert(distinct.get("gw_1") === "Mac mini" && distinct.get("gw_2") === "Ubuntu box", "already-distinct real names pass through untouched");
+
+  assert(dedupeHardwareNodeLabels([]).size === 0, "an empty list disambiguates cleanly");
 }
 
 // ── Partitioning ──────────────────────────────────────────────────────────

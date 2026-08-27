@@ -2016,7 +2016,8 @@ async def fleet_create_bug_report(
     other mutation in this router: the dialog that submits this always gets
     a JSON body back to render, success or failure."""
     resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
-    from server_modules import bug_report_service
+    from server_modules import bug_report_notification_service, bug_report_service
+    from server_modules.control_plane_repository import get_workspace_by_id
 
     try:
         report = await bug_report_service.create_report(
@@ -2028,6 +2029,28 @@ async def fleet_create_bug_report(
             page_path=body.page_path,
             user_agent=request.headers.get("user-agent", ""),
         )
+        # Best-effort: the report row above is already committed, so a dead
+        # mailbox or an unset EMAIL_PROVIDER_API_KEY must never turn a saved
+        # report into a failed response -- deliver_bug_report_notification
+        # never raises, and its own status is only logged, not returned to
+        # the reporter (they asked "did my report save", not "did the
+        # operator's inbox get the memo").
+        try:
+            ws = await get_workspace_by_id(resolved_workspace_id)
+            workspace_name = str((ws or {}).get("name") or "").strip()
+            reporter_label = str(
+                (current_user or {}).get("display_name")
+                or (current_user or {}).get("name")
+                or (current_user or {}).get("email")
+                or ""
+            ).strip()
+            await bug_report_notification_service.deliver_bug_report_notification(
+                report=report,
+                workspace_name=workspace_name,
+                reporter_label=reporter_label,
+            )
+        except Exception:  # noqa: BLE001 -- a saved report must survive any notification defect
+            LOGGER.exception("bug_report_notification_dispatch_failed: report_id=%s", report.get("id"))
         return {"ok": True, "report": report}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}

@@ -88,10 +88,29 @@ export function hardwareNodeId(node: HardwareNodeLike): string {
   return String(node.gateway_id || node.id || "").trim();
 }
 
+/** `display_name` FIRST — the same order `gatewayLabel` (gateway-box-picker.tsx)
+ *  and every inline label in HardwareSection.tsx already use, and the ONLY
+ *  order that can ever show a real machine name. `hardware_label` is not an
+ *  owner-chosen name; it is SERVER-COMPUTED (gateway_registry_service.
+ *  _hardware_presentation) purely from `hardware_kind` — a cloud VPS gets
+ *  "{Provider} · {Region}", and EVERY personal computer that isn't a cloud
+ *  VPS gets the identical literal constant "This Device", regardless of its
+ *  real hostname. This function used to check `hardware_label` FIRST, so two
+ *  paired computers — each with a real, distinct `display_name` the gateway
+ *  reports at pairing (empyralis-gateway/src/config.ts's `displayName`,
+ *  which defaults to `os.hostname()`) — both rendered as the identical,
+ *  meaningless "This Device" in the create wizard's Placement step. The
+ *  founder's own report: two machines, one online, one offline, both
+ *  labelled "This Device", in the ONE control that decides which computer an
+ *  agent gets a shell on. `display_name` was present in the same wire
+ *  payload the whole time (`/api/gateway/registrations`) — it was simply
+ *  outranked by a hardcoded backend fallback. See `dedupeHardwareNodeLabels`
+ *  below for what still happens when two nodes share even their real name
+ *  (or both genuinely have none). */
 export function hardwareNodeLabel(node: HardwareNodeLike): string {
   return (
-    String(node.hardware_label || "").trim() ||
     String(node.display_name || "").trim() ||
+    String(node.hardware_label || "").trim() ||
     String(node.platform || "").trim() ||
     hardwareNodeId(node) ||
     "Computer"
@@ -100,6 +119,50 @@ export function hardwareNodeLabel(node: HardwareNodeLike): string {
 
 export function hardwareNodeOnline(node: HardwareNodeLike): boolean {
   return `${node.connection_status || ""} ${node.status || ""}`.toLowerCase().includes("online");
+}
+
+/** The label fix above still cannot save two nodes that collide for real —
+ *  the same hostname paired twice, or two registrations that both genuinely
+ *  carry no `display_name` and fall all the way to the shared "This Device"/
+ *  platform fallback. Two entries reading identically is exactly the defect
+ *  reported (the control decides which machine an agent gets a SHELL on), so
+ *  every label handed to a list of nodes goes through this function rather
+ *  than `hardwareNodeLabel` directly. Disambiguation is always something
+ *  REAL — the platform, when it tells the colliding nodes apart, else a
+ *  short slice of the node's own id — NEVER a bare ordinal ("This Device
+ *  (2)"), which would imply an order that means nothing and cannot be
+ *  reproduced by the person reading it next time. */
+export function dedupeHardwareNodeLabels(nodes: HardwareNodeLike[]): Map<string, string> {
+  const entries = (nodes || []).map((n) => ({ id: hardwareNodeId(n), label: hardwareNodeLabel(n), node: n }));
+  const groups = new Map<string, typeof entries>();
+  for (const entry of entries) {
+    const list = groups.get(entry.label);
+    if (list) list.push(entry);
+    else groups.set(entry.label, [entry]);
+  }
+  const out = new Map<string, string>();
+  for (const group of groups.values()) {
+    if (group.length < 2) {
+      out.set(group[0].id, group[0].label);
+      continue;
+    }
+    // Try the platform first — a real, meaningful fact ("darwin" vs
+    // "linux") when it actually differs across every colliding node.
+    const platforms = group.map((e) => String(e.node.platform || "").trim());
+    const platformDistinguishes = platforms.every(Boolean) && new Set(platforms).size === group.length;
+    for (let i = 0; i < group.length; i++) {
+      const entry = group[i];
+      if (platformDistinguishes) {
+        out.set(entry.id, `${entry.label} (${platforms[i]})`);
+        continue;
+      }
+      // Fall back to a short slice of the node's own id — real, stable, and
+      // unique by construction (it is the id the server already assigned).
+      const suffix = entry.id.slice(-6);
+      out.set(entry.id, suffix ? `${entry.label} · ${suffix}` : entry.label);
+    }
+  }
+  return out;
 }
 
 /** VPS vs. everything else, by the SAME `hardware_kind` discriminator the
