@@ -11,6 +11,7 @@
  * Run: npx tsx lib/workspace/fleet/agent-setup-steps.test.ts
  */
 
+import { isAgentDetailTab } from "./agent-detail-tabs";
 import {
   agentSetupNextStep,
   agentSetupChannelPlatformLabel,
@@ -139,11 +140,19 @@ assert(fresh.filter((s) => s.primary).length === 1, "exactly one step is primary
 assert(fresh[0].primary && fresh[0].id === "channel", "the channel is the primary action: with chat gone, it is the only way to reach the agent");
 assert(
   fresh.map((s) => s.tab).join(",") === "channels,hardware,connectors",
-  "every step routes to a Configure section that exists in both [tab]/page.tsx VALID_TABS whitelists",
+  "the three steps open Channels, Hardware and Apps, in that order",
 );
+// Was a PROSE claim ("...exists in both [tab]/page.tsx VALID_TABS
+// whitelists"). Now enforced against the real shared guard: a step whose
+// tab isn't routable is a link that lands on "chat" instead of the section
+// it names, which is exactly the failure `context` was in before
+// agent-detail-tabs.ts existed.
+for (const step of fresh) {
+  assert(isAgentDetailTab(step.tab), `step "${step.id}" opens a routable tab (${step.tab})`);
+}
 assert(
   !fresh.some((s) => (s.tab as string) === "context"),
-  "nothing routes to `context` — it is absent from VALID_TABS, so the URL coerces to chat and the sheet closes",
+  "no Context step today — a product decision nobody has made, NOT a routing limitation (the tab routes fine now)",
 );
 assert(
   fresh[0].hint === "Telegram needs no computer",
