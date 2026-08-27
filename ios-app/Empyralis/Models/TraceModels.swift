@@ -341,7 +341,19 @@ struct TraceStep: Identifiable {
         for key in ["command", "query", "path", "title", "url", "name", "text"] {
             if let value = preview[key]?.stringValue,
                !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return String(value.prefix(160))
+                // TRUNCATE VISIBLY. This was a bare .prefix(160), so a long
+                // shell command or path lost its tail with nothing on screen
+                // saying so — the reader could not tell a complete command
+                // from a silently clipped one. The row's own .lineLimit(3)
+                // clips visually too, but that reads as "more text below";
+                // a character cap with no marker reads as the whole value.
+                //
+                // The cap stays despite that visual clip: it bounds what is
+                // carried and measured per row, and a pathological
+                // single-line value (a base64 blob, a 4KB argument) should
+                // not be laid out at all just to be clipped afterwards.
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.count > 160 ? String(trimmed.prefix(160)) + "…" : trimmed
             }
         }
         return nil

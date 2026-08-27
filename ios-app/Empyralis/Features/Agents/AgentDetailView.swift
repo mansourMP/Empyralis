@@ -61,8 +61,17 @@ struct AgentDetailView: View {
     private var traceSection: some View {
         switch lookup {
         case .loading:
-            Spacer()
-            ProgressView()
+            // SkeletonRow, like every other first-load state in this app
+            // (Inbox, My work, Projects, Agents, Documents, Settings). This
+            // was a bare ProgressView — the one loading state that did not
+            // match the house vocabulary. Not an honesty problem: this
+            // genuinely IS a fresh, uncacheable fetch with nothing known yet,
+            // which is exactly the one case a skeleton is allowed to appear.
+            VStack(spacing: Space.x3) {
+                ForEach(0..<4, id: \.self) { _ in SkeletonRow() }
+            }
+            .padding(.horizontal, Space.x4)
+            .padding(.top, Space.x4)
             Spacer()
 
         case .ready:
@@ -97,10 +106,15 @@ struct AgentDetailView: View {
                     message: "Check your connection and try again.",
                     systemImage: "wifi.exclamationmark"
                 )
+                // PrimaryButtonStyle, matching AgentTraceView's own
+                // whole-screen failure. This is the same situation one level
+                // up — nothing loaded, and retry is the only action — so it
+                // gets the same weight. It was SecondaryButtonStyle, which
+                // left this screen with no primary action at all.
                 Button("Try again") {
                     Task { await resolveLatestTrace() }
                 }
-                .buttonStyle(SecondaryButtonStyle())
+                .buttonStyle(PrimaryButtonStyle())
                 .padding(.horizontal, Space.x8)
             }
             Spacer()

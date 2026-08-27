@@ -117,12 +117,17 @@ struct AgentTraceView: View {
                     .font(.empCaption)
                     .foregroundStyle(Theme.textMuted(scheme))
                     .multilineTextAlignment(.center)
+                // THE APP'S OWN PrimaryButtonStyle, not a hand-rolled pill.
+                // This was open-coded — its own accent fill, its own radius,
+                // its own padding — so it drifted from every other primary
+                // button in the app and would not have followed a token
+                // change. On a whole-screen failure, retry IS the primary
+                // action: it is the only thing on screen to do, and the
+                // accent law's positive half says a view with no accent has
+                // no primary action at all.
                 Button("Try again") { model.retry() }
-                    .font(.empBodyMedium)
-                    .foregroundStyle(Theme.accentContrast)
-                    .padding(.horizontal, Space.x4)
-                    .padding(.vertical, Space.x2)
-                    .background(Theme.accent(scheme), in: RoundedRectangle(cornerRadius: Radius.control))
+                    .buttonStyle(PrimaryButtonStyle())
+                    .padding(.horizontal, Space.x8)
                     .padding(.top, Space.x2)
             }
         }
@@ -152,6 +157,14 @@ struct AgentTraceView: View {
                 case .failed(let message):
                     Circle().fill(Theme.offline(scheme)).frame(width: 6, height: 6)
                     Text("Stopped streaming — \(message)")
+                    // DELIBERATELY QUIET, and not an inconsistency with the
+                    // accent-filled retry above. That one owns an otherwise
+                    // empty screen; this one sits inline in a status footer
+                    // beside steps that already streamed successfully. An
+                    // accent-filled button here would be a second primary
+                    // action on a screen that still has content, and at
+                    // caption scale it would shout over the run it is
+                    // reporting on.
                     Button("Try again") { model.retry() }
                         .font(.empCaptionMedium)
                         .foregroundStyle(Theme.textPrimary(scheme))
