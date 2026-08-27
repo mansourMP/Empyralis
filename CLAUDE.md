@@ -9253,3 +9253,77 @@ subagent or to a script.
 its tooling is EVIDENCE, not truth.** Check each claim against the repo
 before acting — every one of its file-level claims was checkable in seconds,
 and most were already stale.
+
+## The device matrix, finished honestly (2026-08-27)
+
+**ALL FOUR DEVICES have now driven all four task-authoring capabilities end
+to end, each confirmed in Postgres rather than from the UI's own feedback.**
+
+```
+                create  subtask  rename  description   DB row
+iPhone 13         ✓        ✓        ✓         ✓        2/1/1/1   (run 2 of 3)
+iPhone 14 Pro     ✓        ✓        ✓         ✓        2/1/1/1
+iPhone 16         ✓        ✓        ✓         ✓        2/1/1/1
+iPhone 17 Pro     ✓        ✓        ✓         ✓        2/1/1/1
+```
+
+**iPhone 14 Pro had never passed before this.** It was the device producing
+the misleading non-monotonic signal (failing a step the SMALLER 13 passed),
+which turned out to be a stale AX5 `content_size` — see the entry above.
+
+**THE HARNESS NEEDED THREE FIXES, EACH A DIFFERENT WAY OF RE-RESOLVING A
+QUERY THAT CHANGED UNDER THE TAP.** They are worth knowing as a set, because
+each one presents as a dead control:
+
+```
+tapFrameOf          the button RENAMES ITSELF mid-press (Create task ->
+                    Creating…), so a retry keyed on its label matches nothing
+                    and reports failure for a tap that LANDED
+settledFrame        the frame was captured MID-ANIMATION, so the tap hit
+                    where the control used to be. 14 Pro: 1/4 -> 3/4
+tapFrameOfVerified  retry only when the tap VERIFIABLY did nothing, judged by
+                    whether the app actually changed — never blindly
+```
+
+All three live in `UIDriver/` and **no app code was ever changed to make a
+test pass** — the signal that mattered, and it held.
+
+**RESIDUAL, stated rather than claimed fixed:** iPhone 13 misses
+`tapRow("Mobile App")` — navigation into a project — on roughly two runs in
+three. Only that one step, only that one device; every other step passes
+there, and the same step passes on the other three. It is a harness tap, not
+a product defect: the same code path serves all four devices and the screen
+renders correctly (verified by screenshot).
+
+**A WHOLE MATRIX RUN CAN FAIL FOR ONE REASON THAT IS NOT THE APP.** All four
+devices once failed identically at sign-in — the seeded backend was down,
+stopped by another agent deliberately testing a failure state. The
+diagnostics added to the harness are what made this one look instead of four:
+they dumped the actual screen ("Couldn't sign in") and its buttons rather
+than a bare miss. **Give a failing harness a tree dump; it converts a
+device-by-device hunt into a single read.**
+
+## RESTARTING THE SEEDED BACKEND REFUSES BY DESIGN, and the override is not the answer (2026-08-27)
+
+`start-e2e-backend.sh` refused twice on a restart, correctly, naming real
+`ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY` and `EMPYRALIS_TELEGRAM_HOSTED_BOT_TOKEN`
+inherited from the repo root's `.env`. That is the guard for the incident
+this file already records — a throwaway stack that long-polled and mutated a
+REAL Telegram bot and ran billed DeepSeek turns.
+
+**Boot with placeholders, never `EMPYRALIS_ALLOW_LOCAL_STACK_LIVE_SECRETS=true`:**
+
+```
+env -u CLAUDE_CODE_MESSAGING_TOKEN \
+  ANTHROPIC_API_KEY=sk-throwaway-blocked \
+  DEEPSEEK_API_KEY=sk-throwaway-blocked \
+  EMPYRALIS_TELEGRAM_HOSTED_BOT_TOKEN=000000:throwaway-blocked \
+  EMPYRALIS_E2E_STATE_HOME=<PIN AN EXISTING ONE> \
+  DATABASE_URL=postgresql://localhost:5432/empyralis_ios_verify \
+  ./frontend/scripts/start-e2e-backend.sh
+```
+
+The `401 invalid token` Telegram line in the log afterwards is the PROOF it
+worked — the fake token being rejected is what "no real bot was touched"
+looks like. And pin `EMPYRALIS_E2E_STATE_HOME` to an existing directory or
+the script mktemps a fresh one and silently invalidates every live session.
