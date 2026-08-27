@@ -109,6 +109,7 @@ import {
   resolveOpenClawChannelKeySupport,
   resolveOpenClawChannelToolFlags,
   resolveOpenClawPluginHookFlags,
+  schemaAuditChannelIds,
   type OpenClawChannelShapeFinding,
 } from "./openclaw-channel-shapes";
 import { resolveOpenClawBinaryPath } from "./openclaw-binary-path";
@@ -686,7 +687,14 @@ export class OpenClawProvisioner {
 
     // ── 2. The installed schema still has the shape the mapping assumes ──
     const schema = await this.options.cli.configSchema();
-    const channelIds = this.options.plan.channels.map((channel) => channel.channelId);
+    // MAN-367: also scans whatever channel ids a registry (ClawHub) install
+    // revealed this run — see schemaAuditChannelIds's own doc comment. A
+    // channel a customer connected through the registry catalog gets the
+    // same tool-authority discovery as a curated one, never none at all.
+    const channelIds = schemaAuditChannelIds(
+      this.options.plan.channels.map((channel) => channel.channelId),
+      registryOutcome.states,
+    );
     const shapeFindings = auditOpenClawChannelShapes(schema, channelIds);
     const hooks = resolveOpenClawPluginHookFlags(schema, channelIds);
     shapeFindings.push(...hooks.findings);
@@ -723,12 +731,27 @@ export class OpenClawProvisioner {
         pluginHookFlags: hooks.enable,
         channelToolFlags: channelTools.disable,
         channelKeySupport,
-        // Straight from the install pass, so `plugins.allow` names exactly
-        // what this box installed — never a hand-kept second list, and never
-        // an intent that the install did not actually produce.
-        installedChannelPluginIds: pluginOutcome.states
-          .filter((state) => state.requiresPlugin && state.installed && state.pluginId)
-          .map((state) => state.pluginId as string),
+        // Straight from the install pass(es), so `plugins.allow` names
+        // exactly what this box installed — never a hand-kept second list,
+        // and never an intent that the install did not actually produce.
+        // MAN-367: this used to read only the curated (channel-id-keyed)
+        // install pass, so a REGISTRY (ClawHub) plugin — installed
+        // successfully by ensureRegistryPluginsInstalled just above — never
+        // reached `plugins.allow` at all. Per OpenClaw's own documented
+        // allowlist semantics ("when set, only listed plugins are eligible
+        // to load"), a plugin absent from this list is a plugin that does
+        // not load, no matter how successfully `openclaw plugins install`
+        // reported it. Folding the registry pass in here is what makes an
+        // installed ClawHub channel plugin an ELIGIBLE-TO-LOAD one rather
+        // than dead weight on disk.
+        installedChannelPluginIds: [
+          ...pluginOutcome.states
+            .filter((state) => state.requiresPlugin && state.installed && state.pluginId)
+            .map((state) => state.pluginId as string),
+          ...registryOutcome.states
+            .filter((state) => state.installed && state.pluginId)
+            .map((state) => state.pluginId),
+        ],
       },
       this.options.secrets,
     );
