@@ -4,19 +4,21 @@ import { useMemo } from "react";
 import { useParams, useRouter } from "next/navigation";
 
 import { resolveAgentProjectId, useFleetAgents, useFleetProjects } from "@/lib/workspace/fleet/fleet-data";
+import { isAgentDetailTab, type AgentDetailTabId } from "@/lib/workspace/fleet/agent-detail-tabs";
 import { FleetAgentDetail } from "@/lib/workspace/fleet/FleetAgentDetail";
 import { useBreadcrumbLabel } from "@/lib/workspace/fleet/Breadcrumbs";
 
-// Same tab set and same "any typo'd tab lands on chat" fallback as the
-// project-scoped twin of this page — see that file's own comment for why
-// "overview" is deliberately absent.
-// "tools" is deliberately absent too, 2026-08-21 — the per-agent Tools tab
-// and the tool-authority tier behind it were deleted
-// (server_modules/authority_mandate_service.py). Same graceful landing as
-// "overview": a stale bookmark to it coerces to "chat" below, never a blank
-// pane.
-const VALID_TABS = ["general", "work", "channels", "connectors", "capabilities", "hardware", "model", "skills", "memory", "chat", "persona"] as const;
-type Tab = (typeof VALID_TABS)[number];
+// The accepted tab set is DERIVED, never hand-listed here. This file used
+// to carry its own VALID_TABS array and its project-scoped twin carried a
+// second one; both had gone stale against the surface they gate, so the
+// Context tab (the per-agent context grant) was offered, rendered, and
+// unreachable from either route — silently coerced to "chat". One source,
+// three consumers now: agent-detail-tabs.ts, imported here, there, and by
+// FleetAgentDetail itself. Which tabs are deliberately ABSENT ("overview",
+// "tools") and why "work" is still accepted are documented there too,
+// once. An unrecognized tab still lands gracefully on "chat" below rather
+// than 404ing.
+type Tab = AgentDetailTabId;
 
 /**
  * The workspace-level twin of .../projects/[projectId]/agents/[agentId]/
@@ -38,7 +40,7 @@ export default function WorkspaceAgentDetailPage() {
   const rawTab = params?.tab;
   const tab: Tab | undefined =
     typeof rawTab === "string"
-      ? ((VALID_TABS as readonly string[]).includes(rawTab) ? (rawTab as Tab) : "chat")
+      ? (isAgentDetailTab(rawTab) ? rawTab : "chat")
       : undefined;
 
   const base = `/w/${encodeURIComponent(workspaceId)}`;

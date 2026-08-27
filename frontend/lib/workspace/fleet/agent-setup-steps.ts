@@ -70,10 +70,17 @@
  *   · The connectors step is suppressed without a project. ConnectorsTab
  *     renders "No project assigned" and no picker without `agent.project_id`
  *     — sending someone there would be a control that submits nothing.
- *   · Nothing routes to the `context` tab. It is in CONFIGURE_GROUPS but
- *     absent from both [tab]/page.tsx `VALID_TABS` whitelists, so the URL
- *     coerces to "chat" and the sheet closes instead of opening. Adding a
- *     Context step here would be a link that visibly does the wrong thing.
+ *   · Nothing routes to the `context` tab — but the REASON changed on
+ *     2026-08-27 and the old one must not be re-cited. It used to be that
+ *     `context` was absent from both [tab]/page.tsx `VALID_TABS` whitelists,
+ *     so the URL coerced to "chat" and the sheet closed instead of opening;
+ *     a Context step would have been a link that visibly did the wrong
+ *     thing. That was a BUG, not a constraint, and it is fixed — the tab
+ *     vocabulary is now derived from agent-detail-tabs.ts and `context`
+ *     routes correctly from both URLs. So a Context step is now merely
+ *     UNBUILT, not impossible: whether granting project context belongs in
+ *     the setup band at all is a product decision nobody has made, not a
+ *     routing limitation. Decide it on its merits if it comes up.
  *
  * ── TWO STEPS DELIBERATELY DO NOT EXIST. Do not add them back. ────────────
  *
@@ -107,9 +114,10 @@ import { CHANNEL_DOORS, CHANNEL_GRID_PLATFORMS } from "./channel-doors";
 import { channelHardwareTier, showsRecommendedBadge, type ChannelHardwareTier } from "./channel-hardware-tier";
 import { isChannelRecommended } from "./channel-popularity";
 
-/** The Configure/Profile route segment a step opens. Every value here is in
- *  BOTH `[tab]/page.tsx` VALID_TABS whitelists — see the `context` note in
- *  this file's header for why that matters. */
+/** The Configure/Profile route segment a step opens. Every value here must
+ *  be a real routable tab — asserted against agent-detail-tabs.ts's own
+ *  `isAgentDetailTab` in this module's test, rather than against a prose
+ *  claim about a whitelist that no longer exists. */
 export type AgentSetupStepTab = "channels" | "hardware" | "connectors";
 
 export type AgentSetupStepId = "channel" | "hardware" | "connectors";

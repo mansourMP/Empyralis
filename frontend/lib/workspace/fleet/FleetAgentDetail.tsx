@@ -41,6 +41,7 @@ import { HardwareTab } from "./tabs/HardwareTab";
 import { MemoryTab } from "./tabs/MemoryTab";
 import { ProfileFilesSection } from "./tabs/ProfileFilesSection";
 import { GroupedRail, type GroupedRailGroup } from "./GroupedRail";
+import { type AgentDetailTabId } from "./agent-detail-tabs";
 import { defaultAgentProfileSegment, isProfileTab, planAgentProfileSegments, type AgentProfileSegmentId } from "./agent-profile-shape";
 import { agentSetupHeading, agentSetupNextStep } from "./agent-setup-steps";
 import { AgentDeleteDialog } from "./AgentDeleteDialog";
@@ -133,13 +134,26 @@ export function isChannelConnected(
   return channel.connected;
 }
 
-// "work" stays a legal value — [tab]/page.tsx's VALID_TABS still accepts a
-// direct hit on the old .../work URL, same "dead-but-live" treatment
-// CLAUDE.md already documents for /agents and /conversations — but it is no
-// longer a distinct SURFACE: activeTab==="work" renders the exact same
-// observation view as activeTab==="chat" (see the render below), so an old
-// bookmark still works instead of 404ing.
-type TabId = "general" | "work" | "channels" | "connectors" | "hardware" | "model" | "skills" | "memory" | "capabilities" | "chat" | "persona" | "context";
+// The tab VOCABULARY is not declared here any more — it lives in
+// agent-detail-tabs.ts, which both [tab] route files import as well, so the
+// set of tabs this surface OFFERS and the set those routes ACCEPT cannot
+// drift apart. They did: `context` was declared here, listed in TABS below,
+// grouped under Reach, and really rendered, while both routes' own
+// hand-kept VALID_TABS arrays had never heard of it — so the founder's own
+// per-agent context grant was a dead control, silently coerced to "chat"
+// from either URL. See that module's header for the full account.
+//
+// Because `TABS` below is typed by this union, adding a row with an id the
+// module doesn't carry is a TYPE ERROR rather than a silently unroutable
+// tab — a new tab cannot be offered before it is routable.
+//
+// "work" stays a legal value — the routes still accept a direct hit on the
+// old .../work URL, same "dead-but-live" treatment CLAUDE.md already
+// documents for /agents and /conversations — but it is no longer a distinct
+// SURFACE: activeTab==="work" renders the exact same observation view as
+// activeTab==="chat" (see the render below), so an old bookmark still works
+// instead of 404ing.
+type TabId = AgentDetailTabId;
 
 // Single source of id/label/icon truth for every one of the remaining
 // sections — Chat is the agent's front door, rendered directly (no tab
