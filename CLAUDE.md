@@ -9394,3 +9394,52 @@ change.
 Per this file's own standing rule, no automated call ever touches a device
 the founder personally uses; everything above is proven by driving the real
 dispatch/transport code with only the Telegram HTTP call mocked.
+
+## Two Agents-surface bugs, one shared verdict: a specialist agent's channel work is not personal (2026-08-28, MAN-368/370)
+
+**MAN-368 verdict: a channel agent's own conversations were invisible to its
+owner.** `GET /threads` (WorkTab.tsx) and `GET /threads/{id}`
+(ProfileFilesSection.tsx) both scoped results to `owner_user_id` for any
+non-privileged, non-admin caller — a scope built for Sage's own personal Ask
+AI console (`SageConsolePanels.tsx`, no `agent_id`). Every channel-originated
+turn stamps `owner_user_id="sage"` (`agent_turn_runtime_service`'s
+`owner_user_id=actor_user_id or "sage"` — there is no `current_user` on a
+Telegram/WhatsApp turn), so an ordinary workspace owner's real `user_id`
+never matched, and the query returned zero rows for every non-privileged
+viewer, on every channel-bound agent, forever — "No conversations yet"
+beside an Agents-grid card showing real, billed activity for the same agent.
+Fixed by skipping the `owner_user_id` filter whenever an `agent_id` is
+requested (list route) or whenever the resolved thread carries a
+`master_agent_install_id` (single-thread route) — that column already
+bounds the request to one agent, and Sage's own threads never carry a
+non-empty one, so this cannot leak Sage's private history.
+
+**MAN-370 verdict: NOT a shared root cause, and NOT a data bug at all.**
+Two real, live layouts existed on the same Agents page: the intended
+default card grid (`agent-card-face.ts`, "THE AGENTS SURFACE IS CARDS"),
+and `AgentsBoard`/`AgentsGroupedList` — a gear-icon opt-in view wired in by
+`78e3eabd` one day AFTER that settled, heavily-quoted redesign shipped. The
+grouped list's row rendered `agentActivityPreviewText` — the literal
+"Created"/"Configured" lifecycle-verb line the card-grid redesign exists to
+retire. No founder quote anywhere endorses that wiring (unlike nearly every
+other decision in this file); the best read is that it was built by analogy
+to Tasks' own view options and reintroduced exactly the pattern already
+rejected. Unwired again (`agents/page.tsx` reverted to its pre-`78e3eabd`
+shape, `primary-rail-space.test.ts`'s guard flipped back to banning the
+import) — components left dormant, not deleted, same "unlinked, not gone"
+treatment `/agents`/`/conversations` already get elsewhere in this file.
+**Judgment call, not certainty — flagged for founder review, one-line-import
+reversible either way.**
+
+The "Basalt shows real activity in the grouped list but 'No channel or
+tasks yet' on its card" detail that made MAN-370 look like it shared
+MAN-368's cause does NOT reproduce as a bug: `agent-card-face.ts`'s reach
+slot reads the identical `agent.channel` field via the identical
+`parseAgentChannelField` the grouped list uses (already covered by
+`agent-card-face.test.ts`). The card grid deliberately omits cost/last-active
+by design ("A CARD FACE IS TWO FACTS AND REFUSES A THIRD"); the grouped
+list's cost/last-active columns are independent, backward-looking facts
+that render regardless of current reachability. Two true, differently
+scoped answers about the same agent, not a wiring defect — check whether a
+"disagreement" between two views is a design difference before assuming a
+shared data-plumbing bug.
