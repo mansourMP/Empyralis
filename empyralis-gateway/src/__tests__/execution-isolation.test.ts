@@ -76,11 +76,21 @@ test("the statements are the customer's words — no mechanism, no instruction, 
     }
     assert.ok(statement.endsWith("."), "each statement is one plain sentence");
   }
-  // "Docker" itself IS allowed in the host statement, and deliberately so —
-  // founder: "we should be honest with the customer... most people already
-  // know what Docker is." Naming the real reason is honesty; telling someone
-  // to go install it is the lecture this list bans.
-  assert.ok(HOST_STATEMENT.includes("Docker"));
+  // INVERTED 2026-08-28, and the reasoning is the point rather than the
+  // string. This used to assert the OPPOSITE — that HOST_STATEMENT names
+  // Docker — on the founder's "most people already know what Docker is"
+  // honesty argument. That argument was sound while a Docker-less box was a
+  // box whose Docker happened to be down. It stopped being sound the day
+  // macOS was ruled to NEVER use Docker at all (docker-autostart.ts's darwin
+  // branch returns null; runtime.ts refuses the sandbox on darwin before it
+  // probes). On that platform host mode is the DESIGN, so "because Docker
+  // isn't running here" states a cause that is not the cause — a true-sounding
+  // sentence about the wrong thing, which is worse than naming no reason.
+  // The statement now says what IS true (direct execution, and that the
+  // command policy still protects keys and system folders) and names no
+  // mechanism, which is what the `statement` contract asked for all along.
+  assert.ok(!HOST_STATEMENT.toLowerCase().includes("docker"),
+    "the host statement must not blame Docker — on macOS host mode is the design, not a degradation");
 });
 
 test("the autostart detail enriches the internal reason and never leaks into the statement", () => {

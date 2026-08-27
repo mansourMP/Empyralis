@@ -7,6 +7,7 @@ import path from "path";
 import { execFileWithTimeout } from "../shell/exec-file-with-timeout";
 import { GatewayShellRuntime, type GatewayShellRuntimeConfig } from "../shell/runtime";
 import type { DockerAutostartOutcome } from "../shell/docker-autostart";
+import { HOST_STATEMENT } from "../shell/execution-isolation";
 import type { GatewayRequestEnvelope, GatewayToolInvokePayload } from "../protocol/types";
 
 // Same memoized real-Docker probe pattern as shell-runtime.test.ts — see
@@ -99,7 +100,7 @@ test("a batch without a ready Docker daemon RUNS on the host, labelled honestly,
 
   assert.equal(result.execution_mode, "host");
   assert.equal(result.isolation, "host");
-  assert.equal(result.isolation_statement, "Commands run directly on this computer, because Docker isn't running here.");
+  assert.equal(result.isolation_statement, HOST_STATEMENT);
   assert.equal(result.warning, undefined, "a host batch is the ordinary state of a Docker-less box, not an alarm");
   const commands = result.commands as CmdResult[];
   assert.equal(commands.length, 2);

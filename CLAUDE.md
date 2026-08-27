@@ -3869,6 +3869,32 @@ stays CORRECT for every already-deployed box, which still gates on Docker
 until it is rebuilt. Deleting it would take an accurate diagnosis away from
 the live fleet. Revisit only once no old gateway build is in service.
 
+**FOLLOW-UP 2026-08-28 — the host STATEMENT was reworded and it broke three
+gateway tests that nobody noticed for a day, because only the targeted suite
+was run.** The founder ruled that macOS never uses Docker at all, which made
+*"Commands run directly on this computer, because Docker isn't running here."*
+state a cause that is not the cause — on that platform host mode is the DESIGN,
+not a degradation, so the sentence was true-sounding about the wrong thing. New
+text names no mechanism. `box-capability-state.test.ts` (frontend) was updated
+with it; `execution-isolation.test.ts` + `shell-runtime.test.ts` +
+`shell-runtime-batch.test.ts` were NOT, and stayed red on main.
+
+```
+CHANGE a pinned literal ─▶ grep the LITERAL repo-wide, not the CONSTANT.
+                           two of the three pins were hand-copied strings that
+                           no grep for HOST_STATEMENT would ever have found.
+                        ─▶ run the changed PACKAGE's full suite, never only the
+                           file you edited. `npm test` in empyralis-gateway is
+                           73s and would have caught all three immediately.
+```
+
+Both hand-copied pins now reference the exported `HOST_STATEMENT`, so the next
+rewording cannot desync them. And the assertion `HOST_STATEMENT.includes
+("Docker")` was **inverted** rather than retuned — it now asserts the statement
+never blames Docker, because that is the actual invariant after the ruling; its
+old comment argued the opposite from a premise (a Docker-less box is one whose
+Docker is down) that the ruling retired.
+
 **Every test that proved the wall was INVERTED, never weakened or deleted**,
 so they are now what fails if it comes back. Proven red-before-green against
 a reverted tree: 15 fail there, all pass here. Gateway 830/830 (baseline

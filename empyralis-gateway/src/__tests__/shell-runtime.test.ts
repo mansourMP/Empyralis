@@ -7,6 +7,7 @@ import path from "path";
 import { execFileWithTimeout } from "../shell/exec-file-with-timeout";
 import { GatewayShellRuntime, resolveExecutionMode, type GatewayShellRuntimeConfig } from "../shell/runtime";
 import type { DockerAutostartOutcome } from "../shell/docker-autostart";
+import { HOST_STATEMENT } from "../shell/execution-isolation";
 import type { GatewayRequestEnvelope, GatewayToolInvokePayload } from "../protocol/types";
 
 let dockerAvailability: Promise<boolean> | null = null;
@@ -200,7 +201,7 @@ test("no Docker: the run is labelled `host`, with the plain statement, and is NO
   const result = await runtime.handleCapabilityInvoke(frame);
   assert.equal(result.execution_mode, "host");
   assert.equal(result.isolation, "host");
-  assert.equal(result.isolation_statement, "Commands run directly on this computer, because Docker isn't running here.");
+  assert.equal(result.isolation_statement, HOST_STATEMENT);
   // A host run must never claim the full_access authorization nobody granted:
   // that token is what the control plane's own policy vocabulary keys on, and
   // fusing the two would make a real escalation unreadable in every log.
