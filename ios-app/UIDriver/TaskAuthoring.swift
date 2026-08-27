@@ -191,7 +191,24 @@ final class TaskAuthoring: XCTestCase {
             tapFrameOf(e)
             guard let navBar else { sleep(2); return true }
             if app.navigationBars[navBar].waitForExistence(timeout: 15) { sleep(1); return true }
-            if attempt == 0 && !e.exists { break } // navigated away; a slow render, not a miss
+
+            // THE ROW IS GONE, SO THE TAP NAVIGATED — the destination is just
+            // still rendering. This branch used to `break`, and its own
+            // comment already said "not a miss" — but break fell straight
+            // through to miss() below, so a tap that had WORKED was reported
+            // as a failure. That is the whole iPhone 13 flake: the smallest
+            // device (and any device under load) crosses 15s often enough to
+            // hit it, which is why it looked device-specific and why the
+            // failing step MOVED between runs.
+            //
+            // Having established navigation actually happened, wait again
+            // rather than give up. Only a destination that never appears at
+            // all is a real miss.
+            if !e.exists {
+                if app.navigationBars[navBar].waitForExistence(timeout: 20) { sleep(1); return true }
+                miss("tap navigated away from '\(text)' but '\(navBar)' never rendered")
+                return false
+            }
         }
         miss("row '\(text)' never reached '\(navBar ?? "")'", probe: e)
         return false
