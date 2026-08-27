@@ -7,6 +7,12 @@ struct MainTabView: View {
 
     @State private var selectedTab: Tab = .inbox
     @State private var inboxPath = NavigationPath()
+    // One path per tab that a deep link can land on with a specific id to
+    // push, mirroring inboxPath above. `.document` is the one link kind
+    // that still cannot push a specific destination — see route(_:)'s own
+    // comment on that case for why, unchanged by this.
+    @State private var projectsPath = NavigationPath()
+    @State private var agentsPath = NavigationPath()
 
     enum Tab: Hashable { case inbox, myWork, projects, agents, search }
 
@@ -38,11 +44,11 @@ struct MainTabView: View {
                 .tabItem { Label("My work", systemImage: "checklist") }
                 .tag(Tab.myWork)
 
-            ProjectsView()
+            ProjectsView(path: $projectsPath)
                 .tabItem { Label("Projects", systemImage: "folder") }
                 .tag(Tab.projects)
 
-            AgentsView()
+            AgentsView(path: $agentsPath)
                 .tabItem { Label("Agents", systemImage: "cpu") }
                 .tag(Tab.agents)
 
@@ -82,10 +88,21 @@ struct MainTabView: View {
             // through; that is a change to the deep-link contract and its
             // tests, not a side effect of moving a tab.
             selectedTab = .projects
-        case .project:
+        case .project(_, let projectId):
             selectedTab = .projects
-        case .agent:
+            // Same shape as .task above: push by id, let
+            // ProjectDestinationView resolve it from the store. This USED
+            // to discard projectId entirely and land on the plain list —
+            // unlike .document just above, there was nothing stopping this
+            // one from resolving; it simply never did.
+            projectsPath.append(ProjectRoute(projectId: projectId))
+        case .agent(_, let agentId):
             selectedTab = .agents
+            // AgentRoute and its resolver (AgentDestinationView) already
+            // existed — the Inbox's own "Failed runs" rows push through
+            // them — this tab simply had no path of its own to push onto
+            // until agentsPath above.
+            agentsPath.append(AgentRoute(agentId: agentId))
         }
         _ = deepLinks.consume()
     }

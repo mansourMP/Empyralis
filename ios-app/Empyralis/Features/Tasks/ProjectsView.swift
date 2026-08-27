@@ -1,21 +1,45 @@
 import SwiftUI
 
 struct ProjectsView: View {
+    /// Owned by MainTabView, same reason InboxView/AgentsView take one: a
+    /// `.project` deep link (a channel message's own link) needs somewhere
+    /// to push a destination FROM OUTSIDE this view. Until this existed the
+    /// project id a link resolved was discarded and every project link
+    /// landed on this generic list instead of the project it named.
+    @Binding var path: NavigationPath
+
     @EnvironmentObject private var store: WorkspaceStore
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             ZStack {
                 Theme.bgPage(scheme).ignoresSafeArea()
 
                 if !store.hasLoadedOnce {
-                    List {
-                        ForEach(0..<5, id: \.self) { _ in
-                            SkeletonRow().listRowBackground(Theme.bgPage(scheme))
+                    if let error = store.loadError {
+                        // Nothing known AND the read failed. "Empty" and
+                        // "couldn't load" are different facts — a permanent
+                        // skeleton here was the collapse.
+                        ScrollView {
+                            EmptyStateView(
+                                title: "Couldn't load projects",
+                                message: error,
+                                systemImage: "wifi.exclamationmark"
+                            )
+                            .padding(.top, Space.x10)
                         }
+                        .refreshable { await store.refresh() }
+                    } else {
+                        // The ONLY state that may show a skeleton: nothing
+                        // known yet, and no failure to report either.
+                        List {
+                            ForEach(0..<5, id: \.self) { _ in
+                                SkeletonRow().listRowBackground(Theme.bgPage(scheme))
+                            }
+                        }
+                        .listStyle(.plain)
                     }
-                    .listStyle(.plain)
                 } else if store.projects.isEmpty {
                     ScrollView {
                         EmptyStateView(
@@ -42,11 +66,47 @@ struct ProjectsView: View {
                 }
             }
             .navigationTitle("Projects")
+            .navigationDestination(for: ProjectRoute.self) { route in
+                ProjectDestinationView(projectId: route.projectId)
+            }
         }
     }
 
     private func openCount(_ project: Project) -> Int {
         store.tasks(inProject: project.id).filter { !$0.isDone }.count
+    }
+}
+
+/// A typed route value for a `.project` deep link — same shape as
+/// MainTabView's own `TaskRoute`/`AgentRoute`, kept beside the view it
+/// targets rather than in MainTabView.swift because nothing outside this
+/// file constructs a `ProjectDetailView`.
+struct ProjectRoute: Hashable {
+    let projectId: String
+}
+
+/// Resolves an id to the project ProjectDetailView needs — the same
+/// "resolve by id at push time, not at route-construction time" shape as
+/// InboxView.swift's own AgentDestinationView, so a store refresh
+/// underneath a pushed route can never leave it holding a stale value.
+struct ProjectDestinationView: View {
+    let projectId: String
+    @EnvironmentObject private var store: WorkspaceStore
+
+    var body: some View {
+        if let project = store.projects.first(where: { $0.id == projectId }) {
+            ProjectDetailView(project: project)
+        } else {
+            // Reachable only if the project disappeared between the tap
+            // and this frame, or the link named one this account cannot
+            // see. "Gone" and "still loading" are different facts and the
+            // store has already loaded by the time a link is followed.
+            EmptyStateView(
+                title: "Project not found",
+                message: "It may have been removed from this workspace.",
+                systemImage: "questionmark.circle"
+            )
+        }
     }
 }
 
@@ -88,9 +148,18 @@ struct ProjectRow: View {
 struct ProjectDetailView: View {
     let project: Project
 
+    @EnvironmentObject private var store: WorkspaceStore
+    @EnvironmentObject private var session: SessionStore
     @Environment(\.colorScheme) private var scheme
     @State private var section: Section = .tasks
     @State private var showTaskComposer = false
+
+    /// Same gate as TaskDetailView's own `canWrite` — `fleet_create_task`
+    /// requires `member` too (routes_fleet.py), so a viewer must not see a
+    /// "+" that only ever comes back with a refusal.
+    private var canWrite: Bool {
+        TaskAuthoring.canWrite(members: store.members, ownUserId: session.user?.id)
+    }
 
     /// Mirrors PROJECT_TAB_VIEWS / PROJECT_TAB_LABEL. Deliberately not a
     /// third member — Agents were removed from a project's tab bar on the
@@ -138,8 +207,10 @@ struct ProjectDetailView: View {
             // Only on Tasks — creating a document isn't part of this
             // change, and a "+" that always creates a task while the
             // Documents segment is showing would be doing something the
-            // screen in front of the person doesn't say.
-            if section == .tasks {
+            // screen in front of the person doesn't say. Only for a WRITER
+            // — a viewer's "+" would submit a create-task call the server
+            // refuses on role alone.
+            if section == .tasks && canWrite {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         showTaskComposer = true

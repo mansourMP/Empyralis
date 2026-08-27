@@ -4,21 +4,47 @@ import SwiftUI
 /// store — same rule as the web fleet grid's "real agent" count. It exists
 /// in every workspace and is not something anyone created.
 struct AgentsView: View {
+    /// Owned by MainTabView, same reason InboxView takes one: an `.agent`
+    /// deep link (a channel message's own link, or the Inbox's "Failed
+    /// runs" rows) needs somewhere to push a destination FROM OUTSIDE this
+    /// view — this tab used to have no such path at all, so a deep link to
+    /// a specific agent could only ever land on the tab's generic list.
+    @Binding var path: NavigationPath
+
     @EnvironmentObject private var store: WorkspaceStore
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             ZStack {
                 Theme.bgPage(scheme).ignoresSafeArea()
 
                 if !store.hasLoadedOnce {
-                    List {
-                        ForEach(0..<4, id: \.self) { _ in
-                            SkeletonRow().listRowBackground(Theme.bgPage(scheme))
+                    if let error = store.loadError {
+                        // Nothing known AND the read failed. This is
+                        // distinct from `agentsLookupFailed` below, which
+                        // fires once we DO have a workspace but the agents
+                        // lookup specifically came back empty/undecodable —
+                        // here we have nothing at all yet.
+                        ScrollView {
+                            EmptyStateView(
+                                title: "Couldn't load agents",
+                                message: error,
+                                systemImage: "wifi.exclamationmark"
+                            )
+                            .padding(.top, Space.x10)
                         }
+                        .refreshable { await store.refresh() }
+                    } else {
+                        // The ONLY state that may show a skeleton: nothing
+                        // known yet, and no failure to report either.
+                        List {
+                            ForEach(0..<4, id: \.self) { _ in
+                                SkeletonRow().listRowBackground(Theme.bgPage(scheme))
+                            }
+                        }
+                        .listStyle(.plain)
                     }
-                    .listStyle(.plain)
                 } else if store.realAgents.isEmpty {
                     ScrollView {
                         // "None" and "couldn't find out" are different facts.
@@ -58,6 +84,12 @@ struct AgentsView: View {
                 }
             }
             .navigationTitle("Agents")
+            // Reuses InboxView.swift's own AgentDestinationView — the SAME
+            // id-to-agent resolution the Inbox's "Failed runs" rows already
+            // push through, rather than a second copy of that lookup here.
+            .navigationDestination(for: AgentRoute.self) { route in
+                AgentDestinationView(agentId: route.agentId)
+            }
         }
     }
 }

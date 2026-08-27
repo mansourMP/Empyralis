@@ -35,6 +35,47 @@ enum TaskAuthoring {
         !isCreating && !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    /// Whether the signed-in person may reasonably expect a task WRITE to
+    /// succeed in this workspace — used only to decide whether to RENDER a
+    /// write control (CLAUDE.md: "no dead controls"), never to gate the
+    /// write itself, which every one of these routes still enforces
+    /// server-side regardless: `fleet_create_task` / `fleet_patch_task` /
+    /// `fleet_assign_task` / `fleet_attach_task_label` /
+    /// `fleet_detach_task_label` / `fleet_comment_task` (routes_fleet.py)
+    /// all call `enforce_workspace_access(..., minimum_role="member")` —
+    /// confirmed for every one of them, not assumed from the one comment
+    /// on WorkspaceStore.setTaskStatus that first flagged this.
+    ///
+    /// Same rule and same shape as `DocumentAuthoring.canWrite` — kept as
+    /// its own copy rather than a shared call, matching this file's own
+    /// pattern of one small pure enum per surface (TaskAuthoring /
+    /// DocumentAuthoring / MyWork / InboxNeedsYou) rather than reaching
+    /// across surfaces for a generic helper — but the REASONING is
+    /// identical and worth restating rather than silently diverging:
+    /// `owner` always passes, `member` passes, `viewer` — a real,
+    /// invitable role (WorkspaceSettingsView's own invite picker offers
+    /// it) — is refused, matching every route above exactly.
+    ///
+    /// An UNRESOLVED own role (no row for `ownUserId` in `members` yet —
+    /// the members fetch hasn't landed, or failed) reads as `false`, the
+    /// same "cannot tell, so do not guess towards a control that might not
+    /// work" default `DocumentAuthoring.canWrite` already takes, chosen
+    /// deliberately over the alternative (assume writable) because a
+    /// wrongly-shown control fails LOUDLY and CONFUSINGLY for a real
+    /// viewer ("Couldn't save", after they already typed something),
+    /// while a wrongly-hidden one for a legitimate member costs at most
+    /// one refresh cycle. That asymmetry is real but small in practice:
+    /// `members` hydrates from the SAME disk cache and the SAME concurrent
+    /// refresh as `tasks` (WorkspaceStore.bind/refresh), so by the time a
+    /// task is on screen at all, the caller's own membership row is almost
+    /// always already known — and the moment a legitimate member's role
+    /// does resolve, these controls appear with no further action needed.
+    static func canWrite(members: [WorkspaceMember], ownUserId: String?) -> Bool {
+        guard let ownUserId, !ownUserId.isEmpty else { return false }
+        guard let role = members.first(where: { $0.userId == ownUserId })?.role else { return false }
+        return role == "owner" || role == "member"
+    }
+
     /// The Sub-tasks badge's total. The server's own rollup
     /// (`task.subtask_count`) can briefly lag a sub-task THIS SCREEN just
     /// created — appended locally with no round trip yet to bump the
