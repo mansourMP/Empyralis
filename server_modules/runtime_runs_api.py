@@ -1288,12 +1288,40 @@ def register_run_routes(app) -> None:
             minimum_role="viewer",
         )
         tenant_id = workspace_tenant_id(current_user, requested_workspace_id)
-        owner_user_id = None if _current_user_is_privileged(current_user) else str(current_user.get("user_id") or "").strip() or None
+        requested_agent_id = str(agent_id or "").strip() or None
+        # MAN-368: owner_user_id scoping exists to keep a person's OWN
+        # private conversation with Sage (SageConsolePanels' Ask AI console,
+        # which never passes agent_id) from reaching any other workspace
+        # member. It must not apply once a caller asks for a SPECIFIC agent's
+        # own work stream (WorkTab.tsx, agent_id set) — a specialist's
+        # channel conversations aren't personal to whichever browser session
+        # happens to be looking at them. They have no web "owner" at all:
+        # ensure_master_thread stamps owner_user_id=actor_user_id or "sage"
+        # (agent_turn_runtime_service.py), and actor_user_id is always empty
+        # on a channel-originated turn (there is no current_user), so every
+        # Telegram/WhatsApp/etc. conversation is durably stored with the
+        # literal owner_user_id "sage" — never the viewing person's own id.
+        # Filtering by the VIEWER's user_id here therefore returned ZERO
+        # rows for every non-privileged, non-admin workspace owner viewing
+        # ANY channel-bound agent's Work tab, on every real production
+        # workspace: "No conversations yet" beside a card showing real,
+        # billed activity for the exact same agent. master_agent_install_id
+        # scoping (thread_service.list_threads, below) is what keeps this
+        # request correctly bounded to the one agent asked about — that
+        # column is never empty/"sage", so removing the owner filter here
+        # cannot leak a DIFFERENT agent's threads, and Sage's own threads
+        # (master_agent_install_id NULL) can never match a non-empty
+        # requested_agent_id either.
+        owner_user_id = (
+            None
+            if requested_agent_id or _current_user_is_privileged(current_user)
+            else str(current_user.get("user_id") or "").strip() or None
+        )
         records = await thread_service.list_threads(
             workspace_id=requested_workspace_id,
             tenant_id=tenant_id,
             owner_user_id=owner_user_id,
-            active_agent_install_id=str(agent_id or "").strip() or None,
+            active_agent_install_id=requested_agent_id,
             include_turns=bool(include_turns),
             limit=max(1, min(int(limit or 50), 200)),
         )
@@ -1361,7 +1389,19 @@ def register_run_routes(app) -> None:
             tenant_id=record.get("tenant_id"),
             minimum_role="viewer",
         )
-        if not _current_user_is_privileged(current_user):
+        # MAN-368, same root cause as the /threads LIST route above: this
+        # per-user privacy check exists for Sage's own personal history, and
+        # must not apply to a specialist agent's channel-facing "work"
+        # thread — those carry a real master_agent_install_id and are never
+        # personal to whichever browser session happens to have selected
+        # them (e.g. ProfileFilesSection.tsx's Files pane, driven by
+        # WorkTab.tsx's selection). Without this guard a non-privileged
+        # owner opening any channel-bound agent's own conversation 404'd
+        # here, because the record's owner_user_id is the literal "sage"
+        # (agent_turn_runtime_service.py stamps that for every
+        # channel-originated turn — there is no current_user on that path)
+        # rather than the viewing person's own user id.
+        if not _current_user_is_privileged(current_user) and not str(record.get("master_agent_install_id") or "").strip():
             request_user_id = str(current_user.get("user_id") or "").strip()
             owner_user_id = str(record.get("owner_user_id") or "").strip()
             if owner_user_id and request_user_id and owner_user_id != request_user_id:
