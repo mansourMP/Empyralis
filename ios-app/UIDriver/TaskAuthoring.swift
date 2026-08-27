@@ -34,8 +34,55 @@ final class TaskAuthoring: XCTestCase {
         print("SHOT \(file.path)")
     }
 
-    private func miss(_ s: String) { misses.append(s); print("TA_MISS \(s)") }
+    /// Every miss dumps state — frames, hittability, the button labels
+    /// actually present — so a failure produces EVIDENCE instead of a guess.
+    /// `probe` is the specific element the caller was trying to reach, when
+    /// there is one; its frame/hittability is the single most useful fact on
+    /// a tap that silently landed wrong.
+    private func miss(_ s: String, probe: XCUIElement? = nil) {
+        misses.append(s)
+        print("TA_MISS \(s)")
+        dumpTree("miss\(misses.count)", probe: probe)
+    }
     private func note(_ s: String) { print("TA_NOTE \(s)") }
+
+    /// Ported from DocumentEditVerify.swift's own `dumpTree` — a screenshot
+    /// plus every nav-bar/button/text label on screen, plus the full
+    /// accessibility tree to a scratch file, plus (when given) the exact
+    /// probe element's frame/hittability. This is what turns "step N missed
+    /// on iPhone 13, cause unknown" into an actual diagnosis instead of a
+    /// second blind guess.
+    private func dumpTree(_ label: String, probe: XCUIElement? = nil) {
+        shot(label)
+        let navBars = app.navigationBars.allElementsBoundByIndex.map(\.identifier)
+        note("TREE[\(label)] navBars=\(navBars)")
+        let buttons = app.buttons.allElementsBoundByIndex.prefix(40)
+            .map { "'\($0.label)' hittable=\($0.isHittable) frame=\($0.frame)" }
+        note("TREE[\(label)] buttons=\(buttons)")
+        let texts = app.staticTexts.allElementsBoundByIndex.prefix(25).map(\.label)
+        note("TREE[\(label)] staticTexts=\(texts)")
+        if let probe {
+            // `.exists` ALONE, as its own statement, before touching anything
+            // else on `probe`. Reproduced live TWICE: a `probe` that has been
+            // held across a prior tap-and-poll sequence (settledFrame reads,
+            // multiple retries) can make `.isHittable`/`.frame` THROW even
+            // though `.exists` itself resolves safely — the exact class of
+            // crash `tapFrameOf`'s own history already documents for a
+            // freshly-queried element, now confirmed for a STALE one too.
+            // General enumeration above (line ~60) is fine because those are
+            // freshly re-queried elements, not a reference held across time.
+            let stillExists = probe.exists
+            if stillExists {
+                note("TREE[\(label)] PROBE exists=true hittable=\(probe.isHittable) frame=\(probe.frame)")
+            } else {
+                note("TREE[\(label)] PROBE exists=false (gone)")
+            }
+        }
+        let full = app.debugDescription
+        let file = shotDir.appendingPathComponent("\(label)-tree.txt")
+        try? full.write(to: file, atomically: true, encoding: .utf8)
+        note("TREE[\(label)] full dump at \(file.path)")
+    }
 
     private func hasFocus(_ e: XCUIElement) -> Bool {
         (e.value(forKey: "hasKeyboardFocus") as? Bool) ?? false
@@ -112,6 +159,21 @@ final class TaskAuthoring: XCTestCase {
 
     private func rows() -> XCUIElementQuery { app.collectionViews.buttons }
 
+    /// ROOT CAUSE, found live on iPhone 13 (a crash, not a miss): the
+    /// previous body here re-tapped `e.coordinate(...)` inside a 3x retry
+    /// loop. When the FIRST tap already navigated away successfully, `e` —
+    /// a row from the LIST screen — no longer exists on the new screen, and
+    /// a slow render (device- or backend-load-dependent) can make the
+    /// post-tap wait outlast its timeout even on a tap that worked. The next
+    /// loop iteration then re-resolves `e.coordinate(...)` against a query
+    /// that matches nothing and XCUITest THROWS
+    /// ("Failed to get matching snapshot") instead of the miss() this
+    /// function is supposed to report — exactly the rename-mid-tap class of
+    /// bug `tapFrameOf`/`settledFrame` were built to close elsewhere in this
+    /// file, just never applied here. Fixed the same way: ONE tap via a
+    /// settled, captured frame, then a genuinely generous wait. A retry is
+    /// still allowed, but ONLY when the row still exists — i.e. the tap
+    /// genuinely missed, not merely a slow transition after a real hit.
     @discardableResult
     private func tapRow(_ text: String, expect navBar: String? = nil) -> Bool {
         let e = rows().matching(NSPredicate(format: "label CONTAINS[c] %@", text)).firstMatch
@@ -125,18 +187,20 @@ final class TaskAuthoring: XCTestCase {
             }
             if !found && !e.exists { miss("no row '\(text)'"); return false }
         }
-        for _ in 0..<3 {
-            e.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        for attempt in 0..<2 {
+            tapFrameOf(e)
             guard let navBar else { sleep(2); return true }
-            if app.navigationBars[navBar].waitForExistence(timeout: 8) { sleep(1); return true }
-            sleep(1)
+            if app.navigationBars[navBar].waitForExistence(timeout: 15) { sleep(1); return true }
+            if attempt == 0 && !e.exists { break } // navigated away; a slow render, not a miss
         }
-        miss("row '\(text)' never reached '\(navBar ?? "")'")
+        miss("row '\(text)' never reached '\(navBar ?? "")'", probe: e)
         return false
     }
 
     /// Task detail has no navigation title of its own; the comment composer
-    /// (present nowhere else) is the proof of arrival.
+    /// (present nowhere else) is the proof of arrival. See `tapRow`'s header
+    /// comment — this had the identical re-resolve-a-gone-element crash risk
+    /// and is fixed the same way.
     @discardableResult
     private func openTask(_ text: String) -> Bool {
         let e = rows().matching(NSPredicate(format: "label CONTAINS[c] %@", text)).firstMatch
@@ -150,20 +214,56 @@ final class TaskAuthoring: XCTestCase {
             }
             if !found && !e.exists { miss("no task row '\(text)'"); return false }
         }
-        for _ in 0..<3 {
-            e.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-            if app.textFields["Comment"].waitForExistence(timeout: 8) { sleep(2); return true }
-            sleep(1)
+        for attempt in 0..<2 {
+            tapFrameOf(e)
+            if app.textFields["Comment"].waitForExistence(timeout: 15) { sleep(2); return true }
+            if attempt == 0 && !e.exists { break } // navigated away; a slow render, not a miss
         }
-        miss("task '\(text)' never opened")
+        miss("task '\(text)' never opened", probe: e)
         return false
+    }
+
+    /// Taps `element` (already resolved via `tapFrameOf`), then — only when
+    /// the caller supplies `landed` — polls up to `landedTimeout` for the
+    /// caller's OWN real expected outcome, retrying the tap ONCE if it never
+    /// happens and the tapped element still exists.
+    ///
+    /// This replaces an earlier, REVERTED attempt (`tapFrameOfVerified`,
+    /// see git history) that retried whenever the tapped element's own
+    /// `.exists` read true shortly after — checked with a single fixed
+    /// 400ms wait. That was unreliable in BOTH directions: on "New task"/
+    /// "Create task" it fired an UNWANTED retry because `.exists` hadn't
+    /// caught up with a tap that had already succeeded (crashing the run
+    /// when the phantom second tap landed on the changed screen), and with
+    /// no retry at all — the state this reverted to — "New task" was then
+    /// observed missing outright with no recovery. Polling the CALLER's own
+    /// real signal (a specific field/sheet appearing) over several seconds
+    /// avoids both failure modes: it never mistakes "not caught up yet" for
+    /// "definitely still there," and it never retries once the real thing
+    /// it is waiting for has actually happened.
+    private func tapAndWaitFor(_ element: XCUIElement, landedTimeout: TimeInterval, landed: () -> Bool) -> Bool {
+        for attempt in 0..<2 {
+            tapFrameOf(element)
+            let deadline = Date().addingTimeInterval(landedTimeout)
+            while Date() < deadline {
+                if landed() { return true }
+                usleep(200_000)
+            }
+            if attempt == 0 && !element.exists { break } // navigated away; not a miss to retry
+        }
+        return landed()
     }
 
     /// EXACT label match — safe only for a button with a plain-text label
     /// or an explicit `.accessibilityLabel` override (no icon+text
     /// composite). See `tapContaining` for the composite case.
+    ///
+    /// `landed`, when supplied, is the caller's own real success signal —
+    /// see `tapAndWaitFor`'s header for why that beats a generic proxy.
+    /// Omitted at call sites (like "Save") that have no single-condition
+    /// success signal cheaper than the caller's own subsequent wait.
     @discardableResult
-    private func tapExact(_ label: String, timeout: TimeInterval = 8) -> Bool {
+    private func tapExact(_ label: String, timeout: TimeInterval = 8, landedTimeout: TimeInterval = 8, landed: (() -> Bool)? = nil) -> Bool {
         let b = app.buttons[label]
         guard b.waitForExistence(timeout: timeout) else { miss("no '\(label)' button"); return false }
         // Re-check BEFORE each retry. The blind 3x loop this replaced threw
@@ -176,26 +276,40 @@ final class TaskAuthoring: XCTestCase {
         // defect — so the harness has to tolerate it. Losing the element
         // after a tap is treated as SUCCESS, because that is what a button
         // which did its job looks like from out here.
-        tapFrameOf(b)
+        guard let landed else {
+            tapFrameOf(b)
+            return true
+        }
+        guard tapAndWaitFor(b, landedTimeout: landedTimeout, landed: landed) else {
+            miss("'\(label)' tapped but its expected outcome never happened", probe: b)
+            return false
+        }
         return true
     }
 
     /// A `PickerRow`-style composite (icon + text) never matches on an EXACT
     /// label — see VerificationGaps.swift's own note on this. Matched on
-    /// CONTAINS instead.
+    /// CONTAINS instead. `landed` — see `tapExact`'s own note.
     @discardableResult
-    private func tapContaining(_ text: String, timeout: TimeInterval = 8) -> Bool {
+    private func tapContaining(_ text: String, timeout: TimeInterval = 8, landedTimeout: TimeInterval = 8, landed: (() -> Bool)? = nil) -> Bool {
         let b = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", text)).firstMatch
         guard b.waitForExistence(timeout: timeout) else {
-            // Dump what IS on screen rather than guessing at why the query
-            // missed. A control that is plainly visible in a screenshot and
-            // still unmatchable means the accessibility tree disagrees with
-            // the render — and the only way to tell which is to look.
-            let labels = app.buttons.allElementsBoundByIndex.map { "\($0.label)|id=\($0.identifier)" }
-            print("TREE_BUTTONS \(labels)")
-            print("TREE_OTHER \(app.staticTexts.allElementsBoundByIndex.prefix(30).map(\.label))")
             miss("no button containing '\(text)'")
             return false
+        }
+        // `.exists` is satisfied the instant a plain (non-lazy) ScrollView
+        // instantiates a child, REGARDLESS of scroll position — TaskDetailView
+        // is exactly that shape (ScrollView { VStack { header, properties,
+        // description, subtasks, ... } }), so a row below the fold "exists"
+        // from the first frame and a blind tapFrameOf lands on whatever
+        // screen point its OFF-SCREEN frame happens to report. isHittable is
+        // the real question; scroll toward it before trusting the frame.
+        if !b.isHittable {
+            note("'\(text)' exists but is not yet hittable (frame=\(b.frame)) — scrolling into view")
+            scrollIntoView(b)
+            if !b.isHittable {
+                note("'\(text)' still not hittable after scrolling (frame=\(b.frame))")
+            }
         }
         // Re-check BEFORE each retry. The blind 3x loop this replaced threw
         // "Failed to get matching snapshot" on a button that had worked
@@ -207,11 +321,34 @@ final class TaskAuthoring: XCTestCase {
         // defect — so the harness has to tolerate it. Losing the element
         // after a tap is treated as SUCCESS, because that is what a button
         // which did its job looks like from out here.
-        tapFrameOf(b)
+        guard let landed else {
+            tapFrameOf(b)
+            return true
+        }
+        guard tapAndWaitFor(b, landedTimeout: landedTimeout, landed: landed) else {
+            miss("'\(text)' tapped but its expected outcome never happened", probe: b)
+            return false
+        }
         return true
     }
 
-
+    /// Scrolls the main scroll view until `element` is hittable, or gives up
+    /// after a bounded number of swipes. Mirrors the swipe-and-recheck shape
+    /// `tapRow`/`openTask` already use for lazily-loaded collection rows —
+    /// this is the same idea applied to a plain, eagerly-instantiated
+    /// ScrollView, where the element was never "not found," only off-screen.
+    @discardableResult
+    private func scrollIntoView(_ element: XCUIElement) -> Bool {
+        if element.exists && element.isHittable { return true }
+        let scroller = app.scrollViews.firstMatch
+        guard scroller.exists else { return element.exists && element.isHittable }
+        for _ in 0..<10 {
+            if element.exists && element.isHittable { return true }
+            scroller.swipeUp()
+            usleep(350_000)
+        }
+        return element.exists && element.isHittable
+    }
 
     /// An element's frame, once it has STOPPED MOVING.
     ///
@@ -229,14 +366,23 @@ final class TaskAuthoring: XCTestCase {
     /// (a sheet that never opens) is indistinguishable from a dead button.
     ///
     /// So: sample until two consecutive reads agree, then tap.
+    ///
+    /// 20 iterations (4s), not the original 10 (2s) — CLAUDE.md's own device
+    /// matrix records iPhone 13/14 Pro as measurably SLOWER simulators on
+    /// this host, and a fixed 2s window that is plenty on 16/17 Pro is
+    /// exactly the kind of budget that would silently fall through here
+    /// without ever reporting it: a fall-through returns whatever the LAST
+    /// read was, which may still be mid-animation, with no signal that
+    /// settling was never actually confirmed.
     private func settledFrame(of element: XCUIElement) -> CGRect {
         var previous = element.frame
-        for _ in 0..<10 {
+        for _ in 0..<20 {
             usleep(200_000)
             let current = element.frame
             if current == previous && current.width > 0 { return current }
             previous = current
         }
+        note("settledFrame never converged after 4s, tapping last-read frame=\(previous)")
         return previous
     }
 
@@ -268,11 +414,43 @@ final class TaskAuthoring: XCTestCase {
         usleep(600_000)
     }
 
-    private func waitForSheetGone(_ navTitle: String, timeout: TimeInterval = 10) {
+    /// TRIED AND REVERTED: a generic `tapFrameOfVerified` wrapper that
+    /// retried whenever the tapped element was still `.exists` shortly
+    /// after. It fixed one real, reproduced miss (a header-title tap whose
+    /// screenshot was byte-identical before and after — nothing happened)
+    /// but then caused a NEW crash two runs later: `.exists` on "New
+    /// task"/"Create task" still read true in the ~400ms right after a tap
+    /// that had ALREADY succeeded (the sheet/rename takes a moment to
+    /// register), so the wrapper fired an UNWANTED second tap at the same
+    /// screen coordinate — now landing on whatever the CHANGED screen had
+    /// there — and that phantom tap is what broke the run. A blind
+    /// re-tap-if-unchanged heuristic is only safe when "unchanged" can be
+    /// checked against the ACTUAL expected outcome (a specific nav bar
+    /// appearing, as `tapRow`/`openTask` already do against a real
+    /// destination), never against a generic, timing-sensitive proxy like
+    /// `.exists` on the tapped element itself. See the two call sites
+    /// below (title/description edit) for the outcome-based version that
+    /// replaced it.
+
+    /// Waits for a sheet's own nav bar to disappear. Previously silent on
+    /// timeout — a sheet that never dismissed (e.g. a create request that
+    /// genuinely took longer than the wait, on a shared backend under
+    /// concurrent load from other agents' runs) would fall through with NO
+    /// signal, and every following step would then fail against the wrong
+    /// screen with a confusing, unrelated-looking miss. Now reports which
+    /// happened, so a real timeout here is distinguishable from whatever
+    /// broke two steps later.
+    @discardableResult
+    private func waitForSheetGone(_ navTitle: String, timeout: TimeInterval = 10) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline && app.navigationBars[navTitle].exists {
             usleep(300_000)
         }
+        let gone = !app.navigationBars[navTitle].exists
+        if !gone {
+            miss("sheet '\(navTitle)' did not dismiss within \(Int(timeout))s")
+        }
+        return gone
     }
 
     // MARK: - The one flow: create task -> create sub-task -> edit title -> edit description
@@ -287,7 +465,14 @@ final class TaskAuthoring: XCTestCase {
         shot("01-project-tasks")
 
         let taskTitle = "\(marker) create test"
-        guard tapExact("New task") else { return }
+        // landed: the sheet's own "Task title" field appearing — a real,
+        // positive, externally-observable signal, checked here rather than
+        // via the immediate `waitForExistence` a step below because a
+        // MISSED tap on "New task" produces the identical symptom ("no Task
+        // title field") as a slow-but-successful one, and only a retry
+        // fixes the first. Reproduced live: this exact tap missed outright
+        // on iPhone 13 with no recovery before this fix.
+        guard tapExact("New task", landed: { self.app.textFields["Task title"].exists }) else { return }
         shot("02-new-task-sheet")
 
         let titleField = app.textFields["Task title"]
@@ -300,8 +485,26 @@ final class TaskAuthoring: XCTestCase {
         // matched nothing — the query resolves against IDENTIFIERS, and this
         // button carries only a label. Same class of miss this file's own
         // `tapContaining` note already documents for composite rows.
-        guard tapContaining("Create task") else { return }
-        waitForSheetGone("New task")
+        //
+        // landed: "Creating…" appearing OR the sheet already gone — NOT
+        // "Creating…" alone. Reproduced live: on a fast create (the common
+        // case on a lightly-loaded backend), the rename-then-dismiss
+        // sequence can complete inside one 200ms poll window, so a check for
+        // "Creating…" alone MISSES it entirely and reports a false failure
+        // for a task that was already created on the server — confirmed by
+        // querying Postgres directly after a reported "miss" and finding the
+        // row. Checking "the sheet is already gone" as a second, OR'd signal
+        // catches the fast case; "Creating…" still catches the slow one.
+        guard tapContaining(
+            "Create task", landedTimeout: 5,
+            landed: { self.app.buttons["Creating…"].exists || !self.app.navigationBars["New task"].exists }
+        ) else { return }
+        // NewTaskSheet is deliberately NOT optimistic (its own header
+        // comment: "waits for a real, server-minted task") — dismissal
+        // waits on a real network round trip, which is genuinely slower on
+        // a shared disposable backend under concurrent load. 20s, not the
+        // 10s default that is correct for the optimistic edit sheets below.
+        waitForSheetGone("New task", timeout: 20)
         sleep(2)
         shot("04-after-create")
         note("CREATED task titled '\(taskTitle)'")
@@ -311,14 +514,19 @@ final class TaskAuthoring: XCTestCase {
         shot("05-task-opened")
 
         let subtaskTitle = "\(marker) subtask test"
-        guard tapContaining("Add sub-task") else { return }
+        guard tapContaining("Add sub-task", landed: { self.app.textFields["Task title"].exists }) else { return }
         shot("06-new-subtask-sheet")
 
         let subtaskField = app.textFields["Task title"]
         guard subtaskField.waitForExistence(timeout: 6) else { miss("no sub-task title field"); return }
         type(into: subtaskField, subtaskTitle)
-        guard tapContaining("Create task") else { return }
-        waitForSheetGone("New sub-task")
+        // Same fast-completion-safe landed check as the top-level create.
+        guard tapContaining(
+            "Create task", landedTimeout: 5,
+            landed: { self.app.buttons["Creating…"].exists || !self.app.navigationBars["New sub-task"].exists }
+        ) else { return }
+        // Same non-optimistic create path as above.
+        waitForSheetGone("New sub-task", timeout: 20)
         sleep(2)
         shot("07-after-subtask-create")
         note("CREATED sub-task titled '\(subtaskTitle)'")
@@ -338,9 +546,23 @@ final class TaskAuthoring: XCTestCase {
         let newTitle = "\(marker) EDITED title"
         let headerButton = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", taskTitle)).firstMatch
         guard headerButton.waitForExistence(timeout: 6) else { miss("no tappable title header"); return }
-        tapFrameOf(headerButton)
-        guard app.navigationBars["Edit title"].waitForExistence(timeout: 6) else {
-            miss("title edit sheet never opened"); return
+        // The header is the FIRST section on TaskDetailView, so it is almost
+        // always already hittable — but a sub-task row just got inserted
+        // above it in the accessibility tree via the previous step's
+        // assertion re-query, and a fresh navigation can still land mid-
+        // scroll on a slow device. Cheap insurance, same as every other tap
+        // in this file now gets.
+        if !headerButton.isHittable { scrollIntoView(headerButton) }
+        // Retry ONLY against the REAL outcome (the sheet's own nav bar), via
+        // the shared tapAndWaitFor helper — not against a generic "is the
+        // element unchanged" proxy, which was tried and reverted after it
+        // caused a worse crash elsewhere (see tapAndWaitFor's own header).
+        // Confirmed live once already (iPhone 13): an accurate, settled,
+        // hittable frame can still produce a tap that does nothing
+        // (screenshot byte-identical before/after), so this retry is real
+        // insurance, not decoration.
+        guard tapAndWaitFor(headerButton, landedTimeout: 6, landed: { self.app.navigationBars["Edit title"].exists }) else {
+            miss("title edit sheet never opened", probe: headerButton); return
         }
         shot("08-edit-title-sheet")
 
@@ -349,7 +571,12 @@ final class TaskAuthoring: XCTestCase {
         replaceText(in: titleEditField, oldLength: taskTitle.count, with: newTitle)
         shot("09-title-retyped")
 
-        guard tapExact("Save") else { return }
+        // landed: the sheet's own nav bar disappearing — Save dismisses
+        // OPTIMISTICALLY (TaskDetailView's titleSheet sets activeSheet =
+        // nil synchronously, before the network write), so this should
+        // resolve fast; a real miss here would otherwise look identical to
+        // a slow save.
+        guard tapExact("Save", landed: { !self.app.navigationBars["Edit title"].exists }) else { return }
         waitForSheetGone("Edit title")
         sleep(2)
         shot("10-after-title-save")
@@ -364,24 +591,34 @@ final class TaskAuthoring: XCTestCase {
         let descText = "\(marker) description body"
         let descButton = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Add a description")).firstMatch
         guard descButton.waitForExistence(timeout: 6) else { miss("no description row"); return }
-        // tapFrameOf, like every other tap in this file — this was the last
-        // surviving `element.coordinate(...).tap()`, and it is exactly the
-        // one that intermittently missed on iPhone 13 while the row was
-        // plainly on screen (10-after-title-save.png).
-        tapFrameOf(descButton)
-        guard app.navigationBars["Edit description"].waitForExistence(timeout: 6) else {
-            miss("description edit sheet never opened"); return
+        // The description row sits BELOW the header + properties card
+        // (Status/Priority/Assignee/Due/Labels) in TaskDetailView's plain,
+        // non-lazy ScrollView — `.exists` is satisfied from the first frame
+        // regardless of scroll position, so a tap keyed only on `.exists`
+        // can land on a frame that is genuinely off-screen. Scroll toward it
+        // first; tapFrameOf's own settling still applies afterward.
+        if !descButton.isHittable {
+            note("description row exists but not hittable (frame=\(descButton.frame)) — scrolling into view")
+            scrollIntoView(descButton)
+        }
+        // Same outcome-based retry as the title header, above.
+        guard tapAndWaitFor(descButton, landedTimeout: 6, landed: { self.app.navigationBars["Edit description"].exists }) else {
+            miss("description edit sheet never opened", probe: descButton); return
         }
         shot("11-edit-description-sheet")
 
         let descField = app.textViews.firstMatch
         guard descField.waitForExistence(timeout: 4) else { miss("no description text view"); return }
-        descField.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-        usleep(500_000)
-        descField.typeText(descText)
+        // Focus-and-verify, same as every text field in this file — a bare
+        // tap+typeText (the shape this replaced) has no confirmation that
+        // the tap actually landed focus before typing starts, and this
+        // harness has repeatedly seen a tap resolve/report-hittable/no-op
+        // (README's own documented trap). `type(into:)` retries the tap and
+        // checks `hasKeyboardFocus` before committing to `typeText`.
+        type(into: descField, descText)
         shot("12-description-typed")
 
-        guard tapExact("Save") else { return }
+        guard tapExact("Save", landed: { !self.app.navigationBars["Edit description"].exists }) else { return }
         waitForSheetGone("Edit description")
         sleep(2)
         shot("13-after-description-save")
