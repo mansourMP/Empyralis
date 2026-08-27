@@ -18,6 +18,7 @@ import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
 import { FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import { HeaderAction, useBreadcrumbBadge } from "@/lib/workspace/fleet/Breadcrumbs";
 import { planAgentCountShape } from "@/lib/workspace/fleet/agent-count-shape";
+import { shouldRedirectToSoloAgent } from "@/lib/workspace/fleet/agent-solo-redirect";
 import { createButtonClass } from "@/lib/workspace/fleet/create-accent";
 
 /**
@@ -123,6 +124,19 @@ export default function AgentsPage() {
     ),
   );
 
+  // AgentCreateCard (2026-08-20) — the founder's correction to the old
+  // zero-decision instant create (see agent-quick-create.ts's own
+  // "CORRECTION, 2026-08-20" header for the full quote): "New agent" opens
+  // ONE card showing name/model/hardware/project pre-filled, rather than
+  // creating on the click itself.
+  //
+  // Declared HERE, ahead of the solo-redirect block below, rather than in
+  // its old spot beside openCreateCard/handleAgentCreated — MAN-374 needed
+  // its VALUE (not just its setter) available to that effect and its
+  // early-return guard, and a `const` read before its own declaration is a
+  // TDZ error, not a stale closure.
+  const [cardOpen, setCardOpen] = useState(false);
+
   // MAN-317 — with exactly one real agent, THIS surface goes straight to that
   // agent, whether a reader lands here via the rail, a bookmark, or a direct
   // URL. The workspace root does NOT do this (CLAUDE.md's own correction on
@@ -149,16 +163,38 @@ export default function AgentsPage() {
   const [suppressSoloRedirect] = useState<boolean>(
     () => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("new") === "1",
   );
+  // MAN-374 — `!cardOpen` is the real guard here, and `suppressSoloRedirect`
+  // alone was never enough: it only protects the ONE entry point that sets
+  // `?new=1` (the command palette). "Create your first agent" (FirstAgentEmpty
+  // -> openCreateCard() directly) and the "New agent" header button both open
+  // this exact same wizard with no query param at all, so this effect was
+  // still live under them. Reproduced end to end on a brand-new workspace:
+  // AgentCreateCard.create() -> createAgentQuickly() awaits
+  // fleet-data.ts's refreshFleetAgents(workspaceId) BEFORE returning, which
+  // synchronously force-refetches the shared `fleet-agents:{workspaceId}`
+  // cache this page's own useFleetAgents subscribes to (mounted right here,
+  // one component up from the modal) — agents.length flips 0 -> 1 while the
+  // wizard is still sitting on step 2 (Brain), agentCountMode computes
+  // "solo" the instant that resolves, and this effect fired router.replace
+  // straight into the new agent's Chat — unmounting AgentCreateCard mid-
+  // sequence and skipping the required Channels step (and Apps) entirely.
+  // The founder's "you cannot have a fucking agent without channel" rule
+  // (agent-create-wizard.ts's own header) has no way to hold once the
+  // component enforcing it has been torn down by an unrelated redirect.
+  // `cardOpen` is the one signal common to every entry point — the wizard
+  // being open at all is reason enough to leave this unrelated navigation
+  // alone, so gating on it (rather than chasing every current and future
+  // way to open the card) closes the whole class of entry points at once.
+  const redirectToSolo = shouldRedirectToSoloAgent({
+    loading,
+    hasSoloTarget: Boolean(soloHref),
+    cardOpen,
+    suppressed: suppressSoloRedirect,
+  });
   useEffect(() => {
-    if (!loading && soloHref && !suppressSoloRedirect) router.replace(soloHref);
-  }, [loading, soloHref, suppressSoloRedirect, router]);
+    if (redirectToSolo && soloHref) router.replace(soloHref);
+  }, [redirectToSolo, soloHref, router]);
 
-  // AgentCreateCard (2026-08-20) — the founder's correction to the old
-  // zero-decision instant create (see agent-quick-create.ts's own
-  // "CORRECTION, 2026-08-20" header for the full quote): "New agent" opens
-  // ONE card showing name/model/hardware/project pre-filled, rather than
-  // creating on the click itself.
-  const [cardOpen, setCardOpen] = useState(false);
   function openCreateCard() {
     setCardOpen(true);
   }
@@ -187,7 +223,13 @@ export default function AgentsPage() {
   // commits, so it stays quiet instead of flashing the page chrome first.
   // If the project can't resolve, soloHref stays null and this falls
   // through to the ordinary render below rather than a dead screen.
-  if (!loading && soloHref && !suppressSoloRedirect) {
+  // MAN-374: reuses `redirectToSolo` rather than re-typing the condition a
+  // second time — this is a full-component early return, so a second copy
+  // that drifted from the effect's own guard would unmount AgentCreateCard
+  // (rendered further down, in the ordinary return below) the instant the
+  // new agent made agentCountMode compute "solo", even on a build where the
+  // effect above is correctly held off.
+  if (redirectToSolo) {
     return (
       <main className="fleet-page-state">
         <div className="fleet-page-state-body">Opening {soloAgent?.label || "your agent"}…</div>
