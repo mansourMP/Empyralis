@@ -247,7 +247,14 @@ assert(
 // one side only, the product says one thing on the Hardware surface and a
 // different thing in the tool result for the same computer. Byte-for-byte.
 assert(ISOLATION_SANDBOX_STATEMENT === "Commands run isolated in a container on this computer.", `sandbox literal pinned to the gateway's`);
-assert(ISOLATION_HOST_STATEMENT === "Commands run directly on this computer, because Docker isn't running here.", `host literal pinned to the gateway's`);
+// Rewritten 2026-08-26 alongside the gateway's own copy. The old wording
+// blamed Docker not running, which became false on macOS the moment the
+// gateway stopped using Docker there BY DESIGN — starting Docker would no
+// longer change the answer, so the sentence was explaining a cause that no
+// longer exists. It now states the fact and the consequence, per the
+// founder: "say your agent is running directly in this laptop, it has
+// access to your files — something short that makes them see the risks."
+assert(ISOLATION_HOST_STATEMENT === "Commands run directly on this computer, so this agent can reach your files. Your keys and system folders stay protected.", `host literal pinned to the gateway's`);
 assert(ISOLATION_FULL_ACCESS_STATEMENT === "Commands run directly on this computer, which has full access turned on.", `full_access literal pinned to the gateway's`);
 
 // No statement may lecture, name a command, or read as a failure.

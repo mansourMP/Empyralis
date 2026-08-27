@@ -237,8 +237,26 @@ export function channelTransportSummary(state: ChannelTransportState): { headlin
 export type ExecutionIsolation = "sandbox" | "host" | "full_access" | "unknown";
 
 export const ISOLATION_SANDBOX_STATEMENT = "Commands run isolated in a container on this computer.";
+// REWRITTEN 2026-08-26. It used to read "…because Docker isn't running
+// here", which became a LIE on macOS the moment the gateway stopped using
+// Docker there by design: it blames an incidental missing dependency for
+// something that is now a deliberate, permanent choice, and it implies
+// starting Docker would change the answer. It would not.
+//
+// The founder's own instruction for what to say instead: *"we are just going
+// to say to the user 'hey, your agent is running directly in this laptop, it
+// has access to your files' — something short that makes them see what the
+// risks are."* So it states the FACT and the CONSEQUENCE, in that order, and
+// stops. It does not apologise, does not explain Docker, and does not
+// instruct — a professional tool labels, it does not lecture.
+//
+// The second sentence is the risk, said plainly rather than softened, and it
+// is bounded honestly: `command-policy.ts` really does still refuse the
+// hard-blocked commands and protect the vault, ~/.ssh, ~/.gnupg and
+// /etc/empyralis in this mode, so "everything" would be an overstatement in
+// the other direction.
 export const ISOLATION_HOST_STATEMENT =
-  "Commands run directly on this computer, because Docker isn't running here.";
+  "Commands run directly on this computer, so this agent can reach your files. Your keys and system folders stay protected.";
 export const ISOLATION_FULL_ACCESS_STATEMENT =
   "Commands run directly on this computer, which has full access turned on.";
 

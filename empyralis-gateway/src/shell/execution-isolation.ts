@@ -65,7 +65,7 @@ export interface ResolvedExecution {
 
 export const SANDBOX_STATEMENT = "Commands run isolated in a container on this computer.";
 export const HOST_STATEMENT =
-  "Commands run directly on this computer, because Docker isn't running here.";
+  "Commands run directly on this computer, so this agent can reach your files. Your keys and system folders stay protected.";
 export const FULL_ACCESS_STATEMENT =
   "Commands run directly on this computer, which has full access turned on.";
 
