@@ -4239,11 +4239,25 @@ a.fleet-breadcrumb:hover {
 }
 /* The persistent header "Work" button (a control distinct from Chat) is
    gone — 2026-08-20, folded into one observation surface with nothing left
-   to switch to. The "⋯" menu is now the only thing after the identity
-   block, so IT carries the margin-left:auto that used to belong to Work,
-   pushing itself to the far edge of the header row. */
-.fleet-chat-header-menu {
+   to switch to. Configure + the "⋯" menu are the only things after the
+   identity block now (MAN-369 promoted Configure out of "⋯" into its own
+   button — see AgentDetailHeader's own comment), so this group carries the
+   margin-left:auto that used to belong to Work, pushing both to the far
+   edge of the header row together. */
+.fleet-chat-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   margin-left: auto;
+}
+/* Plain .fleet-btn, deliberately no accent hue — this page has no
+   creation/connection CTA to reserve --accent-fill for, and a second
+   accent-filled button here would be the "two accent-filled buttons in one
+   view" bug CLAUDE.md's "Purple only on primary buttons" already forbids.
+   28px tall, matching the "⋯" trigger beside it (.fleet-icon-btn) so the
+   two align on one baseline. */
+.fleet-chat-header-configure-btn {
+  text-decoration: none;
 }
 
 /* The relative anchor the Properties overlay floats against — same contract
