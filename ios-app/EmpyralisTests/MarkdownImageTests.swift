@@ -54,7 +54,7 @@ final class MarkdownImageTests: XCTestCase {
 
         This URL resolves but returns 404.
 
-        ![This image link is broken](https://httpstat.us/404)
+        ![This image link is broken](https://upload.wikimedia.org/wikipedia/commons/this-definitely-does-not-exist-404.png)
 
         ## A refused SVG
 
@@ -74,7 +74,7 @@ final class MarkdownImageTests: XCTestCase {
         }
         XCTAssertEqual(images.count, 3)
         XCTAssertEqual(images[0].url, "https://placehold.co/64x64.png")
-        XCTAssertEqual(images[1].url, "https://httpstat.us/404")
+        XCTAssertEqual(images[1].url, "https://upload.wikimedia.org/wikipedia/commons/this-definitely-does-not-exist-404.png")
         XCTAssertEqual(images[2].url, "https://upload.wikimedia.org/wikipedia/commons/4/4a/Commons-logo.svg")
 
         let headingTexts = blocks.compactMap { block -> String? in
