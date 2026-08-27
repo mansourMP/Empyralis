@@ -3888,6 +3888,132 @@ reach the sandbox path must inject `dockerAutostart`**, the guard
 line can render (correctly, from loaded data) while the picker beside it
 still says "Loading your paired computers…". Cosmetic, not a wrong fact.
 
+## MAN-367: the ClawHub supply-chain audit — pin is clean, one real gap closed (2026-08-27)
+
+**Verdict: not launch-blocking. The pinned OpenClaw is not known-vulnerable,
+the two CVEs the ticket names are NOT OpenClaw's, and the one genuine defect
+found — the channel tool-authority lockdown never reaching a ClawHub-installed
+channel — is fixed.**
+
+**THE TICKET'S TWO CVEs ARE CLAUDE CODE'S, NOT OPENCLAW'S. Do not re-chase
+them.** CVE-2025-59536 (CVSS 8.7) and CVE-2026-21852 (5.3) are Check Point
+advisories about `.claude/settings.json` hook entries executing before a
+consent dialog — a different product and a different attack surface than
+Empyralis provisioning OpenClaw plugins onto a customer's box. The Snyk
+ToxicSkills write-up discusses both populations, and the ticket merged them.
+
+**OpenClaw has its own large, unrelated CVE history and the pin sits ahead of
+it.** Sampled ~20 advisories across every wave (Jan/Feb, April, the June 30
+batch of 10, the July 2 batch of 30+), including a coincidental second 8.7
+(CVE-2026-35639, `device.pair.approve` privilege escalation, fixed 2026.3.22).
+Every one checked is patched at or before **2026.6.9** — the pin is
+**2026.6.10**. `npm audit` against the pin agrees: only moderate transitive
+findings (`tar` / `@openclaw/fs-safe` / `undici`), nothing critical.
+
+```
+HONEST LIMIT ON THAT SWEEP  ~20 advisories read, of ~65 PAGES of history.
+                            "nothing found" != "nothing exists".
+                            40+ advisories shipped in two months, so the pin
+                            is a decaying claim, not a settled one.
+```
+
+Bumping the pin is not a one-line change and must not be done casually:
+`openclaw-version.ts`'s own header names three artifacts TRANSCRIBED from
+2026.6.10's bundle (the ambient plugin-SDK types, the cancel-predicate's two
+literal markers, `message.action`'s param/error shape) that all fail SILENTLY
+on drift. Re-verify those three, or the bump trades a hypothetical CVE for a
+certain silent breakage.
+
+**Everything CLAUDE.md already claimed about this system verified TRUE against
+source** — version-drift refusal (`openclaw-plugin-install.ts`, refuses with
+`openclaw_plugin_version_drift` before any config is written), `plugins.allow`
+non-empty (seeded with the bridge id, so it cannot render empty, and enforced
+against the READ-BACK config by `findOpenClawLockdownViolations`, not against
+what we meant to write), and install scope narrowed to bindings ∪ stored
+policy key ∪ explicit request (`channels_in_use`).
+
+**THE ONE REAL GAP, now fixed: tool-authority discovery walked only the
+CURATED channel ids.** `resolveOpenClawChannelToolFlags` /
+`resolveOpenClawPluginHookFlags` / `auditOpenClawChannelShapes` all take a
+`channelIds` list, and the provisioner built it from `plan.channels` alone.
+The REGISTRY (ClawHub) install path landed later and resolves its channel id
+only AFTER install (`revealedChannelIds`), because a third-party plugin
+registers its channel at runtime — and nothing threaded those ids in. The
+curated list never grows to include one, so there was no "next run picks it
+up":
+
+```
+Feishu (curated)   installed ─▶ channels.feishu.tools.* DISCOVERED ─▶ all FALSE
+ClawHub (registry) installed ─▶ channels.<id>.tools.*   never scanned, ever
+```
+
+That is the exact Feishu-shaped risk this file already documents — a channel
+plugin contributes its own tool surface and the global `tools.*` lockdown does
+not reach it — arriving through a path that entry predates. `schemaAuditChannelIds`
+now unions curated ids with every id a registry install revealed this run, and
+`plugins.allow` names registry-installed plugin ids too (per OpenClaw's own
+"when set, only listed plugins are eligible to load", one missing from that
+list is one that does not load).
+
+**THERE IS A SECOND CHANNEL CATALOG, IT IS CLAWHUB, AND NOTHING IN THE PRODUCT
+LINKS TO IT.** Distinct from the four external npm plugins this file names
+(`wecom` -> `@wecom/wecom-openclaw-plugin` and siblings — all proper versioned
+npm packages, all clean):
+
+```
+openclaw_channel_manifest.json  registry_channel_plugins   112 entries
+  install spec                  clawhub:@publisher/pkg@version
+  44 of 112 (39%)               scan_status: "suspicious"   ← OpenClaw's OWN scanner
+                                (ToxicSkills measured 36.8% across the same registry)
+  reachable via                 POST .../openclaw/gateways/{id}/provision
+                                  body: install_plugins: [...]
+  frontend callers              ZERO. grepped: install_plugins / registryChannelPlugin
+```
+
+Built, reachable, and unlinked — the shape this file exists to stop somebody
+rediscovering the hard way. **It is deliberately NOT trust-filtered**:
+`test_openclaw_registry_channel_plugins.py` records a founder ruling that the
+catalog is carried uncurated ("whatever OpenClaw offers as a channel,
+Empyralis offers"), so an agent must not quietly add a `scan_status` gate.
+Open product question for whoever builds its UI: whether installing a
+`suspicious`-scanned plugin gets extra friction. The backend already carries
+`trust` verbatim for exactly that.
+
+### Is plugin install a MEMBER-role action? Asked, and the answer is no — it already isn't
+
+The route reads `minimum_role="member"`, which is misleading in isolation.
+`_require_accessible_gateway_registration` (routes_personal_channels.py:151)
+applies a **per-user hardware-ownership check on top of it**, and that is the
+operative gate:
+
+```
+enforce_workspace_access(minimum_role="member")     the FLOOR
+owner_user_id present  ─▶ caller must BE that user, or 403
+owner_user_id missing  ─▶ caller must be workspace owner/admin, or 403
+```
+
+So a member can provision **their own** paired computer and nobody else's,
+which is precisely this file's "hardware attaches to its owner, never to the
+project" rule implemented — strictly stronger than any role comparison, since
+role rank (`viewer 0 / member 1 / owner 2`) does not encode whose machine it is.
+
+**And it must NOT be added to `authority_mandate_service`'s owner-only
+family.** That service gates MODEL TOOL CALLS, not HTTP routes. Grepped:
+`provision_openclaw_gateway` has exactly three callers — the HTTP route, the
+best-effort policy reconcile, and the gateway-move re-provision — and **neither
+internal caller passes `install_plugins` or `install_channels` at all**; they
+only re-assert stored policy. No tool, connector or MCP surface exposes plugin
+install to a model. Adding a `openclaw__*` prefix to `OWNER_ONLY_TOOL_PREFIXES`
+would be a guard with zero call sites, which is this codebase's single
+most-documented defect.
+
+Applying the service's own membership test — *"does this administer the
+platform itself"* — plugin install would qualify (it is OpenClaw's `plugins`
+surface, sibling to the `cron`/`gateway`/`nodes` trio they reserve). So the
+forward-looking rule: **if a plugin-install TOOL is ever added, it is
+owner-only from its first commit.** Today the correct answer is that the
+boundary already exists one layer up and is stronger than the tier would be.
+
 ## Testing the UI
 
 **Seed your own data. Never ask for the founder's account, and never copy secrets.**
