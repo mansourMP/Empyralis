@@ -412,15 +412,24 @@
   grid-template-columns: minmax(0, 1fr);
 }
 
-/* …and on a phone the channel tiles go one-per-row too — the founder's own
-   instruction, restated here because `auto-fill` would still fit two 140px
-   tiles into 330px and this selector outranks connector-cards.css's. Written
-   as its own block rather than folded into that file: the reason is about
-   THIS dialog's inner width, and a reader debugging the wizard should find
-   its grid rules in one place. */
+/* REVERSED BY THE FOUNDER, 2026-08-26 — on a phone the channel tiles go TWO
+   per row, not one. Do not "restore" the one-per-row rule: it was also his
+   instruction, and this block used to say so, which is exactly why the
+   reversal is recorded here instead of quietly replacing it.
+
+   What changed his mind was seeing it on his own phone: a tile holds an
+   icon, a name and one pill, and at full width that left "seventy percent of
+   that same line completely empty… there was not enough information for
+   that." One-per-row was right about the tile never being CRAMPED and wrong
+   about what the row then looks like — a column of mostly-empty bars, and
+   twice as tall, so the channel you want is twice as far down.
+
+   Two fits: the dialog's inner width at 375px is ~330px, so two columns are
+   ~155px each, above the 140px this file's own comment (just above) measured
+   as the width where a two-word channel name still sits on one line. */
 @media (max-width: 560px) {
   .agent-create-embed .fleet-channel-grid {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

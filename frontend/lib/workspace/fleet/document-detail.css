@@ -524,8 +524,25 @@ h6.fleet-doc-heading { font-size: 14px; }
   line-height: 1.6;
 }
 
+/* `inline-block` + `min-width: 100%` is what makes the add/remove BACKGROUND
+   span the whole line rather than stopping at the visible edge of the
+   scroller.
+   A block-level line takes its width from its containing block — here the
+   CONTENT BOX of `.fleet-doc-history-diff`, i.e. only what is on screen.
+   `white-space: pre` then lets the TEXT overflow past that width while the
+   background does not, so scrolling right on a long line showed the text
+   continuing over bare surface with the green/red stopping dead at the fold.
+   Reported from a real phone, 2026-08-26: "that green colour is not applied
+   in the entire body of this line."
+   `inline-block` shrink-wraps to the content, so a long line's background
+   runs its full length; `min-width: 100%` keeps a SHORT line spanning the
+   full visible width so the stripe still reads as a row. This is the same
+   pair GitHub's own diff rows use, and the reason it must be both: either
+   one alone fixes exactly half the cases. */
 .fleet-doc-diff-line {
   white-space: pre;
+  display: inline-block;
+  min-width: 100%;
   color: var(--text-secondary);
 }
 

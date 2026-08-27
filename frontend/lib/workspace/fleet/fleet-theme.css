@@ -7445,6 +7445,28 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   gap: var(--space-3);
 }
+
+/* On a phone the three cloud providers go one per row.
+   Reported from a real phone, 2026-08-26: "DigitalOcean, Google Cloud and
+   AWS in one line on my phone sucks completely" — the names rendering on top
+   of each other. `auto-fill` + a 180px MINIMUM needs ~560px to seat three,
+   so on a 375px screen the track can only be satisfied by overflowing the
+   viewport rather than by wrapping — the grid keeps the columns and the page
+   scrolls sideways, which is what makes the labels collide.
+   `minmax(0, 1fr)` drops the 180px floor so the column may be narrower than
+   its content wants, which is the whole point on a phone. The providers
+   THEMSELVES stay — the founder was explicit that Google Cloud and AWS are
+   not to be removed; only the row they were crammed into changes. */
+@media (max-width: 560px) {
+  .fleet-provider-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  /* A grid item's default min-width:auto refuses to shrink below its content
+     and is the other half of the same overflow. */
+  .fleet-provider-card {
+    min-width: 0;
+  }
+}
 .fleet-provider-card {
   display: flex;
   flex-direction: column;
