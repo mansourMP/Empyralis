@@ -62,6 +62,12 @@ final class MarkdownImageTests: XCTestCase {
 
         ![An SVG logo, blocked because SVGs are refused by policy](https://upload.wikimedia.org/wikipedia/commons/4/4a/Commons-logo.svg)
 
+        ## A large image
+
+        This one is 1200x800 -- far wider than any phone screen.
+
+        ![A large placeholder image, 1200 by 800](https://placehold.co/1200x800.png)
+
         ## After the images
 
         Ordinary paragraph text confirms the document keeps rendering normally.
@@ -72,10 +78,11 @@ final class MarkdownImageTests: XCTestCase {
             if case let .image(alt, url) = $0 { return (alt, url) }
             return nil
         }
-        XCTAssertEqual(images.count, 3)
+        XCTAssertEqual(images.count, 4)
         XCTAssertEqual(images[0].url, "https://placehold.co/64x64.png")
         XCTAssertEqual(images[1].url, "https://upload.wikimedia.org/wikipedia/commons/this-definitely-does-not-exist-404.png")
         XCTAssertEqual(images[2].url, "https://upload.wikimedia.org/wikipedia/commons/4/4a/Commons-logo.svg")
+        XCTAssertEqual(images[3].url, "https://placehold.co/1200x800.png")
 
         let headingTexts = blocks.compactMap { block -> String? in
             if case let .heading(_, text) = block { return text }
@@ -86,6 +93,7 @@ final class MarkdownImageTests: XCTestCase {
             "A working image",
             "A broken link",
             "A refused SVG",
+            "A large image",
             "After the images",
         ])
 

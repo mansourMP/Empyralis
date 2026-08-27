@@ -154,6 +154,18 @@ final class MarkdownImageVerify: XCTestCase {
         sleep(1)
         shot("document-scrolled")
 
+        // One more screen for the fourth image: 1200x800, far wider than
+        // any phone -- proof the OTHER half of "fit the column" holds, not
+        // just "don't stretch a small one." A real screenshot is the only
+        // way to see whether it overflowed sideways; a unit test cannot
+        // render SwiftUI layout.
+        if !app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "A large image")).firstMatch
+            .waitForExistence(timeout: 4) {
+            app.swipeUp()
+            sleep(1)
+        }
+        shot("document-large-image")
+
         if !misses.isEmpty {
             XCTFail("MISSES: \(misses.joined(separator: " | "))")
         }
