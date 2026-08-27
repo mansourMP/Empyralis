@@ -4014,6 +4014,45 @@ forward-looking rule: **if a plugin-install TOOL is ever added, it is
 owner-only from its first commit.** Today the correct answer is that the
 boundary already exists one layer up and is stronger than the tier would be.
 
+## Worktree isolation covers FILES and GIT. It covers neither PORTS nor BROWSER TABS (2026-08-28)
+
+**Two concurrent agents, both correctly isolated in their own worktrees, still
+collided — because the things they collided on are not in git.** One killed a
+process on the default backend port 8001 believing it was its own; it belonged
+to another agent's disposable stack. The same agent then ran a cookie-clearing
+JS call against a Browser-pane tab it did not own, signing that agent out
+mid-verification.
+
+```
+ISOLATED by `isolation: "worktree"`     SHARED across every session on the box
+  the working tree                        localhost ports  (8001 / 3000 / 3011 ...)
+  the branch, the index, HEAD             Browser-pane TABS and their cookies
+  uncommitted edits                       ~/.empyralis/state  (see below)
+                                          Docker, launchd, the founder's own apps
+```
+
+Nothing was lost either time — a backend restarts, a tab re-authenticates — but
+both are silent to the victim and present as an unrelated bug ("my stack died",
+"I got logged out"), which is expensive to chase.
+
+**So, for any agent that brings up a stack or drives a browser:** pick a
+non-default port up front rather than after a collision, and scope EVERY
+Browser-pane call to your own `tabId` from the first call — `tabs_context`
+lists tabs belonging to other sessions and nothing marks whose is whose.
+**Never kill a process on a shared default port on the assumption it is
+yours**; check what it is first, and if you cannot tell, use a different port.
+
+The orchestrator's half: hand out distinct ports when dispatching agents that
+each need a stack, the same way it hands out worktrees. Two agents told
+"bring up a disposable stack" will both reach for the documented default,
+because that is what the documented default is for.
+
+Related, same family and already recorded above: `git stash` is shared through
+one `.git` across every worktree, and pruning a merged worktree kills whatever
+agent is still working in it. The pattern in all four: **isolation is per
+RESOURCE, and every resource an agent touches that git does not track is still
+shared.**
+
 ## Testing the UI
 
 **Seed your own data. Never ask for the founder's account, and never copy secrets.**
