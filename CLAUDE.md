@@ -4014,6 +4014,55 @@ forward-looking rule: **if a plugin-install TOOL is ever added, it is
 owner-only from its first commit.** Today the correct answer is that the
 boundary already exists one layer up and is stronger than the tier would be.
 
+## A BUG YOU DOCUMENT BECOMES A CONSTRAINT THE NEXT READER INHERITS (2026-08-28)
+
+**The `context` tab was defined, offered in the Configure rail, and rendered —
+and absent from both `[tab]/page.tsx` `VALID_TABS` whitelists, so every
+navigation to `.../agents/{id}/context` silently coerced to `chat` and the
+sheet closed. The per-agent CONTEXT GRANT — the decision this file records as
+core, the whole "an agent belongs to the WORKSPACE" ruling, backend shipped and
+tested — was unreachable through the product. By anyone. Ever.**
+
+What makes it worth its own entry is not the missing string. It is what had
+already happened to the finding:
+
+```
+agent-setup-steps.ts, header comment
+  "absent from both [tab]/page.tsx VALID_TABS whitelists, so the URL
+   coerces to 'chat' and the sheet closes"        ← a correct diagnosis...
+agent-setup-steps.test.ts
+  assert "nothing routes to `context` — it is absent from VALID_TABS"
+                                                  ← ...PINNED AS INTENDED
+```
+
+Someone hit the bug, understood it exactly, routed around it, wrote the
+workaround down as a permanent property of the system, and added a test
+asserting the broken behaviour. From then on it was not a bug in the codebase's
+own account of itself — it was a constraint, and the next three readers
+inherited it as fact.
+
+**The rule: when you route around a defect, the note says the defect is
+UNFIXED, never that the capability is IMPOSSIBLE — and a test may pin what a
+thing DOES, never that it is right that it does it.** This file already forbids
+weakening an assertion to make it pass; this is the same failure wearing the
+opposite costume, an assertion STRENGTHENED around something broken, which is
+harder to spot because the suite stays green and the comment reads as
+authority.
+
+**The structural fix is derivation, and the compiler turned out to be a better
+guard than the test.** `agent-detail-tabs.ts` is now the one tab vocabulary,
+consumed by `FleetAgentDetail` and BOTH route modules — a third and fourth
+hand-kept copy of one list is what broke this, so adding `"context"` to two
+arrays would have been the same mistake with a longer fuse. `TABS` is typed
+against the shared ids, so **a tab cannot be offered before it is routable** —
+precisely the sequence that failed is now a type error, proven by adding a
+bogus row and watching `tsc` exit 2.
+
+`work` is deliberately ROUTABLE BUT NOT DISPLAYED (no label, absent from
+`TABS`) — a retired surface kept alive so old bookmarks resolve instead of
+404ing. The routable set being wider than the displayed set is correct here;
+do not "tidy" it into a mismatch.
+
 ## Worktree isolation covers FILES and GIT. It covers neither PORTS nor BROWSER TABS (2026-08-28)
 
 **Two concurrent agents, both correctly isolated in their own worktrees, still
