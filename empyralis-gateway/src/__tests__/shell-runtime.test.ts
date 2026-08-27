@@ -53,6 +53,12 @@ function baseConfig(overrides: Partial<GatewayShellRuntimeConfig> = {}): Gateway
     stateDir: fs.mkdtempSync(path.join(os.tmpdir(), "empyralis-shell-runtime-test-")),
     fullAccessLocallyEnabled: false,
     dockerAutostart: NEVER_STARTS_DOCKER,
+    // Pinned to linux since 2026-08-26. macOS deliberately never uses Docker
+    // at all (founder's decision — see ensureDockerAvailable), so the sandbox
+    // and autostart behaviour these tests cover only exists on Linux. Without
+    // this the whole file would silently pass-by-short-circuit on a Mac and
+    // test nothing. macOS's own guarantee has its own explicit tests below.
+    platform: "linux",
     ...overrides,
   };
 }

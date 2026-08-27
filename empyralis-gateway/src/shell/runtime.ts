@@ -59,6 +59,17 @@ export interface GatewayShellRuntimeConfig {
    * that `host` is NOT the separately-authorized `full_access` escalation.
    */
   dockerAutostart?: () => Promise<DockerAutostartOutcome>;
+  /**
+   * Injectable for tests. Defaults to the real `process.platform`.
+   *
+   * Exists because macOS deliberately never uses Docker at all (see
+   * ensureDockerAvailable), and that rule has to be TESTABLE from a test
+   * process that is itself running on macOS. Reading `process.platform`
+   * inline made the Linux sandbox tests fail on a developer's Mac while the
+   * production Linux path was fine — an untestable branch, which is exactly
+   * the shape this codebase keeps getting caught by.
+   */
+  platform?: NodeJS.Platform;
 }
 
 function requireObject(value: unknown, message: string): Record<string, unknown> {
@@ -141,10 +152,12 @@ async function isDockerReady(): Promise<boolean> {
 export class GatewayShellRuntime {
   private readonly dockerReadyCheck: () => Promise<boolean>;
   private readonly dockerAutostart: () => Promise<DockerAutostartOutcome>;
+  private readonly platform: NodeJS.Platform;
 
   constructor(private readonly config: GatewayShellRuntimeConfig) {
     this.dockerReadyCheck = config.dockerReadyCheck ?? isDockerReady;
     this.dockerAutostart = config.dockerAutostart ?? (() => ensureDockerReady());
+    this.platform = config.platform ?? process.platform;
   }
 
   /**
@@ -160,6 +173,29 @@ export class GatewayShellRuntime {
    * labelled as one (resolveRun below). This function is unchanged.
    */
   private async ensureDockerAvailable(): Promise<{ ready: true } | { ready: false; detail: string }> {
+    // MACOS DOES NOT USE DOCKER AT ALL. Founder's decision, 2026-08-26, asked
+    // as an explicit choice and answered "never use it, always run direct":
+    // *"I don't need no fucking Docker here."*
+    //
+    // Deliberately BEFORE the readiness probe, not after — the point is that
+    // Docker is irrelevant on a personal Mac, so we do not even ask whether
+    // it is running. Docker being open must not silently change how an
+    // agent behaves; that inconsistency (capability depending on whether an
+    // app happens to be running) is itself a thing he has been bitten by.
+    //
+    // A separate change already stopped macOS LAUNCHING Docker
+    // (resolvePlatformStartCommand -> null). This is the second half: it is
+    // never USED either. Together they mean one behaviour on a Mac, always —
+    // commands run on the machine.
+    //
+    // Linux is untouched and still prefers the sandbox: a headless daemon on
+    // a box that exists to run the agent was never the complaint.
+    if (this.platform === "darwin") {
+      return {
+        ready: false,
+        detail: "This computer runs commands directly rather than in a container.",
+      };
+    }
     if (await this.dockerReadyCheck()) {
       return { ready: true };
     }
