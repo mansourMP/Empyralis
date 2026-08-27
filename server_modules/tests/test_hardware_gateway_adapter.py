@@ -666,9 +666,13 @@ class HardwareGatewayAdapterTests(unittest.TestCase):
         # extraction, mocked here only to control its RETURN VALUE rather
         # than build a live gateway_sessions row) reports Docker as
         # genuinely not ready, the specific, actionable Docker sentence is
-        # correct and still used.
+        # correct and still used. platform="darwin" makes this a macOS box —
+        # the message is now platform-aware (a Linux VPS gets "Start Docker
+        # service", never "Docker Desktop", which does not exist on Linux —
+        # see gateway_reason_messages._docker_not_running_message), so this
+        # test supplies the platform evidence its own assertion requires.
         summary = asyncio.run(self._run_capability_missing(
-            registration=_registration(),
+            registration=_registration(platform="darwin"),
             service_statuses_patch={"docker": "offline"},
         ))
         self.assertEqual(

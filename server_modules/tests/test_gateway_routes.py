@@ -758,10 +758,25 @@ class GatewayRoutesTests(unittest.TestCase):
         )
         self.assertEqual(bind_response.status_code, 200)
 
-        readiness_response = self.client.get(
-            f"/api/gateway/registrations/{gateway_id}/dedicated-workstation/readiness",
-            params={"workspace_id": "default", "trace_id": "trace-ready"},
-        )
+        # This test simulates "connected" purely at the DB layer (mark_
+        # gateway_session_connected/touch_gateway_session above), never
+        # through a real gateway.connect WS handshake -- so it never
+        # registers a real entry in gateway_protocol_service's in-process
+        # live-connection map. connection_status now demotes "online" to
+        # "offline" unless that map agrees (the picker/turn-time mismatch
+        # fix — see gateway_registry_service._gateway_connection_payload),
+        # so a genuinely-live box is simulated here explicitly, the same
+        # way test_runtime_attachment_service.py already does for this
+        # exact scenario. This test is about the READINESS POLICY, not
+        # about connection_status derivation itself (that has its own
+        # dedicated coverage in test_gateway_registry_service_hardware_
+        # readiness.py), so simulating genuine liveness is the correct
+        # fix, not a weakened assertion.
+        with patch("server_modules.gateway_protocol_service.gateway_connection_is_live", return_value=True):
+            readiness_response = self.client.get(
+                f"/api/gateway/registrations/{gateway_id}/dedicated-workstation/readiness",
+                params={"workspace_id": "default", "trace_id": "trace-ready"},
+            )
 
         self.assertEqual(readiness_response.status_code, 200)
         self.assertEqual(readiness_response.json()["readiness"], "ready")

@@ -339,7 +339,9 @@ async def execute_gateway_action(
             tool_call_id=tool_call_id,
             status="offline",
             summary=gateway_reason_messages.gateway_reason_message(
-                unusable_reason, capability_id=capability_id,
+                unusable_reason,
+                capability_id=capability_id,
+                platform=(registration or {}).get("platform"),
             ),
             capability_id=capability_id,
             arguments=arguments,
@@ -387,7 +389,10 @@ async def execute_gateway_action(
             tool_call_id=tool_call_id,
             status="offline",
             summary=gateway_reason_messages.gateway_reason_message(
-                reason, capability_id=capability_id, service_statuses=service_statuses,
+                reason,
+                capability_id=capability_id,
+                service_statuses=service_statuses,
+                platform=(registration or {}).get("platform"),
             ),
             capability_id=capability_id,
             arguments=arguments,
