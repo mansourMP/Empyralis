@@ -17,6 +17,7 @@ from server_modules import direct_tool_execution_service
 from server_modules import empyralis_model_tier_contract
 from server_modules import empyralis_model_tier_routing_service
 from server_modules import healthguide_safety_service
+from server_modules import provider_failure_classification
 from server_modules import response_leak_guard_service
 from server_modules import secret_redaction_service
 from server_modules import tool_honesty_guard
@@ -1002,6 +1003,16 @@ def _public_generation_error_code(llm_error: str) -> str:
     if detail.startswith("max_tool_iterations_reached:"):
         return detail
     if detail.startswith("provider_"):
+        # ProviderCallError stringifies as "<code>: <our sentence>" — the
+        # code leads because str(exc) is all that survives being written to
+        # a trace payload or a run's error_text. Return the CODE, not the
+        # whole sentence: this function's contract is a code, and a caller
+        # comparing it against a known value would never match a string
+        # carrying prose. A bare code (no colon) still passes through
+        # unchanged, which is what every pre-existing producer sends.
+        head = detail.split(":", 1)[0].strip()
+        if head in provider_failure_classification.ALL_CODES:
+            return head
         return detail
     lowered = detail.lower()
     if "http_429" in lowered or "rate limit" in lowered or "too many requests" in lowered:

@@ -22,6 +22,7 @@ from urllib.parse import quote, quote_plus
 
 from server_modules import platform_config_schema, pricing_registry_service, secrets_broker, usage_accounting_service
 from server_modules import credential_rotation_service
+from server_modules import provider_failure_classification
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -2571,12 +2572,51 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             payload=payload,
             timeout=60,
         )
+        # http_json_request preserves `status` and the parsed error body on a
+        # non-2xx (its own comment says so, precisely so bad credentials still
+        # surface the provider's status code). Reading only body["choices"]
+        # threw all of that away and reported SEVEN different facts —
+        # 401/402/429/404/500/400 and a genuinely empty 200 — as the single
+        # sentence "<Provider> returned no choices."
+        #
+        # Nine providers share this adapter and DeepSeek is the platform-
+        # credits provider, so that was the message every credits customer
+        # got when the platform key died. Preflight already names that exact
+        # scenario in plain language at boot; this is the same information,
+        # kept instead of discarded. See provider_failure_classification.
+        status = res.get("status")
         body = res.get("json")
+        failure = provider_failure_classification.classify_provider_http_failure(
+            status,
+            body,
+            provider_label=self.provider_label,
+            model=model,
+        )
+        if failure is not None:
+            # The provider's own words go to the log, never to the customer:
+            # DeepSeek's 401 body is "Your api key: ****cked is invalid", and
+            # a provider's prose is not something this product can vouch for
+            # however it is worded next month.
+            _LOGGER.warning(
+                "provider call failed: provider=%s model=%s code=%s status=%s detail=%s",
+                self.provider_id,
+                model,
+                failure.code,
+                failure.status,
+                failure.provider_detail or "(none)",
+            )
+            raise failure
         if not isinstance(body, dict):
             raise RuntimeError(f"{self.provider_label} returned invalid response.")
         choices = body.get("choices")
         if not isinstance(choices, list) or not choices:
-            raise RuntimeError(f"{self.provider_label} returned no choices.")
+            # The one case the old sentence was ever true of: a 2xx that
+            # carried no completion. Nothing is misconfigured, nothing is
+            # down — so it keeps its own name rather than being the bucket
+            # six real failures hid in.
+            raise provider_failure_classification.empty_response_error(
+                self.provider_label, status=status
+            )
         message = choices[0].get("message") if isinstance(choices[0], dict) else None
         content = message.get("content") if isinstance(message, dict) else None
         if isinstance(content, list):
