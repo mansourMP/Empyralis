@@ -106,7 +106,9 @@ class SageTurnResult:
 def normalize_sage_mode(mode: str) -> str:
     normalized = str(mode or "").strip().lower()
     if not normalized:
-        raise ValueError("Sage mode is required.")
+        # Customer-visible: sage_chat_api re-raises this as an HTTP 400
+        # `detail`, which getErrorMessage surfaces verbatim on screen.
+        raise ValueError("A mode is required.")
     if normalized in SAGE_MODE_ALIASES:
         return SAGE_MODE_ALIASES[normalized]
     if normalized == SAGE_MODE:

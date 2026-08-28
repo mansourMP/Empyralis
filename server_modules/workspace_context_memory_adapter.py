@@ -125,8 +125,10 @@ def _meaningful_context_file_content(filename: str, value: Any) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
-    default = str(workspace_context.DEFAULT_CONTEXT_FILE_CONTENTS.get(str(filename or "").strip()) or "").strip()
-    if default and text == default:
+    # Every scaffold variant, not just the current one — a file still holding
+    # the pre-rename text is boilerplate, and injecting it into a prompt as
+    # though the owner wrote it is the bug this guard exists to prevent.
+    if text in workspace_context.default_context_scaffold_variants(filename):
         return ""
     return text
 

@@ -2640,7 +2640,7 @@ async def fleet_create_agent(
         return {
             "ok": False,
             "error": (
-                f"capability_preset '{capability_preset}' is reserved (Sage-class operator) "
+                f"capability_preset '{capability_preset}' is reserved (the workspace operator's own preset) "
                 "and cannot be created through the normal flow. Use 'knowledge' or 'standard'."
             ),
         }

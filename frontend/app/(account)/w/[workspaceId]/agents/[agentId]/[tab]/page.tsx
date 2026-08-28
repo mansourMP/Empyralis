@@ -7,6 +7,7 @@ import { resolveAgentProjectId, useFleetAgents, useFleetProjects } from "@/lib/w
 import { isAgentDetailTab, type AgentDetailTabId } from "@/lib/workspace/fleet/agent-detail-tabs";
 import { FleetAgentDetail } from "@/lib/workspace/fleet/FleetAgentDetail";
 import { useBreadcrumbLabel } from "@/lib/workspace/fleet/Breadcrumbs";
+import { agentDisplayLabel } from "@/lib/workspace/fleet/fleet-presentation";
 
 // The accepted tab set is DERIVED, never hand-listed here. This file used
 // to carry its own VALID_TABS array and its project-scoped twin carried a
@@ -53,7 +54,10 @@ export default function WorkspaceAgentDetailPage() {
   const project = projects.find((p) => p.id === projectId);
   const projectName = project?.name || (projectsLoading ? undefined : "—");
 
-  useBreadcrumbLabel(agentId, agent?.label);
+  // agentDisplayLabel, never agent.label — landing on the workspace
+  // assistant's own route would otherwise put its stored persona name in the
+  // breadcrumb (and in the document title that follows the crumb).
+  useBreadcrumbLabel(agentId, agent ? agentDisplayLabel(agent) : undefined);
 
   return (
     <FleetAgentDetail

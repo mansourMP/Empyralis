@@ -1,7 +1,7 @@
 export const WORKSPACE_NAV_DESTINATIONS = [
   {
     id: 'sage',
-    label: 'Sage',
+    label: 'Ask AI',
     iconName: 'message-square',
     defaultRouteId: 'chat',
     childRouteIds: ['chat', 'memory', 'integrations', 'channels', 'tasks', 'artifacts', 'approvals', 'notifications'],
@@ -70,7 +70,7 @@ export const WORKSPACE_WEB_NAV_GROUP_LABELS = WORKSPACE_NAV_DESTINATIONS.reduce(
 export const WORKSPACE_ROUTE_DEFINITIONS = [
   {
     id: 'chat',
-    label: 'Sage',
+    label: 'Ask AI',
     segment: 'sage',
     legacySegments: ['chat'],
     destinationId: 'sage',

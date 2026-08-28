@@ -101,13 +101,32 @@ class UnknownCommandTests(unittest.TestCase):
 class DisplayNameSeedTests(unittest.TestCase):
     """Agent definitions seed display_name correctly."""
 
-    def test_sage_has_display_name(self):
-        """Sage seeds with display_name='Sage'."""
+    def test_master_seeds_a_display_name_that_is_not_a_persona(self):
+        """The workspace assistant seeds a real display_name, and it names no
+        removed persona.
+
+        INVERTED, not weakened (2026-08-28). This asserted `display_name ==
+        "Sage"` — it pinned the name the founder ordered removed from every
+        customer-visible string, so it was what failed when the name went.
+        It now asserts the property that actually has to hold, in both
+        directions: the seed still carries a real label (an empty one would
+        render "Unnamed agent" on every fresh workspace — a different bug a
+        bare not-equal check would pass happily), and that label does not
+        reintroduce the persona.
+        """
         from server_modules.agent_registry_repository import DEFAULT_MASTER_AGENT_DEFINITION
-        self.assertEqual(
-            DEFAULT_MASTER_AGENT_DEFINITION.get("display_name"),
-            "Sage",
-        )
+
+        for field in ("name", "display_name"):
+            value = str(DEFAULT_MASTER_AGENT_DEFINITION.get(field) or "").strip()
+            self.assertTrue(value, f"master agent seed must carry a real {field}")
+            self.assertNotIn(
+                "sage",
+                value.lower(),
+                f"{field} must not name the removed persona",
+            )
+
+        description = str(DEFAULT_MASTER_AGENT_DEFINITION.get("description") or "")
+        self.assertNotIn("Sage", description)
 
     def test_fleet_specialist_display_name_is_none(self):
         """Fleet specialist seeds with display_name=None (will ask owner)."""

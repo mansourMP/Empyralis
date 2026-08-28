@@ -520,10 +520,13 @@ DEFAULT_AGENT_DEFINITIONS: List[Dict[str, Any]] = [
     },
 ]
 DEFAULT_MASTER_AGENT_DEFINITION: Dict[str, Any] = {
+    # `slug` keeps its stored value: it is a persisted lookup key, not a name a
+    # customer reads. name/display_name/description ARE read — they seed the
+    # install a new workspace bootstraps, and reach the screen as its label.
     "slug": "sage",
-    "name": "Sage",
-    "display_name": "Sage",
-    "description": "The central Life OS orchestrator for this workspace. Sage owns the primary relationship, planning loop, delegation graph, and universal memory.",
+    "name": "Assistant",
+    "display_name": "Assistant",
+    "description": "The workspace assistant. It owns the primary relationship, planning loop, delegation graph, and universal memory.",
     "category": "System",
     "icon": "sparkles",
     "agent_kind": "master",

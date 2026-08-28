@@ -33,7 +33,39 @@ struct Agent: Codable, Identifiable, Equatable {
         case stopped
     }
 
-    var displayName: String { label?.isEmpty == false ? label! : id }
+    /// The customer-facing name of the workspace assistant. It is a plain
+    /// assistant inside the platform, not a persona, and this is the only
+    /// name it has. Mirrors the web's `WORKSPACE_ASSISTANT_LABEL`
+    /// (frontend/lib/workspace/fleet/fleet-presentation.ts).
+    static let workspaceAssistantLabel = "Ask AI"
+
+    /// What to PRINT for this agent. Never read `label` directly at a render
+    /// site — this is the one place that decides.
+    ///
+    /// The master install's STORED label on every workspace created before
+    /// 2026-08-28 is literally "Sage", the persona name the founder removed
+    /// from the product. That column is data (rewriting it across live rows
+    /// is a migration, not a rename), so the assistant prints as "Ask AI"
+    /// here whatever the row says.
+    ///
+    /// This is not cosmetic on iOS and the phone leaked it worse than web
+    /// did: TaskDetailView's "Created by"/"Completed by" rows and
+    /// DocumentEditSheet's revision authorship both resolve against
+    /// `store.agents` — the UNFILTERED list, unlike `store.realAgents` — so
+    /// any task the assistant created printed the old name on the primary
+    /// task screen. Web's own TaskDetailView never showed it, because it is
+    /// handed a project-filtered list and the assistant carries no project.
+    ///
+    /// Keyed on `agentKind` first: that is the structural fact, and the
+    /// label-substring clause below it is only a fallback for rows that
+    /// predate the field.
+    var displayName: String {
+        let kind = (agentKind ?? "").trimmingCharacters(in: .whitespaces).lowercased()
+        if kind == "master" { return Self.workspaceAssistantLabel }
+        guard let label, !label.isEmpty else { return id }
+        if label.lowercased().contains("sage") { return Self.workspaceAssistantLabel }
+        return label
+    }
 
     var isWorking: Bool { currentRunId?.isEmpty == false }
     var isStopped: Bool { stopped?.active == true }

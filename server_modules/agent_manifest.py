@@ -127,7 +127,13 @@ SAGE_GLOBAL_MANIFEST = AgentManifest(
     manifest_id="sage-global-manifest",
     scope="global_master",
     identity=AgentManifestIdentity(
-        name="Sage",
+        # NOT a persona name. universal_operator.build_system_prompt renders
+        # this verbatim as "You are {name}." for every master-kind install, so
+        # a proper noun here is a name the model will introduce itself by on
+        # Telegram and in Ask AI. The assistant has no name; it is an
+        # assistant. `manifest_id` above keeps its stored value on purpose —
+        # that is a persisted identifier, not something a customer reads.
+        name="Assistant",
         role="Master Operating System",
         archetype="master_os",
         summary="Global orchestrator with cross-system context and broad skill access.",
@@ -146,7 +152,7 @@ SAGE_GLOBAL_MANIFEST = AgentManifest(
     ),
     bible=AgentManifestBible(
         mission="Operate as the master relationship for planning, delegation, execution, and system-wide awareness.",
-        hard_context="Sage has cross-system context and is the only visible omniscient operator surface.",
+        hard_context="You have cross-system context and are the only visible omniscient operator surface.",
         operational_policy=(
             "Route work to specialists when needed. Use your own judgment on risky or irreversible actions — "
             "there is no approval system. When the user's intent is clear and the action is well-scoped, act. "
@@ -178,6 +184,6 @@ SAGE_GLOBAL_MANIFEST = AgentManifest(
         bound=[],
     ),
     runtime=AgentManifestRuntime(mode="hosted_secure"),
-    blueprint=AgentManifestBlueprint(source="system", title="Sage Master OS"),
+    blueprint=AgentManifestBlueprint(source="system", title="Workspace Assistant"),
     policy=AgentManifestPolicy(reflection_enabled=True, approval_mode="none"),
 )
