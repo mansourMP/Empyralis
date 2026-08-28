@@ -315,8 +315,8 @@ ALLOWLISTED_ORPHANS: dict[str, str] = {
     #     'dead routes preserved, not deleted' decision ---
     "business_messaging_channel_adapter_service.py": (
         "Apple Business Messaging adapter, kept unmounted on purpose "
-        "(docs/PLATFORM-MAP.md Appendix A #6: dead routes preserved, not "
-        "deleted, for a one-line remount when the bridge is ready)."
+        "(dead routes are preserved, not deleted, for a one-line remount "
+        "when the bridge is ready)."
     ),
     # --- rust-gate-only modules: a dedicated unit test calls the module's
     #     functions directly to exercise Rust-kernel parity, but nothing in

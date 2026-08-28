@@ -105,7 +105,7 @@ The generalizable principle: **everything either (a) is cheap and always-on (sys
 
 ## Part B — How OpenClaw does it (read-only reference, `/Users/mansur/openclaw`)
 
-Per the memory index note (`docs/PLATFORM-MAP.md`), OpenClaw is a second live reference the founder wants mined for patterns. Three pieces are directly relevant:
+Per the memory index note, OpenClaw is a second live reference the founder wants mined for patterns. Three pieces are directly relevant:
 
 ### B1. Root memory files — same `MEMORY.md` convention, resolved defensively
 

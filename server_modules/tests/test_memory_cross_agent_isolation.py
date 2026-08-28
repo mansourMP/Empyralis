@@ -17,7 +17,7 @@ NOT thread agent_install_id through from session_metadata — meaning any
 specialist agent's memory_search/memory_get calls silently fell back to
 the WORKSPACE ROOT (Sage's own memory notebook) instead of that
 specialist's own directory. See agent_workspace_context_dir's fallback
-(workspace_context.py) and docs/PLATFORM-MAP.md's memory security audit.
+(workspace_context.py).
 """
 
 from __future__ import annotations

@@ -105,14 +105,13 @@ function fieldLabel(field: string): string {
 // Deliberate fallback for a connector with no mapped logo (CONNECTOR_ICONS
 // in fleet-icons.ts should cover the full catalog, but this is the
 // deployment-agnostic safety net for whatever gets added to the backend
-// catalog before an icon is wired for it — see docs/PLATFORM-MAP.md's
-// fleet-icons.ts entry). Renders into the SAME icon box a real <img> logo
-// would (same size/shape, per MAN-145 founder feedback: a bare letter on the
-// muted default background read as broken, not as a deliberate placeholder)
-// but gives every connector its own deterministic color so the grid doesn't
-// look uniformly grey/unstyled. Same small palette + hashing approach as the
-// AgentSigil convention used elsewhere in fleet (deterministic per-id color,
-// not random per-render).
+// catalog before an icon is wired for it). Renders into the SAME icon box
+// a real <img> logo would (same size/shape, per MAN-145 founder feedback:
+// a bare letter on the muted default background read as broken, not as a
+// deliberate placeholder) but gives every connector its own deterministic
+// color so the grid doesn't look uniformly grey/unstyled. Same small
+// palette + hashing approach as the AgentSigil convention used elsewhere in
+// fleet (deterministic per-id color, not random per-render).
 const MONOGRAM_COLORS = [
   "#2E5B9E", "#9E3F2E", "#2E9E6C", "#9E2E7C", "#7C9E2E",
   "#2E7C9E", "#9E712E", "#5B2E9E", "#2E9E39", "#9E2E50",

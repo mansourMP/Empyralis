@@ -1042,12 +1042,30 @@ the matcher must classify both directions correctly. Proven red-before-green
 by putting the founder's own screenshotted ring back.
 
 `lib/ui/chrome.css` is excluded from that scan **with a written reason in the
-test's header**: ~130 remaining accent declarations there belong to selectors
+test's header**: the remaining accent declarations there belong to selectors
 with no consumer outside that one file (`studio-*`, `marketplace-*`,
-`deployed-agents-*`, `app-filter-pill`, `sage-unified-card` — all verified
-dead by grep). Its LIVE surfaces were swept by hand. Do not widen the scan
-there without deleting the dead CSS first; a scan that fails on 130 dead
-rules is a scan someone disables.
+`deployed-agents-*`, `app-filter-pill` — all verified dead by grep). Its LIVE
+surfaces were swept by hand. Do not widen the scan there without deleting the
+dead CSS first; a scan that fails on dead rules is a scan someone disables.
+
+**MEASURED 2026-08-28, and it says the widening is NOT one more deletion
+away.** The `sage-*` half of that dead CSS is now gone — 532 rules and 3
+keyframes, 26,533 -> 22,411 lines — and widening the scan over what is left
+still fails:
+
+| | accent declarations |
+| --- | ---: |
+| before the sage prune | 97 |
+| after it | **85** |
+
+So the sage rules were 12 of the 97. Of the 85 left, **77 are in dead families**
+(`marketplace-pane-*` 15, `app-memory-*` 9, `studio-ai-*` 8, `app-chat-*` 7,
+`studio-agent-*` 6, `deployed-agents-*` 6, `app-studio-*` 5, and a long tail) —
+more deletions of the same shape. **The other 8 are on LIVE selectors**:
+`app-auth-*` (4, including `.app-auth-kicker` on the login page), `cloud-vps-*`
+(4) and one `workstation-hardware-*`. Those are a DESIGN decision about the
+accent rule, not cleanup, so finishing the deletions does not by itself buy the
+widening — someone has to decide whether the login page's kicker may be purple.
 
 **`--task-done` no longer aliases `--accent`** — a status dot is not a
 button. It takes the success hue its own comment already said it meant
@@ -2230,6 +2248,74 @@ binary is built** (`target/` is untracked, so a fresh worktree skips 77
 pressure, and a killed run's truncated output reads as a *smaller* failure
 count, not as an error — that is how "±16" gets quoted). Run it as
 `DATABASE_URL= venv/bin/python -m pytest server_modules/tests`, alone.
+
+**A FAILING-SET COMPARISON IS AN INSTRUMENT, AND THIS ONE HAS INVENTED
+PHANTOM FAILURES THREE TIMES (2026-08-28).** Every instance reported a
+regression in a file nothing had touched, and every instance was the parser,
+not the code. Check the instrument before believing the number.
+
+```
+1  ^FAILED|^ERROR grep also matches LOG lines beginning "ERROR " —
+   random UUIDs, so the "failing set" differed on every run   613 -> 489 ids
+   FIX  require a server_modules/tests/ path after the verb
+2  a concurrent log write with NO trailing newline glues its own ISO
+   timestamp onto the summary line, with NO separator:
+       ...unavailable2026-08-28 21:5...
+   cutting at WHITESPACE is not enough. It landed on a DIFFERENT node id
+   each run, so the naive parse reported 2 regressions AND 2 fixes in
+   test_session_service.py where nothing had changed.
+   FIX  also cut the id at the first yyyy-mm-dd
+3  comparing post-rename node ids against a PRE-rename baseline list.
+   24 phantom regressions in test_agent_turn_runtime_service.py, purely
+   because the file had been renamed in the same branch.
+   FIX  compare against a baseline that uses the same names, or apply the
+        rename map first
+```
+
+The rule: **when a comparison reports a regression, reproduce the failing
+test alone before believing it.** All three of these survive a `-q` summary
+read and look exactly like real breakage. And a rename batch makes #3
+inevitable — the ids move, so the baseline has to move with them.
+
+**THE SINGLE-PROCESS HANG NO LONGER REPRODUCES, and the note that recorded it
+was becoming an inherited constraint (2026-08-28).**
+`docs/CODEX-RENAME-STEP-0-EVIDENCE.md` recorded
+`test_mcp_oauth_provider.py::test_resolve_workspace_read_only_scope_blocks_writes`
+blocking forever ~5,341 tests into a single 10,333-test run. Measured again
+at `4473dbd0`, twice, with `-o faulthandler_timeout=300` armed:
+
+```
+files 1..417 (up to and including that file)   5,348 tests   348s   no stall
+ALL 849 files, ONE process                    10,333 tests   723s   no stall
+                                495 failed / 9,663 passed / 174 skipped
+```
+
+faulthandler NEVER fired; the named test appears in neither failure list.
+**The suite is usable in one process at this commit — 12 minutes, exit 1 on
+real failures.** Order-dependence is real but tiny now: 490 distinct failing
+ids in one process vs 489 in 8 chunks, delta 1 in one direction only.
+
+Reading the test says why a hang there was surprising: with the contextvar
+set, `mcp_server._resolve_workspace(ctx=None)` returns from its FIRST branch
+before any `await`, so the coroutine cannot block. Anything that stalls is
+the surrounding machinery — `import mcp_server`, `asyncio.run`'s loop
+teardown, or a lock/non-daemon thread left by an earlier test.
+
+**If it returns, do not start by editing the test.** Reproduce with
+`faulthandler_timeout` armed and READ THE DUMP — `pytest-timeout` is not
+installed, and pytest's built-in faulthandler is the only thing that turns
+"it hangs" into "it is waiting on X". `import mcp_server` in the frame points
+at this file's own `sys.modules["server"]` stand-in leak; `asyncio.run` points
+at loop teardown on a non-daemon thread or an un-`unref`'d timer (the same
+family as the gateway's `ws-client-event-seq-race` hang above); a socket read
+points at conftest's egress guard, where a blocked connect with no timeout
+looks exactly like this.
+
+Two clean runs are evidence, not proof — a hang that depends on machine load,
+a concurrently running stack, or `~/.empyralis` state is not ruled out. But
+**do not inherit "the suite cannot be run in one process" as a constraint**;
+that is the failure this file already names, where a workaround gets written
+down as a property of the system.
 
 **Nothing gates on the Python suite.** Every workflow in `.github/workflows`
 is `on: workflow_dispatch` — no push trigger, no PR trigger, no git hooks.

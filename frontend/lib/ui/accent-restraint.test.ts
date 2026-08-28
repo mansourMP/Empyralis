@@ -24,14 +24,27 @@
  * WHAT IS SCANNED, AND THE ONE EXCLUSION.
  *   lib/**, app/**   every .css file. This is the product.
  *   lib/ui/chrome.css   EXCLUDED, with a reason rather than by oversight.
- *     26k lines of the legacy app-shell, carrying ~130 remaining accent
- *     declarations whose selectors have zero consumer anywhere outside that
- *     one file (studio-*, marketplace-*, deployed-agents-*, app-filter-pill,
- *     sage-unified-card…). Its LIVE surfaces were swept by hand in the same
- *     change; bringing the dead remainder under the rule means deleting dead
- *     CSS, which is a different job with a different risk. Do not quietly
- *     widen this to chrome.css without doing that job — a scan that fails on
- *     130 dead rules is a scan someone will disable.
+ *     The legacy app-shell, carrying accent declarations whose selectors have
+ *     zero consumer anywhere outside that one file (studio-*, marketplace-*,
+ *     deployed-agents-*, app-filter-pill…). Its LIVE surfaces were swept by
+ *     hand in the same change; bringing the dead remainder under the rule
+ *     means deleting dead CSS, which is a different job with a different
+ *     risk. Do not quietly widen this to chrome.css without doing that job —
+ *     a scan that fails on dead rules is a scan someone will disable.
+ *
+ *     MEASURED 2026-08-28 by running this scan with EXCLUDED neutralised.
+ *     The sage-* dead CSS has since been deleted (532 rules, 3 keyframes,
+ *     26,533 -> 22,411 lines), and the widening still fails:
+ *         before the sage prune   97 accent declarations
+ *         after  the sage prune   85
+ *     77 of the 85 are in other dead families (marketplace-pane-* 15,
+ *     app-memory-* 9, studio-ai-* 8, app-chat-* 7, studio-agent-* 6,
+ *     deployed-agents-* 6, app-studio-* 5, plus a tail) — more deletions.
+ *     THE OTHER 8 ARE ON LIVE SELECTORS: app-auth-* (4, .app-auth-kicker
+ *     among them, i.e. the login page), cloud-vps-* (4) and one
+ *     workstation-hardware-*. Those are a design decision about the accent
+ *     rule, not cleanup — so finishing the deletions does not on its own
+ *     make this widenable.
  *
  * ALIASES ARE FOLLOWED. --interactive-accent, --app-accent and friends all
  * resolve to --accent, and a rule painting with an alias is painting with the

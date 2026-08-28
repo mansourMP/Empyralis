@@ -2273,8 +2273,7 @@ def _personal_channel_state(connection_id: str, gateway_id: str, agent_id: str =
         # (e.g. paired from Sage's workspace-wide console), reflect that — the
         # session is shared, so the per-agent Channels tile should read
         # "Connected", not the false "Set up" that contradicts the connect
-        # card. (Revisit when the Gateway pools true per-agent sessions —
-        # see PLATFORM-MAP's multi-agent-per-box plan.)
+        # card. (Revisit when the Gateway pools true per-agent sessions.)
         #
         # Deliberately reads box_state.status literally rather than adding
         # yet another layer of distrust here — this fallback can only ever

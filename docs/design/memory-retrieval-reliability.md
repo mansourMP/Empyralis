@@ -21,7 +21,7 @@ and `.orion-stack/memory/...` (`server_modules/agent_memory.py:21-22`).
 Confirmed independently in this pass: `grep -rn "MEMORY.md|memory_read|
 memory_write|memory_search|memory_get" empyralis-gateway/src/` returns **zero
 hits**. Even `cli_subscription` agents — which run the customer's real
-`claude`/`codex` binary on their own box (PLATFORM-MAP.md Part 26) — never
+`claude`/`codex` binary on their own box — never
 have that binary touch a local memory file: `sage_agent_runtime_service.py`
 flattens the entire conversation + system prompt (including the memory
 brief) into text and ships it down the wire every turn
@@ -52,7 +52,7 @@ where it would and wouldn't differ from today's server-side path:
   the same durable-dispatch/WSS-flush mechanism a memory read would reuse
   (`llm.generate`) is **~4.4s per turn on the fast/warm path, with a 40s
   worst-case deadline** before the call fails outright
-  (PLATFORM-MAP.md Part 26.3/26.4, cited and re-verified in
+  (measured by an earlier audit, cited and re-verified in
   `memory-placement-scope.md:201-213`). That is not a network call to a
   colocated service — it is enqueue → wait for a WSS flush cycle → real
   process work on a customer's own, possibly single-vCPU machine. A local
@@ -60,7 +60,7 @@ where it would and wouldn't differ from today's server-side path:
 - **Real difference #2 — a whole new failure class.** Local disk reads
   fail only if the file is missing/corrupt (see hallucination vectors
   below). A VPS pull adds: the box being offline, the WSS socket being dead
-  while showing "Online" (PLATFORM-MAP.md §26.0's documented gotcha), and a
+  while showing "Online" (a documented gotcha), and a
   durable-dispatch timeout that looks, from the model's perspective, exactly
   like every other kind of "nothing came back" unless it's deliberately
   built to look different (see Hardening Plan item 7).

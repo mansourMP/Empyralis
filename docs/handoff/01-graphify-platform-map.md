@@ -1,5 +1,14 @@
 # Prompt: Produce a Complete Platform Map of Empyralis
 
+
+> **HISTORICAL — the baseline this prompt reads no longer exists (2026-08-28).**
+> `docs/PLATFORM-MAP.md` was deleted: a commit-pinned 2026-07-13 snapshot
+> that had gone stale (122 references to 23 modules that no longer exist),
+> per this repository's standing rule that snapshot documents are not kept.
+> Every instruction below to read or update it, and every reference to its
+> section numbers, is therefore unfollowable. Read this file as a record of
+> how the map was produced, not as a work order to run.
+
 This prompt is for a Claude Code session. You are mapping the ENTIRE Empyralis platform — every subsystem, every file of significance, every connection between them. The output is a document an outside engineer can read cold and understand the whole system.
 
 ## Context you need first

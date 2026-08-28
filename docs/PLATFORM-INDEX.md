@@ -1,8 +1,7 @@
 # Empyralis — Platform Index
 
 At-a-glance inventory of what exists on the platform today. Static facts
-only — no history, no changelog. For the deep reference (file:line
-citations, wiring traces, open gaps), see `docs/PLATFORM-MAP.md`.
+only — no history, no changelog.
 
 Tags used below: `(built, not wired)` = code exists but nothing live calls
 it or a UI to reach it is missing. `(planned)` = not built yet.

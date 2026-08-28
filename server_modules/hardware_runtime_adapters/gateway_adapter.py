@@ -35,8 +35,8 @@ def _agent_scoped_mount(base_mount: str, agent_install_id: Optional[str]) -> str
     empyralis-gateway/src/shell/runtime.ts — filesystem.read_write and
     shell.execute both key off this exact path). Without this, the seam is
     scoped by (mount-bucket, workspace_id) only, which is shared across
-    every agent in a workspace — the same leak class PLATFORM-MAP.md Part
-    27.8 flagged CRITICAL for connector credentials, here for the file/shell
+    every agent in a workspace — the same leak class already flagged
+    CRITICAL for connector credentials, here for the file/shell
     connectors instead (see docs/design/memory-placement-scope.md's
     "gateway seam" section).
 

@@ -47,7 +47,7 @@ _MEMORY_DIR = _REPO_ROOT / ".orion-stack" / "memory"
 `_memory_db_path()` (`agent_memory.py:302-309`) writes each install's
 `memory.db` to `.orion-stack/memory/<workspace_token>/agents/<install_token>/memory.db`
 — a real, physically-separate file per `(workspace_id, agent_install_id)`
-(this per-file separation is what Part 27 of PLATFORM-MAP.md verified as
+(this per-file separation is what the platform-map audit verified as
 the cross-agent isolation boundary — see below), but still on the platform
 server's disk, never the customer's.
 
@@ -98,12 +98,12 @@ a location (which disk).
 The founder's own reference case is Claude Code: memory sits on the user's
 laptop because the CLI *reads local files itself*. Checked whether
 Empyralis's `cli_subscription` mode — which does run the real `claude`/
-`codex` binary on the customer's own box (PLATFORM-MAP.md Part 26) —
+`codex` binary on the customer's own box —
 already does this. It does not.
 
 `empyralis-gateway/src/llm/cli-runner.ts` `buildInvocation` (`:244-260`)
 passes `--system-prompt <text>` and a fully-flattened message list over the
-wire; PLATFORM-MAP.md Part 26.5 confirms directly: *"`sage_agent_runtime_service.py`
+wire; the platform-map audit confirmed directly: *"`sage_agent_runtime_service.py`
 already re-flattens the **entire** conversation into one prompt every
 single turn"* and the wire protocol carries no stable per-conversation
 identity, only `runtime`/`model`/`messages`/`timeoutMs`. **The box's own
@@ -133,7 +133,7 @@ the latency section below.
 
 **Verdict: a real, live, already-proven remote-execution seam exists and
 memory tools could ride it — but it has zero agent-level scoping today,
-which is exactly the class of gap Part 27 of PLATFORM-MAP.md found and
+which is exactly the class of gap the platform-map audit found and
 fixed for the *existing* memory tools.**
 
 ### The capability that would carry it: `filesystem.read_write`
@@ -187,12 +187,12 @@ supplies (`:130-131`, `sanitizeMountName`/`sanitizeWorkspaceId`) — nothing
 server-side or Gateway-side currently forces that mount name to be
 agent-install-scoped. Compare this to the file/SQLite memory layers today,
 where isolation is either enforced by a hard filesystem-path check
-(`agent_memory_tools.py`'s `_resolve_safe_path`, verified in PLATFORM-MAP.md
-§27.3 to correctly reject `..` and symlink escapes) or by physically
+(`agent_memory_tools.py`'s `_resolve_safe_path`, verified to correctly
+reject `..` and symlink escapes) or by physically
 separate files per install (§27.4). **Routing memory writes through
 `filesystem.read_write` as-is, with multiple agents sharing one box, would
-recreate exactly the class of cross-agent leak PLATFORM-MAP.md's Part 27.8
-flagged as CRITICAL for connector credentials (vector D) — a resolver that
+recreate exactly the class of cross-agent leak already flagged as CRITICAL
+for connector credentials (vector D) — a resolver that
 picks "whichever `mount` string was passed" instead of enforcing identity.**
 Any extension of this seam for memory MUST add install-scoped path
 derivation (e.g. mount = `agent_install_id`, never caller-suppliable) as a
@@ -200,7 +200,7 @@ hard, non-bypassable rule — not an afterthought.
 
 ### The real cost of any gateway round trip, measured
 
-PLATFORM-MAP.md Part 26.3/26.4 measured the `llm.generate` capability
+An earlier audit measured the `llm.generate` capability
 (same durable-dispatch, enqueue-then-flush mechanism `filesystem.read_write`
 would use) at **~4.4s per turn on the fast/warm path**, with a **40-second
 worst-case deadline** (`sage_agent_runtime_service.py:1144`,
@@ -224,8 +224,8 @@ through a durable dispatch queue, they are not. Two separate load-bearing
 facts collide here:
 
 1. MEMORY.md injection happens **before the model call**, synchronously,
-   as part of prompt assembly (`sage_instruction_compiler_service.py`,
-   PLATFORM-MAP.md Part 16) — it is not a mid-turn tool call with a
+   as part of prompt assembly (`sage_instruction_compiler_service.py`)
+   — it is not a mid-turn tool call with a
    natural request/response/error shape the way `filesystem.read_write`
    is used today.
 2. The existing offline precedent (`hardware_runtime_target_resolver.py`)
@@ -285,8 +285,8 @@ owner get any export/backup affordance before that acceptance is asked of
 them, or is silent, permanent loss on de-pair/hardware-failure acceptable
 as shipped? No export mechanism for hardware-side memory exists to check
 against (there is no "box side" memory yet at all). Recommend: at minimum,
-the existing MemoryTab UI (`frontend/lib/workspace/fleet/tabs/MemoryTab.tsx`,
-PLATFORM-MAP.md Part 16) should surface "this agent's memory lives on
+the existing MemoryTab UI (`frontend/lib/workspace/fleet/tabs/MemoryTab.tsx`)
+should surface "this agent's memory lives on
 [device name]; if it's disconnected/removed, this memory is gone" — an
 honesty affordance rather than a silent trap, consistent with this
 codebase's own stated ethic (the "starter scaffold" honesty banner,
@@ -311,7 +311,7 @@ confirmed — not designed here, flagged as a required build item.
 
 ### Per-agent isolation with multiple agents on one box
 
-PLATFORM-MAP.md Part 27 proved the *current* file/SQLite layers hold this
+The platform-map audit proved the *current* file/SQLite layers hold this
 invariant (19/19 tests, per-file physical separation). Extending storage
 onto the Gateway's `filesystem.read_write` seam **must** re-derive the
 same invariant there, since (per "What the seam does NOT have" above) it
@@ -319,7 +319,7 @@ does not hold today. Concretely: mount/path derivation for any memory
 write dispatched through the Gateway must be a server-computed function of
 `agent_install_id` alone, never a caller-suppliable argument threaded
 through `arguments.mount` the way the existing `file`/`shell` connectors
-allow today — otherwise this becomes vector D (PLATFORM-MAP.md Part 27.8)
+allow today — otherwise this becomes vector D
 again, for memory instead of Stripe keys.
 
 ---

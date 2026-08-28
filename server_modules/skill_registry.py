@@ -587,8 +587,8 @@ async def _live_memory_read_skill(
 
     # SECURITY: an empty agent scope must never silently fall through to
     # the workspace root's memory (that is exactly how a prior cross-agent
-    # memory leak happened — see docs/PLATFORM-MAP.md's memory security
-    # audit and workspace_context.agent_workspace_context_dir's docstring).
+    # memory leak happened — see
+    # workspace_context.agent_workspace_context_dir's docstring).
     # Fail closed instead.
     resolved_agent = str(agent_install_id or agent_id or "").strip()
     if not resolved_agent:

@@ -325,7 +325,7 @@ def _enforce_specialist_memory_viewer(
     # viewer_install_id derived from trusted, server-side turn context
     # (never from model/tool-call-supplied arguments), or this check
     # silently does nothing and one specialist could read another's
-    # payload. See docs/PLATFORM-MAP.md's memory security audit.
+    # payload.
     normalized_viewer_role = str(viewer_role or "specialist").strip().lower() or "specialist"
     if normalized_viewer_role != "specialist":
         raise PermissionError(

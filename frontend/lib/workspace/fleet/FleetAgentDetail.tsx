@@ -1054,7 +1054,7 @@ export function FleetAgentDetail({
   // cli_subscription/local agents) wins over tool-hardware placement
   // (hardware_access + preferred_gateway_id) — see resolveHardwarePlacement.
   // Never runtime_target, which stays pinned to a runtime_profile FK real
-  // Fleet agents never update (see docs/PLATFORM-MAP.md Part 22, Hardware).
+  // Fleet agents never update.
   const { gateways } = useWorkspaceGateways(workspaceId);
   const placement = resolveHardwarePlacement(agent?.hardware_access, agent?.preferred_gateway_id, gateways, agent?.model_config);
   // Separate honest facts for the Sessions panel's top region (2026-08-14,

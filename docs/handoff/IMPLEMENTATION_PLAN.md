@@ -1,5 +1,14 @@
 # Implementation Plan — Post-Audit
 
+
+> **HISTORICAL — the baseline this prompt reads no longer exists (2026-08-28).**
+> `docs/PLATFORM-MAP.md` was deleted: a commit-pinned 2026-07-13 snapshot
+> that had gone stale (122 references to 23 modules that no longer exist),
+> per this repository's standing rule that snapshot documents are not kept.
+> Every instruction below to read or update it, and every reference to its
+> section numbers, is therefore unfollowable. Read this file as a record of
+> how the map was produced, not as a work order to run.
+
 **Date:** 2026-07-03  
 **Based on:** `concerns.md` audit findings  
 **Rule:** fixes go straight to code. Decisions come to you.

@@ -460,98 +460,85 @@ positives: `sage-agent-computer` matches only the HTTP path
 `sage-unified-card` / `sage-unified-section` match only comments in
 `accent-restraint.test.ts` and an e2e spec. **All 433 are dead as CSS.**
 
-The provable, narrow alternative: **534 rules occupying 3,418 lines (13% of the
-file)** have selectors composed only of dead `sage-*` classes. That is the
-deletion CLAUDE.md's accent-restraint note is actually asking for ("do not
-widen the scan there without deleting the dead CSS first"). Not done here —
-this is a founder decision, and the instruction as given would have taken the
-login screen down.
+**The narrow version SHIPPED once the founder had checked the refusal himself**
+(`dde55928`): 532 style rules plus 3 sage keyframes, **26,533 -> 22,411 lines**.
+The pruned file is a strict SUBSEQUENCE of the old one — only lines removed,
+none added, reordered or edited — which is a stronger claim than the diffstat's
+~10.7k "insertions" (git re-anchoring on a 26k-line file of near-identical
+short lines). Census before/after: zero classes with a consumer changed their
+selector count, zero of the 195 custom properties lost, zero surviving
+`animation:` references pointing at a removed keyframe, and every one of the
+425 classes that lost occurrences is in the proven-dead set.
 
-### docs/PLATFORM-MAP.md: deletable on the standing rule, but it has ~40 referrers
+`sage-thinking-text-glow` is KEPT and is the case that would have broken a
+screen: it is referenced by live `.app-chat-system-row--running` and
+`.app-chat-live-trace--running` rules. A line-based prune takes it; the
+brace-depth parser tracks references and did not. 23 MIXED rules pairing a dead
+sage class with a class from another family are kept WHOLE, which is why 29
+sage class names still appear in the file.
 
-4,819 lines, header pinned to commit `01c6081ce` and dated 2026-07-13, with its
-own graph statistics marked "predates the changes in this refresh". It names
-**122 occurrences of 23 modules that no longer exist**, plus five that never
-existed under those names at all (`sage_service.py`, `sage_events_repository.py`,
-`sage_reporting.py`, `sage_accounting_service.py`, `sage_bridge_service.py`).
-It also carries its own 2026-07-23 note saying the Sage concept is dead.
+**AND THE RED-BEFORE-GREEN SAYS THE ACCENT SCAN STILL CANNOT BE WIDENED.**
+Measured by running `accent-restraint.test.ts`'s own logic with its `EXCLUDED`
+constant neutralised (a throwaway copy beside the original; the tracked test
+was never edited):
 
-CLAUDE.md's standing rule says snapshot/audit documents are not kept. The cost
-of applying it here is that roughly 40 "see docs/PLATFORM-MAP.md" pointers go
-dangling, and they are not all in docs — `agent_turn_runtime_service.py`,
-`skills_service.py`, `personal_channels_service.py`, `workspace_context.py`,
-`wechat_official_service.py`, `deployed_agent_service.py`,
-`test_module_reachability.py`, a gateway `.ts` file, `FleetAgentDetail.tsx`,
-`ConnectorPicker.tsx` and 18 brand-asset SVGs all cite it as the explanation
-for why some code is the way it is. Deleting the file is one line; deleting it
-honestly means stripping those clauses in the same commit.
+| chrome.css | accent declarations if the scan is widened |
+| --- | ---: |
+| original | 97 |
+| pruned | **85** |
 
-### The single-process hang DID NOT REPRODUCE, and the note above is now a claim with an expiry date
+The sage rules were 12 of the 97. Of the 85 left, **77 are in other dead
+families** (`marketplace-pane-*` 15, `app-memory-*` 9, `studio-ai-*` 8,
+`app-chat-*` 7, `studio-agent-*` 6, `deployed-agents-*` 6, `app-studio-*` 5,
+plus a tail) — more deletions of exactly this shape. **The other 8 are on LIVE
+selectors**: `app-auth-*` (4, `.app-auth-kicker` among them, i.e. the login
+page), `cloud-vps-*` (4) and one `workstation-hardware-*`. Those are a DESIGN
+decision about the accent rule, not cleanup — so finishing the deletions does
+not on its own buy the widening. Both the test's header and CLAUDE.md now carry
+those numbers instead of the old "~130 dead declarations" estimate, which was
+wrong in both directions.
 
-The section "The suite has an order-dependent hang, and it is not new" (above)
-records `test_mcp_oauth_provider.py::test_resolve_workspace_read_only_scope_blocks_writes`
-blocking forever ~5,341 tests into a single 10,333-test run. **Measured again
-on 2026-08-28 at `4473dbd0`, twice, it does not happen.**
+### docs/PLATFORM-MAP.md is DELETED, and the ~40 pointers moved with it
 
-```
-PROBE 1  files 1..417 of the sorted list (up to and including the named file)
-         5,348 tests   completed in 348s   no stall
-PROBE 2  ALL 849 files, ONE process -- the exact described condition
-         10,333 tests  completed in 723s   495 failed / 9,663 passed / 174 skipped
-         495 pytest failure LINES de-duplicate to 490 distinct node ids
-```
+4,819 lines, pinned to commit `01c6081ce`, dated 2026-07-13, its own graph
+statistics marked "predates the changes in this refresh". It named **122
+occurrences of 23 modules that no longer exist**, plus five that never existed
+under those names at all (`sage_service.py`, `sage_events_repository.py`,
+`sage_reporting.py`, `sage_accounting_service.py`, `sage_bridge_service.py`),
+and carried its own 2026-07-23 note saying the Sage concept was already dead.
+This repository's standing rule is that snapshot documents are not kept.
 
-Both runs were made with `-o faulthandler_timeout=300` armed. pytest's built-in
-faulthandler plugin dumps every thread's stack when one test blocks that long —
-that is the only thing that turns "it hangs" into "it is waiting on X", and
-`pytest-timeout` is not installed here so it is also the only option. **It never
-fired.** `test_mcp_oauth_provider.py` was file 417 of 849 in both runs and
-appears nowhere in either failure list, i.e. it passed.
+**The pointers were the whole cost, so they were paid rather than left
+dangling.** 65 sites, each an explicit anchor asserted to match exactly once —
+nothing edited by pattern-matching luck:
 
-**Reading the test itself says why a hang there is surprising.** With the
-contextvar set, `mcp_server._resolve_workspace(ctx=None)` returns from its FIRST
-branch, before any `await`:
+| where | sites | treatment |
+| --- | ---: | --- |
+| backend `.py` (incl. 5 tests) | 21 | citation dropped, REASON kept |
+| gateway `.ts` | 2 | same |
+| frontend `.tsx` | 2 | same |
+| brand-asset SVGs | 18 | one identical clause, mechanical |
+| docs | 22 | same |
+| `docs/handoff/*` prompts | 5 files | banner: the baseline is gone |
 
-```
-access_token = get_access_token()        <- a contextvar read, set by the test
-workspace_id = "ws-scoped"               <- non-empty, so ...
-return {...}                             <- ... it returns here. no await at all.
-```
+The rule applied at every site is the coordinator's: **a clause carrying a
+real explanation keeps the explanation and loses only the citation; a clause
+that was nothing but a citation goes entirely.** So
+`deployed_agent_service.py` still says the Studio surfaces were deleted as
+dead code under the "one agent class" strangler plan, and
+`gateway_adapter.py` still says the file/shell seam is the same leak class
+already flagged CRITICAL for connector credentials — neither now points at a
+file that is not there.
 
-So the coroutine cannot block. Anything that stalls has to be the surrounding
-machinery — `import mcp_server` (a 107KB module that builds the MCP server and
-pulls the FastAPI app in), `asyncio.run()`'s loop setup/teardown, or a lock or
-non-daemon thread left behind by an earlier test in the same process. That is
-also why it is order-dependent rather than a property of the test.
+`docs/graphify-report.md`'s three lines are deliberately UNTOUCHED: it is
+generated graph output and those are edge DATA, not a pointer a reader
+follows. Hand-editing generated output is worse than leaving it.
 
-**Order-dependence is real but now tiny, and this is the number worth keeping:**
-
-```
-one process   490 distinct failing node ids
-8 chunks      489
-delta          1, in one direction only
-   ONLY in one process:
-     test_assistant_channel_certification_core.py::DiscordCertification::test_discord_setup_readiness
-   ONLY when chunked:   (none)
-```
-
-**What a fix would need, if it comes back.** Do not start by editing the test.
-Reproduce with `faulthandler_timeout` armed and read the dump — it names the
-frame, and until something has, every explanation is a guess. If it names
-`import mcp_server`, the suspect is this repository's own documented
-`sys.modules["server"]` stand-in leak (an earlier test whose cleanup block never
-ran). If it names `asyncio.run`, the suspect is loop teardown waiting on a
-non-daemon thread or an un-`unref`'d timer from an earlier test, which is the
-same family as the gateway's `ws-client-event-seq-race` hang recorded in
-CLAUDE.md. If it names a socket read, the egress guard in `conftest.py` is the
-place to look, because a blocked connect with no timeout looks exactly like this.
-
-**What can be said today, plainly: the suite is usable in one process at this
-commit — 12 minutes, exit 1 on real failures, no stall.** The chunked
-measurement in this document is still the right instrument for a before/after
-comparison (it isolates module-level state), but it is no longer a workaround
-for an unusable single-process run.
-
-Not ruled out, and stated rather than glossed: a hang that depends on machine
-load, on a concurrently running stack, or on state under `~/.empyralis` that
-differed on the day it was seen. Two clean runs are evidence, not proof.
+`docs/handoff/` got a banner rather than surgery on a dozen individual
+instructions, because those files are WORK ORDERS — "a stale design doc gets
+cited as present truth, which is bad; a stale work order gets EXECUTED, which
+is worse" — and rewriting their internals would dress them up as runnable.
+Their own output (`docs/handoff/PLATFORM-MAP.md`) has never existed and the
+directory's last commit is 2026-07-23. **Flagged for the founder: the whole
+directory is a candidate for deletion on the same rule; not deleted here
+because that was not the instruction.**

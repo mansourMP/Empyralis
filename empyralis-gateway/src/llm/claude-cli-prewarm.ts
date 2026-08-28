@@ -15,8 +15,8 @@
 // — once from its own memory, once redundantly as new input text — and,
 // without a stable per-conversation key threaded through the wire protocol
 // (there isn't one today: `handleCapabilityInvoke` below only ever sees
-// runtime/model/messages/timeout, never an agent or conversation id — see
-// docs/PLATFORM-MAP.md Part 26), reusing a process by system-prompt alone
+// runtime/model/messages/timeout, never an agent or conversation id),
+// reusing a process by system-prompt alone
 // risks one caller's turn landing on a process that still remembers a
 // DIFFERENT conversation for the same agent.
 //
