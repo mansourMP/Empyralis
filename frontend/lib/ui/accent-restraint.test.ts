@@ -69,7 +69,7 @@ const PRIMARY_BUTTON_ALLOWLIST: { selector: RegExp; why: string }[] = [
     why: "the app-wide filled primary action (Create agent, Next, Connect, New task)",
   },
   {
-    selector: /^\.fleet-sage-chat-send\b/,
+    selector: /^\.fleet-assistant-chat-send\b/,
     why: "Ask AI's filled circular send button — the composer's primary action",
   },
   {

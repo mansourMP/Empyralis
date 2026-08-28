@@ -1072,7 +1072,7 @@ a.fleet-breadcrumb:hover {
   position: relative;
   padding: 16px 8px 0;
   border-top: 1px solid var(--border);
-  /* Same z-index heritage as .fleet-sage-launcher / .fleet-health-float /
+  /* Same z-index heritage as .fleet-assistant-launcher / .fleet-health-float /
      .fleet-bugreport-float above: position:relative alone doesn't create a
      stacking context (z-index stays "auto"), so
      without an explicit value here .fleet-rail-account-popover's own
@@ -1435,10 +1435,10 @@ a.fleet-breadcrumb:hover {
 /* ── Ask AI rail row (formerly a floating corner console, sat left of Help) ── */
 /* Trigger button composes .fleet-rail-item too — see SageLauncher.tsx. */
 
-.fleet-sage-launcher {
+.fleet-assistant-launcher {
   position: relative;
   width: 100%;
-  /* This wrapper also holds .fleet-sage-console when open (a real chat
+  /* This wrapper also holds .fleet-assistant-console when open (a real chat
      surface, not a "floating bubble"), which needs to stay above the
      properties drawer (z-index 30) like any other active dialog — the
      .is-open bump below restores that specifically while open. Same
@@ -1446,11 +1446,11 @@ a.fleet-breadcrumb:hover {
   z-index: 20;
 }
 
-.fleet-sage-launcher.is-open {
+.fleet-assistant-launcher.is-open {
   z-index: 45;
 }
 
-.fleet-sage-console {
+.fleet-assistant-console {
   position: absolute;
   bottom: calc(100% + 10px);
   left: 0;
@@ -1480,7 +1480,7 @@ a.fleet-breadcrumb:hover {
   animation: fleet-fade var(--dur-2) var(--ease-out);
 }
 
-.fleet-sage-console-header {
+.fleet-assistant-console-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1498,13 +1498,13 @@ a.fleet-breadcrumb:hover {
 /* Replaced the old Chat/Connect tab strip (MAN-93 removed Connect, leaving
    one section — see SageLauncher.tsx). Same 12px/medium as the tab labels
    it succeeds, at full contrast since it's a title now, not a picker. */
-.fleet-sage-console-title {
+.fleet-assistant-console-title {
   font-size: 12px;
   font-weight: var(--weight-medium);
   color: var(--text-primary);
 }
 
-.fleet-sage-console-close {
+.fleet-assistant-console-close {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1517,19 +1517,19 @@ a.fleet-breadcrumb:hover {
   cursor: pointer;
 }
 
-.fleet-sage-console-close:hover {
+.fleet-assistant-console-close:hover {
   background: var(--bg-card-hover);
   color: var(--text-primary);
 }
 
-.fleet-sage-console-body {
+.fleet-assistant-console-body {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
 }
 
-.fleet-sage-console-body .fleet-sage-chat {
+.fleet-assistant-console-body .fleet-assistant-chat {
   flex: 1;
   min-height: 0;
 }
@@ -3876,7 +3876,7 @@ a.fleet-breadcrumb:hover {
   border-color: var(--border-strong);
 }
 
-.fleet-sage-tile {
+.fleet-assistant-tile {
   width: 40px;
   height: 40px;
   flex-shrink: 0;
@@ -3889,24 +3889,24 @@ a.fleet-breadcrumb:hover {
   font-size: 18px;
 }
 
-.fleet-sage-body {
+.fleet-assistant-body {
   flex: 1;
   min-width: 0;
 }
 
-.fleet-sage-name-row {
+.fleet-assistant-name-row {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-.fleet-sage-name {
+.fleet-assistant-name {
   font-size: 14px;
   font-weight: 500;
   color: var(--text-primary);
 }
 
-.fleet-sage-badge {
+.fleet-assistant-badge {
   font-size: 11px;
   font-weight: 400;
   color: var(--text-secondary);
@@ -3916,7 +3916,7 @@ a.fleet-breadcrumb:hover {
   padding: 2px 8px;
 }
 
-.fleet-sage-desc {
+.fleet-assistant-desc {
   font-size: 13px;
   color: var(--text-muted);
   margin-top: 4px;
@@ -7756,7 +7756,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
    (the context-usage rail that used to sit beside it as a row sibling is
    now folded into the composer's own control row instead — see
    ContextUsageRail.tsx). */
-.fleet-sage-chat {
+.fleet-assistant-chat {
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -7768,7 +7768,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
    container — so flex:1 above has nothing to fill. height:100% (same fix
    .fleet-work-split uses) gives it a definite height to hand down. New
    chat/History moved out to the page header (FleetAgentDetail's own
-   tabbar, next to Configure) — this panel's only child is .fleet-sage-chat
+   tabbar, next to Configure) — this panel's only child is .fleet-assistant-chat
    itself now. */
 .fleet-agent-chat-panel {
   display: flex;
@@ -7790,7 +7790,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   border-color: var(--border-strong);
   background: var(--bg-inset);
 }
-.fleet-sage-chat-list {
+.fleet-assistant-chat-list {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
@@ -7799,7 +7799,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   flex-direction: column;
   gap: var(--space-2);
 }
-.fleet-sage-chat-empty {
+.fleet-assistant-chat-empty {
   /* Bottom-anchored, not dead-centered: margin-top:auto absorbs all the
      extra space above (empty conversation = short content), so this block
      sits just above the pinned composer rather than stretching it toward
@@ -7813,7 +7813,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   align-items: center;
   gap: var(--space-2);
 }
-.fleet-sage-chat-suggestions {
+.fleet-assistant-chat-suggestions {
   /* A row of small chips, not a stacked column of full-width boxes. */
   display: flex;
   flex-direction: row;
@@ -7824,7 +7824,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   margin-bottom: var(--space-5);
   width: auto;
 }
-.fleet-sage-chat-suggestion {
+.fleet-assistant-chat-suggestion {
   text-align: center;
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--border);
@@ -7834,12 +7834,12 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   color: var(--text-secondary);
   cursor: pointer;
 }
-.fleet-sage-chat-suggestion:hover {
+.fleet-assistant-chat-suggestion:hover {
   color: var(--text-primary);
   border-color: var(--border-strong);
   background: var(--bg-card-hover);
 }
-.fleet-sage-chat-thinking {
+.fleet-assistant-chat-thinking {
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -7855,14 +7855,14 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
    toggle row the instant real reply text starts arriving, via the
    max-height transition below; the user can still reopen it manually while
    the turn is in flight. */
-.fleet-sage-chat-reasoning {
+.fleet-assistant-chat-reasoning {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--bg-card);
   margin-bottom: var(--space-2);
   overflow: hidden;
 }
-.fleet-sage-chat-reasoning-toggle {
+.fleet-assistant-chat-reasoning-toggle {
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -7875,26 +7875,26 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   cursor: pointer;
   text-align: left;
 }
-.fleet-sage-chat-reasoning-toggle:hover {
+.fleet-assistant-chat-reasoning-toggle:hover {
   color: var(--text-secondary);
 }
-.fleet-sage-chat-reasoning-chevron {
+.fleet-assistant-chat-reasoning-chevron {
   transition: transform 120ms ease-out;
   transform: rotate(-90deg);
   flex-shrink: 0;
 }
-.fleet-sage-chat-reasoning.is-expanded .fleet-sage-chat-reasoning-chevron {
+.fleet-assistant-chat-reasoning.is-expanded .fleet-assistant-chat-reasoning-chevron {
   transform: rotate(0deg);
 }
-.fleet-sage-chat-reasoning-body {
+.fleet-assistant-chat-reasoning-body {
   display: grid;
   grid-template-rows: 0fr;
   transition: grid-template-rows 130ms ease-out;
 }
-.fleet-sage-chat-reasoning.is-expanded .fleet-sage-chat-reasoning-body {
+.fleet-assistant-chat-reasoning.is-expanded .fleet-assistant-chat-reasoning-body {
   grid-template-rows: 1fr;
 }
-.fleet-sage-chat-reasoning-body > p {
+.fleet-assistant-chat-reasoning-body > p {
   overflow: hidden;
   margin: 0;
   padding: 0 var(--space-3) var(--space-2);
@@ -7911,7 +7911,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
    just a textarea + Send) — everything about the turn you're about to send
    now lives in the object you're typing into. Send is the one accent
    surface in the whole row; every other control is neutral. */
-.fleet-sage-chat-composer {
+.fleet-assistant-chat-composer {
   position: relative;
   flex-shrink: 0;
   display: flex;
@@ -7929,7 +7929,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
    composer-popover wholesale (same upward-opening popover every other
    composer control already uses) rather than inventing its own box. Wider
    than the 220px model popover — a command name plus a real description
-   needs the room. Anchored to .fleet-sage-chat-composer itself (position:
+   needs the room. Anchored to .fleet-assistant-chat-composer itself (position:
    relative, above) rather than to the textarea, so it never shifts as the
    textarea auto-grows. */
 .fleet-slash-command-hints {
@@ -7994,10 +7994,10 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
    still clearly visible for keyboard users (never bare `outline: none` with
    nothing to replace it), still collapses under prefers-reduced-motion (the
    .fleet-root * rule above already zeroes transition-duration). */
-.fleet-sage-chat-composer:focus-within {
+.fleet-assistant-chat-composer:focus-within {
   border-color: var(--border-strong);
 }
-.fleet-sage-chat-input {
+.fleet-assistant-chat-input {
   width: 100%;
   resize: none;
   border: none;
@@ -8010,11 +8010,11 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   max-height: 200px;
   padding: var(--space-2) var(--space-2) 4px;
 }
-.fleet-sage-chat-input:focus-visible {
+.fleet-assistant-chat-input:focus-visible {
   outline: none;
   box-shadow: none;
 }
-.fleet-sage-chat-input::placeholder { color: var(--text-muted); }
+.fleet-assistant-chat-input::placeholder { color: var(--text-muted); }
 .fleet-agent-composer-attachments {
   display: flex;
   flex-wrap: wrap;
@@ -8108,7 +8108,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   background: var(--bg-card-hover);
   border-color: var(--border);
 }
-.fleet-sage-chat-send {
+.fleet-assistant-chat-send {
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -8121,7 +8121,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   color: var(--accent-contrast);
   cursor: pointer;
 }
-.fleet-sage-chat-send:disabled {
+.fleet-assistant-chat-send:disabled {
   background: var(--bg-inset);
   color: var(--text-muted);
   cursor: not-allowed;
@@ -8752,7 +8752,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
 
   /* Sage console: fixed 400px is wider than most phones. Stays
      position:absolute (inherited from the base rule, anchored to its own
-     .fleet-sage-launcher row) rather than switching to fixed — .fleet-rail
+     .fleet-assistant-launcher row) rather than switching to fixed — .fleet-rail
      animates open/closed via `transform` on mobile, and `transform` on an
      ancestor reparents any position:fixed descendant's containing block to
      that ancestor's own box instead of the viewport, which would mismeasure
@@ -8761,7 +8761,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
      viewport width with a little breathing room on each side, same as the
      help popover beside it needs no override at all because 220px already
      fits. */
-  .fleet-sage-console {
+  .fleet-assistant-console {
     width: min(400px, calc(100vw - 24px));
     /* `height`, matching the desktop rule — one fixed frame for every view.
        See the base rule for why this is not a max-height, and for the 232px. */
@@ -8780,7 +8780,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
      Hiding by CSS keyed off the drawer's own open class is correct no
      matter which of those dismissal paths fired, instead of chasing each
      one to also close the panel's React state. */
-  .fleet-rail:not(.fleet-rail--mobile-open) .fleet-sage-console,
+  .fleet-rail:not(.fleet-rail--mobile-open) .fleet-assistant-console,
   .fleet-rail:not(.fleet-rail--mobile-open) .fleet-health-popover {
     display: none;
   }
@@ -8960,7 +8960,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   /* Chat tab: the one tab that needs ITS OWN fixed-height internal scroll +
      a composer that stays pinned in view, unlike every other tab (which
      shares one page-level scroll via .fleet-detail-body above).
-     .fleet-agent-chat-panel/.fleet-sage-chat's height:100% chain (same one
+     .fleet-agent-chat-panel/.fleet-assistant-chat's height:100% chain (same one
      desktop already relies on) needs a real height handed down, not
      height:auto — restored here, scoped to just this tab via :has() so the
      generic rules above stay correct for every other tab. Properties itself
@@ -11023,17 +11023,17 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
    would be the "two accent-filled controls in one view" bug. Active state
    here is the same neutral wash the rail uses for its own selection. */
 
-.fleet-sage-console-actions {
+.fleet-assistant-console-actions {
   display: flex;
   align-items: center;
   gap: 2px;
   flex-shrink: 0;
 }
 
-/* Same 24px ghost-icon geometry as .fleet-sage-console-close beside it,
+/* Same 24px ghost-icon geometry as .fleet-assistant-console-close beside it,
    declared separately rather than by widening that selector so this block
    stays purely additive. */
-.fleet-sage-console-action {
+.fleet-assistant-console-action {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -11047,25 +11047,25 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   transition: background var(--dur-1) var(--ease-out), color var(--dur-1) var(--ease-out);
 }
 
-.fleet-sage-console-action:hover {
+.fleet-assistant-console-action:hover {
   background: var(--bg-card-hover);
   color: var(--text-primary);
 }
 
-.fleet-sage-console-action.is-active {
+.fleet-assistant-console-action.is-active {
   background: var(--bg-card-hover);
   color: var(--text-primary);
 }
 
 /* h2 now, not a div (real heading structure) — strip the UA margin so the
    header keeps the same optical baseline it had as a div. */
-h2.fleet-sage-console-title {
+h2.fleet-assistant-console-title {
   margin: 0;
 }
 
 /* Shared shell for both non-chat views: one scroller, sized to whatever the
    console's body has left. */
-.fleet-sage-panel {
+.fleet-assistant-panel {
   flex: 1;
   min-height: 0;
   display: flex;
@@ -11075,7 +11075,7 @@ h2.fleet-sage-console-title {
 
 /* ── History rows ──────────────────────────────────────────────────────── */
 
-.fleet-sage-history-row {
+.fleet-assistant-history-row {
   display: flex;
   align-items: baseline;
   gap: 10px;
@@ -11095,19 +11095,19 @@ h2.fleet-sage-console-title {
 
 /* The panel is a fixed height now, so a short list leaves space below it —
    a rule under the final row would be a divider between a row and nothing. */
-.fleet-sage-history-row:last-child {
+.fleet-assistant-history-row:last-child {
   border-bottom: none;
 }
 
-.fleet-sage-history-row:hover {
+.fleet-assistant-history-row:hover {
   background: var(--bg-card-hover);
 }
 
-.fleet-sage-history-row.is-active {
+.fleet-assistant-history-row.is-active {
   background: var(--bg-card-hover);
 }
 
-.fleet-sage-history-row-title {
+.fleet-assistant-history-row-title {
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -11116,23 +11116,23 @@ h2.fleet-sage-console-title {
   color: var(--text-primary);
 }
 
-.fleet-sage-history-row.is-active .fleet-sage-history-row-title {
+.fleet-assistant-history-row.is-active .fleet-assistant-history-row-title {
   font-weight: var(--weight-medium);
 }
 
-.fleet-sage-history-row-time {
+.fleet-assistant-history-row-time {
   flex-shrink: 0;
   font-size: var(--text-2xs);
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
 }
 
-/* The Memory view's rules (.fleet-sage-memory-*) lived here until 2026-08-01
+/* The Memory view's rules (.fleet-assistant-memory-*) lived here until 2026-08-01
    and went with the view itself — see SageLauncher.tsx for the ruling. The
    agent detail page's Memory tab keeps its own styles; nothing here was
    shared with it. */
 
-.fleet-sage-panel .fleet-page-state-body {
+.fleet-assistant-panel .fleet-page-state-body {
   padding: 12px 14px;
 }
 

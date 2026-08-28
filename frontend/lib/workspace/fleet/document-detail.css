@@ -421,7 +421,7 @@ h6.fleet-doc-heading { font-size: 14px; }
      var(--app-shadow-focus) }` still fires, drawing a 2px ring around the
      ENTIRE document the moment someone clicks in to type — the worst possible
      moment for it, and the exact effect the comment above says must not
-     happen. Same suppression .fleet-sage-chat-input:focus-visible already
+     happen. Same suppression .fleet-assistant-chat-input:focus-visible already
      uses in fleet-theme.css for the same reason. */
   box-shadow: none;
 }

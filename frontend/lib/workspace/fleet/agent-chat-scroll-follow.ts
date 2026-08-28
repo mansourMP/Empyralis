@@ -11,7 +11,7 @@
  * That wrapper broke `.fleet-agent-chat-panel` being `.fleet-detail-body`'s
  * DIRECT child, which is what both the internal-scroll height chain and the
  * width-cap opt-out in fleet-theme.css key off — so the intended inner
- * scroller (`.fleet-sage-chat-list`) grew to fit ALL of its content instead
+ * scroller (`.fleet-assistant-chat-list`) grew to fit ALL of its content instead
  * of being bounded, and `.fleet-detail-body` (the page-level scroller)
  * became the one actually scrolling.
  *

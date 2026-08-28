@@ -371,7 +371,7 @@ export function FleetTaskDetailSkeleton({ label = "Loading" }: { label?: string 
 
 /**
  * AgentChat transcript skeleton — a sibling to FleetChatSkeleton but built
- * against AgentChat's OWN real markup (`.fleet-sage-chat-list` of
+ * against AgentChat's OWN real markup (`.fleet-assistant-chat-list` of
  * `article.app-chat-message[data-chat-role]` from lib/workspace/chat-message.tsx),
  * which is a different element tree than WorkTab/ConversationsView's
  * `.fleet-work-transcript`/`.fleet-work-msg` — FleetChatSkeleton's classes

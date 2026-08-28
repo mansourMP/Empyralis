@@ -6900,7 +6900,7 @@ BEFORE (measured on production)          AFTER
 .fleet-detail-body  scrollTop 0          .fleet-detail-body  scrollTop 0
   scrollHeight 12,979  ← the PAGE          scrollHeight == clientHeight
   scrolls, lands on message #1              ← nothing to scroll, bounded
-.fleet-sage-chat-list (meant to           .fleet-sage-chat-list is the
+.fleet-assistant-chat-list (meant to           .fleet-assistant-chat-list is the
   scroll internally) never bounded,          REAL scroller, lands exactly
   grew to fit ALL content                    at scrollHeight-clientHeight
 composer position:relative, y≈12,928      composer flex-shrink:0, always
@@ -6912,9 +6912,9 @@ composer position:relative, y≈12,928      composer flex-shrink:0, always
 body` and `.fleet-agent-chat-panel`, so `.fleet-detail-body > .fleet-agent-
 chat-panel` in fleet-theme.css never matched again — the direct-child
 selector that hands the panel its `height:100%` chain (which is what
-bounds `.fleet-sage-chat-list`'s own `overflow-y:auto`) AND the one that
+bounds `.fleet-assistant-chat-list`'s own `overflow-y:auto`) AND the one that
 opts it out of the 820px reading-column cap. With no bounded height,
-`.fleet-sage-chat-list` just grew to fit its whole 12,979px of content, so
+`.fleet-assistant-chat-list` just grew to fit its whole 12,979px of content, so
 `.fleet-detail-body` — the page itself — became the real scroller. Fixed
 by deleting the wrapper: `ChatTab` now applies `display:none` to its OWN
 root div (`.fleet-agent-chat-panel` stays `.fleet-detail-body`'s direct

@@ -45,7 +45,7 @@
  * the assigned agent (task_commented, bounded_scheduler_service) — best-
  * effort, surfaced the same way assignment's wake failure already is.
  * MAN-145 restyled it as a bordered, auto-growing surface (the same idiom
- * AgentChat's .fleet-sage-chat-composer already uses) instead of a bare
+ * AgentChat's .fleet-assistant-chat-composer already uses) instead of a bare
  * textarea + wide button, but the write path and the optimistic-then-
  * refetch contract are unchanged.
  *
@@ -726,7 +726,7 @@ export function TaskDetailView({
 
   // MAN-145: the composer textarea auto-grows with its content instead of
   // sitting at a fixed 2 rows or exposing a manual resize handle — same
-  // idiom, same cap (200px), as AgentChat's .fleet-sage-chat-input.
+  // idiom, same cap (200px), as AgentChat's .fleet-assistant-chat-input.
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const autoGrow = useCallback(() => {
     const el = composerRef.current;
@@ -925,8 +925,8 @@ export function TaskDetailView({
           .fleet-task-page-scroll is the ONLY thing that scrolls (title,
           description, sub-tasks, Activity/comments); the composer dock
           below it is a flex-shrink:0 sibling that always sits at the true
-          bottom of the column, exactly AgentChat's own .fleet-sage-chat /
-          .fleet-sage-chat-list / .fleet-sage-chat-composer split — reused,
+          bottom of the column, exactly AgentChat's own .fleet-assistant-chat /
+          .fleet-assistant-chat-list / .fleet-assistant-chat-composer split — reused,
           not reinvented, so there is one "message input pinned to the
           bottom" pattern in this codebase, not two. */}
       <div className="fleet-task-page-main">

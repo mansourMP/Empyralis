@@ -1531,36 +1531,36 @@ export function AgentChat({
   });
 
   return (
-    <div className="fleet-sage-chat">
-      <div className="fleet-sage-chat-list" ref={listRef}>
+    <div className="fleet-assistant-chat">
+      <div className="fleet-assistant-chat-list" ref={listRef}>
         {chatViewState === "loading" ? (
           <FleetAgentChatSkeleton bubbles={4} />
         ) : chatViewState === "error" ? (
-          <div className="fleet-sage-chat-empty">
+          <div className="fleet-assistant-chat-empty">
             <span className="fleet-empty-icon"><AlertCircle size={20} strokeWidth={1.75} /></span>
             <div className="fleet-tab-state-title">Couldn&rsquo;t load this conversation</div>
             <div className="fleet-tab-state-body">
               {error || "Something went wrong loading your messages."} Your connection may have hiccupped — this
               isn&rsquo;t an empty conversation, it just couldn&rsquo;t be read yet.
             </div>
-            <div className="fleet-sage-chat-suggestions">
-              <button type="button" className="fleet-sage-chat-suggestion" onClick={() => void loadThread()}>
+            <div className="fleet-assistant-chat-suggestions">
+              <button type="button" className="fleet-assistant-chat-suggestion" onClick={() => void loadThread()}>
                 Try again
               </button>
             </div>
           </div>
         ) : chatViewState === "empty" ? (
-          <div className="fleet-sage-chat-empty">
+          <div className="fleet-assistant-chat-empty">
             <span className="fleet-empty-icon"><EmptyIcon size={20} strokeWidth={1.75} /></span>
             <div className="fleet-tab-state-title">{emptyTitle}</div>
             <div className="fleet-tab-state-body">{emptyBody}</div>
             {starterPrompts.length > 0 && (
-              <div className="fleet-sage-chat-suggestions">
+              <div className="fleet-assistant-chat-suggestions">
                 {starterPrompts.map((prompt) => (
                   <button
                     key={prompt}
                     type="button"
-                    className="fleet-sage-chat-suggestion"
+                    className="fleet-assistant-chat-suggestion"
                     onClick={() => void send(prompt)}
                   >
                     {prompt}
@@ -1585,17 +1585,17 @@ export function AgentChat({
               // NEXT send() starts. Never persisted server-side, so a page
               // reload simply has no row here — that absence is intentional,
               // not broken: this was scratch reasoning, not an answer.
-              <div className={`fleet-sage-chat-reasoning${thinkingExpanded ? " is-expanded" : ""}`}>
+              <div className={`fleet-assistant-chat-reasoning${thinkingExpanded ? " is-expanded" : ""}`}>
                 <button
                   type="button"
-                  className="fleet-sage-chat-reasoning-toggle"
+                  className="fleet-assistant-chat-reasoning-toggle"
                   onClick={() => setThinkingExpanded((cur) => !cur)}
                   aria-expanded={thinkingExpanded}
                 >
-                  <ChevronDown size={13} strokeWidth={2} className="fleet-sage-chat-reasoning-chevron" />
+                  <ChevronDown size={13} strokeWidth={2} className="fleet-assistant-chat-reasoning-chevron" />
                   {thinkingActive ? "Thinking…" : "Thought"}
                 </button>
-                <div className="fleet-sage-chat-reasoning-body">
+                <div className="fleet-assistant-chat-reasoning-body">
                   <p>{thinkingText}</p>
                 </div>
               </div>
@@ -1617,7 +1617,7 @@ export function AgentChat({
               />
             )}
             {sending && !streamingText && !thinkingText && (
-              <div className="fleet-sage-chat-thinking">
+              <div className="fleet-assistant-chat-thinking">
                 <Loader2 size={14} strokeWidth={2} style={{ animation: "spin 1s linear infinite" }} />
                 Thinking…
               </div>
@@ -1635,7 +1635,7 @@ export function AgentChat({
           reasoning-effort only render when this chat belongs to a real
           Fleet agent (agentInstallId + agent both set) — Sage's own
           workspace-wide chat has no model_config to control. */}
-      <div className="fleet-sage-chat-composer">
+      <div className="fleet-assistant-chat-composer">
         {slashCommandHints.length > 0 && (
           <div
             className="fleet-toolbar-popover fleet-composer-popover fleet-slash-command-hints"
@@ -1664,7 +1664,7 @@ export function AgentChat({
         )}
         <textarea
           ref={textareaRef}
-          className="fleet-sage-chat-input"
+          className="fleet-assistant-chat-input"
           placeholder={placeholder}
           rows={1}
           value={draft}
@@ -1745,7 +1745,7 @@ export function AgentChat({
           <div className="fleet-agent-composer-controls-spacer" />
           <button
             type="button"
-            className="fleet-sage-chat-send"
+            className="fleet-assistant-chat-send"
             disabled={!draft.trim() || sending || !actor}
             onClick={() => void send(draft)}
             aria-label="Send"

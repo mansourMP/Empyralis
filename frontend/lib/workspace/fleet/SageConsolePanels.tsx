@@ -145,7 +145,7 @@ export function SageHistoryPanel({
   onOpen: (threadId: string) => void;
 }) {
   return (
-    <div className="fleet-sage-panel" role="list">
+    <div className="fleet-assistant-panel" role="list">
       {conversations.map((c) => {
         const isActive = c.id === activeThreadId;
         return (
@@ -153,11 +153,11 @@ export function SageHistoryPanel({
             key={c.id}
             type="button"
             role="listitem"
-            className={`fleet-sage-history-row${isActive ? " is-active" : ""}`}
+            className={`fleet-assistant-history-row${isActive ? " is-active" : ""}`}
             onClick={() => onOpen(c.id)}
           >
-            <span className="fleet-sage-history-row-title">{c.title}</span>
-            <span className="fleet-sage-history-row-time">
+            <span className="fleet-assistant-history-row-title">{c.title}</span>
+            <span className="fleet-assistant-history-row-time">
               {isActive ? "Open" : timeAgo(c.lastActivityAt)}
             </span>
           </button>
