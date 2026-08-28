@@ -1,6 +1,21 @@
 /**
- * VIEW OPTIONS FOR THE WORKSPACE AGENTS PAGE — Board/List layout, grouping,
- * ordering, display properties.
+ * VIEW OPTIONS FOR THE WORKSPACE AGENTS PAGE — Cards/Board/List layout,
+ * grouping, ordering, display properties.
+ *
+ * THREE LAYOUTS, AND CARDS IS THE DEFAULT. Tasks has two (board | list)
+ * because a task list and a task board are the only two shapes that surface
+ * has. Agents has a third that is already settled and already shipped: the
+ * CARD GRID (agent-card-face.ts / AgentCards.tsx), which is what this page
+ * renders when nobody has touched this popover. Board and List are
+ * alternatives you switch INTO; they never displace the default.
+ *
+ * That is also why `layout: "cards"` had to become a real value rather than
+ * being spelled `list` + `grouping: "none"`, which is how the first build of
+ * this file expressed it. Back then the ungrouped List branch rendered the
+ * flat table (AgentsList.tsx); today it renders the card grid, so a popover
+ * whose "List" chip lit up over a grid of cards was a control describing a
+ * view that was not on screen. Layout says which of the three renderings you
+ * are looking at, and it is the only thing that decides.
  *
  * A PARALLEL build to task-view-options.ts / TaskViewOptions.tsx, not a
  * generalization of it. The founder's YC demo video already shows the task
@@ -15,14 +30,26 @@
  * Tasks*.tsx is imported or edited by this feature.
  *
  * A few pure helpers below (agentBrainLabel, agentMoney,
- * parseAgentChannelField, agentActivityPreviewText) are intentional,
- * documented DUPLICATES of private (non-exported) functions already living
- * in AgentsList.tsx. They are not re-exported from there because touching
- * AgentsList.tsx at all is unnecessary risk to a table that must keep
- * behaving exactly as it does today — see that file. A one-line drift
- * between the flat table's formatting and this file's is a real bug to fix
- * by hand if it ever happens, which is a cheaper failure mode than a shared
- * import breaking the table this feature was never supposed to touch.
+ * parseAgentChannelField) are intentional, documented DUPLICATES of private
+ * (non-exported) functions already living in AgentsList.tsx. They are not
+ * re-exported from there because touching AgentsList.tsx at all is
+ * unnecessary risk to a table that must keep behaving exactly as it does
+ * today — see that file. A one-line drift between that table's formatting and
+ * this file's is a real bug to fix by hand if it ever happens, which is a
+ * cheaper failure mode than a shared import breaking a table this feature was
+ * never supposed to touch.
+ *
+ * `agentActivityPreviewText` USED TO LIVE HERE AND IS DELETED, not merely
+ * unused. It returned `activity_preview` — a LIFECYCLE VERB — and both
+ * renderings this file feeds drew it as their one secondary line, so every
+ * board card and every list row read "Created". That is true of every agent
+ * that has ever existed, so a column of it distinguishes nothing; it is the
+ * exact line agent-card-face.ts was written to replace on the card grid, and
+ * shipping it on two more surfaces put it straight back on screen one click
+ * away. Both now call that module's own `agentCardReach` instead, so the
+ * three renderings cannot say different things about the same agent. The
+ * helper is gone rather than left exported because an exported helper is how
+ * it comes back.
  *
  * WHAT AN AGENT'S "STATUS" HONESTLY IS, AND WHY THE BOARD HAS FOUR COLUMNS.
  * An agent has no backlog/todo/in_progress/done lifecycle — it isn't a task,
@@ -64,38 +91,46 @@ import { formatUsd } from "../../ui/money";
 
 // ── Vocabulary ──────────────────────────────────────────────────────────────
 
-/** Two views, the same split tasks make: Board is spatial, List is one line
- *  (or one row inside a section) per agent. "Grouped" is not a third view —
- *  it is the List with a grouping switched on (see agentSurfaceFor). */
-export type AgentLayout = "board" | "list";
+/** Three renderings, and every one of them exists on screen today. "Grouped"
+ *  is NOT a fourth — it is the List with a grouping switched on, which is why
+ *  grouping is a separate axis (see agentSurfaceFor). */
+export type AgentLayout = "cards" | "board" | "list";
+
+/** Rendered by AgentViewOptions.tsx in this order. Data, not three literals
+ *  in the JSX, so the popover and `readAgentViewOptions`' own accepted-value
+ *  list can never disagree about what a layout is. */
+export const AGENT_LAYOUT_OPTIONS: { value: AgentLayout; label: string }[] = [
+  { value: "cards", label: "Cards" },
+  { value: "board", label: "Board" },
+  { value: "list", label: "List" },
+];
 
 export type AgentGrouping = "none" | "status" | "project" | "placement";
 
-/** Deliberately a SUBSET of the workspace Agents page's existing sort
- *  dropdown (agents/page.tsx's SORT_OPTIONS: last_active/status/cost/
- *  name/group) — "status" and "group" are dropped because they are now
- *  what AgentGrouping does, and offering the same reshaping two different
- *  ways in two different controls is the confusing-duplicate-control this
- *  file avoids by cutting rather than by unifying (see AgentViewOptions.tsx
- *  for how this coexists on-screen with that unchanged legacy dropdown). */
+/** Three keys, and "status"/"group" are deliberately absent: they are what
+ *  AgentGrouping already does, and offering the same reshaping two ways in one
+ *  popover is a duplicate control. (The page's pre-2026-08-22 "Sort by"
+ *  dropdown, which this set was originally cut against, no longer exists —
+ *  that surface was replaced by the card grid.) */
 export type AgentOrdering = "last_active" | "cost" | "name";
 
 export type AgentOrderDirection = "asc" | "desc";
 
-/** The six columns the existing flat table already draws (AgentsList.tsx's
- *  Brain/Placement/Channels/Last active/Cost/Status), offered as a toggle
- *  set for the two NEW renderings only (Board card, Grouped-list row) — the
- *  flat table itself is not gated by this at all, it keeps showing all six
- *  unconditionally exactly as it does today. */
+/** The six fields a Board card and a List row can draw beside an agent's
+ *  name. The card grid offers none of them — see AgentSurface below. */
 export type AgentDisplayProperty = "brain" | "placement" | "channels" | "lastActive" | "cost" | "status";
 
-/** Which rendering is on screen. "list" (the flat, ungrouped table) is
- *  included so agentSurfaceFor/displayPropertiesFor have a total answer, but
- *  no AgentDisplayProperty below ever lists "list" among its surfaces — the
- *  flat table's columns are not toggleable, so displayPropertiesFor("list")
- *  is always []. AgentViewOptions.tsx reads that empty array as "hide the
- *  Display properties section", not as "render an empty one". */
-export type AgentSurface = "board" | "grouped" | "list";
+/** Which rendering is on screen — one per layout, so this is now the layout
+ *  itself rather than a derived third value. It survives as its own type
+ *  because `displayPropertiesFor` answers a question about a RENDERING ("does
+ *  this surface actually draw that field"), and keeping the two names apart is
+ *  what stops a future fourth layout silently inheriting another's column set.
+ *
+ *  `displayPropertiesFor("cards")` is always [] — a card face is two facts and
+ *  refuses a third (agent-card-face.ts), so there is nothing on it to toggle.
+ *  AgentViewOptions.tsx reads that empty array as "hide the Display properties
+ *  section", never as "render an empty one". */
+export type AgentSurface = AgentLayout;
 
 export type AgentDisplayState = Record<AgentDisplayProperty, boolean>;
 
@@ -141,31 +176,33 @@ export function orderDirectionLabel(ordering: AgentOrdering, direction: AgentOrd
 }
 
 /**
- * Every display toggle, and the surfaces each is real on. Both are "board"
- * and "grouped" for all six — unlike tasks, an agent's board card has no
- * interactive control living inside any of these (there is no drag-and-drop
- * here; see AgentsBoard.tsx for why), so nothing needs to be exempted from
- * the toggle the way the task board's status ring is.
+ * Every display toggle, and the surfaces each is real on. All six are real on
+ * "board" and "list" and on neither of them is anything exempt: unlike tasks,
+ * an agent's board card has no interactive control living inside any of these
+ * (there is no drag-and-drop here; see AgentsBoard.tsx for why), so nothing
+ * needs the exemption the task board's status ring gets. "cards" appears in no
+ * row, which is what makes displayPropertiesFor("cards") empty.
  */
 export const AGENT_DISPLAY_PROPERTIES: {
   key: AgentDisplayProperty;
   label: string;
   surfaces: AgentSurface[];
 }[] = [
-  { key: "brain", label: "Brain", surfaces: ["board", "grouped"] },
-  { key: "placement", label: "Placement", surfaces: ["board", "grouped"] },
-  { key: "channels", label: "Channels", surfaces: ["board", "grouped"] },
-  { key: "lastActive", label: "Last active", surfaces: ["board", "grouped"] },
-  { key: "cost", label: "Cost", surfaces: ["board", "grouped"] },
-  { key: "status", label: "Status", surfaces: ["board", "grouped"] },
+  { key: "brain", label: "Brain", surfaces: ["board", "list"] },
+  { key: "placement", label: "Placement", surfaces: ["board", "list"] },
+  { key: "channels", label: "Channels", surfaces: ["board", "list"] },
+  { key: "lastActive", label: "Last active", surfaces: ["board", "list"] },
+  { key: "cost", label: "Cost", surfaces: ["board", "list"] },
+  { key: "status", label: "Status", surfaces: ["board", "list"] },
 ];
 
 const ALL_DISPLAY_KEYS = AGENT_DISPLAY_PROPERTIES.map((p) => p.key);
 
-/** Everything on, List layout, no grouping — exactly what the Agents page has
- *  always shown, so a reader who never opens the popover sees no change. */
+/** Everything on, CARDS layout, no grouping — exactly the settled card grid
+ *  (agent-card-face.ts), so a reader who never opens the popover sees the page
+ *  the founder spent a day getting right and nothing else. */
 export const DEFAULT_AGENT_VIEW_OPTIONS: AgentViewOptions = {
-  layout: "list",
+  layout: "cards",
   grouping: "none",
   ordering: "last_active",
   direction: "desc",
@@ -173,8 +210,7 @@ export const DEFAULT_AGENT_VIEW_OPTIONS: AgentViewOptions = {
 };
 
 export function agentSurfaceFor(options: AgentViewOptions): AgentSurface {
-  if (options.layout === "board") return "board";
-  return options.grouping === "none" ? "list" : "grouped";
+  return options.layout;
 }
 
 export function displayPropertiesFor(surface: AgentSurface) {
@@ -203,7 +239,12 @@ export function resetAgentViewOptions(options: AgentViewOptions): AgentViewOptio
 
 // ── Persistence ─────────────────────────────────────────────────────────────
 
-const STORAGE_VERSION = 1;
+/** BUMPED 1 -> 2 (2026-08-29). A v1 blob's `layout: "list"` meant "the card
+ *  grid", because back then the ungrouped List branch rendered the card grid;
+ *  in v2 "list" means the row list. Reading a v1 blob under the v2 vocabulary
+ *  would silently move a reader into a view they never picked, so the old key
+ *  is simply not read — the default (Cards) is what a v1 reader saw anyway. */
+const STORAGE_VERSION = 2;
 
 /** `fleet:agent-view:*` — its OWN namespace, never `fleet:task-view:*`, so
  *  the two features can never read or clobber each other's blob even though
@@ -233,7 +274,11 @@ export function readAgentViewOptions(workspaceId: string): AgentViewOptions {
       }
     }
     return {
-      layout: oneOf<AgentLayout>(parsed.layout, ["board", "list"], DEFAULT_AGENT_VIEW_OPTIONS.layout),
+      layout: oneOf<AgentLayout>(
+        parsed.layout,
+        AGENT_LAYOUT_OPTIONS.map((o) => o.value),
+        DEFAULT_AGENT_VIEW_OPTIONS.layout,
+      ),
       grouping: oneOf<AgentGrouping>(
         parsed.grouping,
         AGENT_GROUPING_OPTIONS.map((o) => o.value),
@@ -389,6 +434,13 @@ export type AgentGroup = {
   projectId?: string;
   placementCategory?: AgentPlacementCategory;
   empty?: boolean;
+  /** The single synthetic bucket grouping "none" produces. It is not a section
+   *  anybody chose — it holds every agent, so its heading would name the one
+   *  thing already on screen and its collapse control's only effect would be to
+   *  hide the entire list. AgentsGroupedList draws its rows and NO header. The
+   *  flag lives here rather than being sniffed from `key === "all"` at the
+   *  render site so the two cannot drift. */
+  ungrouped?: boolean;
 };
 
 export function groupAgents(
@@ -408,7 +460,7 @@ export function groupAgents(
   } = {},
 ): AgentGroup[] {
   if (grouping === "none") {
-    return [{ key: "all", label: "All agents", agents, count: agents.length }];
+    return [{ key: "all", label: "All agents", agents, count: agents.length, ungrouped: true }];
   }
 
   if (grouping === "status") {
@@ -503,12 +555,14 @@ function orderValue(agent: FleetAgent, ordering: AgentOrdering, cost: Map<string
 }
 
 /**
- * Order a list of agents for the Board and Grouped-list surfaces. Not
- * mutating — same reasoning as sortTasks: callers hold `agents` straight off
- * the polled cache. The FLAT table's own ordering is untouched by this
- * function; it keeps using agents/page.tsx's existing sortAgents (the
- * pre-existing "Sort by" dropdown), unchanged — see AgentViewOptions.tsx for
- * why the two don't compete on screen.
+ * Order a list of agents for the Board and List surfaces. Not mutating — same
+ * reasoning as sortTasks: callers hold `agents` straight off the polled cache.
+ * THE CARD GRID IS NEVER RUN THROUGH THIS. planAgentCards ranks by attention
+ * (blocked > working > unfinished setup > stopped > healthy, alphabetical
+ * within), which is a settled decision for that surface — "never recency... a
+ * card's position is stable" — and a saved "cost" or "name" ordering must not
+ * silently override it. That is also why Ordering is not offered while Cards
+ * is the layout (AgentViewOptions.tsx).
  */
 export function sortAgentsForView(
   agents: FleetAgent[],
@@ -577,14 +631,28 @@ export function parseAgentChannelField(raw: string): { key: string; extra: numbe
   return { key: trimmed, extra: 0 };
 }
 
-/** Display-time guard against pre-2026-07-09 raw internal titles — verbatim
- *  copy of AgentsList.tsx's own RAW_INTERNAL_TITLE + activityPreviewText. */
-const RAW_INTERNAL_TITLE = /^Fleet:\s|ainstall_[a-z0-9]|(?:^|[\s:])ws_[a-z0-9]/i;
-
-export function agentActivityPreviewText(agent: FleetAgent): string {
-  const preview = (agent.activity_preview || "").trim();
-  if (!preview || RAW_INTERNAL_TITLE.test(preview)) return "No activity yet";
-  return preview;
+/**
+ * THE CAPABILITY-PRESET BADGE, AND WHEN IT IS WORTH DRAWING AT ALL.
+ *
+ * `capability_preset` has exactly two creatable values (server:
+ * capability_presets.CREATABLE_CAPABILITY_PRESETS) and "standard" is the
+ * DEFAULT every agent gets unless someone deliberately picks the other one.
+ * Measured on a seeded 40-agent workspace: 40 of 40 read "Standard". A badge
+ * on every row distinguishes nothing — the same test agent-card-face.ts
+ * applies to kill `activity_preview` ("Created is true of every agent that has
+ * ever existed"), and the same one CLAUDE.md records the founder applying to
+ * the amber reach line once it turned out to be the majority state.
+ *
+ * So: "" for the default and for anything unset, and the real word for a
+ * genuinely non-default preset — which is the only case a reader can act on.
+ * Returning "" rather than hiding it at the render site keeps the rule in one
+ * place; both renderings already skip an empty badge.
+ */
+export function agentPresetBadge(preset: string | undefined | null): string {
+  const token = String(preset || "").trim().toLowerCase();
+  if (!token || token === "standard") return "";
+  const words = token.replace(/_/g, " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
 export { timeAgo as agentRelativeActivity };

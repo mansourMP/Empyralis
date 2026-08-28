@@ -96,6 +96,7 @@ When you learn something durable, add ONE line. A paragraph is archaeology.
 - Dense inside a group, airy between groups. Motion 100–150ms ease-out on state change only. Real `h1`/`h2`. Primary navigation is real links so cmd-click works.
 - A component that moves focus programmatically owns the obligation to clear it.
 - The Agents surface is cards. **A card face is two facts and refuses a third**: state (stopped/blocked/working/idle) and reach (the task it is on > tasks waiting > where it answers > neither). The two slots may disagree — that is the point. Sort by attention rank then name, never recency.
+- Agents has three layouts behind one view-options popover — **Cards (default) · Board · List** — the shape Projects already has. Cards is a real layout VALUE, never the absence of a grouping, and all three draw the same reach line: `activity_preview` is a lifecycle verb, true of every agent, and putting it back is the defect this surface has regressed to twice. Guard: `agent-view-options.test.ts`.
 - Channels is a square-card grid; a face is icon + label + ONE pill, everything else in the panel it opens. Apps is a row card: name left, action right, whole card opens the detail.
 - One platform = one card; a variant is always a door. The door COUNT decides direct-vs-picker, never a named channel. A door states its consequence on its face.
 - Any auto-fill grid on a `.fleet-content` page needs `--wide`, or it collapses to one column with dead space either side.

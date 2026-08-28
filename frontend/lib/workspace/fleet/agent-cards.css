@@ -202,21 +202,49 @@
   color: var(--text-secondary);
 }
 
-/* ── The filter ────────────────────────────────────────────────────────────
-   AT THE TOP, above the grid, and drawn on the SAME surface as the cards it
-   filters — both corrections the founder made on the Apps grid, which had the
-   identical shape (a search over many faces). A filled --bg-inset slab reads
-   heavier than the things it acts on; it is a filter, not the thing you came
-   for.
+/* ── The page's one toolbar row ────────────────────────────────────────────
+   Search LEFT, view options RIGHT — one row, whichever of the three layouts
+   is on screen. It is a row rather than two stacked bands because the founder
+   already rejected exactly that on this page's ancestor: chrome that does not
+   pay for itself. It is also NOT `.fleet-content-toolbar`, which carries its
+   own `padding: 0 32px`; this row lives inside `.fleet-content`, which already
+   supplies that padding, and nesting the two would stack it to 64px — the
+   doubling measured and removed here on 2026-08-28.
 
-   It renders only when there is enough to filter — see AgentCards.tsx. A
-   search box over four cards is a control with nothing to do. */
-.fleet-agent-card-search {
+   The search sits at the top, above the content it filters, and is drawn on
+   the SAME surface as the cards — both corrections the founder made on the
+   Apps grid, which had the identical shape (a search over many faces). A
+   filled --bg-inset slab reads heavier than the things it acts on; it is a
+   filter, not the thing you came for. */
+.fleet-agent-surface-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
   margin-bottom: var(--space-4);
+  /* On the Board layout the page shell is a flex COLUMN that owns its own
+     height, so this row is a flex item that would otherwise be squeezable —
+     and a search box compressed to make room for the columns below it is the
+     same defect as one that is not rendered at all. */
+  flex-shrink: 0;
+}
+
+/* Claims the row's free space so the gear lands on the right edge. On the
+   layouts where the search is not rendered (too few agents to filter) this
+   spacer is what keeps the gear there rather than letting it drift left. */
+.fleet-agent-surface-toolbar-spacer {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Kept as the search's own class so the width cap and surface stay described
+   where the input is, not spread across the row that happens to hold it. */
+.fleet-agent-card-search {
+  flex: 0 1 320px;
+  min-width: 0;
 }
 
 .fleet-agent-card-search > .fleet-wizard-input {
-  max-width: 320px;
+  width: 100%;
   background: var(--bg-card);
 }
 
@@ -238,7 +266,7 @@
   .fleet-agent-card-grid {
     grid-template-columns: minmax(0, 1fr);
   }
-  .fleet-agent-card-search > .fleet-wizard-input {
-    max-width: none;
+  .fleet-agent-card-search {
+    flex: 1;
   }
 }

@@ -29,6 +29,19 @@
  * A column renders iff it has an agent in it — same rule TasksBoard's own
  * `visibleStatuses` applies, so "Needs attention" simply isn't drawn on a
  * healthy fleet rather than showing up empty every time.
+ *
+ * THE CARD'S SECOND LINE IS agent-card-face.ts's REACH, and it used to be
+ * `activity_preview`. That is a LIFECYCLE VERB — "Created" is true of every
+ * agent that has ever existed, so a column of it distinguishes nothing, which
+ * is the exact finding that produced the card grid one layout away. Reach is
+ * the fact that actually differs: the task it is on > tasks waiting > where it
+ * answers > neither. Imported from that module rather than reimplemented, so a
+ * card here and a card there cannot say different things about one agent.
+ *
+ * TEXT ONLY, no channel mark — unlike the card grid, this card has a Channels
+ * field of its own (display.channels, with the icon), and drawing the same
+ * channel twice on one face is noise. When reach IS a task, that field is
+ * showing something else anyway.
  */
 
 import type { KeyboardEvent, ReactNode } from "react";
@@ -37,9 +50,9 @@ import { Fragment, useMemo } from "react";
 import {
   AGENT_PLACEMENT_LABELS,
   AGENT_STATUS_GROUPS,
-  agentActivityPreviewText,
   agentBrainLabel,
   agentDisplayStatus,
+  agentPresetBadge,
   agentMoney,
   agentPlacementCategory,
   agentStatusGroup,
@@ -47,6 +60,7 @@ import {
   type AgentDisplayState,
   type AgentStatusGroup,
 } from "./agent-view-options";
+import { agentCardReach, type AgentCardTaskInput } from "./agent-card-face";
 import { resolveHardwarePlacement, type FleetGateway } from "./gateway-box-picker";
 import { AgentSigil, StatusDot } from "./fleet-indicators";
 import { CHANNEL_LABELS, channelIconSrc } from "./fleet-icons";
@@ -91,8 +105,9 @@ export function AgentsBoard({
    *  PrimaryRail's footer pulse already do. Without this, an agent with a
    *  real in-progress task read "Ready" on its own Board card while sitting
    *  in a column literally labelled "Working" one row up — the exact "two
-   *  surfaces disagree" bug CLAUDE.md already documents fixing elsewhere. */
-  tasksByAgent: Map<string, { status?: string | null }[]>;
+   *  surfaces disagree" bug CLAUDE.md already documents fixing elsewhere. Also
+   *  what agentCardReach reads for each card's second line. */
+  tasksByAgent: Map<string, AgentCardTaskInput[]>;
   /** Which card fields this reader wants drawn (the view-options popover's
    *  "Display properties"). */
   display: AgentDisplayState;
@@ -159,13 +174,14 @@ function AgentCard({
   gateways: FleetGateway[];
   cost: number;
   /** This one agent's own tasks — see AgentsBoard's own tasksByAgent doc. */
-  tasks: { status?: string | null }[];
+  tasks: AgentCardTaskInput[];
   display: AgentDisplayState;
   selected: boolean;
   onSelect: (agentId: string, projectId: string) => void;
 }) {
-  const presetRaw = (agent.capability_preset || "").toLowerCase().replace(/_/g, " ");
-  const preset = presetRaw ? presetRaw.charAt(0).toUpperCase() + presetRaw.slice(1) : "";
+  // "" for the default preset — see agentPresetBadge for why a badge every
+  // card carries is a badge that says nothing.
+  const preset = agentPresetBadge(agent.capability_preset);
   // Enriched, not the bare deriveAgentStatus — see agentDisplayStatus's own
   // doc comment. Keeps this card's own status chip agreeing with which
   // column it is actually sitting in.
@@ -259,7 +275,7 @@ function AgentCard({
         <span className="fleet-agent-board-card-name">{agent.label || "Unnamed agent"}</span>
         {preset ? <span className="fleet-badge fleet-badge--preset">{preset}</span> : null}
       </div>
-      <div className="fleet-agent-board-card-preview">{agentActivityPreviewText(agent)}</div>
+      <div className="fleet-agent-board-card-preview">{agentCardReach(agent, tasks).label}</div>
       {fields.length > 0 ? (
         <div className="fleet-agent-board-card-meta">
           {fields.map((f) => (
