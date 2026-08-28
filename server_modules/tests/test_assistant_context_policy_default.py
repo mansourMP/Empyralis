@@ -2,7 +2,7 @@
 context_policy is configured.
 
 Runs the full execute_sage_turn -> handle_sage_chat path (same harness shape
-as test_sage_governance_gate_e2e.py's TelegramHostedE2ETests) with a large
+as test_assistant_governance_gate_e2e.py's TelegramHostedE2ETests) with a large
 model context window and enough estimated tokens to sit between the sane
 default (128K) and the model's raw window (1M) — the exact gap this default
 closes. Proves the OBSERVABLE effect (proactive compaction fires) rather
@@ -47,7 +47,7 @@ _EXPLICIT_LARGER_CAP = 500_000
 
 class ContextPolicyDefaultE2ETests(unittest.TestCase):
     def _base_patches(self, *, get_master_install=None):
-        """The same I/O-boundary mocks test_sage_governance_gate_e2e.py uses
+        """The same I/O-boundary mocks test_assistant_governance_gate_e2e.py uses
         to run the full handle_sage_chat path, plus the compaction-window
         mocks this test needs. agent_trace_service.start_trace returns None
         (a real, handled case — see start_trace's own `if not trace: return

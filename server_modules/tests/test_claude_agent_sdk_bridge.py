@@ -1040,7 +1040,7 @@ class TranslateUserMessageToolResultTests(unittest.TestCase):
         # this pins that the "ok"/"failed" tokens this module emits land on
         # the correct side of that classifier (see
         # CollectSageOperatorLoopV3EventsToolResultStatusTests in
-        # test_sage_agent_runtime_service.py for the same classifier tested
+        # test_agent_turn_runtime_service.py for the same classifier tested
         # against the legacy engine's own producer).
         from server_modules import tool_result_status
 

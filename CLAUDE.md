@@ -2185,7 +2185,7 @@ cache it; `external_write_safety` additionally copies its whole namespace
 into its own globals. Fourteen test modules install a stand-in
 `types.ModuleType("server")` carrying a handful of attributes — 67 install
 sites — for the length of one test, each restoring it in its own cleanup
-block (`test_sage_context_files_api.py` never restores at all), and a test
+block (`test_assistant_context_files_api.py` never restores at all), and a test
 that FAILS before reaching that block leaves the stand-in registered. One
 does today
 (`test_runtime_runs_api_canonical_routes.py::test_create_runtime_session_
@@ -4296,8 +4296,8 @@ test. Allowed: loopback, the `DATABASE_URL` host, `curl` at a loopback URL,
 and local CLI capability probes (`claude auth status`). Opt in with
 `@pytest.mark.live_provider` or `EMPYRALIS_TEST_ALLOW_LIVE_PROVIDER_CALLS=1`;
 no test needs either today. Turning it on exposed 12 tests
-(`test_sage_agent_runtime_service.py` ×6, `test_preflight.py` ×3,
-`test_operator_chat.py`, `test_sage_chat_api.py`) that had been calling
+(`test_agent_turn_runtime_service.py` ×6, `test_preflight.py` ×3,
+`test_operator_chat.py`, `test_assistant_chat_api.py`) that had been calling
 providers for real — still open, and each needs a mock, not a weaker
 assertion.
 

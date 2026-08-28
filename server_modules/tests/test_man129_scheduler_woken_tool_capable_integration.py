@@ -12,7 +12,7 @@ Unlike test_man129_orion_result_generate_tool_capable.py (which mocks at
 the execute_sage_turn boundary to test runs_execution.py's own wiring in
 isolation), this file mocks ONLY at
 direct_chat_generation_service.stream_provider_backed_direct_chat -- the
-exact seam server_modules/tests/test_sage_agent_runtime_service.py already
+exact seam server_modules/tests/test_agent_turn_runtime_service.py already
 establishes as safe for exercising handle_sage_chat/_run_sage_action_loop_v3
 for real (see e.g. test_main_sage_chat_executes_web_search_tool there).
 Everything above that seam runs for real:
@@ -56,7 +56,7 @@ def _heartbeat_shaped_context() -> dict:
 
 
 def _enter_handle_sage_chat_fixtures(stack: ExitStack, *, stream_events) -> dict:
-    """The exact fixture set test_sage_agent_runtime_service.py's own
+    """The exact fixture set test_agent_turn_runtime_service.py's own
     test_main_sage_chat_executes_web_search_tool uses to drive
     handle_sage_chat for real without touching a live DB/provider. Kept as
     a helper (not imported from that test module -- new-file-only rule) so

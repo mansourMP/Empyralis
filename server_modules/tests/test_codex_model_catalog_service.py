@@ -15,7 +15,7 @@ class FetchCodexModelCatalogTests(unittest.TestCase):
     """URGENT fix (2026-08-14) — the live catalog fetch that replaces the
     hand-typed MODELS_BY_PROVIDER mirror. Mirrors
     CliSubscriptionGatewayBrainTests's mocking shape in
-    test_sage_agent_runtime_service.py (same execute_tool_via_gateway seam)."""
+    test_agent_turn_runtime_service.py (same execute_tool_via_gateway seam)."""
 
     def test_supported_runtime_returns_relayed_catalog(self):
         response = {

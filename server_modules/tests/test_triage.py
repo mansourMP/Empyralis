@@ -7,7 +7,7 @@ reaching the model. That gate — and its dedicated tests below — were
 removed per founder ruling (2026-07-23): "Every single message goes to the
 reasoning model, absolutely. We are not going to have filters that flag a
 message and don't deliver it. No hardcoded outputs — everything is the
-agent's own reasoning." See server_modules/tests/test_sage_turn_adapter.py's
+agent's own reasoning." See server_modules/tests/test_agent_turn_adapter.py's
 TriageRulingTests for the regression proof that inbound messages now always
 reach handle_sage_chat, even with a triage-enabled install_metadata.
 

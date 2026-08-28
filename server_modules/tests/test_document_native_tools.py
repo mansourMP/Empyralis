@@ -449,7 +449,7 @@ class DocumentToolTier1VisibilityTests(unittest.TestCase):
     """document__* must be a STRUCTURAL Tier-1 carve-out for a project-member
     specialist -- present in the actual assembled tool payload handed to the
     model, not just discoverable via Tier-2 query_tool_registry. Mirrors
-    test_sage_agent_runtime_service.py's ProjectTaskToolTier1VisibilityTests
+    test_agent_turn_runtime_service.py's ProjectTaskToolTier1VisibilityTests
     exactly, for the sibling connector."""
 
     _DOCUMENT_NAMES = {"document__list", "document__read", "document__edit", "document__write"}

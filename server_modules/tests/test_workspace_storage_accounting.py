@@ -477,7 +477,7 @@ class StorageLedgerShapeTests(unittest.TestCase):
 
 class _FakeUploadFile:
     """Mirrors the two members of Starlette's UploadFile the route touches --
-    the same stand-in test_sage_context_files_api.py already uses, for the
+    the same stand-in test_assistant_context_files_api.py already uses, for the
     same reason its own comment gives: the route reads the bytes up front."""
 
     def __init__(self, filename: str, content: bytes, content_type: str = "text/plain") -> None:
