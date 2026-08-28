@@ -88,6 +88,48 @@ def is_already_a_member(members: Optional[Iterable[Dict[str, Any]]], user_id: st
     return False
 
 
+def member_with_email(
+    members: Optional[Iterable[Dict[str, Any]]],
+    email: str,
+) -> Optional[Dict[str, Any]]:
+    """The active member holding this email address, if any.
+
+    The email-keyed sibling of is_already_a_member, which keys on user_id —
+    an invite names an ADDRESS, and the person behind it may not have an
+    account yet, so the id-keyed check cannot answer this question.
+
+    Same active-status semantics as its sibling and as active_member_count:
+    a removed or suspended membership is not "already inside", so
+    re-inviting that person is a real invite rather than a no-op.
+
+    list_workspace_members already lowercases and strips `email`; this
+    normalizes both sides anyway rather than trusting one caller's shape.
+    """
+    clean_email = str(email or "").strip().lower()
+    if not clean_email:
+        return None
+    for member in members or []:
+        if not isinstance(member, dict):
+            continue
+        if str(member.get("email") or "").strip().lower() != clean_email:
+            continue
+        status = str(member.get("status") or "active").strip().lower()
+        if not status or status == "active":
+            return member
+    return None
+
+
+def already_a_member_sentence(*, email: str, role: str = "") -> str:
+    """What an owner is told when they invite someone already inside.
+
+    Names the person and the fact, and nothing else — there is no action to
+    suggest, because the outcome the owner wanted is already true.
+    """
+    who = str(email or "").strip() or "That person"
+    where = f" as {role}" if str(role or "").strip() else ""
+    return f"{who} is already a member of this workspace{where}."
+
+
 def member_limit_sentence(*, used_seats: int, limit: int) -> str:
     """The one line every seat refusal says. Names the limit, what is in
     use, and the two things that actually change the outcome."""
