@@ -470,7 +470,7 @@ class TestUpdateDontDuplicateAuditTrail(unittest.TestCase):
 
 
 class TestPerAgentIsolationPreserved(unittest.TestCase):
-    """Part 27's finding (PLATFORM-MAP.md) -- physical per-(workspace,
+    """The per-agent isolation finding -- physical per-(workspace,
     agent_install_id) .db file separation -- must hold for the new
     memory_entries_history table and the new attribution_reason column
     exactly as it already does for content/source_*."""

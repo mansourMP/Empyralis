@@ -1,7 +1,7 @@
 """Proves the Gateway filesystem/shell cross-agent isolation fix.
 
 Background (see docs/design/memory-placement-scope.md's "gateway seam"
-section and PLATFORM-MAP.md Part 27.8): GatewayShellRuntime.filesystem.
+section): GatewayShellRuntime.filesystem.
 read_write and shell.execute (empyralis-gateway/src/shell/runtime.ts) both
 key their on-box directory off (mount, workspace_id) alone
 (`mounts/<mount>/<workspace_id>/`). Neither dimension was ever derived from
@@ -33,7 +33,7 @@ caller of this exact connector when a box is paired — never has
 active_agent_install_id/agent_install_id set in session_ctx at all. A hard
 fail on empty identity would break Sage's own file/shell tool use outright,
 not just a specialist edge case. Empty is instead treated the same way
-PLATFORM-MAP.md Part 27.1 already treats it for memory: a stable,
+memory already treats it: a stable,
 server-controlled signal for "this is the owner-facing agent's own turn"
 (never model-forgeable), which keeps today's existing, workspace-level
 mount — while any SPECIALIST identity, which agent_turn_runtime_service.py

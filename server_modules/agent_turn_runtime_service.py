@@ -783,7 +783,7 @@ async def _resolve_cloud_provider(
     # Sage kept silently running on DeepSeek/platform credits regardless.
     # Fail loudly instead — the owner needs to know the setting isn't
     # taking effect, not discover it by wondering why Sage never used their
-    # subscription. See docs/PLATFORM-MAP.md's provider-resolution audit.
+    # subscription.
     if check_master_model_config:
         try:
             from server_modules.control_plane_repository import resolve_tenant_id_for_workspace as _resolve_tenant
@@ -1028,8 +1028,7 @@ async def _resolve_agent_cloud_provider(
     # right here, so changing that one workspace-wide setting (Sage's /model
     # command, or the AI-Setup page) shifted every default agent's brain at
     # once. That violated the platform's per-agent isolation law and was
-    # the exact cross-agent bleed byok_api/cli_subscription/local never had
-    # (see docs/PLATFORM-MAP.md's per-agent-provider audit).
+    # the exact cross-agent bleed byok_api/cli_subscription/local never had.
     #
     # Backward compat (no data migration, no write-on-read): an agent
     # created before this fix — or one whose owner explicitly left it on
@@ -1961,8 +1960,7 @@ async def _dispatch_cli_subscription_gateway_brain(
             # describe (direct_chat_service.py _run_sage's worker-thread event
             # loop starving gateway sends) is fixed — that WAS the event-loop
             # freeze in direct_chat_stream_response_service.py, not a property
-            # of running on a worker thread per se; see docs/PLATFORM-MAP.md
-            # §26.2 (BUG3) and today's live re-verification (3 sequential
+            # of running on a worker thread per se; re-verified live (3 sequential
             # turns, real replies, 3.7-7.8s each). 40s stays the right number
             # on its own merits — a healthy connection answers in seconds, so
             # there's no longer any failure mode that legitimately needs a

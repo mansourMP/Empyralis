@@ -7,7 +7,7 @@ protocol -- signature verification, inbound XML callback parsing, access-
 token management, outbound send -- inside the GATEWAY, at
 empyralis-gateway/src/channels/wechat/. That was the wrong home: the Gateway's
 only sanctioned network posture is an outbound WSS reverse tunnel with "no
-inbound holes" (docs/PLATFORM-MAP.md's Key Contract 7), but Tencent's
+inbound holes", but Tencent's
 WeChat/WeCom callback contract REQUIRES a publicly reachable HTTPS URL Tencent
 itself calls (GET to verify, POST per inbound message) -- the Gateway
 structurally cannot receive that. Every other business/bot channel that needs

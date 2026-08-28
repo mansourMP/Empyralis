@@ -19,8 +19,7 @@ then:
      refused outright rather than silently falling back to a shared
      workspace-root location; see ``agent_workspace_context_dir``'s own
      docstring for why that fallback is a real cross-agent leak vector
-     (the exact class of bug fixed 2026-07-14 per
-     docs/PLATFORM-MAP.md Part 27).
+     (the exact class of bug fixed 2026-07-14).
   2. For kind in {"image", "file"}: additionally mirrors the bytes into
      ``workspace_context.workspace_attachments_dir(workspace_id)`` under a
      globally-unique, agent-namespaced filename, and returns an

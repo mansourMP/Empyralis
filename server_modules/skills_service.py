@@ -5534,7 +5534,7 @@ async def execute_single_direct_tool_call_async(
             # SECURITY: filesystem.read_write and shell.execute on the
             # Gateway share one on-box directory per (mount, workspace_id) —
             # see docs/design/memory-placement-scope.md's "gateway seam"
-            # section and PLATFORM-MAP.md Part 27.8 (the identical leak
+            # section (the identical leak
             # class, for connector credentials). gateway_adapter now folds
             # the CALLING agent's own identity into that mount server-side
             # (never from anything the model/caller supplied, and never read
@@ -5552,8 +5552,8 @@ async def execute_single_direct_tool_call_async(
             # box is paired — never has active_agent_install_id/
             # agent_install_id set in session_ctx at all. A hard fail here
             # would break Sage's own file/shell tool use outright, not just
-            # a specialist edge case. This mirrors PLATFORM-MAP.md's Part
-            # 27.1 precedent for memory: "an empty agent_install_id does not
+            # a specialist edge case. This mirrors the memory layer's own
+            # precedent: "an empty agent_install_id does not
             # mean 'no scope' — it resolves to the WORKSPACE ROOT ...
             # intentional and correct for the owner-facing agent's own
             # turns." Empty here is a stable, server-controlled signal

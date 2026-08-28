@@ -1227,8 +1227,9 @@ ADDENDUM (2026-07-20) — WECHAT CHANNEL / TENCENT iLINK PROTOCOL
 
 CORRECTION to prior internal claims: `frontend/lib/workspace/fleet/SageLauncher.tsx:53`
 says "Personal WeChat has no official API to build a bridge against, so this isn't
-supported yet" and `docs/PLATFORM-MAP.md:1187` says WeChat is unbuilt because "Personal
-WeChat has no official API to build a bridge against." Both were true when written but
+supported yet", and the since-deleted platform map said the same: WeChat is
+unbuilt because "Personal WeChat has no official API to build a bridge
+against." Both were true when written but
 are now STALE. Tencent released an official personal-WeChat bot API on 2026-03-21/22
 (confirmed via npm registry `time.created` for `@tencent-weixin/openclaw-weixin`, not
 just a blog claim). The old grey-market/reverse-engineered path (WeChatPadPro, itchat,

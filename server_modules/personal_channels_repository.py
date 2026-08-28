@@ -575,9 +575,8 @@ def find_agent_id_for_telegram_session(
     touched this gateway+channel — i.e. whoever's configure() call (or
     inbound message) last claimed it. This is well-defined as long as only
     one agent's session is live per gateway+channel, which is true until
-    the Gateway itself pools multiple concurrent sessions (not built yet —
-    see docs/PLATFORM-MAP.md's cli_subscription/channels sections for the
-    multi-agent-per-box plan). Deliberately NOT restricted to
+    the Gateway itself pools multiple concurrent sessions (the
+    multi-agent-per-box plan, not built yet). Deliberately NOT restricted to
     status='connected': configure_telegram_personal_gateway seeds a row
     under the real agent_id immediately, before the Gateway ever reports
     back, specifically so a mid-pairing status (code_required,

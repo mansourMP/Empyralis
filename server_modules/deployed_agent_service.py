@@ -2,9 +2,8 @@
 
 Fleet (workspace_agent_installs) is now the one agent class. The live-channel
 delivery, quota/cost-cap enforcement, and every Studio UI surface that used to
-call into this file have been deleted as dead code — see
-docs/PLATFORM-MAP.md ("Part 13: One Agent Class") for the full inventory and
-the ordered strangler plan this file's cleanup came from.
+call into this file have been deleted as dead code, under the "one agent
+class" strangler plan this file's cleanup came from.
 
 What's left here is intentionally NOT deleted: the customer-facing, monetized
 agent product this file implements (public marketplace listing, daily message

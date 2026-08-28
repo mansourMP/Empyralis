@@ -12,7 +12,7 @@ import { ClaudeCliPrewarmPool, type ClaudePrewarmParams } from "../llm/claude-cl
 // message continues the SAME conversation — so if the pool ever reused a
 // process across two logical turns, one caller's turn could land on a
 // process still holding a DIFFERENT conversation's content. See
-// claude-cli-prewarm.ts's file header and docs/PLATFORM-MAP.md §26.5.
+// claude-cli-prewarm.ts's file header.
 
 interface FakeChild {
   stdinWrites: string[];

@@ -477,9 +477,9 @@ def agent_workspace_context_dir(*, workspace_id: str | None = None, agent_instal
     # specialist's memory tools transparently fall through to Sage's own
     # root-level memory instead of failing — this is exactly how a real
     # cross-agent leak happened (skills_service.py's memory_search/memory_get
-    # dispatch, fixed 2026-07-14; see docs/PLATFORM-MAP.md's memory security
-    # audit). When adding a new caller, thread the CALLING agent's own
-    # install_id through explicitly — never assume the default is safe.
+    # dispatch, fixed 2026-07-14). When adding a new caller, thread the
+    # CALLING agent's own install_id through explicitly — never assume the
+    # default is safe.
     scope_root = workspace_scope_dir(workspace_id)
     normalized_install_id = str(agent_install_id or "").strip()
     if not normalized_install_id:

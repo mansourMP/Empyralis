@@ -965,7 +965,7 @@ async def _dispatch_personal_channel_command(
 # nothing server-side ever checked WHO was messaging before generating a
 # reply — any contact who texted the owner's own WhatsApp/Telegram number
 # got an automatic reply, indistinguishable from the owner themselves. This
-# is the real gate. See docs/PLATFORM-MAP.md for the write-up.
+# is the real gate.
 #
 # Modelled on OpenClaw's dmPolicy (extensions/signal/src/monitor/access-policy.ts,
 # extensions/slack/src/monitor/dm-auth.ts, src/channels/message-access/sender-gates.ts):
@@ -2450,10 +2450,9 @@ def _boolish(value: Any, *, default: bool = False) -> bool:
 # _ensure_agent_channel_binding_enabled schedules below -- asyncio only
 # weakly tracks a bare create_task() via the event loop, so without this
 # set the task can be garbage-collected mid-run with no warning (the same
-# footgun documented for the compaction background job,
-# docs/PLATFORM-MAP.md Part 31.1). Entries remove themselves via
-# add_done_callback the moment each task finishes, so this never grows
-# unbounded. See docs/design/audit-silent-failures.md C2.
+# footgun documented for the compaction background job). Entries remove
+# themselves via add_done_callback the moment each task finishes, so this
+# never grows unbounded. See docs/design/audit-silent-failures.md C2.
 _CHANNEL_BINDING_ENABLE_TASKS: set[asyncio.Task] = set()
 
 

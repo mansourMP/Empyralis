@@ -1,5 +1,14 @@
 # Architecture Concerns
 
+
+> **HISTORICAL — the baseline this prompt reads no longer exists (2026-08-28).**
+> `docs/PLATFORM-MAP.md` was deleted: a commit-pinned 2026-07-13 snapshot
+> that had gone stale (122 references to 23 modules that no longer exist),
+> per this repository's standing rule that snapshot documents are not kept.
+> Every instruction below to read or update it, and every reference to its
+> section numbers, is therefore unfollowable. Read this file as a record of
+> how the map was produced, not as a work order to run.
+
 Questions from the builder. Your job: read the provided `PLATFORM-MAP.md`, answer every concern against what those documents show, and report what's real vs what's missing vs what's broken. Work exclusively from the documents provided to you.
 
 **What this platform is:** Agents as a Service — the easiest, most reliable way for a business owner to automate real work. Not a chat app. Not a demo. A business owner describes what they need, the platform creates and runs digital workers that do it. Those agents control computers, talk to customers, monitor systems, process data — actual work, reliably, every day. The business owner doesn't need to know how agents work. They just need their work done. That's the billion-dollar product.

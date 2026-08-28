@@ -10,11 +10,11 @@ by" — match the numbers.
 
 > **Terminology note (2026-07-23):** "Sage" is legacy product terminology — the
 > platform has only agents (owner-facing, customer-facing serving the owner,
-> and AskAI). The "Ask Sage launcher" references below name the literal,
-> currently-shipped UI string (`SageLauncher.tsx`) — the "Ask Sage" → "Ask AI"
-> rename has not shipped (see `docs/PLATFORM-MAP.md` Part 24). Read as a
-> citation of current UI copy, not as this document endorsing "Sage" as live
-> product naming.
+> and AskAI). The "Ask Sage launcher" references below were written before
+> the label rename shipped; `SageLauncher.tsx` renders "Ask AI" today and
+> says so in its own header, while the component/route/class names still
+> say Sage. Read them as naming that component, not as this document
+> endorsing "Sage" as live product naming.
 
 ## 1. Type
 
