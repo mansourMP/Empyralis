@@ -73,6 +73,14 @@ async def start_pairing(
     # alone is enough — we resolve the username from the Bot API on demand.
     bot_username = await hosted.ensure_bot_username_cached()
 
+    # How long a NUMERIC pairing code stays valid, reported so the UI can show
+    # a real countdown instead of transcribing this module's default into the
+    # frontend (it is an env var — EMPYRALIS_TELEGRAM_PAIRING_CODE_TTL_SECONDS
+    # — so a copied 600 would be a claim this deployment need not honour).
+    # Deep-link tokens are NOT time-tracked in the service and deliberately
+    # carry no expiry here; a caller must not apply this to them.
+    code_ttl_seconds = hosted._PAIRING_CODE_TTL_SECONDS
+
     existing_code = hosted.pairing_code_for_workspace(workspace_id)
     if existing_code:
         is_deep_link = len(existing_code) > hosted.PAIRING_CODE_LENGTH
@@ -81,6 +89,7 @@ async def start_pairing(
             "deep_link": hosted.build_deep_link(existing_code) if is_deep_link else None,
             "bot_username": bot_username or None,
             "status": "active",
+            "expires_in_seconds": None if is_deep_link else code_ttl_seconds,
         }
 
     # Generate both — user can type the short code or click the deep link
@@ -91,6 +100,7 @@ async def start_pairing(
         "deep_link": hosted.build_deep_link(deep_link_token),
         "bot_username": bot_username or None,
         "status": "active",
+        "expires_in_seconds": code_ttl_seconds,
     }
 
 
