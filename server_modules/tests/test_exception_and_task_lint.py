@@ -179,7 +179,7 @@ BARE_EXCEPT_PASS_BASELINE_FILES: frozenset[str] = frozenset({
     "server_modules/runtime_route_registration_service.py",
     "server_modules/safe_mode_service.py",
     "server_modules/agent_turn_runtime_service.py",
-    "server_modules/sage_chat_api.py",
+    "server_modules/assistant_chat_api.py",
     "server_modules/agent_command_dispatcher.py",
     "server_modules/assistant_audit_log_service.py",
     "server_modules/agent_reply_dispatcher.py",

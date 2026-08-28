@@ -93,7 +93,7 @@ def _emit_approval_audit(
         pass
 
 
-def register_sage_chat_routes(app) -> None:
+def register_assistant_chat_routes(app) -> None:
     import server as _server
 
     module_globals = globals()
@@ -246,7 +246,7 @@ def register_sage_chat_routes(app) -> None:
         raw = await file.read()
         if len(raw) > MAX_ATTACHMENT_BYTES:
             raise HTTPException(status_code=413, detail="File exceeds maximum size.")
-        # Same policy as the live twin in sage_context_files_api.py, which
+        # Same policy as the live twin in assistant_context_files_api.py, which
         # registers this exact path first and is therefore the handler
         # customers actually reach. Two registrations of one route must not
         # accept two different sets of files.
@@ -266,7 +266,7 @@ def register_sage_chat_routes(app) -> None:
         # Same storage cap as the live twin, for the same reason the content
         # policy above is duplicated here: two registrations of one route
         # must never accept two different things. This handler is shadowed
-        # (sage_context_files_api registers the path first and FastAPI serves
+        # (assistant_context_files_api registers the path first and FastAPI serves
         # the first match), so this call is what keeps the shadow honest if
         # registration order ever changes.
         try:

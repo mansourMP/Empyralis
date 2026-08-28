@@ -16,8 +16,8 @@ Two halves, deliberately:
     the handler itself.
 
 Both live registrations of POST /api/sage-chat/attachments are exercised.
-routes_workflows.py registers sage_context_files_api FIRST, so that one is
-what FastAPI actually serves; sage_chat_api declares the same path and is
+routes_workflows.py registers assistant_context_files_api FIRST, so that one is
+what FastAPI actually serves; assistant_chat_api declares the same path and is
 shadowed. Testing only the shadowed twin would assert nothing about what a
 customer hits.
 """
@@ -31,7 +31,7 @@ import types
 import unittest
 from unittest.mock import patch
 
-from server_modules import sage_context_files_api
+from server_modules import assistant_context_files_api
 from server_modules import upload_content_policy
 
 
@@ -176,7 +176,7 @@ class AttachmentRouteEnforcesPolicyServerSideTests(unittest.TestCase):
             else sys.modules.__setitem__("server", previous_server)
         )
         app = _FakeApp()
-        sage_context_files_api.register_sage_context_file_routes(app)
+        assistant_context_files_api.register_assistant_context_file_routes(app)
         return app.routes[("POST", "/api/sage-chat/attachments")]
 
     def _call(self, upload_file, tmpdir):
@@ -184,10 +184,10 @@ class AttachmentRouteEnforcesPolicyServerSideTests(unittest.TestCase):
         from pathlib import Path
 
         with (
-            patch("server_modules.sage_context_files_api.enforce_workspace_access", return_value="workspace-1"),
-            patch("server_modules.sage_context_files_api.workspace_tenant_id", return_value="tenant-1"),
+            patch("server_modules.assistant_context_files_api.enforce_workspace_access", return_value="workspace-1"),
+            patch("server_modules.assistant_context_files_api.workspace_tenant_id", return_value="tenant-1"),
             patch(
-                "server_modules.sage_context_files_api.workspace_attachments_dir",
+                "server_modules.assistant_context_files_api.workspace_attachments_dir",
                 return_value=Path(tmpdir),
             ),
         ):
@@ -237,17 +237,17 @@ class AttachmentRouteEnforcesPolicyServerSideTests(unittest.TestCase):
 
 
 class BothRegistrationsShareOnePolicyTests(unittest.TestCase):
-    """sage_chat_api declares the same path and is shadowed by
-    sage_context_files_api. Two registrations of one route must not accept
+    """assistant_chat_api declares the same path and is shadowed by
+    assistant_context_files_api. Two registrations of one route must not accept
     two different sets of files -- whichever one wins a future registration
     reshuffle."""
 
     def test_both_modules_call_the_shared_policy(self) -> None:
         import inspect
 
-        from server_modules import sage_chat_api
+        from server_modules import assistant_chat_api
 
-        for module in (sage_context_files_api, sage_chat_api):
+        for module in (assistant_context_files_api, assistant_chat_api):
             with self.subTest(module=module.__name__):
                 source = inspect.getsource(module)
                 self.assertIn("upload_content_policy.assert_allowed_upload", source)

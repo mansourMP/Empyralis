@@ -21,7 +21,7 @@ Architecture:
 The channel wrapper owns: parse inbound, resolve workspace, resolve media.
 The dispatcher owns: EVERYTHING after that.
 
-Web chat is a SEPARATE path (sage_chat_api.py calls handle_sage_chat()
+Web chat is a SEPARATE path (assistant_chat_api.py calls handle_sage_chat()
 directly) and is intentionally not routed through here — it may still show
 the user what went wrong.
 """

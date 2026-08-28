@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from server_modules import sage_dreaming_pipeline
+from server_modules import dreaming_pipeline
 
 
 _ALLOW_DECISION = {
@@ -25,11 +25,11 @@ class SageDreamingPipelineRustGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "dream.json"
             with mock.patch.object(
-                sage_dreaming_pipeline.rust_runtime_kernel_client,
+                dreaming_pipeline.rust_runtime_kernel_client,
                 "runtime_state_store_decision",
                 return_value=dict(_ALLOW_DECISION),
             ) as rust_decision:
-                sage_dreaming_pipeline._write_dreaming_json(
+                dreaming_pipeline._write_dreaming_json(
                     operation="write_sage_dreaming_staging_file",
                     workspace_id="workspace-1",
                     path=path,
@@ -51,12 +51,12 @@ class SageDreamingPipelineRustGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "dream.json"
             with mock.patch.object(
-                sage_dreaming_pipeline.rust_runtime_kernel_client,
+                dreaming_pipeline.rust_runtime_kernel_client,
                 "runtime_state_store_decision",
                 return_value=wrong_action,
             ):
-                with self.assertRaises(sage_dreaming_pipeline.SageDreamingRustGateError) as raised:
-                    sage_dreaming_pipeline._write_dreaming_json(
+                with self.assertRaises(dreaming_pipeline.SageDreamingRustGateError) as raised:
+                    dreaming_pipeline._write_dreaming_json(
                         operation="write_sage_dreaming_staging_file",
                         workspace_id="workspace-1",
                         path=path,
@@ -78,12 +78,12 @@ class SageDreamingPipelineRustGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "dream.json"
             with mock.patch.object(
-                sage_dreaming_pipeline.rust_runtime_kernel_client,
+                dreaming_pipeline.rust_runtime_kernel_client,
                 "runtime_state_store_decision",
                 return_value=block_decision,
             ):
-                with self.assertRaises(sage_dreaming_pipeline.SageDreamingRustGateError):
-                    sage_dreaming_pipeline._write_dreaming_json(
+                with self.assertRaises(dreaming_pipeline.SageDreamingRustGateError):
+                    dreaming_pipeline._write_dreaming_json(
                         operation="write_sage_dreaming_staging_file",
                         workspace_id="workspace-1",
                         path=path,
