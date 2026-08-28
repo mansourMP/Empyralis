@@ -1042,12 +1042,30 @@ the matcher must classify both directions correctly. Proven red-before-green
 by putting the founder's own screenshotted ring back.
 
 `lib/ui/chrome.css` is excluded from that scan **with a written reason in the
-test's header**: ~130 remaining accent declarations there belong to selectors
+test's header**: the remaining accent declarations there belong to selectors
 with no consumer outside that one file (`studio-*`, `marketplace-*`,
-`deployed-agents-*`, `app-filter-pill`, `sage-unified-card` — all verified
-dead by grep). Its LIVE surfaces were swept by hand. Do not widen the scan
-there without deleting the dead CSS first; a scan that fails on 130 dead
-rules is a scan someone disables.
+`deployed-agents-*`, `app-filter-pill` — all verified dead by grep). Its LIVE
+surfaces were swept by hand. Do not widen the scan there without deleting the
+dead CSS first; a scan that fails on dead rules is a scan someone disables.
+
+**MEASURED 2026-08-28, and it says the widening is NOT one more deletion
+away.** The `sage-*` half of that dead CSS is now gone — 532 rules and 3
+keyframes, 26,533 -> 22,411 lines — and widening the scan over what is left
+still fails:
+
+| | accent declarations |
+| --- | ---: |
+| before the sage prune | 97 |
+| after it | **85** |
+
+So the sage rules were 12 of the 97. Of the 85 left, **77 are in dead families**
+(`marketplace-pane-*` 15, `app-memory-*` 9, `studio-ai-*` 8, `app-chat-*` 7,
+`studio-agent-*` 6, `deployed-agents-*` 6, `app-studio-*` 5, and a long tail) —
+more deletions of the same shape. **The other 8 are on LIVE selectors**:
+`app-auth-*` (4, including `.app-auth-kicker` on the login page), `cloud-vps-*`
+(4) and one `workstation-hardware-*`. Those are a DESIGN decision about the
+accent rule, not cleanup, so finishing the deletions does not by itself buy the
+widening — someone has to decide whether the login page's kicker may be purple.
 
 **`--task-done` no longer aliases `--accent`** — a status dot is not a
 button. It takes the success hue its own comment already said it meant
