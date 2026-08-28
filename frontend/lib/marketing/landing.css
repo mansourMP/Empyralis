@@ -1,8 +1,8 @@
 /* Landing page — marketing surface only. Reuses the shared --app-* tokens
    (theme, spacing, radius, motion) from lib/ui/theme-tokens.css + chrome.css
    so light/dark and the rest of the product stay in lockstep. The larger
-   display sizes below are local to this file — UI-CONTRACT.md's type scale
-   governs product chrome, not marketing/auth headings (explicit carve-out). */
+   display sizes below are local to this file — the product's type scale
+   governs chrome, not marketing/auth headings (explicit carve-out). */
 
 .landing {
   display: flex;

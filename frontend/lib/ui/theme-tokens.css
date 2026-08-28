@@ -79,7 +79,7 @@
      only), scrim fade. What may NOT: colour, background, border-colour,
      box-shadow. Those are state, and state should read as instant — a
      150ms colour fade on hover is the single most common way an interface
-     starts to feel laggy. See docs/UI-CONTRACT.md §"Motion". */
+     starts to feel laggy. */
   --dur-1: 90ms;    /* hover, focus ring, press */
   --dur-2: 140ms;   /* default: panel enter/exit, collapse, disclosure */
   --dur-3: 200ms;   /* max — overlays/scrims only. Nothing exceeds this. */

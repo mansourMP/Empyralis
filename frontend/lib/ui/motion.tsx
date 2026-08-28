@@ -54,9 +54,9 @@ type SafeDivProps = Omit<
   | 'onAnimationIterationCapture'
 >;
 
-/* MAN-126 — this module now obeys docs/UI-CONTRACT.md §Motion, which it
-   previously contradicted outright: "ease-out, capped at 200ms… No spring,
-   no bounce, no overshoot."
+/* MAN-126 — this module previously contradicted the house motion rule
+   outright. The rule: ease-out, capped at 200ms. No spring, no bounce,
+   no overshoot.
 
    What changed and why:
    - `press` and `sheet` were springs (stiffness 420/320). A spring, by
