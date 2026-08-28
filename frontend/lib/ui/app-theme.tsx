@@ -82,10 +82,27 @@ export function AppThemeProvider({
     const onChange = (event: MediaQueryListEvent) => {
       setPrefersDark(event.matches);
     };
-    const documentTheme = readDocumentTheme();
-    if (!documentTheme) {
-      setPrefersDark(mediaQuery.matches);
-    }
+    // UNDER 'system' THE DEVICE IS THE AUTHORITY, ALWAYS — read it here
+    // rather than deferring to whatever is currently painted.
+    //
+    // This line used to be `if (!readDocumentTheme()) { … }`, guarding
+    // against overriding the pre-hydration paint. At first load that guard
+    // is harmless, because layout.tsx's bootstrap script resolves 'system'
+    // from this same prefers-color-scheme query, so the value it skipped
+    // reading was one it already agreed with. At RUNTIME it was a silent
+    // bug: this provider stamps data-theme on <html> and <body> itself, so
+    // readDocumentTheme() can never be null once it has rendered once —
+    // switching the preference TO 'system' therefore adopted whatever the
+    // PREVIOUS preference had painted and sat there until the OS scheme
+    // happened to change.
+    //
+    // It was unreachable until 2026-08-29 because nothing in the product
+    // could write 'system': the only writer was the rail account-popover's
+    // binary light/dark toggle. Settings ▸ Account's three-way picker makes
+    // it reachable, and measured it directly — device light, app showing
+    // dark, pick System, app stays dark. Fresh loads were always correct,
+    // which is what kept this hidden.
+    setPrefersDark(mediaQuery.matches);
     if (typeof mediaQuery.addEventListener === 'function') {
       mediaQuery.addEventListener('change', onChange);
       return () => mediaQuery.removeEventListener('change', onChange);
