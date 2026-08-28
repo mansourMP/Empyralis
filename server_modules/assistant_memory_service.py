@@ -32,7 +32,18 @@ SAGE_MEMORY_CATEGORY_DEFINITIONS: dict[str, dict[str, str]] = {
 }
 
 SAGE_MEMORY_ENTRY_LIMIT = 50
-SAGE_MEMORY_WIPE_CONFIRMATION = "WIPE SAGE MEMORY"
+# The phrase an owner TYPES to confirm wiping assistant memory, and the phrase
+# echoed back in the 400 when it does not match. Both are read by a person, so
+# neither may name the removed persona.
+SAGE_MEMORY_WIPE_CONFIRMATION = "WIPE ASSISTANT MEMORY"
+# ...and the pre-2026-08-28 phrase is still ACCEPTED. A confirmation phrase is
+# a contract with whoever memorised it: silently refusing the old one turns a
+# destructive action a person is deliberately performing into an error they
+# cannot explain. Only the phrase we ASK for changed; both still work.
+SAGE_MEMORY_WIPE_CONFIRMATIONS_ACCEPTED = (
+    SAGE_MEMORY_WIPE_CONFIRMATION,
+    "WIPE SAGE MEMORY",
+)
 
 SAGE_MEMORY_CATEGORY_ALIASES: dict[str, str] = {
     "work_context": "safe_general",
@@ -398,7 +409,7 @@ def wipe_sage_memory(
     actor_user_id: Optional[str] = None,
     confirm: str,
 ) -> Dict[str, Any]:
-    if _coerce_text(confirm) != SAGE_MEMORY_WIPE_CONFIRMATION:
+    if _coerce_text(confirm) not in SAGE_MEMORY_WIPE_CONFIRMATIONS_ACCEPTED:
         raise HTTPException(
             status_code=400,
             detail=f"Confirmation phrase required: {SAGE_MEMORY_WIPE_CONFIRMATION}",

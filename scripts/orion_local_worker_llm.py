@@ -1581,7 +1581,9 @@ def compact_tool_mode_system_prompt(system_prompt: Optional[str]) -> Optional[st
 
     sections = [
         (
-            "You are Sage.\n"
+            # No "You are <name>." lead-in. This text is handed to the model as
+            # its system prompt, so a proper noun here is a name it will
+            # introduce itself by. The directives below are the whole point.
             "Use the provided API tool definitions when they match the request.\n"
             "Do not claim you lack filesystem, browser, desktop, clipboard, shell, or web access if a matching tool is available.\n"
             "For local machine requests like listing desktop files, reading local files, taking screenshots, or running terminal commands, call the matching tool before answering."

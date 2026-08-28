@@ -1,6 +1,6 @@
 ---
 name: telegram-bot
-description: Sends a message through the workspace's connected Telegram bot. Use when the user asks Sage to message someone on Telegram, reply in a Telegram conversation, or notify a Telegram chat.
+description: Sends a message through the workspace's connected Telegram bot. Use when the user asks you to message someone on Telegram, reply in a Telegram conversation, or notify a Telegram chat.
 skill_class: system
 execution_mode: live
 action_class: write

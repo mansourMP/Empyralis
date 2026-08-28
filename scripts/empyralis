@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Empyralis CLI companion — chat with Sage from the terminal.
+"""Empyralis CLI companion — chat with your assistant from the terminal.
 
 Usage:
   empyralis chat "Your message here"
@@ -38,7 +38,7 @@ def cmd_chat(args: list[str]) -> None:
         print("Not logged in. Run: empyralis login <your-api-key>")
         sys.exit(1)
 
-    print(f"Sage: ", end="", flush=True)
+    print("Assistant: ", end="", flush=True)
     try:
         result = send_turn(message)
         reply = format_reply(result)

@@ -103,6 +103,11 @@ export type AgentSummary = {
   id: string;
   name: string;
   role: string;
+  /** "master" for the workspace assistant, "specialist" for everything else.
+   *  Optional because older callers construct AgentSummary without it; the
+   *  structural signal isSageAgent needs, since `role` is measured to be
+   *  "specialist" even on the master install. */
+  agentKind?: string;
   preset: "customer_facing" | "internal_assistant" | "operator";
   runtimeTarget: string;
   hardwareStatus: string;
@@ -179,6 +184,7 @@ export function toAgentSummary(agent: FleetAgent, index: number): AgentSummary {
     id: agent.agent_id,
     name: agent.label || "Unnamed agent",
     role: agent.role,
+    agentKind: agent.agent_kind,
     // purpose_preset is set at creation time by the create-agent wizard
     // (step 2) and returned by fleet_list_agents. Older agents created
     // before that field existed fall back to a role-based guess.
@@ -195,17 +201,76 @@ export function toAgentSummary(agent: FleetAgent, index: number): AgentSummary {
   };
 }
 
+/** The workspace assistant — the one install every workspace gets, surfaced
+ *  to customers as "Ask AI".
+ *
+ *  KEYED ON `agent_kind === "master"` FIRST, and that ordering is
+ *  load-bearing rather than stylistic. The two clauses under it are LEGACY
+ *  FALLBACKS for rows that predate `agent_kind` being emitted — and the
+ *  name-substring clause used to be the ONLY one that matched anything.
+ *  Measured live 2026-08-21 and recorded on FleetAgent.agent_kind's own
+ *  declaration: the workspace operator comes back as `role: "specialist"`,
+ *  `agent_kind: "master"`, so NEITHER role clause fires on real data.
+ *
+ *  That made the assistant identifiable only by its stored label containing
+ *  "sage" — exactly the stale-string-matching failure CLAUDE.md documents.
+ *  Returning null here does not degrade gracefully: it removes the Ask AI
+ *  console entirely (SageLauncher returns null without an agent), stops
+ *  excluding the assistant from PrimaryRail/Projects/Agents/Inbox, and
+ *  breaks agent-count-shape's contract that it never counts. So the
+ *  structural signal goes first and the legacy clauses stay, which is what
+ *  makes renaming the assistant safe. */
 export function isSageAgent(agent: AgentSummary): boolean {
   const r = agent.role.toLowerCase();
-  return r === "sage" || r === "operator" || agent.name.toLowerCase().includes("sage");
+  return (
+    (agent.agentKind || "").trim().toLowerCase() === "master" ||
+    r === "sage" ||
+    r === "operator" ||
+    agent.name.toLowerCase().includes("sage")
+  );
+}
+
+/** The customer-facing name of the workspace assistant. It is a plain
+ *  assistant inside the platform, not a persona, and this is the only name
+ *  it has. */
+export const WORKSPACE_ASSISTANT_LABEL = "Ask AI";
+
+/** What to PRINT for an agent — never `agent.label` directly.
+ *
+ *  The master install's stored label on every workspace created before
+ *  2026-08-28 is literally "Sage", the persona name the founder removed from
+ *  the product. That column is DATA (rewriting it across live rows is a
+ *  migration, not a rename), so the fix is at the render seam: the assistant
+ *  prints as "Ask AI" wherever its row appears, whatever the row says.
+ *
+ *  Every surface that shows an agent name should call this. The ones that
+ *  motivated it are Billing/Usage — a live, linked page whose per-agent spend
+ *  legend and attribution matrix both render the raw field, so the removed
+ *  name was on screen for any workspace whose assistant had spent anything. */
+export function agentDisplayLabel(
+  agent: Pick<FleetAgent, "label" | "role" | "agent_kind"> | null | undefined,
+): string {
+  if (!agent) return "Unnamed agent";
+  const kind = (agent.agent_kind || "").trim().toLowerCase();
+  const role = (agent.role || "").trim().toLowerCase();
+  const label = (agent.label || "").trim();
+  // Same discriminator ladder as findSageAgent, and for the same reason:
+  // agent_kind is the structural fact, the rest are legacy fallbacks.
+  if (kind === "master" || role === "sage" || role === "operator") {
+    return WORKSPACE_ASSISTANT_LABEL;
+  }
+  if (label.toLowerCase().includes("sage")) return WORKSPACE_ASSISTANT_LABEL;
+  return label || "Unnamed agent";
 }
 
 /** Same match as isSageAgent, over the raw FleetAgent list — used anywhere
  *  that needs the actual agent record (id, project_id, …) rather than the
  *  display-only AgentSummary. */
 export function findSageAgent(agents: FleetAgent[]): FleetAgent | null {
+  const kind = (a: FleetAgent) => (a.agent_kind || "").trim().toLowerCase();
   const r = (a: FleetAgent) => (a.role || "").toLowerCase();
   return (
+    agents.find((a) => kind(a) === "master") ||
     agents.find((a) => r(a) === "sage" || r(a) === "operator") ||
     agents.find((a) => (a.label || "").toLowerCase().includes("sage")) ||
     null

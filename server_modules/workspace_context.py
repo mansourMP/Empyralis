@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import re
-from typing import Dict
+from typing import Dict, Tuple
 
 from server_modules import rust_runtime_kernel_client
 
@@ -170,23 +170,23 @@ USER_MEMORY_FILE_RE = re.compile(
 DEFAULT_CONTEXT_FILE_CONTENTS: Dict[str, str] = {
     "SOUL.md": (
         "---\n"
-        "Purpose: Sage's core personality, tone, and values.\n"
+        "Purpose: The assistant's core personality, tone, and values.\n"
         "Edit when your persona, communication style, or fundamental approach changes.\n"
         "Do not put factual memories or user preferences here.\n"
         "---\n\n"
         "# Empyralis\n\n"
         "Empyralis is a calm mobile-first AI product.\n"
-        "Its job is to help the user through one personal assistant named Sage.\n"
+        "Its job is to help the user through one personal assistant.\n"
         "Keep replies clear, useful, and free of product demos or setup chatter.\n"
     ),
     "AGENTS.md": (
         "---\n"
-        "Purpose: Operating rules and priorities for how Sage behaves.\n"
+        "Purpose: Operating rules and priorities for how the assistant behaves.\n"
         "Edit when you learn new behavioral rules or the user changes how they want you to operate.\n"
         "Do not put personality or factual memories here.\n"
         "---\n\n"
         "# Assistant\n\n"
-        "- Sage is the only visible assistant in the mobile product.\n"
+        "- There is one visible assistant in the mobile product.\n"
         "- Do not introduce hidden roles, internal specialists, or routing language to the user.\n"
     ),
     "TOOLS.md": (
@@ -201,7 +201,7 @@ DEFAULT_CONTEXT_FILE_CONTENTS: Dict[str, str] = {
     ),
     "IDENTITY.md": (
         "---\n"
-        "Purpose: Sage's name, channel presence, and surface-level identity.\n"
+        "Purpose: The assistant's channel presence and surface-level identity.\n"
         "Edit during onboarding or when identity details change.\n"
         "---\n"
     ),
@@ -220,7 +220,7 @@ DEFAULT_CONTEXT_FILE_CONTENTS: Dict[str, str] = {
         "---\n"
         "Purpose: Who the user is — name, preferences, context, important facts.\n"
         "Edit during onboarding and whenever the user shares something about themselves.\n"
-        "Loaded every turn so Sage always knows who it is talking to.\n"
+        "Loaded every turn so the assistant always knows who it is talking to.\n"
         "---\n\n"
         "# About the User\n"
     ),
@@ -228,21 +228,21 @@ DEFAULT_CONTEXT_FILE_CONTENTS: Dict[str, str] = {
         "---\n"
         "Purpose: What the user is working toward — short and long-term goals.\n"
         "Edit when goals change or new ones emerge from conversation.\n"
-        "Loaded every turn so Sage can proactively help.\n"
+        "Loaded every turn so the assistant can proactively help.\n"
         "---\n\n"
         "# Goals\n"
     ),
     "PROCEDURES.md": (
         "---\n"
-        "Purpose: Reusable workflows and procedures the user wants Sage to follow.\n"
+        "Purpose: Reusable workflows and procedures the user wants the assistant to follow.\n"
         "Edit when the user establishes a new routine or process.\n"
-        "Loaded every turn so Sage knows how to handle recurring tasks.\n"
+        "Loaded every turn so the assistant knows how to handle recurring tasks.\n"
         "---\n\n"
         "# Procedures\n"
     ),
     "REFLECTION.md": (
         "---\n"
-        "Purpose: An optional place for Sage's own reflections on past\n"
+        "Purpose: An optional place for the assistant's own reflections on past\n"
         "interactions — what worked, what didn't, patterns noticed.\n"
         "Nothing writes here automatically; use memory_write when a\n"
         "reflection is worth keeping.\n"
@@ -255,13 +255,138 @@ DEFAULT_CONTEXT_FILE_CONTENTS: Dict[str, str] = {
     ),
     "HEARTBEAT.md": (
         "---\n"
-        "Purpose: A running log of what Sage did during heartbeat runs —\n"
+        "Purpose: A running log of what the assistant did during heartbeat runs —\n"
         "tasks checked, reminders sent, actions taken, anomalies noticed.\n"
-        "Sage writes here after every heartbeat. Do not edit manually.\n"
+        "The assistant writes here after every heartbeat. Do not edit manually.\n"
         "Read this to understand what happened while the user was away.\n"
         "---\n"
     ),
 }
+
+# FROZEN. The scaffold text as it stood before the assistant's name was
+# removed from customer-visible strings (2026-08-28). These are not an
+# alternative style to keep in sync -- they are a historical artifact, and
+# they must never be edited again.
+#
+# Why they have to exist at all: is_default_context_content() is a
+# BYTE-FOR-BYTE comparison, and it is what decides whether a context file is
+# "the untouched scaffold" or "content the owner actually wrote". Files
+# holding the old text are already on disk. Dropping these would reclassify
+# every one of them as real owner content overnight -- which means the
+# scaffold's own boilerplate starts being injected into prompts as if it
+# were something the customer said, and MEMORY.md stops being safe to
+# overwrite. Only entries whose text actually named the assistant are listed;
+# the rest never changed.
+_LEGACY_DEFAULT_CONTEXT_FILE_CONTENTS: Dict[str, Tuple[str, ...]] = {
+    "SOUL.md": (
+        (
+            "---\n"
+            "Purpose: Sage's core personality, tone, and values.\n"
+            "Edit when your persona, communication style, or fundamental approach changes.\n"
+            "Do not put factual memories or user preferences here.\n"
+            "---\n\n"
+            "# Empyralis\n\n"
+            "Empyralis is a calm mobile-first AI product.\n"
+            "Its job is to help the user through one personal assistant named Sage.\n"
+            "Keep replies clear, useful, and free of product demos or setup chatter.\n"
+        ),
+    ),
+    "AGENTS.md": (
+        (
+            "---\n"
+            "Purpose: Operating rules and priorities for how Sage behaves.\n"
+            "Edit when you learn new behavioral rules or the user changes how they want you to operate.\n"
+            "Do not put personality or factual memories here.\n"
+            "---\n\n"
+            "# Assistant\n\n"
+            "- Sage is the only visible assistant in the mobile product.\n"
+            "- Do not introduce hidden roles, internal specialists, or routing language to the user.\n"
+        ),
+    ),
+    "IDENTITY.md": (
+        (
+            "---\n"
+            "Purpose: Sage's name, channel presence, and surface-level identity.\n"
+            "Edit during onboarding or when identity details change.\n"
+            "---\n"
+        ),
+    ),
+    "USER.md": (
+        (
+            "---\n"
+            "Purpose: Who the user is — name, preferences, context, important facts.\n"
+            "Edit during onboarding and whenever the user shares something about themselves.\n"
+            "Loaded every turn so Sage always knows who it is talking to.\n"
+            "---\n\n"
+            "# About the User\n"
+        ),
+    ),
+    "GOALS.md": (
+        (
+            "---\n"
+            "Purpose: What the user is working toward — short and long-term goals.\n"
+            "Edit when goals change or new ones emerge from conversation.\n"
+            "Loaded every turn so Sage can proactively help.\n"
+            "---\n\n"
+            "# Goals\n"
+        ),
+    ),
+    "PROCEDURES.md": (
+        (
+            "---\n"
+            "Purpose: Reusable workflows and procedures the user wants Sage to follow.\n"
+            "Edit when the user establishes a new routine or process.\n"
+            "Loaded every turn so Sage knows how to handle recurring tasks.\n"
+            "---\n\n"
+            "# Procedures\n"
+        ),
+    ),
+    "REFLECTION.md": (
+        (
+            "---\n"
+            "Purpose: An optional place for Sage's own reflections on past\n"
+            "interactions — what worked, what didn't, patterns noticed.\n"
+            "Nothing writes here automatically; use memory_write when a\n"
+            "reflection is worth keeping.\n"
+            "NOT loaded every turn — only MEMORY.md is. Link anything here\n"
+            "that should actually influence future turns under MEMORY.md's\n"
+            "Topic files section, the same way any other memory file is\n"
+            "surfaced on demand.\n"
+            "---\n\n"
+            "# Reflection\n"
+        ),
+    ),
+    "HEARTBEAT.md": (
+        (
+            "---\n"
+            "Purpose: A running log of what Sage did during heartbeat runs —\n"
+            "tasks checked, reminders sent, actions taken, anomalies noticed.\n"
+            "Sage writes here after every heartbeat. Do not edit manually.\n"
+            "Read this to understand what happened while the user was away.\n"
+            "---\n"
+        ),
+    ),
+}
+
+
+def default_context_scaffold_variants(filename: str) -> Tuple[str, ...]:
+    """Every text that counts as "the untouched scaffold" for ``filename``,
+    STRIPPED, current first.
+
+    One accessor so the three call sites that ask this question
+    (is_default_context_content here, plus the two prompt-assembly helpers in
+    workspace_context_memory_adapter and unified_memory_service) cannot drift
+    into three different answers -- which is exactly how a file holding the
+    pre-rename scaffold would end up injected into a prompt by one reader and
+    skipped by another."""
+    name = str(filename or "").strip()
+    current = DEFAULT_CONTEXT_FILE_CONTENTS.get(name)
+    variants = [] if current is None else [str(current).strip()]
+    for legacy in _LEGACY_DEFAULT_CONTEXT_FILE_CONTENTS.get(name, ()):
+        stripped = str(legacy).strip()
+        if stripped and stripped not in variants:
+            variants.append(stripped)
+    return tuple(variants)
 
 
 class WorkspaceContextRustGateError(RuntimeError):
@@ -869,8 +994,14 @@ def is_default_context_content(filename: str, content: str) -> bool:
     ``filename`` (see DEFAULT_CONTEXT_FILE_CONTENTS / ensure_workspace_context_files)
     — i.e. the owner has never actually written to this file. Any edit at all,
     even trivial, flips this False, so callers never need a separate stored
-    flag that could drift from the real content."""
-    default = DEFAULT_CONTEXT_FILE_CONTENTS.get(filename)
-    if default is None:
+    flag that could drift from the real content.
+
+    Accepts the pre-rename scaffold text too — see
+    _LEGACY_DEFAULT_CONTEXT_FILE_CONTENTS. A file written before the
+    assistant's name was removed is still an untouched scaffold; the owner
+    did not write it just because we changed the wording underneath them."""
+    variants = default_context_scaffold_variants(filename)
+    if not variants:
         return False
-    return str(content or "") == default.strip() + "\n"
+    actual = str(content or "")
+    return any(actual == variant + "\n" for variant in variants)

@@ -1,6 +1,6 @@
 ---
 name: vision-monitor
-description: Monitors a physical space using camera snapshots from a connected device and reports what is visible or what changed. Use when the user asks Sage to watch a room, check a camera, or describe what a connected camera currently sees.
+description: Monitors a physical space using camera snapshots from a connected device and reports what is visible or what changed. Use when the user asks you to watch a room, check a camera, or describe what a connected camera currently sees.
 skill_class: system
 execution_mode: live
 action_class: read

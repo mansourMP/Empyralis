@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, MessagesSquare } from "lucide-react";
 
 import { useFleetAgents } from "./fleet-data";
-import { findSageAgent, timeAgo } from "./fleet-presentation";
+import { agentDisplayLabel, timeAgo, WORKSPACE_ASSISTANT_LABEL } from "./fleet-presentation";
 import { MarkdownLiteText } from "@/lib/workspace/markdown-lite";
 import { FleetChatSkeleton } from "./fleet-states";
 
@@ -106,14 +106,20 @@ function prettySender(sender: string): string {
 
 export function ConversationsView({ workspaceId }: { workspaceId: string }) {
   const { agents } = useFleetAgents(workspaceId);
-  const sageAgent = useMemo(() => findSageAgent(agents), [agents]);
   const agentLabel = useCallback(
     (agentId: string): string => {
-      if (!agentId) return sageAgent?.label || "Ask AI";
+      // Always "Ask AI" — never the master install's STORED label. Existing
+      // workspaces still carry "Sage" in that column (a persisted value, not
+      // a name), and the assistant's customer-facing name is Ask AI. Looking
+      // the install up to read its label is what put the old name on screen.
+      if (!agentId) return WORKSPACE_ASSISTANT_LABEL;
       const a = agents.find((x) => x.agent_id === agentId);
-      return a?.label || "Unnamed agent";
+      // agentDisplayLabel, never a.label: a conversation that DOES carry the
+      // master install's id hits this branch, and its stored label is the
+      // old persona name on every workspace created before 2026-08-28.
+      return agentDisplayLabel(a);
     },
-    [agents, sageAgent],
+    [agents],
   );
 
   const listUrl = `/api/w/${encodeURIComponent(workspaceId)}/conversations`;

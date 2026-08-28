@@ -7,7 +7,7 @@ import { useParams } from "next/navigation";
 import { BarChart3 } from "lucide-react";
 
 import { useFleetAgents } from "@/lib/workspace/fleet/fleet-data";
-import { formatNumber, tintKeyForIndex, TINTS, usagePayerLabel, type UsageMatrixRow } from "@/lib/workspace/fleet/fleet-presentation";
+import { agentDisplayLabel, formatNumber, tintKeyForIndex, TINTS, usagePayerLabel, type UsageMatrixRow } from "@/lib/workspace/fleet/fleet-presentation";
 import { MultiSeriesChart, type ChartSeries } from "@/lib/workspace/fleet/fleet-sparkline";
 import { FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import { HeaderAction } from "@/lib/workspace/fleet/Breadcrumbs";
@@ -197,7 +197,7 @@ export default function UsagePage() {
           events: Number(b.events) || 0,
         });
       }
-      return { agentId: a.agent_id, label: a.label || "Unnamed agent", color: TINTS[tintKeyForIndex(i)].fg, byDate };
+      return { agentId: a.agent_id, label: agentDisplayLabel(a), color: TINTS[tintKeyForIndex(i)].fg, byDate };
     }),
     [agents, bucketsByAgent],
   );
@@ -234,7 +234,7 @@ export default function UsagePage() {
   const hasAnyUsage = legend.length > 0;
 
   const agentLabelById = useMemo(
-    () => new Map(agents.map((a) => [a.agent_id, a.label || "Unnamed agent"])),
+    () => new Map(agents.map((a) => [a.agent_id, agentDisplayLabel(a)])),
     [agents],
   );
   const matrixRows = useMemo(

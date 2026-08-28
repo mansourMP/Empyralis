@@ -93,6 +93,28 @@ final class AgentDecodingTests: XCTestCase {
         XCTAssertEqual(decoded.agents.first?.displayName, "Release Scout")
     }
 
+    /// The workspace assistant prints as "Ask AI", never as its stored label.
+    ///
+    /// This asserts against the REAL captured row above — `"label": "Sage"`,
+    /// `"agent_kind": "master"` — which is what a live backend still returns
+    /// for every workspace created before 2026-08-28. `label` is deliberately
+    /// still asserted as the raw value: the stored column is data and must NOT
+    /// be quietly rewritten, so the whole fix is that `displayName` is the
+    /// only thing a render site is allowed to print.
+    func testTheWorkspaceAssistantNeverPrintsItsStoredLabel() throws {
+        let decoded = try JSONDecoder().decode(AgentsResponse.self, from: liveAgentsPayload)
+        let master = decoded.agents.first { $0.agentKind == "master" }
+        XCTAssertNotNil(master, "the captured payload carries the master install")
+        XCTAssertEqual(master?.label, "Sage", "the stored column is untouched — this is data")
+        XCTAssertEqual(master?.displayName, "Ask AI")
+
+        // The exemption must not be too WIDE: an ordinary specialist keeps
+        // its own name. A test that only checked the master would pass just
+        // as happily if displayName returned "Ask AI" for everything.
+        let specialist = decoded.agents.first { $0.label == "Billing Watcher" }
+        XCTAssertEqual(specialist?.displayName, "Billing Watcher")
+    }
+
     /// The route sends NO `id` key. Proving its absence is the whole point —
     /// a test written against a payload that happens to carry both keys
     /// would pass under the original bug.

@@ -5183,7 +5183,9 @@ async def _apply_fresh_session_context_policy(
         new_session_id = await session_service.create_session(
             workspace_id=workspace_id,
             tenant_id=tenant_id,
-            actor={"id": "sage", "display_name": "Sage"},
+            # `id` stays: it is a persisted actor key on runtime_sessions rows.
+            # `display_name` is what a person reads, so it carries no name.
+            actor={"id": "sage", "display_name": "Assistant"},
             channel="sage",
             metadata={
                 "thread_id": thread_id,
