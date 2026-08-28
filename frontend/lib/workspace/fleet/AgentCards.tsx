@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import Link from "next/link";
 
 import { type FleetAgent, type FleetTask } from "./fleet-data";
@@ -29,6 +29,13 @@ import "./agent-cards.css";
  * for — the same shape a project already has: a list, then the thing.
  *
  * NO COMPOSER, NO CHAT, NOWHERE. Conversation happens in channels.
+ *
+ * THE SEARCH BOX IS NOT IN HERE — the page owns it (agents/page.tsx), because
+ * as of 2026-08-29 this grid is one of three layouts and a filter that only
+ * exists on one of them is a control that disappears when you switch view.
+ * `query` arrives as a prop and this component still applies it through the
+ * same planAgentCards call it always did, so the rule that decides which
+ * agents survive is unchanged and still lives in agent-card-face.ts.
  */
 /**
  * The loading placeholder, in the REAL grid and the REAL card class — so the
@@ -59,6 +66,7 @@ export function AgentCards({
   agents,
   tasks,
   gateways,
+  query,
 }: {
   workspaceId: string;
   /** Sage/the Operator already excluded by the caller — the same exclusion
@@ -70,8 +78,11 @@ export function AgentCards({
   /** Paired boxes, so a brain-bound agent's status is the honest one
    *  (Needs sign-in / Computer offline) rather than a bare "Ready". */
   gateways: FleetGateway[];
+  /** The page's own search text — see the file header. "" matches everything
+   *  (matchesAgentCardQuery's own rule), so a caller that renders no search
+   *  box passes "" and this grid behaves exactly as it did before. */
+  query: string;
 }) {
-  const [query, setQuery] = useState("");
   const base = `/w/${encodeURIComponent(workspaceId)}`;
 
   // Bucketed ONCE for the whole grid, not per card — see groupTasksByAgent.
@@ -81,28 +92,8 @@ export function AgentCards({
     [agents, gateways, tasksByAgent, query],
   );
 
-  // A filter earns its place once there is enough to filter. Below that it is
-  // a control with nothing to do, on a surface whose whole complaint was
-  // chrome that did not pay for itself. Keyed on the REAL agent count, not on
-  // the filtered result, or typing a query that matches nothing would delete
-  // the only control that can undo it.
-  const showsSearch = agents.length >= 8;
-
   return (
     <>
-      {showsSearch && (
-        <div className="fleet-agent-card-search">
-          <input
-            type="text"
-            className="fleet-wizard-input"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search agents"
-            aria-label="Search agents"
-          />
-        </div>
-      )}
-
       {cards.length === 0 ? (
         <div className="fleet-agent-card-none">No agents match “{query.trim()}”.</div>
       ) : (

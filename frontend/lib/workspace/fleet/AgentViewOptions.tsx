@@ -10,40 +10,49 @@
  * name is its own (`.fleet-agent-view-options*`), and it imports nothing
  * from task-view-options.ts or TaskViewOptions.tsx.
  *
- * TWO DELIBERATE DIFFERENCES FROM TaskViewOptions.tsx, both because the
- * Agents page already had real, working filter/sort controls before this
- * feature existed (FleetToolbar's "Filter and sort" popover — project/
- * status/channel filters, a 5-option sort dropdown) that tasks never had:
+ * THREE LAYOUTS, NOT TWO, AND CARDS LEADS. The card grid is this page's
+ * settled default (agent-card-face.ts), so it is a layout you can switch back
+ * TO, not an absence you fall into — spelling it as "List with no grouping"
+ * is what used to make the "List" chip light up over a grid of cards. The
+ * three come from AGENT_LAYOUT_OPTIONS rather than being typed here, so this
+ * popover and readAgentViewOptions' accepted-value list cannot disagree.
  *
- *   1. ORDERING is hidden while the flat table (List layout, no grouping) is
- *      on screen. It has nothing to act on there — the flat table keeps
- *      using its own pre-existing "Sort by" dropdown unchanged, exactly as
- *      it did before this feature shipped. Showing this popover's Ordering
- *      row at the same time would be a second, confusing "sort" control
- *      with a different, smaller vocabulary (last active/cost/name against
- *      the legacy dropdown's five). It appears only once it has real effect
- *      — Board, or List with a grouping selected — same "no dead controls"
- *      reasoning TaskViewOptions.tsx already applies to Grouping-in-Board.
- *   2. Display properties is skipped entirely (not rendered with an empty
- *      chip row) on the flat table, for the same reason: those six columns
- *      are not toggleable there, they're the ones AgentsList.tsx has always
- *      drawn unconditionally.
+ * WHAT THE CARDS LAYOUT OFFERS BELOW LAYOUT: nothing, and that is the point.
  *
- * This popover's own trigger sits BESIDE FleetToolbar's, both pinned to the
- * row's right edge — see the small `.fleet-agent-view-cluster` wrapper added
- * in agents/page.tsx and its own note in fleet-theme.css for why a wrapper
- * was needed rather than reusing `.fleet-view-options`' auto-margin rule
- * (that rule assumes exactly one right-aligned cluster per row, which was
- * true on every page it already served — TaskViewOptions and FleetToolbar
- * are mutually exclusive tabs on the project page — and is no longer true
- * here, where both are visible at once).
+ *   · GROUPING is a List concept. The Board's four columns already ARE the
+ *     "status" grouping, always on, and a card grid has no sections at all —
+ *     so on both, a grouping picker would be a control that does nothing (the
+ *     same rule task-view-options.ts states for Grouping-in-Board).
+ *   · ORDERING is hidden on Cards because that grid has its OWN settled
+ *     ordering: planAgentCards ranks by attention (blocked > working >
+ *     unfinished setup > stopped > healthy), which CLAUDE.md records as a
+ *     decision — "never recency... a card's position is stable". A cost/name
+ *     sort there would either silently override that or do nothing, and both
+ *     are worse than not offering it.
+ *   · DISPLAY PROPERTIES is skipped entirely (never rendered as an empty chip
+ *     row) on Cards, because a card face is two facts and refuses a third —
+ *     there is nothing on it those six toggles could show or hide.
+ *
+ * So on Cards this popover is the layout switch and nothing else; every other
+ * row appears exactly when the layout on screen gives it something to act on,
+ * and is never rendered disabled.
+ *
+ * WHERE THE TRIGGER SITS: in the Agents page's own single toolbar row, pinned
+ * right, with the agent search pinned left (.fleet-agent-surface-toolbar,
+ * agent-cards.css). It no longer shares that row with FleetToolbar — the
+ * filter/sort/properties cluster this page used to carry went with the flat
+ * table in the 2026-08-22 card-grid redesign — so the `.fleet-agent-view-
+ * cluster` wrapper that existed only to stop two auto-margined children
+ * fighting over the row's free space is deleted with it, and this component's
+ * own root carries the popover's positioning context instead.
  */
 
 import { useEffect, useId, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, LayoutGrid, Rows3, Settings2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Columns3, LayoutGrid, Rows3, Settings2 } from "lucide-react";
 
 import {
   AGENT_GROUPING_OPTIONS,
+  AGENT_LAYOUT_OPTIONS,
   AGENT_ORDERING_DEFAULT_DIRECTION,
   AGENT_ORDERING_OPTIONS,
   agentSurfaceFor,
@@ -52,9 +61,20 @@ import {
   orderDirectionLabel,
   resetAgentViewOptions,
   type AgentGrouping,
+  type AgentLayout,
   type AgentOrdering,
   type AgentViewOptions as AgentViewOptionsState,
 } from "./agent-view-options";
+
+/** One mark per layout, keyed off the shared vocabulary so a layout added to
+ *  AGENT_LAYOUT_OPTIONS without a mark here is a compile error rather than a
+ *  blank button. LayoutGrid is the card grid (what it draws), Columns3 the
+ *  board, Rows3 the list. */
+const LAYOUT_ICON: Record<AgentLayout, typeof LayoutGrid> = {
+  cards: LayoutGrid,
+  board: Columns3,
+  list: Rows3,
+};
 
 export function AgentViewOptions({
   options,
@@ -92,14 +112,10 @@ export function AgentViewOptions({
   const surface = agentSurfaceFor(options);
   const properties = displayPropertiesFor(surface);
   const dirty = !isDefaultAgentViewOptions(options);
-  // Grouping is a LIST concept — the Board's four columns already ARE the
-  // "status" grouping, always on, so offering a second way to pick it there
-  // would be a control that does nothing (see task-view-options.ts's own
-  // identical rule for the Board/Grouping split).
+  // Both are in the file header. Each row renders exactly when the layout on
+  // screen gives it something to act on — never rendered and inert.
   const showGrouping = options.layout === "list";
-  // Ordering has nothing to act on while the flat, ungrouped table is on
-  // screen — see the file header.
-  const showOrdering = surface !== "list";
+  const showOrdering = options.layout !== "cards";
 
   return (
     <div className="fleet-agent-view-options" ref={ref}>
@@ -118,22 +134,25 @@ export function AgentViewOptions({
         <div className="fleet-toolbar-popover fleet-agent-view-options-popover">
           {/* Layout leads the popover, exactly like TaskViewOptions — every
               control that reshapes the view lives behind this one icon, so
-              the toolbar row keeps one stable shape whether Board or List is
+              the toolbar row keeps one stable shape whichever layout is
               active. */}
           <div className="fleet-agent-view-options-layout" role="tablist" aria-label="Agent layout">
-            {(["board", "list"] as const).map((v) => (
-              <button
-                key={v}
-                type="button"
-                role="tab"
-                aria-selected={options.layout === v}
-                className={`fleet-agent-view-options-layout-btn${options.layout === v ? " is-active" : ""}`}
-                onClick={() => onChange((prev) => ({ ...prev, layout: v }))}
-              >
-                {v === "board" ? <LayoutGrid size={14} strokeWidth={1.75} /> : <Rows3 size={14} strokeWidth={1.75} />}
-                {v === "board" ? "Board" : "List"}
-              </button>
-            ))}
+            {AGENT_LAYOUT_OPTIONS.map((option) => {
+              const Icon = LAYOUT_ICON[option.value];
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  role="tab"
+                  aria-selected={options.layout === option.value}
+                  className={`fleet-agent-view-options-layout-btn${options.layout === option.value ? " is-active" : ""}`}
+                  onClick={() => onChange((prev) => ({ ...prev, layout: option.value }))}
+                >
+                  <Icon size={14} strokeWidth={1.75} />
+                  {option.label}
+                </button>
+              );
+            })}
           </div>
 
           {showGrouping && (

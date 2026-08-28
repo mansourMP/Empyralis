@@ -1,13 +1,32 @@
 "use client";
 
 /**
- * The workspace Agents page's grouped list — the List layout with a grouping
- * applied (status / project / hardware placement), rendered as collapsible
- * sections instead of the flat table. A PARALLEL build to
+ * The workspace Agents page's LIST layout — one row per agent, in collapsible
+ * sections when a grouping is on (status / project / hardware placement) and
+ * as a plain run of rows when it is not. A PARALLEL build to
  * TasksGroupedList.tsx, not a shared/generalized version of it — see
  * agent-view-options.ts's file header for why. Nothing here imports from
- * task-view-options.ts or Tasks*.tsx; the flat table itself (AgentsList.tsx)
- * is untouched and is what still renders whenever grouping is "none".
+ * task-view-options.ts or Tasks*.tsx.
+ *
+ * IT RENDERS grouping: "none" TOO, and draws NO heading for it. groupAgents
+ * answers that case with one synthetic bucket holding every agent
+ * (`ungrouped: true`); a heading over it would name the only thing on screen,
+ * and its collapse control's one effect would be to hide the entire list —
+ * chrome that does not pay for itself, and a control whose own label admits
+ * it does nothing. The rows are the list. (This used to be the flat table's
+ * job; that table lost its last caller in the 2026-08-22 card-grid redesign,
+ * and reviving a third rendering to serve one value of one dropdown would be
+ * two lists that must never drift instead of one.)
+ *
+ * A ROW'S SECOND LINE IS agent-card-face.ts's REACH, and it used to be
+ * `activity_preview` — a LIFECYCLE VERB, true of every agent that has ever
+ * existed, so a column of it distinguishes nothing. That is the exact finding
+ * behind the card grid one layout away. Reach is what differs: the task it is
+ * on > tasks waiting > where it answers > neither. Imported from that module
+ * rather than reimplemented, so a row here and a card there cannot say
+ * different things about one agent. Text only, no channel mark: this row has
+ * a Channels cell of its own (display.channels, with the icon), and drawing
+ * one channel twice across one row is noise.
  *
  * GROUPING BY. "status" reuses the exact same four buckets the Board draws
  * (agentStatusGroup — see agent-view-options.ts); "project" is the reason
@@ -36,9 +55,9 @@ import { ChevronRight } from "lucide-react";
 
 import {
   AGENT_PLACEMENT_LABELS,
-  agentActivityPreviewText,
   agentBrainLabel,
   agentDisplayStatus,
+  agentPresetBadge,
   agentMoney,
   agentPlacementCategory,
   groupAgents,
@@ -48,6 +67,7 @@ import {
   type AgentGrouping,
   type AgentStatusGroup,
 } from "./agent-view-options";
+import { agentCardReach, type AgentCardTaskInput } from "./agent-card-face";
 import { resolveHardwarePlacement, type FleetGateway } from "./gateway-box-picker";
 import { AgentSigil, StatusDot } from "./fleet-indicators";
 import { ProjectIcon } from "./fleet-project-identity";
@@ -123,12 +143,13 @@ export function AgentsGroupedList({
    *  is needed (folding an in-progress task into "Working", the same
    *  agentDisplayStatus/agentStatusGroup enrichment used there, so the
    *  "status" grouping and each row's own status cell agree with the Board
-   *  and the card grid instead of a fourth opinion on the same fact). */
-  tasksByAgent: Map<string, { status?: string | null }[]>;
+   *  and the card grid instead of a fourth opinion on the same fact). Also
+   *  what agentCardReach reads for each row's second line. */
+  tasksByAgent: Map<string, AgentCardTaskInput[]>;
   projectById?: Map<string, FleetProject>;
-  /** "none" never reaches this component — the page renders AgentsList (the
-   *  flat table) for it. */
-  grouping: Exclude<AgentGrouping, "none">;
+  /** Every value, "none" included — see the file header for why that case is
+   *  this component's job rather than a third rendering's. */
+  grouping: AgentGrouping;
   display: AgentDisplayState;
   onSelect: (agentId: string, projectId: string) => void;
 }) {
@@ -173,22 +194,27 @@ export function AgentsGroupedList({
   return (
     <div className="fleet-agent-glist">
       {sections.map((section) => {
-        const isCollapsed = collapsed.includes(section.key);
+        // The synthetic no-grouping bucket has no heading, so it can never be
+        // collapsed either — a collapse whose only effect is to hide every row
+        // on the page is not a state to leave a reader stranded in.
+        const isCollapsed = !section.ungrouped && collapsed.includes(section.key);
         return (
           <section key={section.key} className="fleet-agent-glist-section" aria-label={section.label}>
-            <header className="fleet-agent-glist-header">
-              <button
-                type="button"
-                className="fleet-agent-glist-header-btn"
-                aria-expanded={!isCollapsed}
-                onClick={() => toggleCollapsed(section.key)}
-              >
-                <ChevronRight size={13} strokeWidth={2.25} className="fleet-agent-glist-chevron" />
-                <SectionGlyph section={section} projectById={projectById} />
-                <span className="fleet-agent-glist-header-title">{section.label}</span>
-                <span className="fleet-agent-glist-header-count">{section.count}</span>
-              </button>
-            </header>
+            {section.ungrouped ? null : (
+              <header className="fleet-agent-glist-header">
+                <button
+                  type="button"
+                  className="fleet-agent-glist-header-btn"
+                  aria-expanded={!isCollapsed}
+                  onClick={() => toggleCollapsed(section.key)}
+                >
+                  <ChevronRight size={13} strokeWidth={2.25} className="fleet-agent-glist-chevron" />
+                  <SectionGlyph section={section} projectById={projectById} />
+                  <span className="fleet-agent-glist-header-title">{section.label}</span>
+                  <span className="fleet-agent-glist-header-count">{section.count}</span>
+                </button>
+              </header>
+            )}
 
             {isCollapsed ? null : (
               <div className="fleet-agent-glist-rows">
@@ -246,13 +272,13 @@ function AgentGroupedRow({
   cost: number;
   /** This one agent's own tasks — see AgentsGroupedList's own tasksByAgent
    *  doc. */
-  tasks: { status?: string | null }[];
+  tasks: AgentCardTaskInput[];
   display: AgentDisplayState;
   rowStyle: CSSProperties;
   onSelect: (agentId: string, projectId: string) => void;
 }) {
-  const presetRaw = (agent.capability_preset || "").toLowerCase().replace(/_/g, " ");
-  const preset = presetRaw ? presetRaw.charAt(0).toUpperCase() + presetRaw.slice(1) : "";
+  // "" for the default preset — see agentPresetBadge.
+  const preset = agentPresetBadge(agent.capability_preset);
   // Enriched, not the bare deriveAgentStatus — see agentDisplayStatus's own
   // doc comment and AgentsBoard.tsx's identical line.
   const st = agentDisplayStatus(agent, gateways, tasks);
@@ -285,10 +311,17 @@ function AgentGroupedRow({
         <AgentSigil seed={agent.agent_id} size={14} />
       </span>
 
+      {/* Two LINES in a column, and the badge belongs on the first one. It used
+          to be the cell's own third child, which in a column flex gave it a
+          full-width line of its own between the name and the reach — measured
+          live at 1680x1050 before this wrapper, and it is why a 44px row was
+          rendering 58px tall. */}
       <span className="fleet-agent-glist-cell-title">
-        <span className="fleet-agent-glist-cell-name">{agent.label || "Unnamed agent"}</span>
-        {preset ? <span className="fleet-badge fleet-badge--preset">{preset}</span> : null}
-        <span className="fleet-agent-glist-cell-preview">{agentActivityPreviewText(agent)}</span>
+        <span className="fleet-agent-glist-cell-heading">
+          <span className="fleet-agent-glist-cell-name">{agent.label || "Unnamed agent"}</span>
+          {preset ? <span className="fleet-badge fleet-badge--preset">{preset}</span> : null}
+        </span>
+        <span className="fleet-agent-glist-cell-preview">{agentCardReach(agent, tasks).label}</span>
       </span>
 
       {display.brain ? (

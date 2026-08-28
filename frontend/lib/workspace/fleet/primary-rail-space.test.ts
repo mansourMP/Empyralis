@@ -14,15 +14,21 @@
  * claim about, and the rule they composed (planAgentCountShape) keeps its
  * own test.
  *
- * UPDATED 2026-08-23, then REVERTED 2026-08-28 (MAN-370) — the assertion
- * below briefly flipped to REQUIRE AgentsBoard/AgentsGroupedList/
- * AgentViewOptions to be imported, once 78e3eabd wired them in as an opt-in
- * view. That wiring reintroduced `agentActivityPreviewText` (the lifecycle-
- * verb line "THE AGENTS SURFACE IS CARDS", CLAUDE.md 2026-08-22, documents
- * the founder rejecting), and produced a live report of two disagreeing
- * Agents layouts on one screen. Unwired again in agents/page.tsx — see that
- * file's own "MAN-370, 2026-08-28" header for the full reasoning — so this
- * guard is back to banning the import, exactly as it read before 78e3eabd.
+ * THE AGENTS VIEW-OPTIONS ASSERTION HAS FLIPPED THREE TIMES; read the whole
+ * history before flipping it a fourth. It banned importing AgentsBoard/
+ * AgentsGroupedList/AgentViewOptions (they were only reachable through a
+ * deleted rail space, so an import could only be an accidental resurrection);
+ * required them (78e3eabd wired them in as a real opt-in view); banned them
+ * again (MAN-370 — that wiring shipped `agentActivityPreviewText`, the
+ * lifecycle-verb line CLAUDE.md records the founder rejecting, one click from
+ * the grid built to replace it); and now REQUIRES them again, because the
+ * founder asked for the views back by name and the lifecycle verb is deleted
+ * at the source rather than hidden behind an unwired import.
+ *
+ * What was constant through all four states, and is the only thing this file
+ * is really about, is that the AGENTS PICKER IS NEVER ON THE RAIL. None of
+ * these layouts touches the rail; they are three renderings inside the content
+ * area, and exactly one is on screen at a time.
  *
  * Run: npx tsx lib/workspace/fleet/primary-rail-space.test.ts
  */
@@ -315,15 +321,25 @@ assert(
   !/Pick an agent to watch it work/.test(agentsPageSource),
   "…and no longer prompts a pick, which only ever made sense beside the deleted column",
 );
-// REVERTED 2026-08-28 (MAN-370, see this file's own header): back to
-// banning the import outright. 78e3eabd's brief opt-in wiring reintroduced
-// the lifecycle-verb row "THE AGENTS SURFACE IS CARDS" documents the founder
-// rejecting, and produced a live report of two disagreeing Agents layouts —
-// agents/page.tsx no longer imports any of the three, and this assertion is
-// what makes a future re-wiring fail loudly instead of silently.
+// RESTORED 2026-08-29 on the founder's own ask (see this file's header for
+// the full flip history, and agents/page.tsx's own header for his words).
+// Built-and-never-wired is this codebase's most common defect, so the three
+// components are asserted to be IMPORTED AND RENDERED, not merely importable.
+for (const component of ["AgentsBoard", "AgentsGroupedList", "AgentViewOptions"] as const) {
+  assert(
+    agentsPageSource.includes(`from "@/lib/workspace/fleet/${component}"`),
+    `the workspace Agents index imports ${component} — the founder asked for these views back`,
+  );
+  assert(
+    new RegExp(`<${component}\\b`).test(agentsPageSource),
+    `…and RENDERS it, rather than importing it and never reaching the branch`,
+  );
+}
+// The default must still be the card grid. A layout switch that quietly moved
+// everyone off the settled surface would satisfy every assertion above.
 assert(
-  !/from ["']@\/lib\/workspace\/fleet\/(AgentsBoard|AgentsGroupedList|AgentViewOptions)["']/.test(agentsPageSource),
-  "the workspace Agents index no longer IMPORTS the fleet-management surfaces that were already unreachable behind the old rail-space gate (mentioning them in prose, e.g. explaining they're now orphaned, is fine — this only bans a live import)",
+  /DEFAULT_AGENT_VIEW_OPTIONS/.test(agentsPageSource) && /readAgentViewOptions\s*\(/.test(agentsPageSource),
+  "the layout comes from the shared, persisted vocabulary — not a second opinion grown on the page",
 );
 
 // And the in-content sidebar is actually GONE: SettingsShell must not render
