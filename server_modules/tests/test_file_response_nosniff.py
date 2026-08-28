@@ -9,7 +9,7 @@ accepted image. These files are served straight back by FileResponse; an SVG
 carries script and would execute on the workspace's own origin." That
 reasoning covers the WRITE side (the extension allowlist) but the four
 `FileResponse(...)` call sites that actually serve a file back — three in
-`agent_workspace_api.py`, one in `sage_context_files_api.py` — built the
+`agent_workspace_api.py`, one in `assistant_context_files_api.py` — built the
 response with no `X-Content-Type-Options` header at all, so a browser was
 free to MIME-sniff the body instead of trusting the declared Content-Type.
 Verified live against a real e2e stack (2026-08-13, frontend/attachment
@@ -85,7 +85,7 @@ class NoDirectFileResponseCallTests(unittest.TestCase):
         helper that itself skips the wrapper) is still caught."""
         expected = {
             "agent_workspace_api.py": 3,
-            "sage_context_files_api.py": 1,
+            "assistant_context_files_api.py": 1,
         }
         for filename, expected_count in expected.items():
             path = _SERVER_MODULES_ROOT / filename

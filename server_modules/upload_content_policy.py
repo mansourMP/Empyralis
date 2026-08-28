@@ -55,8 +55,8 @@ ALLOWED_TEXT_EXTENSIONS = frozenset({".txt", ".text", ".md", ".markdown", ".csv"
 ALLOWED_IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".heif"})
 ALLOWED_EXTENSIONS = frozenset(ALLOWED_TEXT_EXTENSIONS | ALLOWED_IMAGE_EXTENSIONS)
 
-# 32MB, the cap sage_chat_api.py already declared. The live registration of
-# that route (sage_context_files_api.py -- registered FIRST on the same path,
+# 32MB, the cap assistant_chat_api.py already declared. The live registration of
+# that route (assistant_context_files_api.py -- registered FIRST on the same path,
 # so it is the one FastAPI serves) had no cap at all.
 MAX_UPLOAD_BYTES = 32 * 1024 * 1024
 

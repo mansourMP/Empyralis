@@ -14,7 +14,7 @@ object at the moment it is written:
 
     chat_attachment   POST /api/sage-chat/attachments -- the only multipart
                       upload route in the product (registered twice; see
-                      sage_context_files_api.py's own comment on which
+                      assistant_context_files_api.py's own comment on which
                       registration FastAPI actually serves). Real customer
                       bytes, written to workspace_attachments_dir, served
                       back out by FileResponse.

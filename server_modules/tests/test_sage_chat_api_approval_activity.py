@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from server_modules import sage_chat_api
+from server_modules import assistant_chat_api
 
 
 class SageChatApiApprovalActivityTests(unittest.IsolatedAsyncioTestCase):
@@ -13,19 +13,19 @@ class SageChatApiApprovalActivityTests(unittest.IsolatedAsyncioTestCase):
                 "ws_1": {"tenant_id": "tenant_ws_1"},
             }
         }
-        resolved = sage_chat_api._resolve_tenant_id(current_user, "ws_1")
+        resolved = assistant_chat_api._resolve_tenant_id(current_user, "ws_1")
         self.assertEqual(resolved, "tenant_ws_1")
 
     def test_resolve_tenant_id_falls_back_to_default(self):
-        resolved = sage_chat_api._resolve_tenant_id({}, "ws_missing")
+        resolved = assistant_chat_api._resolve_tenant_id({}, "ws_missing")
         self.assertEqual(resolved, "default")
 
     async def test_emit_approval_activity_appends_timeline_event(self):
         with patch(
-            "server_modules.sage_chat_api.activity_ledger_service.append_activity_event",
+            "server_modules.assistant_chat_api.activity_ledger_service.append_activity_event",
             new=AsyncMock(),
         ) as mock_append:
-            await sage_chat_api._emit_approval_activity(
+            await assistant_chat_api._emit_approval_activity(
                 action="sage_approval_resolved",
                 status="approved",
                 approval_token="sap_test",
@@ -49,10 +49,10 @@ class SageChatApiApprovalActivityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_emit_approval_activity_swallow_failures(self):
         with patch(
-            "server_modules.sage_chat_api.activity_ledger_service.append_activity_event",
+            "server_modules.assistant_chat_api.activity_ledger_service.append_activity_event",
             new=AsyncMock(side_effect=RuntimeError("write failed")),
         ):
-            await sage_chat_api._emit_approval_activity(
+            await assistant_chat_api._emit_approval_activity(
                 action="sage_approval_executed",
                 status="completed",
                 approval_token="sap_test",

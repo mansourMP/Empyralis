@@ -4,7 +4,7 @@ import types
 import unittest
 from unittest.mock import patch
 
-from server_modules import sage_context_files_api
+from server_modules import assistant_context_files_api
 
 
 class _FakeUploadFile:
@@ -68,7 +68,7 @@ class SageContextFilesApiTaxonomyRemovalTests(unittest.TestCase):
             else sys.modules.__setitem__("server", previous_server)
         )
         app = _FakeApp()
-        sage_context_files_api.register_sage_context_file_routes(app)
+        assistant_context_files_api.register_assistant_context_file_routes(app)
         return app
 
     def test_context_file_routes_are_not_registered(self) -> None:
@@ -83,8 +83,8 @@ class SageContextFilesApiTaxonomyRemovalTests(unittest.TestCase):
 
         upload_route = app.routes[("POST", "/api/sage-chat/attachments")]
         with (
-            patch("server_modules.sage_context_files_api.enforce_workspace_access", return_value="workspace-1"),
-            patch("server_modules.sage_context_files_api.workspace_tenant_id", return_value="tenant-1"),
+            patch("server_modules.assistant_context_files_api.enforce_workspace_access", return_value="workspace-1"),
+            patch("server_modules.assistant_context_files_api.workspace_tenant_id", return_value="tenant-1"),
         ):
             payload = asyncio.run(
                 upload_route(

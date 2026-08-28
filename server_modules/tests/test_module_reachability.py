@@ -289,7 +289,7 @@ ALLOWLISTED_ORPHANS: dict[str, str] = {
         "audit-silent-failures.md H1."
     ),
     # --- H2: the dreaming/memory-relief pipeline that never runs ---
-    "sage_dreaming_pipeline.py": (
+    "dreaming_pipeline.py": (
         "Built to relieve the 50-entry Sage memory cap (SAGE_MEMORY_ENTRY_LIMIT) "
         "but never called from any scheduler/route/command dispatcher. "
         "audit-silent-failures.md H2."
@@ -342,7 +342,7 @@ def test_no_new_reachability_orphans() -> None:
     outside itself) must be in ALLOWLISTED_ORPHANS above -- a reviewed,
     deliberate exception -- or this fails with the exact new orphan(s)
     named, so they can't land silently the way mini_apps_service.py,
-    sage_dreaming_pipeline.py, and retention_enforcement_job.py all did.
+    dreaming_pipeline.py, and retention_enforcement_job.py all did.
     """
     orphan_keys, existing_basenames = _repo_orphans()
     assert existing_basenames, "sanity check: found zero server_modules/*.py files -- path resolution is broken"

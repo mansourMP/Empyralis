@@ -3,11 +3,11 @@ from fastapi import APIRouter
 from server_modules.assistant_health_api import register_sage_heartbeat_routes
 from server_modules.app_registry_api import register_app_registry_routes
 from server_modules.assistant_memory_api import register_sage_memory_routes
-from server_modules.sage_context_files_api import register_sage_context_file_routes
+from server_modules.assistant_context_files_api import register_assistant_context_file_routes
 from server_modules.assistant_profile_api import register_sage_profile_routes
 from server_modules.assistant_skills_api import register_sage_skills_routes
 from server_modules.assistant_services_api import register_sage_services_routes
-from server_modules.sage_chat_api import register_sage_chat_routes
+from server_modules.assistant_chat_api import register_assistant_chat_routes
 from server_modules.workflow_api import register_workflow_routes
 
 
@@ -15,10 +15,10 @@ router = APIRouter()
 
 register_app_registry_routes(router)
 register_sage_heartbeat_routes(router)
-register_sage_context_file_routes(router)
+register_assistant_context_file_routes(router)
 register_sage_memory_routes(router)
 register_sage_profile_routes(router)
 register_sage_skills_routes(router)
 register_sage_services_routes(router)
-register_sage_chat_routes(router)
+register_assistant_chat_routes(router)
 register_workflow_routes(router)

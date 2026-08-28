@@ -11,7 +11,7 @@ from server_modules.runtime_common import require_member_api_key, require_viewer
 from server_modules.workspace_context import workspace_attachments_dir
 
 
-def register_sage_context_file_routes(app) -> None:
+def register_assistant_context_file_routes(app) -> None:
     # Founder ruling (2026-07-23, final): the two SOUL.md/MEMORY.md/GOALS.md/
     # etc. "context file" routes that used to live here (GET
     # /api/sage-context-files, PATCH /api/sage-context-files/{filename}) are
@@ -22,7 +22,7 @@ def register_sage_context_file_routes(app) -> None:
     # uploads, still live -- workstation-client.ts:1215 calls them) and stay
     # registered through this same function under its original name.
     #
-    # THIS is the live POST handler for that path. sage_chat_api.py declares
+    # THIS is the live POST handler for that path. assistant_chat_api.py declares
     # an identical route, but routes_workflows.py registers this module
     # first and FastAPI serves the first match -- so the size cap and the
     # content policy have to be here, not only there. Both now call the same

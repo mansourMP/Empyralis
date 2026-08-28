@@ -373,8 +373,8 @@ class StorageAccountingWiringTests(unittest.TestCase):
     read the real source of the two registrations of
     POST /api/sage-chat/attachments."""
 
-    LIVE_HANDLER = _REPO_ROOT / "server_modules" / "sage_context_files_api.py"
-    SHADOWED_TWIN = _REPO_ROOT / "server_modules" / "sage_chat_api.py"
+    LIVE_HANDLER = _REPO_ROOT / "server_modules" / "assistant_context_files_api.py"
+    SHADOWED_TWIN = _REPO_ROOT / "server_modules" / "assistant_chat_api.py"
 
     def _source(self, path: Path) -> str:
         self.assertTrue(path.exists(), f"{path} is missing — this test's target moved")
@@ -515,7 +515,7 @@ class _FakeApp:
 
 class AttachmentRouteCapTests(unittest.TestCase):
     """Drives the REAL handler registered by
-    sage_context_files_api.register_sage_context_file_routes -- the one
+    assistant_context_files_api.register_assistant_context_file_routes -- the one
     FastAPI actually serves for POST /api/sage-chat/attachments -- so what
     is asserted here is what a customer's browser would receive, not what a
     service function returns in isolation."""
@@ -525,7 +525,7 @@ class AttachmentRouteCapTests(unittest.TestCase):
         import tempfile
         import types
 
-        from server_modules import billing_credit_config, sage_context_files_api, workspace_storage_service
+        from server_modules import billing_credit_config, assistant_context_files_api, workspace_storage_service
 
         fake_server = types.ModuleType("server")
         fake_server.Depends = lambda dependency: dependency
@@ -538,11 +538,11 @@ class AttachmentRouteCapTests(unittest.TestCase):
             else sys.modules.__setitem__("server", previous_server)
         )
 
-        self.api = sage_context_files_api
+        self.api = assistant_context_files_api
         self.service = workspace_storage_service
         self.billing = billing_credit_config
         app = _FakeApp()
-        sage_context_files_api.register_sage_context_file_routes(app)
+        assistant_context_files_api.register_assistant_context_file_routes(app)
         self.upload = app.routes[("POST", "/api/sage-chat/attachments")]
 
         self._tmp = tempfile.TemporaryDirectory()
@@ -565,10 +565,10 @@ class AttachmentRouteCapTests(unittest.TestCase):
         from unittest.mock import patch
 
         with (
-            patch("server_modules.sage_context_files_api.enforce_workspace_access", return_value="ws1"),
-            patch("server_modules.sage_context_files_api.workspace_tenant_id", return_value="t1"),
+            patch("server_modules.assistant_context_files_api.enforce_workspace_access", return_value="ws1"),
+            patch("server_modules.assistant_context_files_api.workspace_tenant_id", return_value="t1"),
             patch(
-                "server_modules.sage_context_files_api.workspace_attachments_dir",
+                "server_modules.assistant_context_files_api.workspace_attachments_dir",
                 return_value=Path(self._tmp.name),
             ),
         ):
