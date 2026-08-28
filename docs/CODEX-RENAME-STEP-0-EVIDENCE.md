@@ -174,3 +174,105 @@ instead is stronger for these commits than a green test run would have been:
 across the whole branch, **zero** changed `.ts`/`.tsx` lines are anything other
 than `//`, `*` or `/*` — every frontend touch is a comment. A batch that
 changes real frontend code must install dependencies in the worktree first.
+
+## Phase 2, batches 5-6 (2026-08-28)
+
+Two more module renames, each committed alone and each verified before commit.
+
+| Batch | Domain | Commit |
+|---|---|---|
+| 5 | daily operator, instruction compiler | `d4183174` |
+| 6 | agent-computer selection | `08631d99` |
+
+`server_modules/sage_*.py` is down from 7 modules to 4. Nothing observable
+moved: all 955 live HTTP route entries (the 56 `/api/sage-*` among them), the
+73 direct-chat tool names (all three `sage_service__*`), 29 MCP tools, 1,264
+schema table.column entries, 640 environment names, 5,015 persisted/protocol
+literal VALUES, 97 frontend build routes and 1,368 CSS class references are
+byte-identical to the pre-batch snapshot.
+
+**The guard was proven in this worktree before it was trusted, in both
+directions.** `--demo` detects an injected route, tool and CSS class; a repeat
+run against an unchanged tree is byte-identical to its own baseline (exit 0).
+A verifier that has only ever been seen to pass is not a verifier.
+
+### The snapshot records provenance, so renaming a FILE is a non-empty diff
+
+`environment_variables.dynamic_reads` and `persisted_protocol_literals` are
+stored as `path:line:value`. Renaming a file that contains a collected literal
+therefore moves those entries even when every value is unchanged. That is not
+an excuse to wave a diff through: the check is now that the VALUE sets are
+equal with the `path:line:` prefix removed, and the script doing it exits
+non-zero if any value is added or removed. It DID exit non-zero on the first
+attempt at batch 6, which is how the next item was found.
+
+### The guard's own coverage rule contains the word being renamed
+
+`collect_contract_literals`'s `key_hint` (scripts/rename_contract_snapshot.py)
+lists `SAGE` among the tokens that make a constant "contract-shaped". So a
+literal is collected only while the constant holding it still has a qualifying
+name — and renaming a `SAGE_*` constant silently narrows the very guard the
+rename is verified with.
+
+Measured, not inferred: renaming `SAGE_AGENT_COMPUTER_SELECTION_DB_FILE`
+dropped `EMPYRALIS_SAGE_AGENT_COMPUTER_SELECTION_DB` and
+`sage-agent-computer-selection.sqlite3` out of the literal set (5,015 ->
+5,013) while both strings remained in the source. Restoring the constant name
+restored them. Across the repo, **67 constants holding 360 literal values are
+collected only because of that token — 33 genuinely `SAGE_*`, and 34 that
+match by accident because `MESSAGE` contains "sage"**.
+
+The constant keeps its name here for an independent reason: it names the
+environment variable it reads, which is a frozen contract, so keeping them
+matching keeps the path greppable from env var to reader. But the general
+problem stands and should be fixed before any further `SAGE_*` constant is
+renamed — widen `key_hint` with `DB|FILE|PATH|DIR|URL` so coverage follows
+what a constant HOLDS rather than what it is called, regenerate the baseline
+in its own commit, and only then rename.
+
+### Two flaws in the pass's own measurement, both found and fixed
+
+Neither is in the repository; both are recorded because the next person will
+build the same instrument.
+
+1. `grep '^FAILED\|^ERROR'` over pytest output also matches LOG lines
+   beginning `ERROR ` — which carry random UUIDs, so the "failing set"
+   differed on every run and could never report unchanged. Requiring the token
+   after the verb to be a `server_modules/tests/` path took the baseline from
+   613 entries to 489 real node ids.
+2. A concurrent log write with no trailing newline glues itself onto a summary
+   line, corrupting one node id in whichever run it lands in and reading as a
+   regression. One such case existed in the baseline and was cut at the
+   timestamp.
+
+### The suite has an order-dependent hang, and it is not new
+
+`test_mcp_oauth_provider.py::test_resolve_workspace_read_only_scope_blocks_writes`
+blocks forever when reached ~5,341 tests into a single 10,333-test run, and
+passes in 1.86s in isolation. That is why this pass measured the suite as
+eight fixed chunks of the sorted test-file list rather than one process. The
+split is identical before and after, so the comparison is like-for-like; it is
+NOT comparable to a single-process run's numbers.
+
+Test FILENAMES were deliberately not renamed in these two batches: renaming
+one changes the sorted list the chunking derives from, which would invalidate
+the before/after node-id comparison. They belong in their own batch, compared
+through an explicit old->new path map.
+
+### Result
+
+Full Python suite, 849 test files, measured as the same 8 chunks before and
+after: **489 distinct FAILED/ERROR node ids on both sides, set delta 0** —
+zero added, zero removed. Counts alone would not prove that; the set does.
+Frontend `npm run test:unit` and `npx tsc --noEmit` both exit 0 before and
+after (and both batches touch zero frontend files, so that is a control rather
+than a claim).
+
+Separately, every one of the 72 changed lines across the two commits is
+explained by applying the 5-entry rename map to the removed line — 72 removed,
+72 added, zero lines unaccounted for. A rename batch hiding a real edit would
+show up there and does not.
+
+The `preflight._STATE_HOME_BAKED_AT_IMPORT_EXCEPTIONS` key move was proven
+red-before-green in memory: with the old key the boot check reports a
+violation, with the new key it returns clean.
