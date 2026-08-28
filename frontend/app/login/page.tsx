@@ -348,10 +348,6 @@ function LoginPageContent() {
   }
 
   const authRuntimeUnavailable = authRuntimeError !== null;
-  const emailAuthEnabled = isHydrated
-    && providersLoaded
-    && !authRuntimeUnavailable
-    && providers.email?.enabled === true;
   const googleAuthEnabled = isHydrated
     && providersLoaded
     && !authRuntimeUnavailable
@@ -588,7 +584,19 @@ function LoginPageContent() {
               Google button and the email field stayed on screen. Real
               conditional rendering is the only version that actually
               removes them. */}
-          {!chosen ? (
+          {/* Rendered ONLY when Google is positively available.
+              It used to render always — disabled whenever it could not be
+              used — under a caption that said so out loud ("Google sign-in
+              is unavailable right now"). That is a dead control plus a
+              caption admitting it, which this product forbids outright, on
+              the first screen a customer ever sees.
+              `googleAuthEnabled` already means hydrated AND providers
+              loaded AND no runtime error AND google enabled, so this
+              covers all three states at once: unavailable renders nothing,
+              not-yet-known renders nothing, available renders a button
+              that works. The divider goes with it — with no social option
+              above it, "or email" divides nothing. */}
+          {!chosen && googleAuthEnabled ? (
           <div className="app-auth-provider-stack">
             <div className="app-auth-social-stack">
               <AppButton
@@ -596,7 +604,7 @@ function LoginPageContent() {
                 tone="secondary"
                 className="app-auth-social"
                 onClick={() => startGoogleLogin()}
-                disabled={submitting || !googleAuthEnabled}
+                disabled={submitting}
               >
                 <GoogleProviderIcon className="app-auth-provider-mark" />
                 <span className="app-auth-social__content">
@@ -604,9 +612,6 @@ function LoginPageContent() {
                 </span>
               </AppButton>
             </div>
-            {!authRuntimeUnavailable && providersLoaded && providers.google?.enabled !== true && emailAuthEnabled ? (
-              <p className="app-auth-provider-note">Google sign-in is unavailable right now. Use email below.</p>
-            ) : null}
             <div className="app-auth-divider">
               <span aria-hidden="true" />
               <span>or email</span>

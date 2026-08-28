@@ -604,16 +604,51 @@ def _trace_surface_for_channel(channel: Any) -> str:
     return "channel"
 
 
-def _trace_root_agent_id_for_metadata(metadata: Optional[Dict[str, Any]]) -> str:
+def _agent_install_id_for_metadata(metadata: Optional[Dict[str, Any]]) -> str:
+    """The bare install id this run belongs to, or "" when it is the Operator.
+
+    Extracted so _trace_root_agent_id_for_metadata and every caller that
+    needs the id WITHOUT the "specialist:" prefix share one resolution
+    order. Two independent answers to "which agent is this run" is exactly
+    how a trace and a notification end up disagreeing about the same run.
+    """
     safe_metadata = metadata if isinstance(metadata, dict) else {}
-    install_id = (
+    return (
         str(safe_metadata.get("active_agent_install_id") or "").strip()
         or str(safe_metadata.get("master_agent_install_id") or "").strip()
         or str(safe_metadata.get("workspace_agent_install_id") or "").strip()
     )
+
+
+def _trace_root_agent_id_for_metadata(metadata: Optional[Dict[str, Any]]) -> str:
+    install_id = _agent_install_id_for_metadata(metadata)
     if install_id:
         return f"specialist:{install_id}"
     return "sage"
+
+
+def _run_agent_install_id(run: Dict[str, Any]) -> str:
+    context = run.get("context") if isinstance(run.get("context"), dict) else {}
+    metadata = context.get("metadata") if isinstance(context.get("metadata"), dict) else {}
+    return _agent_install_id_for_metadata(metadata)
+
+
+def _run_failure_summary(run: Dict[str, Any], status: str) -> str:
+    """Why this run ended badly, in one sentence.
+
+    Was derived inline inside the blocked-task branch and used only in a
+    system comment body. The same fact belongs on the outbox event so the
+    Inbox row can say it too — derived HERE, once, so the comment and the
+    notification can never disagree about the same run.
+    """
+    outcome = run.get("execution_outcome") if isinstance(run.get("execution_outcome"), dict) else {}
+    return (
+        str(outcome.get("summary") or "").strip()
+        or str(outcome.get("stderr") or "").strip()
+        or str(run.get("error") or "").strip()
+        or str(run.get("result") or "").strip()
+        or f'The assigned agent\'s run ended with status "{status}" and produced no result.'
+    )
 
 
 def _trace_runtime_target_for_turn_request(turn_request: AgentTurnRequest) -> str:
@@ -982,6 +1017,7 @@ def _emit_run_transition_outbox_event(
     if str(from_state or "").strip() == str(to_state or "").strip():
         return
     try:
+        status_token = str(to_state or "").strip().lower()
         outbox_service.emit_run_transition_event(
             run_id=run_id,
             tenant_id=_run_tenant_id(run),
@@ -990,6 +1026,14 @@ def _emit_run_transition_outbox_event(
             to_state=to_state,
             actor=actor,
             trace_id=trace_id,
+            # Everything a reader needs to get from the row to the cause,
+            # carried WITH the transition. All of it is already on `run`.
+            agent_install_id=_run_agent_install_id(run),
+            failure_reason=(
+                _run_failure_summary(run, status_token)
+                if status_token in {"failed", "timeout"}
+                else ""
+            ),
         )
     except Exception as exc:
         LOGGER.warning("Failed to emit outbox run transition for %s: %s", run_id, exc)
@@ -2140,13 +2184,7 @@ def transition_live_run_status(
                         try:
                             from server_modules import project_tasks_service
 
-                            outcome = run.get("execution_outcome") if isinstance(run.get("execution_outcome"), dict) else {}
-                            failure_summary = (
-                                str(outcome.get("summary") or "").strip()
-                                or str(outcome.get("stderr") or "").strip()
-                                or str(run.get("result") or "").strip()
-                                or f'The assigned agent\'s run ended with status "{status}" and produced no result.'
-                            )
+                            failure_summary = _run_failure_summary(run, status)
                             failed_task_tenant_id = _run_tenant_id(run)
                             failed_task_workspace_id = _run_workspace_id(run)
                             run_async_tool_call(
@@ -2155,6 +2193,27 @@ def transition_live_run_status(
                                     workspace_id=failed_task_workspace_id,
                                     task_id=failed_task_id,
                                     status="blocked",
+                                )
+                            )
+                            # The status change and its EXPLANATION are two
+                            # writes, deliberately: "blocked" has to land
+                            # even if this does. Before it existed the run
+                            # id survived only as prose inside the comment
+                            # below, which nothing parses — so the board
+                            # said "Blocked" and the cause was reachable
+                            # from nowhere.
+                            run_async_tool_call(
+                                project_tasks_service.record_task_run_failure(
+                                    tenant_id=failed_task_tenant_id,
+                                    workspace_id=failed_task_workspace_id,
+                                    task_id=failed_task_id,
+                                    run_id=run_id,
+                                    trace_id=(
+                                        trace_id
+                                        if agent_trace_service.is_linkable_trace_id(trace_id)
+                                        else ""
+                                    ),
+                                    reason=failure_summary,
                                 )
                             )
                             run_async_tool_call(
@@ -2226,13 +2285,18 @@ def transition_live_run_status(
                                 ),
                                 operation=f"trace.failed:{run_id}:{status}",
                             )
+                            # FAILED, not "partial": this branch only runs
+                            # for status in {failed, timeout}, and "partial"
+                            # claims work happened. WorkTab reads only
+                            # needs_input, so a failed run used to render
+                            # identically to a successful one.
                             _emit_trace_call(
                                 agent_trace_service.finish_trace(
                                     trace_context,
-                                    outcome="partial",
+                                    outcome=agent_trace_service.TRACE_OUTCOME_FAILED,
                                     final_message_id=None,
                                 ),
-                                operation=f"trace.finish:{run_id}:partial",
+                                operation=f"trace.finish:{run_id}:failed",
                             )
                 machine_lease_service.reconcile_machine_lease_release(
                     run_id,
@@ -6859,9 +6923,10 @@ async def execute_durable_turn_request(
                 isinstance(exc, HTTPException) and int(getattr(exc, "status_code", 0) or 0) >= 500,
                 None,
             )
+            # The run never started, so nothing was even partly done.
             await agent_trace_service.finish_trace(
                 trace_context,
-                outcome="partial",
+                outcome=agent_trace_service.TRACE_OUTCOME_FAILED,
                 final_message_id=None,
             )
         raise

@@ -1485,6 +1485,83 @@ async def add_human_task_comment(
     return {"task": task, "wake_request": wake_request, "wake_error": wake_error}
 
 
+async def record_task_run_failure(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    task_id: str,
+    run_id: str,
+    trace_id: str = "",
+    reason: str = "",
+) -> None:
+    """Stamp WHY a task is blocked onto the task itself.
+
+    A task moved to `blocked` by a failed run used to carry no machine-
+    readable link to that run at all: the run id survived only as prose
+    inside a system comment, which nothing parses. So the board said
+    "Blocked" and the cause — which existed, in the trace — was reachable
+    from nowhere.
+
+    Written to `metadata.last_failed_run` rather than a new column, the
+    same JSONB seam `metadata.comments` and `metadata.activity` already
+    use, with the same one-atomic-UPDATE, no read-modify-write shape.
+
+    `trace_id` is written ONLY when it names a real agent trace (see
+    agent_trace_service.is_linkable_trace_id) — an id a reader cannot
+    resolve is worse than no id, because it renders as a link that 404s.
+
+    Swallows its own failure and logs: this is the explanation for a
+    status change that has already committed, and losing the explanation
+    must never roll back the status.
+    """
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    resolved_task_id = str(task_id or "").strip()
+    if not (resolved_tenant_id and resolved_workspace_id and resolved_task_id):
+        return
+    pool = await control_plane_repository.ensure_control_plane_schema()
+    if pool is None:
+        return
+    record: Dict[str, Any] = {
+        "run_id": str(run_id or "").strip(),
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+    resolved_trace_id = str(trace_id or "").strip()
+    if resolved_trace_id:
+        record["trace_id"] = resolved_trace_id
+    resolved_reason = str(reason or "").strip()[:1000]
+    if resolved_reason:
+        record["reason"] = resolved_reason
+    try:
+        await control_plane_repository.rls_execute(
+            pool,
+            """
+            UPDATE project_tasks
+            SET metadata = jsonb_set(
+                    COALESCE(metadata, '{}'::jsonb),
+                    '{last_failed_run}',
+                    $4::jsonb,
+                    true
+                ),
+                updated_at = NOW()
+            WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3
+            """,
+            resolved_tenant_id,
+            resolved_workspace_id,
+            resolved_task_id,
+            json.dumps(record),
+            tenant_id=resolved_tenant_id,
+            workspace_id=resolved_workspace_id,
+        )
+    except Exception:
+        LOGGER.warning(
+            "Failed to record run failure on task %s (run %s)",
+            resolved_task_id,
+            run_id,
+            exc_info=True,
+        )
+
+
 async def update_task(
     *,
     tenant_id: str,

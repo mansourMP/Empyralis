@@ -177,6 +177,84 @@ assert(
 );
 assert(countUnseenBlockedRuns([], "2026-08-01T00:00:00Z") === 0, "no events, no unseen count");
 
+// ── A failed-run row NAMES the agent and SAYS what went wrong ─────────────
+//
+// The row used to be the bare word "Run failed" with `detail: null` and an
+// href built from `install_id`, which the producer never set — so a person
+// saw a failure, could not tell which agent, and had no route to why.
+//
+// Note the fixture shape: `install_id` and `summary` are what the BACKEND
+// now writes (outbox_service._run_transition_metadata → the ledger row),
+// not fields invented here to make an assertion pass.
+const agentNameFor = (id: string | null | undefined) =>
+  id === "agent_1" ? "Rey" : null;
+const namedRuns: InboxBlockedRunShape[] = [
+  {
+    id: "e9",
+    title: "Run failed",
+    event_class: "blocked_action",
+    install_id: "agent_1",
+    summary: "provider_auth_failed: DeepSeek rejected the API key for this workspace.",
+    created_at: "2026-08-29T00:00:00Z",
+  },
+];
+const named = planInboxNeedsYou({
+  stuckTasks: [],
+  notifications: [],
+  blockedRuns: namedRuns,
+  userId: ME,
+  taskHrefFor,
+  agentHrefFor,
+  agentNameFor,
+});
+assert(named.runs[0].title.includes("Rey"), "the row names the agent that failed");
+assert(
+  named.runs[0].detail === "provider_auth_failed: DeepSeek rejected the API key for this workspace.",
+  "the row says WHY, from the event's own summary",
+);
+assert(named.runs[0].href === "/agents/agent_1", "the row links to the agent whose traces explain it");
+
+// An agent the caller cannot name falls back to the plain title rather
+// than inventing one — "which agent" and "an agent we could not name" are
+// different facts.
+const unnamed = planInboxNeedsYou({
+  stuckTasks: [],
+  notifications: [],
+  blockedRuns: [{ id: "e10", title: "Run failed", event_class: "blocked_action", install_id: "ghost", created_at: "2026-08-29T00:00:00Z" }],
+  userId: ME,
+  taskHrefFor,
+  agentHrefFor,
+  agentNameFor,
+});
+assert(unnamed.runs[0].title === "Run failed", "an unnameable agent does not get a fabricated name");
+assert(unnamed.runs[0].detail === null, "no summary means no detail, never an empty string");
+
+// A row with no install_id at all still renders — as plain, unclickable
+// text. That is the honest degradation, not a link to nowhere.
+const orphan = planInboxNeedsYou({
+  stuckTasks: [],
+  notifications: [],
+  blockedRuns: [{ id: "e11", event_class: "blocked_action", created_at: "2026-08-29T00:00:00Z" }],
+  userId: ME,
+  taskHrefFor,
+  agentHrefFor,
+  agentNameFor,
+});
+assert(orphan.runs.length === 1, "an unattributable failure is still surfaced");
+assert(orphan.runs[0].href === null, "…and is unclickable rather than linked to nowhere");
+
+// The resolvers are OPTIONAL — every pre-existing caller keeps working.
+const legacy = planInboxNeedsYou({
+  stuckTasks: [],
+  notifications: [],
+  blockedRuns: namedRuns,
+  userId: ME,
+  taskHrefFor,
+  agentHrefFor,
+});
+assert(legacy.runs[0].title === "Run failed", "without agentNameFor the row keeps its plain title");
+assert(legacy.runs[0].detail !== null, "the summary still reaches the row without any resolver");
+
 if (failed > 0) {
   console.error(`\n${failed} failed, ${passed} passed`);
   process.exit(1);

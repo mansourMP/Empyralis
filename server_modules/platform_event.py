@@ -209,6 +209,21 @@ PROVIDER_UNREACHABLE = PlatformEvent(
     severity="warning",
 )
 
+# The provider answered, and said it has no such model. A CONFIGURATION
+# fact, not a failure — which is why it may never share a message with one.
+# Before this existed it fell through to GENERIC_ERROR ("Something went
+# wrong. Try again."), so the one thing that could never work — retrying —
+# was the only thing the product suggested, forever. The stored model id is
+# the fix and it is the owner's own to change, so the message names the
+# screen that holds it.
+PROVIDER_MODEL_NOT_FOUND = PlatformEvent(
+    code="provider_model_not_found",
+    title="Model unavailable",
+    detail="The provider has no model by this agent's configured name. Pick a different model under Configure.",
+    channel_text="The provider has no model by this agent's configured name. Pick a different model under Configure.",
+    severity="error",
+)
+
 # 2026-08-14 (CLAUDE.md, founder decision): TOOLS_LIMITED_NO_REPLY is GONE.
 # It used to substitute "This agent doesn't have every tool turned on...
 # An owner can enable more under Tools" for a turn that ran and said

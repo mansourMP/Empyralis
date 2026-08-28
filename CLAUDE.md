@@ -119,7 +119,9 @@ When you learn something durable, add ONE line. A paragraph is archaeology.
 - **Silence is a decision, never a failure.** An empty string cannot express one — if two callers must tell "chose not to" from "could not", the producer has to say which.
 - **Two different facts may never share one signal.** Delivery outcome, invite mail, update advertisement, absent-vs-empty capability lists. Never advertise an update whose success could not be observed.
 - **Put a safety filter on the narrow waist, never on each branch** — a per-branch call is a rule the next author has to know; a wrapper is one they cannot reach around. Guard display and persistence separately.
-- Match on stable CODES, never on prose. A reworded message silently breaks a keyword bucket.
+- Match on stable CODES, never on prose. A reworded message silently breaks a keyword bucket. Provider failures have ONE code vocabulary — `provider_failure_classification` — and every code in it is already an `agent_command_dispatcher.classify_error` keyword. Never mint a second name for a failure that has one.
+- **Read the whole response, not the one field you came for** — and the provider's OWN error code, not just the status: OpenAI answers 429 for both throttling and an empty balance, which need opposite advice.
+- **An identity that stops at the emit site never reaches the row.** A surface can only render what it was handed; carry the fact from wherever it is already in hand.
 - **A migration that BACKFILLS a tenant-scoped table under RLS silently writes zero rows** and exits 0 — DDL applies, DML addresses the empty set. Use `SET LOCAL app.rls_bypass = 'on'`, or move the backfill into boot code.
 - **Apply production migrations as `empyralis_app`, not as the Postgres superuser** — a superuser-applied migration leaves the table owned by `postgres` and the app crash-loops. Re-run `migrations/enable_rls.sql` after adding any table.
 - Renaming a table that carries `tenant_id`/`workspace_id` is a TWO-PART change: add the new key to `preflight._RLS_COVERAGE_EXCEPTIONS`, deploy, *then* rename. Keep the old key so the revert also boots.
@@ -147,7 +149,9 @@ When you learn something durable, add ONE line. A paragraph is archaeology.
 `test_outcome_honesty_lint`, `test_exception_and_task_lint`, `test_agent_reachability_guard`,
 `test_agent_context_grant`, `test_unguarded_reply_paths`, `test_tool_honesty_guard`,
 `test_default_engine_credit_debit`, `test_authority_mandate_service`,
-`test_run_state_scope_fails_closed`, `test_tool_name_secret_redaction`, `test_reload_isolation`.
+`test_run_state_scope_fails_closed`, `test_tool_name_secret_redaction`, `test_reload_isolation`,
+`test_provider_failure_classification`, `test_failed_run_identity`,
+`test_trace_outcome_honesty`, `test_invite_existing_member`.
 
 When a guard exists, do not restate its rule here — extend the guard instead.
 

@@ -116,12 +116,11 @@ export default function InboxPage() {
     "blocked_action",
   );
 
-  // Task/agent id → project id, resolved from the SAME lists already on
-  // screen rather than a second fetch — every href this page builds points
-  // at the item's one real home (its task page, or the agent's own Work
-  // tab), never a second place it can be opened from.
+  // Task id → project id, resolved from the SAME list already on screen
+  // rather than a second fetch — every href this page builds points at the
+  // item's one real home (its task page, or the agent's own Work tab),
+  // never a second place it can be opened from.
   const taskProjectById = useMemo(() => new Map(tasks.map((t) => [t.id, t.project_id || ""])), [tasks]);
-  const agentProjectById = useMemo(() => new Map(agents.map((a) => [a.agent_id, a.project_id || ""])), [agents]);
 
   const taskHrefFor = useMemo(
     () => (taskId: string | null | undefined) => {
@@ -131,18 +130,31 @@ export default function InboxPage() {
     },
     [base, taskProjectById],
   );
+  // The WORKSPACE-level agent route, not the project-scoped twin. An agent
+  // belongs to the workspace (CLAUDE.md), and `project_id` is a nullable,
+  // never-backfilled column — so the project-scoped URL this used to build
+  // resolved to null for exactly the agents whose rows most needed a
+  // destination, and the failed-run row rendered as unclickable text.
+  // This route takes no project id, so it cannot fail that way.
   const agentHrefFor = useMemo(
     () => (installId: string | null | undefined) => {
       if (!installId) return null;
-      const projectId = agentProjectById.get(installId);
-      return projectId ? `${base}/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(installId)}/work` : null;
+      return `${base}/agents/${encodeURIComponent(installId)}/work`;
     },
-    [base, agentProjectById],
+    [base],
+  );
+  // Null, never a placeholder: "which agent" and "an agent we could not
+  // name" are different facts, and the row falls back to its own plain
+  // title rather than inventing a name.
+  const agentNameFor = useMemo(
+    () => (installId: string | null | undefined) =>
+      (installId ? agentNameByInstall.get(installId) : null) || null,
+    [agentNameByInstall],
   );
 
   const groups: InboxNeedsYouGroups = useMemo(
-    () => planInboxNeedsYou({ stuckTasks: tasks, notifications, blockedRuns, userId: myAccountId, taskHrefFor, agentHrefFor }),
-    [tasks, notifications, blockedRuns, myAccountId, taskHrefFor, agentHrefFor],
+    () => planInboxNeedsYou({ stuckTasks: tasks, notifications, blockedRuns, userId: myAccountId, taskHrefFor, agentHrefFor, agentNameFor }),
+    [tasks, notifications, blockedRuns, myAccountId, taskHrefFor, agentHrefFor, agentNameFor],
   );
   const needsYouTotal = inboxNeedsYouCount(groups);
 

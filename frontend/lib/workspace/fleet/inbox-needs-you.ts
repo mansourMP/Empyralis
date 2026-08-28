@@ -103,6 +103,11 @@ export type InboxBlockedRunShape = {
   event_class?: string | null;
   install_id?: string | null;
   created_at?: string | null;
+  /** The row's own account of what went wrong. It is on the wire
+   *  (WorkspaceActivityEvent carries it) and was simply not read here, so
+   *  every failed run rendered as the bare word "Run failed" with the
+   *  cause — which exists, in the trace — reachable from nowhere. */
+  summary?: string | null;
 };
 
 /** Structural, not string-matched: activity_ledger_service.py's
@@ -151,8 +156,19 @@ export function planInboxNeedsYou(input: {
   userId: string | null;
   taskHrefFor: (taskId: string | null | undefined) => string | null;
   agentHrefFor: (installId: string | null | undefined) => string | null;
+  /** Resolves an install id to the agent's own name. A row that cannot
+   *  name the agent it is about is the complaint this exists to answer. */
+  agentNameFor?: (installId: string | null | undefined) => string | null;
 }): InboxNeedsYouGroups {
-  const { stuckTasks, notifications, blockedRuns, userId, taskHrefFor, agentHrefFor } = input;
+  const {
+    stuckTasks,
+    notifications,
+    blockedRuns,
+    userId,
+    taskHrefFor,
+    agentHrefFor,
+    agentNameFor,
+  } = input;
 
   const tasks: InboxNeedsYouItem[] = stuckTasks
     .filter((t) => isMyStuckTask(t, userId))
@@ -183,14 +199,26 @@ export function planInboxNeedsYou(input: {
     .filter(isBlockedRunEvent)
     .slice()
     .sort((a, b) => sortMillis(b.created_at) - sortMillis(a.created_at))
-    .map((e) => ({
-      kind: "run" as const,
-      id: `run:${e.id || e.created_at}`,
-      title: e.title || "An agent run failed",
-      detail: null,
-      timestamp: e.created_at || null,
-      href: agentHrefFor(e.install_id),
-    }));
+    .map((e) => {
+      // "Run failed" names nothing and "detail: null" said nothing. Both
+      // facts a person needs — WHICH agent, and WHY — are on the event and
+      // were being dropped here.
+      const agentName = agentNameFor ? agentNameFor(e.install_id) : null;
+      const baseTitle = e.title || "An agent run failed";
+      const title = agentName ? `${agentName}: ${baseTitle.toLowerCase()}` : baseTitle;
+      // There is no page that opens one trace by id — only the API — so
+      // the destination is the agent's own Work tab, which is where its
+      // traces are read. A link to a trace route that does not exist would
+      // be a dead control wearing a URL.
+      return {
+        kind: "run" as const,
+        id: `run:${e.id || e.created_at}`,
+        title,
+        detail: (e.summary || "").trim() || null,
+        timestamp: e.created_at || null,
+        href: agentHrefFor(e.install_id),
+      };
+    });
 
   return { tasks, notifications: notificationItems, runs };
 }

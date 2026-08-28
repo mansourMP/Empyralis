@@ -981,6 +981,28 @@ async def create_workspace_invite_route(
         )
         current_members = None
     if current_members is not None:
+        # Someone already inside cannot be invited in. Minting an invite for
+        # them created a real row and token, and parked a permanent
+        # "You've been invited · Join · Decline" banner over a workspace
+        # they were already working in — an artifact that can only confuse,
+        # for an outcome that was already true.
+        #
+        # 409, matching the seat refusal directly below: the caller is not
+        # forbidden, the destination already has them. Checked on the SAME
+        # roster read that check already needed, so this costs no query.
+        #
+        # Gated on `current_members is not None` with the seat check, so an
+        # unreadable roster fails OPEN here too — a read blip must never
+        # take away an owner's ability to invite a real teammate.
+        existing_member = workspace_member_policy.member_with_email(current_members, clean_email)
+        if existing_member is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=workspace_member_policy.already_a_member_sentence(
+                    email=clean_email,
+                    role=str(existing_member.get("role") or "").strip(),
+                ),
+            )
         try:
             workspace_member_policy.assert_seat_available(members=current_members)
         except workspace_member_policy.WorkspaceMemberLimitReached as exc:

@@ -163,7 +163,15 @@ def build_notification_from_outbox_event(event: Any) -> Optional[Dict[str, Any]]
             return None
         action = f"run_{to_state}"
         title = "Run completed" if to_state == "completed" else "Run failed"
-        text = f"Run {run_id or 'unknown'} {to_state}."
+        # "Run c4ab05f3-… failed." restates the id in the same row that
+        # already carries it and says nothing a person can act on. When the
+        # producer knows WHY — it does, at the emit site — that is the
+        # sentence. The id stays in run_id, where a machine reads it.
+        failure_reason = str(metadata.get("failure_reason") or "").strip()
+        if to_state == "failed" and failure_reason:
+            text = failure_reason
+        else:
+            text = f"Run {run_id or 'unknown'} {to_state}."
         priority = "normal" if to_state == "completed" else "high"
         metadata = {
             **metadata,

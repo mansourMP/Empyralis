@@ -32,6 +32,7 @@ from server_modules.platform_event import (
     SAGE_OVERFLOW as _SAGE_OVERFLOW,
     SAGE_UNAVAILABLE as _SAGE_UNAVAILABLE,
     SERVICE_RATE_LIMITED,
+    PROVIDER_MODEL_NOT_FOUND,
     AI_LIMIT_REACHED_WEB,
     AUTH_FAILED_WEB,
 )
@@ -61,6 +62,7 @@ SAGE_AI_NEEDS_ATTENTION_PLATFORM_REPLY = AUTH_FAILED_PLATFORM.channel_text
 SAGE_PAYMENT_REQUIRED_PLATFORM_REPLY = PROVIDER_PAYMENT_REQUIRED_PLATFORM.channel_text
 SAGE_PAYMENT_REQUIRED_BYOK_REPLY = PROVIDER_PAYMENT_REQUIRED_BYOK.channel_text
 SAGE_PROVIDER_UNREACHABLE_REPLY = PROVIDER_UNREACHABLE.channel_text
+SAGE_MODEL_NOT_FOUND_REPLY = PROVIDER_MODEL_NOT_FOUND.channel_text
 SAGE_NO_PROVIDER_REPLY = NO_AI_PROVIDER.channel_text
 SAGE_ERROR_REPLY = GENERIC_ERROR.channel_text
 
@@ -107,18 +109,19 @@ def classify_error(
     SAGE_NO_PROVIDER_REPLY's "Connect one →" — a trailing arrow with no
     click target on that surface (CLAUDE.md's "No dead controls" law) —
     while SAGE_NO_PROVIDER_MESSAGE, built for exactly this case, had zero
-    callers anywhere. Buckets 2/3/6/7 have no web-specific text and are
+    callers anywhere. Buckets 2/3/5/7/8 have no web-specific text and are
     unaffected by this flag.
 
-    Seven specific buckets, checked in order:
+    Eight specific buckets, checked in order:
 
     1. Credits exhausted (platform usage cap) → SAGE_AI_LIMIT_REPLY
     2. Provider payment/balance required      → SAGE_PAYMENT_REQUIRED_{PLATFORM,BYOK}_REPLY
     3. Rate limited                           → SAGE_RATE_LIMITED_REPLY
     4. No provider set                        → SAGE_NO_PROVIDER_REPLY (known-fixable state)
-    5. Auth / key failed                      → SAGE_AI_NEEDS_ATTENTION_{REPLY,PLATFORM_REPLY}
-    6. Provider unreachable                   → SAGE_PROVIDER_UNREACHABLE_REPLY
-    7. Catch-all                              → SAGE_ERROR_REPLY
+    5. Model does not exist on this provider  → SAGE_MODEL_NOT_FOUND_REPLY (known-fixable state)
+    6. Auth / key failed                      → SAGE_AI_NEEDS_ATTENTION_{REPLY,PLATFORM_REPLY}
+    7. Provider unreachable                   → SAGE_PROVIDER_UNREACHABLE_REPLY
+    8. Catch-all                              → SAGE_ERROR_REPLY
     """
     if raw_error:
         import logging
@@ -175,7 +178,19 @@ def classify_error(
             "provider_not_configured",
         )):
             base = SAGE_NO_PROVIDER_MESSAGE if is_web else SAGE_NO_PROVIDER_REPLY
-        # 5) Auth / key failed
+        # 5) The provider has no such model — a CONFIGURATION fact, not a
+        #    failure. Checked before the auth bucket for the same reason the
+        #    payment bucket is: a stored model id that no longer exists is
+        #    nobody's authentication problem, and "verify the API key" sends
+        #    an owner to the one screen that cannot fix it. Before this
+        #    bucket existed it fell through to the catch-all, so the only
+        #    advice the product gave was to retry — the one action that can
+        #    never work.
+        elif any(kw in msg for kw in (
+            "provider_model_not_found", "model_not_found",
+        )):
+            base = SAGE_MODEL_NOT_FOUND_REPLY
+        # 6) Auth / key failed
         elif any(kw in msg for kw in (
             "provider_generation_failed", "401", "403", "auth", "api key",
             "invalid key", "unauthorized",
@@ -189,13 +204,13 @@ def classify_error(
                     else SAGE_AI_NEEDS_ATTENTION_REPLY
                 )
             )
-        # 6) Provider unreachable
+        # 7) Provider unreachable
         elif any(kw in msg for kw in (
             "provider_transport_unavailable", "transport", "connection",
             "timeout", "unreachable",
         )):
             base = SAGE_PROVIDER_UNREACHABLE_REPLY
-        # 7) Catch-all
+        # 8) Catch-all
         else:
             base = SAGE_ERROR_REPLY
 
