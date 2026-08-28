@@ -193,18 +193,37 @@ def evaluate_action_policy(
                 audit_payload=audit,
             )
 
-    # ── Step 3: Risk classification + approval decision ─────────────
-    # This single call handles:
-    #   - capability risk classification (via classify_capability_risk)
-    #   - approval memory matching (if consume_approval_memory=True)
-    #   - approval card building (if approval is required)
-    #   - policy-based blocking (if risk is too high for autonomy mode)
+    # ── Step 3: registry contract check (the ONLY path) ─────────────
     #
-    # The risk classifier only handles "agent computer" capabilities
-    # (shell, file, browser, screen, mouse, keyboard). For other
-    # capabilities (web, memory, SaaS connectors), we skip risk
-    # classification and return "allow" — those are governed by
-    # policy_service.evaluate_tool_policy_decision() separately.
+    # READ THIS BEFORE BELIEVING THE CODE BELOW RUNS.
+    #
+    # `agent_computer_approval_decision_service` WAS DELETED in 0820a732
+    # ("Remove approval system — agent now acts on reasoning, not approval
+    # gates"), together with its own test file. The import on the next line is
+    # therefore the first statement in the try and it ALWAYS raises
+    # ModuleNotFoundError — measured, not assumed:
+    #
+    #     >>> import_module("server_modules.agent_computer_approval_decision_service")
+    #     ModuleNotFoundError: No module named
+    #     'server_modules.agent_computer_approval_decision_service'
+    #
+    # So `decide_agent_computer_action` is never called, `approval_decision` is
+    # never bound, and the `except` handler below is not a fallback for an
+    # unrecognized capability — it is the ONLY path this function takes, on
+    # every call, unconditionally. The handler returns on both of its branches,
+    # which makes the 64 lines after the try (the post-classifier registry
+    # check and the final ActionPolicyDecision) UNREACHABLE.
+    #
+    # The try/except is left standing rather than collapsed into a plain call:
+    # deleting it is a product decision about whether the risk-classifier seam
+    # is ever coming back, not a tidy-up. Flagged for the founder.
+    #
+    # What the classifier USED to do, kept only as the record of what this
+    # seam was for: capability risk classification, approval-memory matching,
+    # approval-card building, and policy-based blocking, for the "agent
+    # computer" capabilities (shell, file, browser, screen, mouse, keyboard).
+    # Other capabilities (web, memory, SaaS connectors) were never its business
+    # and are governed by policy_service.evaluate_tool_policy_decision().
     try:
         from server_modules.agent_computer_approval_decision_service import (
             decide_agent_computer_action,
@@ -227,11 +246,18 @@ def evaluate_action_policy(
             consume_approval_memory=consume_approval_memory,
         )
     except Exception:
-        # Capability not recognized by the agent-computer risk classifier.
-        # Fall back to the capability registry contract check — this mirrors
-        # what gateway_approval_service.capability_requires_owner_approval()
-        # does in the old gateway path.  We must not return "allow" for a
-        # capability that the registry itself considers risky.
+        # ALWAYS TAKEN — the import above cannot succeed (see the block at the
+        # top of Step 3). This used to say "capability not recognized by the
+        # agent-computer risk classifier", which named a cause that stopped
+        # being the cause the day that module was deleted: the real one is
+        # ModuleNotFoundError, and it fires for every capability, recognized or
+        # not.
+        #
+        # What the handler does is still correct and still wanted: the
+        # capability registry contract check, mirroring
+        # gateway_approval_service.capability_requires_owner_approval() from
+        # the old gateway path. We must not return "allow" for a capability
+        # that the registry itself considers risky.
         registry_decision = _evaluate_from_registry_contract(
             capability=capability,
             workspace_id=workspace_id,
