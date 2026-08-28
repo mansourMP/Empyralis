@@ -11,7 +11,7 @@ from server_modules import (
     gateway_state_repository,
     personal_channels_repository,
     runtime_common,
-    sage_agent_computer_selection_service,
+    agent_computer_selection_service,
 )
 from server_modules.runtime_config import CONNECTOR_CATALOG, CHANNEL_REGISTRY
 
@@ -2181,7 +2181,7 @@ def _selected_gateway(
 ) -> tuple[Optional[Dict[str, Any]], list[Dict[str, Any]], Optional[str]]:
     requested = _text(selected_gateway_id)
     if not requested and user_id:
-        selection = sage_agent_computer_selection_service.get_selection(
+        selection = agent_computer_selection_service.get_selection(
             workspace_id=workspace_id,
             user_id=user_id,
         )

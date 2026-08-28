@@ -1783,7 +1783,7 @@ async def process_due_recurring_schedules_once(
 #     exist on the other engine this codebase still runs), and a skill is
 #     a reusable CAPABILITY the agent chooses to invoke, not a specific
 #     goal's own state -- wrong shape and wrong lifecycle entirely.
-#   - sage_instruction_compiler_service.py: this is Sage's own (the
+#   - instruction_compiler_service.py: this is Sage's own (the
 #     workspace MASTER agent) system-prompt compiler, with its own budget
 #     and its own char-limit machinery -- docs/design/context-engineering-
 #     plan.md item 10 notes the SPECIALIST branch (the one that actually

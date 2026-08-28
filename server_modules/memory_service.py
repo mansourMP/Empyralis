@@ -967,7 +967,7 @@ def memory_read_file(
 
 # Index-first discipline (task: agent memory like Claude Code's -- index +
 # pull-on-demand). MEMORY.md is the ONE file guaranteed to be injected into
-# every turn (sage_instruction_compiler_service.build_root_memory_brief_sections);
+# every turn (instruction_compiler_service.build_root_memory_brief_sections);
 # everything else is pulled on demand via memory_search/memory_get. That only
 # holds if MEMORY.md itself stays a compact, line-per-entry index instead of
 # growing into a prose dump. These two guards are scoped to reason=="memory_write"
@@ -994,7 +994,7 @@ MEMORY_MD_INDEX_MAX_BYTES = 25_000
 #
 # NOTE ON SCOPE: this constant governs the WRITE-time guard in
 # memory_write_file/update_memory_context_file only. The audit's other named
-# failure mode -- sage_instruction_compiler_service.py silently truncating
+# failure mode -- instruction_compiler_service.py silently truncating
 # MEMORY.md on *read* against the shared ROOT_MEMORY_BRIEF_TOTAL_CHAR_LIMIT
 # (4,800 chars, shared across every root file, not a dedicated MEMORY.md
 # allowance) -- is NOT fixed here. That file was locked for concurrent edits

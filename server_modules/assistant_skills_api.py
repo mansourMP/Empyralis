@@ -227,7 +227,7 @@ def _skill_capability_records(skill_items: list[Dict[str, Any]]) -> list[Dict[st
     Before this, a skill with no explicit `tools:` list (true of nearly
     every entry — the curated pack, and every skill_registry SkillDefinition
     that isn't backed by its own bespoke LLM tool) got `tool_id=None` here,
-    which sage_instruction_compiler_service.build_model_capability_manifest
+    which instruction_compiler_service.build_model_capability_manifest
     silently drops (`if not tool_id: continue`) — so those skills could
     NEVER reach the live "## Callable Tools" prompt text, independent of
     which catalog fed this function. Routing every record through

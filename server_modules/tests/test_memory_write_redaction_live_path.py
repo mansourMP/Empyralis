@@ -6,7 +6,7 @@ every write with secret_redaction_service.redact_text and passes 10/10 of
 its own tests (test_agent_memory_write_secret_redaction.py).
 
 VERIFIED GAP (re-confirmed before this fix):
-  - The kernel prompt (sage_instruction_compiler_service.py's _kernel_prompt,
+  - The kernel prompt (instruction_compiler_service.py's _kernel_prompt,
     the "## Memory -- why first" rule) instructs the model to persist
     durable facts by calling the tool literally named `memory_write` with
     path='MEMORY.md'.

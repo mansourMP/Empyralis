@@ -17,7 +17,7 @@ from server_modules import (
     execution_mode_policy,
     gateway_registry_service,
     gateway_state_repository,
-    sage_agent_computer_selection_service,
+    agent_computer_selection_service,
     setup_sessions,
 )
 import logging
@@ -95,7 +95,7 @@ def _user_role(current_user: Any) -> str:
 
 
 def _selection_payload(*, workspace_id: str, user_id: str) -> Dict[str, Any]:
-    selection = sage_agent_computer_selection_service.get_selection(
+    selection = agent_computer_selection_service.get_selection(
         workspace_id=workspace_id,
         user_id=user_id,
     )
@@ -328,7 +328,7 @@ async def list_connection_status(
 
 
 @router.get("/connections/sage-agent-computer")
-async def get_sage_agent_computer_selection(
+async def get_agent_computer_selection(
     workspace_id: str = Query(..., min_length=1),
     current_user=Depends(get_current_user),
 ):
@@ -340,7 +340,7 @@ async def get_sage_agent_computer_selection(
 
 
 @router.put("/connections/sage-agent-computer")
-async def set_sage_agent_computer_selection(
+async def set_agent_computer_selection(
     body: SageAgentComputerSelectionRequest,
     request: Request,
     current_user=Depends(get_current_user),
@@ -361,7 +361,7 @@ async def set_sage_agent_computer_selection(
         access_metadata=access_metadata,
         metadata_keys_to_remove=metadata_keys_to_remove,
     )
-    selection = sage_agent_computer_selection_service.set_selection(
+    selection = agent_computer_selection_service.set_selection(
         workspace_id=resolved_workspace_id,
         user_id=current_user_id,
         selected_gateway_id=str(registration.get("gateway_id") or "").strip(),
@@ -402,7 +402,7 @@ async def start_connection_setup(
             )
             # Fall through to OAuth start — do not raise
     if item.get("requires_gateway"):
-        selection = sage_agent_computer_selection_service.get_selection(
+        selection = agent_computer_selection_service.get_selection(
             workspace_id=resolved_workspace_id,
             user_id=_user_id(current_user) or "",
         )

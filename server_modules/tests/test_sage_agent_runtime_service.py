@@ -3554,7 +3554,7 @@ class EngineAwareCapabilityManifestIntegrationTests(unittest.TestCase):
                 return_value={"runtime_ok": True, "local_gateway_online": True},
             ),
             patch(
-                "server_modules.sage_instruction_compiler_service.assistant_skills_api.build_sage_capabilities_payload",
+                "server_modules.instruction_compiler_service.assistant_skills_api.build_sage_capabilities_payload",
                 return_value={"items": capability_items},
             ),
             patch(
@@ -3822,7 +3822,7 @@ class SageAgentRuntimeSpecialistCapabilityManifestTests(unittest.TestCase):
                 return_value={"runtime_ok": True, "local_gateway_online": True},
             ),
             patch(
-                "server_modules.sage_instruction_compiler_service.assistant_skills_api.build_sage_capabilities_payload",
+                "server_modules.instruction_compiler_service.assistant_skills_api.build_sage_capabilities_payload",
                 return_value={"items": capability_items},
             ),
             patch(

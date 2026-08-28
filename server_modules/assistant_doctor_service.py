@@ -110,7 +110,7 @@ class SageDoctorService:
 
     @staticmethod
     def _check_agent_computer_selection(workspace_id: str, tenant_id: str, user_id: str = "") -> Dict[str, str]:
-        import server_modules.sage_agent_computer_selection_service as sel
+        import server_modules.agent_computer_selection_service as sel
 
         spec = _spec_by_id("agent_computer_selection")
         selection = sel.get_selection(workspace_id=workspace_id, user_id=user_id)
@@ -368,7 +368,7 @@ class SageDoctorService:
     @staticmethod
     def _resolve_gateway_id(workspace_id: str, user_id: str = "") -> str:
         """Return the selected gateway_id for this workspace, or empty string."""
-        import server_modules.sage_agent_computer_selection_service as sel
+        import server_modules.agent_computer_selection_service as sel
 
         selection = sel.get_selection(workspace_id=workspace_id, user_id=user_id)
         if selection is not None:

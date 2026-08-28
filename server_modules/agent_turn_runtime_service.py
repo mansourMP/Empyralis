@@ -27,8 +27,8 @@ from server_modules import (
     mcp_registry_service,
     no_provider_service,
     response_leak_guard_service,
-    sage_daily_operator_service,
-    sage_instruction_compiler_service,
+    daily_operator_service,
+    instruction_compiler_service,
     assistant_health_service,
     assistant_memory_service,
     assistant_audit_log_service,
@@ -2074,7 +2074,7 @@ def _load_profile_context(*, workspace_id: str) -> str:
 
 def _load_context_files(*, workspace_id: str) -> str:
     files = workspace_context.read_workspace_context_files(workspace_id=workspace_id)
-    sections, _diagnostics = sage_instruction_compiler_service.build_root_memory_brief_sections(files)
+    sections, _diagnostics = instruction_compiler_service.build_root_memory_brief_sections(files)
     return "\n\n".join(sections)
 
 
@@ -3601,7 +3601,7 @@ def _message_might_need_sage_action_loop(message: str, prior_messages: list[dict
         return True
     if _message_is_hardware_check_followup(message, prior_messages):
         return True
-    if sage_daily_operator_service.message_might_need_daily_operator(message):
+    if daily_operator_service.message_might_need_daily_operator(message):
         return True
     if _connector_requirements_for_message(message):
         return True
@@ -4352,7 +4352,7 @@ async def _run_sage_action_loop_v3(
     import asyncio as _asyncio
 
     daily_operator_result = await _asyncio.to_thread(
-        sage_daily_operator_service.run_daily_operator_recipe,
+        daily_operator_service.run_daily_operator_recipe,
         message=message,
         tools=tools,
         tool_capabilities=tool_capabilities,
@@ -4802,7 +4802,7 @@ async def _run_memory_flush_before_compaction(
     async def _attempt_flush() -> tuple[str | None, str | None]:
         """Single flush attempt. Returns (reply_or_None, error_string_or_None)."""
         try:
-            from server_modules.sage_instruction_compiler_service import build_sage_instruction_bundle
+            from server_modules.instruction_compiler_service import build_sage_instruction_bundle
 
             flush_prompt = (
                 "Before this conversation is summarized, save any important facts "
@@ -5844,7 +5844,7 @@ async def _handle_sage_chat_unguarded(
                 agent_install_id=_spec_install_id,
             )
             _spec_memory_sections, _spec_memory_diagnostics = (
-                sage_instruction_compiler_service.build_root_memory_brief_sections(
+                instruction_compiler_service.build_root_memory_brief_sections(
                     _spec_context_files_payload
                 )
             )
@@ -6102,7 +6102,7 @@ async def _handle_sage_chat_unguarded(
     # (claude_agent_sdk_bridge._UNSUPPORTED_TOOL_NAMES) — threaded into both
     # the master kernel prompt and the specialist capability manifest below
     # so neither ever tells the model to reach for a tool that engine
-    # cannot register. See sage_instruction_compiler_service.py's
+    # cannot register. See instruction_compiler_service.py's
     # tool_discovery_available parameters for the honesty rationale.
     _tool_discovery_available = (
         _resolve_turn_engine_id(_effective_engine_options) != claude_agent_sdk_bridge.ENGINE_ID
@@ -6159,7 +6159,7 @@ async def _handle_sage_chat_unguarded(
             # last SAGE_THREAD_MAX_TURNS window) because the summary can be
             # legitimately older than that window and still be the only
             # durable memory of everything before it. _normalize_recent_
-            # messages (sage_instruction_compiler_service.py) recognizes
+            # messages (instruction_compiler_service.py) recognizes
             # this role explicitly and carries it through as a role="user"
             # tagged note — never "system" (silently dropped by every
             # cloud-provider transport's prior_messages normalizer).
@@ -6209,8 +6209,8 @@ async def _handle_sage_chat_unguarded(
             # detect it here so the agent gets the Hardware tier and tools.
             if not _has_hardware:
                 try:
-                    from server_modules import sage_agent_computer_selection_service
-                    _selection = sage_agent_computer_selection_service.get_selection(
+                    from server_modules import agent_computer_selection_service
+                    _selection = agent_computer_selection_service.get_selection(
                         workspace_id=normalized_workspace_id,
                         user_id=actor_user_id,
                     )
@@ -6243,7 +6243,7 @@ async def _handle_sage_chat_unguarded(
         except Exception:
             pass
 
-        instruction_bundle = sage_instruction_compiler_service.build_sage_instruction_bundle(
+        instruction_bundle = instruction_compiler_service.build_sage_instruction_bundle(
             workspace_id=normalized_workspace_id,
             tenant_id=normalized_tenant_id,
             user_id=actor_user_id,
@@ -6269,7 +6269,7 @@ async def _handle_sage_chat_unguarded(
             "build_sage_instruction_bundle failed for workspace=%s: %s — using minimal fallback",
             normalized_workspace_id, _exc
         )
-        instruction_bundle = sage_instruction_compiler_service.SageInstructionBundle(
+        instruction_bundle = instruction_compiler_service.SageInstructionBundle(
             messages=[{"role": "system", "content": "You are a helpful AI assistant."},
                        {"role": "user", "content": normalized_message}],
             diagnostics={"error": "bundle_build_failed", "workspace_id": normalized_workspace_id},
@@ -6392,7 +6392,7 @@ async def _handle_sage_chat_unguarded(
         # customer-facing surface and got the thinnest prompt). The tiered-
         # autonomy doctrine the founder asked for applies here at least as
         # much as to the master path: a specialist can hold its own bound-
-        # connector credentials. Mirrors sage_instruction_compiler_service.
+        # connector credentials. Mirrors instruction_compiler_service.
         # _TIERED_AUTONOMY_STATEMENT, condensed for the specialist's own
         # (unbounded, no shared budget) prompt.
         _spec_autonomy_rule = (
@@ -6477,9 +6477,9 @@ async def _handle_sage_chat_unguarded(
                 _item for _item in (instruction_bundle.capability_manifest or [])
                 if _specialist_tool_allowed(str(_item.get("tool") or ""), _spec_toolset_for_manifest)
             ]
-            _spec_manifest_text = sage_instruction_compiler_service.render_capability_manifest_text(
+            _spec_manifest_text = instruction_compiler_service.render_capability_manifest_text(
                 _spec_scoped_manifest,
-                char_limit=sage_instruction_compiler_service.SPECIALIST_CAPABILITY_MANIFEST_CHAR_LIMIT,
+                char_limit=instruction_compiler_service.SPECIALIST_CAPABILITY_MANIFEST_CHAR_LIMIT,
                 tool_discovery_available=_tool_discovery_available,
             )
             if _spec_manifest_text:

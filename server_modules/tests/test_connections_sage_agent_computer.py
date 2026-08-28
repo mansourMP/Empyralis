@@ -26,7 +26,7 @@ def _install_auth(monkeypatch):
 async def test_get_sage_agent_computer_selection_returns_current_user_selection(monkeypatch):
     _install_auth(monkeypatch)
     monkeypatch.setattr(
-        routes_connections.sage_agent_computer_selection_service,
+        routes_connections.agent_computer_selection_service,
         "get_selection",
         lambda workspace_id, user_id: {
             "workspace_id": workspace_id,
@@ -54,7 +54,7 @@ async def test_get_sage_agent_computer_selection_returns_current_user_selection(
         lambda registration: dict(registration),
     )
 
-    payload = await routes_connections.get_sage_agent_computer_selection(
+    payload = await routes_connections.get_agent_computer_selection(
         workspace_id="ws-1",
         current_user={"user_id": "user-1", "role": "member"},
     )
@@ -97,7 +97,7 @@ async def test_put_sage_agent_computer_selection_keeps_default_guarded_without_m
         _update_gateway_registration_state,
     )
     monkeypatch.setattr(
-        routes_connections.sage_agent_computer_selection_service,
+        routes_connections.agent_computer_selection_service,
         "set_selection",
         lambda **kwargs: {
             "workspace_id": kwargs["workspace_id"],
@@ -115,7 +115,7 @@ async def test_put_sage_agent_computer_selection_keeps_default_guarded_without_m
         },
     )
 
-    payload = await routes_connections.set_sage_agent_computer_selection(
+    payload = await routes_connections.set_agent_computer_selection(
         body=routes_connections.SageAgentComputerSelectionRequest(
             workspace_id="ws-1",
             selected_gateway_id="gateway-1",
@@ -149,7 +149,7 @@ async def test_put_sage_agent_computer_selection_rejects_full_access_without_war
     )
 
     with pytest.raises(HTTPException) as raised:
-        await routes_connections.set_sage_agent_computer_selection(
+        await routes_connections.set_agent_computer_selection(
             body=routes_connections.SageAgentComputerSelectionRequest(
                 workspace_id="ws-1",
                 selected_gateway_id="gateway-1",
@@ -197,7 +197,7 @@ async def test_put_sage_agent_computer_selection_applies_full_access_after_warni
         _update_gateway_registration_state,
     )
     monkeypatch.setattr(
-        routes_connections.sage_agent_computer_selection_service,
+        routes_connections.agent_computer_selection_service,
         "set_selection",
         lambda **kwargs: {
             "workspace_id": kwargs["workspace_id"],
@@ -215,7 +215,7 @@ async def test_put_sage_agent_computer_selection_applies_full_access_after_warni
         },
     )
 
-    payload = await routes_connections.set_sage_agent_computer_selection(
+    payload = await routes_connections.set_agent_computer_selection(
         body=routes_connections.SageAgentComputerSelectionRequest(
             workspace_id="ws-1",
             selected_gateway_id="gateway-1",
@@ -269,7 +269,7 @@ async def test_put_sage_agent_computer_selection_applies_custom_mode(monkeypatch
         _update_gateway_registration_state,
     )
     monkeypatch.setattr(
-        routes_connections.sage_agent_computer_selection_service,
+        routes_connections.agent_computer_selection_service,
         "set_selection",
         lambda **kwargs: {
             "workspace_id": kwargs["workspace_id"],
@@ -287,7 +287,7 @@ async def test_put_sage_agent_computer_selection_applies_custom_mode(monkeypatch
         },
     )
 
-    payload = await routes_connections.set_sage_agent_computer_selection(
+    payload = await routes_connections.set_agent_computer_selection(
         body=routes_connections.SageAgentComputerSelectionRequest(
             workspace_id="ws-1",
             selected_gateway_id="gateway-1",
@@ -399,7 +399,7 @@ async def test_put_sage_agent_computer_selection_rejects_another_users_gateway(m
     )
 
     with pytest.raises(HTTPException) as raised:
-        await routes_connections.set_sage_agent_computer_selection(
+        await routes_connections.set_agent_computer_selection(
             body=routes_connections.SageAgentComputerSelectionRequest(
                 workspace_id="ws-1",
                 selected_gateway_id="gateway-1",
@@ -427,7 +427,7 @@ async def test_put_sage_agent_computer_selection_rejects_revoked_gateway(monkeyp
     )
 
     with pytest.raises(HTTPException) as raised:
-        await routes_connections.set_sage_agent_computer_selection(
+        await routes_connections.set_agent_computer_selection(
             body=routes_connections.SageAgentComputerSelectionRequest(
                 workspace_id="ws-1",
                 selected_gateway_id="gateway-1",
@@ -455,7 +455,7 @@ def test_connection_status_does_not_auto_select_gateway(monkeypatch):
         lambda registration: dict(registration),
     )
     monkeypatch.setattr(
-        connection_catalog_service.sage_agent_computer_selection_service,
+        connection_catalog_service.agent_computer_selection_service,
         "get_selection",
         lambda workspace_id, user_id: None,
     )
@@ -497,7 +497,7 @@ def test_connection_status_exposes_single_online_candidate_without_auto_selectin
         lambda registration: dict(registration),
     )
     monkeypatch.setattr(
-        connection_catalog_service.sage_agent_computer_selection_service,
+        connection_catalog_service.agent_computer_selection_service,
         "get_selection",
         lambda workspace_id, user_id: None,
     )
@@ -539,7 +539,7 @@ def test_connection_status_uses_persisted_selected_gateway(monkeypatch):
         lambda registration: dict(registration),
     )
     monkeypatch.setattr(
-        connection_catalog_service.sage_agent_computer_selection_service,
+        connection_catalog_service.agent_computer_selection_service,
         "get_selection",
         lambda workspace_id, user_id: {"selected_gateway_id": "gateway-2"},
     )
@@ -585,7 +585,7 @@ def test_connection_status_treats_fresh_active_gateway_as_online(monkeypatch):
         lambda registration: dict(registration),
     )
     monkeypatch.setattr(
-        connection_catalog_service.sage_agent_computer_selection_service,
+        connection_catalog_service.agent_computer_selection_service,
         "get_selection",
         lambda workspace_id, user_id: {"selected_gateway_id": "gateway-live"},
     )
@@ -626,7 +626,7 @@ def test_connection_status_preserves_stale_selected_gateway_id(monkeypatch):
         lambda registration: dict(registration),
     )
     monkeypatch.setattr(
-        connection_catalog_service.sage_agent_computer_selection_service,
+        connection_catalog_service.agent_computer_selection_service,
         "get_selection",
         lambda workspace_id, user_id: {"selected_gateway_id": "gateway-stale"},
     )
@@ -667,7 +667,7 @@ def test_personal_channel_status_does_not_advertise_dead_generic_test(monkeypatc
         lambda registration: dict(registration),
     )
     monkeypatch.setattr(
-        connection_catalog_service.sage_agent_computer_selection_service,
+        connection_catalog_service.agent_computer_selection_service,
         "get_selection",
         lambda workspace_id, user_id: {"selected_gateway_id": "gateway-1"},
     )
@@ -727,7 +727,7 @@ def test_sage_channel_status_marks_gateway_dependent_channels_from_backend(monke
         lambda workspace_id, tenant_id=None, user_id=None, include_revoked=False: [],
     )
     monkeypatch.setattr(
-        connection_catalog_service.sage_agent_computer_selection_service,
+        connection_catalog_service.agent_computer_selection_service,
         "get_selection",
         lambda workspace_id, user_id: None,
     )
@@ -779,7 +779,7 @@ def test_local_bridge_health_promotes_status_to_connected(monkeypatch):
         lambda registration: dict(registration),
     )
     monkeypatch.setattr(
-        connection_catalog_service.sage_agent_computer_selection_service,
+        connection_catalog_service.agent_computer_selection_service,
         "get_selection",
         lambda workspace_id, user_id: {"selected_gateway_id": "gateway-1"},
     )
@@ -914,7 +914,7 @@ def test_oauth_status_locks_setup_when_provider_credentials_are_missing(monkeypa
         lambda *_args, **_kwargs: [],
     )
     monkeypatch.setattr(
-        connection_catalog_service.sage_agent_computer_selection_service,
+        connection_catalog_service.agent_computer_selection_service,
         "get_selection",
         lambda **_kwargs: None,
     )
@@ -949,7 +949,7 @@ def test_oauth_status_allows_setup_when_provider_credentials_exist(monkeypatch):
         lambda *_args, **_kwargs: [],
     )
     monkeypatch.setattr(
-        connection_catalog_service.sage_agent_computer_selection_service,
+        connection_catalog_service.agent_computer_selection_service,
         "get_selection",
         lambda **_kwargs: None,
     )
@@ -1353,7 +1353,7 @@ async def test_new_oauth_app_setup_callback_and_status(
         lambda *_args, **_kwargs: [],
     )
     monkeypatch.setattr(
-        connection_catalog_service.sage_agent_computer_selection_service,
+        connection_catalog_service.agent_computer_selection_service,
         "get_selection",
         lambda **_kwargs: None,
     )
@@ -1387,7 +1387,7 @@ async def test_personal_channel_setup_accepts_fresh_active_gateway(monkeypatch):
 
     monkeypatch.setattr(routes_connections.setup_sessions, "handle_create_setup_session", fail_create_setup_session)
     monkeypatch.setattr(
-        routes_connections.sage_agent_computer_selection_service,
+        routes_connections.agent_computer_selection_service,
         "get_selection",
         lambda workspace_id, user_id: {"selected_gateway_id": "gateway-1"},
     )
@@ -1437,7 +1437,7 @@ async def test_local_bridge_connection_setup_returns_agent_computer_contract(mon
 
     monkeypatch.setattr(routes_connections.setup_sessions, "handle_create_setup_session", fail_create_setup_session)
     monkeypatch.setattr(
-        routes_connections.sage_agent_computer_selection_service,
+        routes_connections.agent_computer_selection_service,
         "get_selection",
         lambda workspace_id, user_id: {"selected_gateway_id": "gateway-1"},
     )
@@ -1524,7 +1524,7 @@ async def test_wechat_connection_setup_returns_agent_computer_contract(monkeypat
 
     monkeypatch.setattr(routes_connections.setup_sessions, "handle_create_setup_session", fail_create_setup_session)
     monkeypatch.setattr(
-        routes_connections.sage_agent_computer_selection_service,
+        routes_connections.agent_computer_selection_service,
         "get_selection",
         lambda workspace_id, user_id: {"selected_gateway_id": "gateway-1"},
     )

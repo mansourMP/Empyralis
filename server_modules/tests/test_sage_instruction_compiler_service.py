@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from server_modules import sage_instruction_compiler_service as compiler
+from server_modules import instruction_compiler_service as compiler
 
 
 class SageInstructionCompilerServiceTests(unittest.TestCase):
