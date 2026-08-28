@@ -119,13 +119,29 @@
  * created, NOT reachable    reads "Cancel" again (same head control as
  *                           before the commit exists at all), and pressing
  *                           it opens a confirmation instead of silently
- *                           doing either thing wrong: "Go back" (stay and
- *                           connect a channel) or "Delete this agent" — the
- *                           SAME `deleteFleetAgent` every other delete on
- *                           this surface goes through, in the same
- *                           Cancel + `.fleet-btn--danger` shell
- *                           AgentDeleteDialog already uses.
+ *                           doing either thing wrong. THREE ways out, in
+ *                           this order (AGENT_CREATE_UNREACHABLE_EXITS):
+ *                             Go back            stay and connect one
+ *                             Leave it for now   keep it, open it — its own
+ *                                                page flags it unfinished
+ *                             Delete agent       the SAME `deleteFleetAgent`
+ *                                                every other delete here
+ *                                                uses, `--danger`, last
  * ```
+ *
+ * **The third option is a 2026-08-28 correction to this very paragraph, and
+ * the claim it corrects is the sentence immediately below.** PART B shipped
+ * with only "Go back" and "Delete agent" while asserting that REQUIRED never
+ * becomes CAGED. It did: Escape and the backdrop both resolve to "Go back",
+ * the backdrop covers the rail, and Channels blocks the forward button — so
+ * a customer without a bot token in front of them could leave the browser or
+ * destroy their own work, and nothing else. "Leave it for now" is the
+ * `open_agent` behaviour made EXPLICIT rather than reinstated silently:
+ * PART B was right that a dismiss must never resolve there on its own, and
+ * wrong that the destination should therefore be unreachable — the agent's
+ * own page renders the "Connect a channel" band whenever zero channels are
+ * connected, so it lands on the screen that says what is missing. The
+ * founder's rule is untouched: Channels still BLOCKS advancing.
  *
  * Leaving is still never blocked — a confirmation is one more press, not a
  * wall, so REQUIRED still never becomes CAGED. `reachable` is tracked
@@ -175,6 +191,7 @@ import {
 } from "./agent-create-placement";
 import {
   AGENT_CREATE_STEPS,
+  AGENT_CREATE_UNREACHABLE_EXITS,
   agentCreateCloseIntent,
   agentCreateNextStep,
   agentCreatePreviousStep,
@@ -277,12 +294,15 @@ function UnreachableAgentCloseDialog({
   busy,
   error,
   onCancel,
+  onLeave,
   onConfirm,
 }: {
   agentName: string;
   busy: boolean;
   error: string | null;
   onCancel: () => void;
+  /** Keep the agent and go to it. See AGENT_CREATE_UNREACHABLE_EXITS. */
+  onLeave: () => void;
   onConfirm: () => void;
 }) {
   useEffect(() => {
@@ -323,19 +343,37 @@ function UnreachableAgentCloseDialog({
           </span>
         </div>
         <div className="fleet-small-dialog-body">
+          {/* The fact once, then the buttons carry their own consequences —
+              a professional tool labels rather than lecturing. The only
+              consequence that cannot live on a button is the irreversible
+              one, so that is the sentence that stays. */}
           <p style={{ margin: 0, fontSize: 13, color: "var(--text-primary)", lineHeight: 1.5 }}>
-            <strong>{agentName}</strong> has no channel connected yet, so nobody can message it. Go
-            back and connect one, or delete this agent — that can&apos;t be undone.
+            <strong>{agentName}</strong> has no channel connected yet, so nobody can message it. You
+            can come back to it any time — it stays on your Agents list, flagged as unfinished.
+            Deleting it instead can&apos;t be undone.
           </p>
           {error && <p style={{ margin: 0, fontSize: 12, color: "var(--offline-text)" }}>{error}</p>}
         </div>
+        {/* Rendered FROM the ordered rule, not three literals — so "leaving is
+            never the default" and "exactly one destructive option, last" are
+            properties a test can hold still. See
+            AGENT_CREATE_UNREACHABLE_EXITS. */}
         <div className="fleet-small-dialog-footer">
-          <button type="button" className="fleet-btn" onClick={onCancel} disabled={busy}>
-            Go back
-          </button>
-          <button type="button" className="fleet-btn fleet-btn--danger" onClick={onConfirm} disabled={busy}>
-            {busy ? "Deleting…" : "Delete agent"}
-          </button>
+          {AGENT_CREATE_UNREACHABLE_EXITS.map((exit) => {
+            const onPress = exit.id === "stay" ? onCancel : exit.id === "leave" ? onLeave : onConfirm;
+            const label = exit.id === "delete" && busy ? "Deleting…" : exit.label;
+            return (
+              <button
+                key={exit.id}
+                type="button"
+                className={exit.destructive ? "fleet-btn fleet-btn--danger" : "fleet-btn"}
+                onClick={onPress}
+                disabled={busy}
+              >
+                {label}
+              </button>
+            );
+          })}
         </div>
       </div>
     </div>,
@@ -657,6 +695,23 @@ export function AgentCreateCard({
     if (deleteBusy) return;
     setConfirmUnreachableClose(false);
   }, [deleteBusy]);
+
+  /** The THIRD way out: keep the agent, unreachable, and go to it.
+   *
+   *  This is byte-for-byte the `open_agent` path — the same exit animation
+   *  and the same `finish()` — with the difference that the person ASKED for
+   *  it. PART B's fix was right that `requestClose` must not resolve here on
+   *  its own (that is how an unreachable agent got abandoned with nothing
+   *  said) and wrong to conclude the destination should be unreachable: the
+   *  agent's own page renders the "Connect a channel" setup band whenever
+   *  zero channels are connected, so landing there is landing on the exact
+   *  screen that says what is still missing and offers the fix. */
+  const leaveUnreachableForNow = useCallback(() => {
+    if (deleteBusy || closing) return;
+    setConfirmUnreachableClose(false);
+    setClosing(true);
+    closeTimer.current = window.setTimeout(() => finish(), exitDurationMs());
+  }, [closing, deleteBusy, finish]);
 
   /** The other way out of the confirmation: actually delete the agent that
    *  was created but never became reachable, then close the wizard exactly
@@ -1399,6 +1454,7 @@ export function AgentCreateCard({
             busy={deleteBusy}
             error={deleteError}
             onCancel={cancelUnreachableClose}
+            onLeave={leaveUnreachableForNow}
             onConfirm={() => void confirmDeleteUnreachable()}
           />
         ) : null}

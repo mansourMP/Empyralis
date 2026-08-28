@@ -143,14 +143,22 @@
  *   created, NOT reachable   ─▶  dismiss reads Cancel (same head control as
  *                                before the commit), and PRESSING it asks —
  *                                never silently opens the agent, never
- *                                silently deletes it either. "Go back and
- *                                connect one" or "Delete this agent" are
- *                                both one press away, in the same
- *                                Cancel + `.fleet-btn--danger` confirm shell
- *                                AgentDeleteDialog already uses for the
- *                                identical action taken later, from the
- *                                agent's own page.
+ *                                silently deletes it either. THREE named
+ *                                choices, in order: "Go back", "Leave it for
+ *                                now", "Delete agent" — see
+ *                                AGENT_CREATE_UNREACHABLE_EXITS below, which
+ *                                is where that order and the single
+ *                                `.fleet-btn--danger` are held still.
  * ```
+ *
+ * **The middle option landed 2026-08-28 and it corrects this section's own
+ * claim.** As shipped, PART B offered only the outer two, which is not "not
+ * caged": Escape and the backdrop both resolve to "Go back", so somebody with
+ * no credential to hand could leave the browser or delete their own work and
+ * nothing else. The rule below is unchanged — Channels still blocks the
+ * forward button — because whether the SEQUENCE may be completed without a
+ * channel and whether a person may LEAVE keeping the agent are two different
+ * questions, and only the first one is the founder's.
  *
  * REQUIRED IS STILL NOT CAGED: pressing dismiss is never blocked, in either
  * state — a confirmation is one more press, not a wall. What changed is
@@ -448,6 +456,62 @@ export function agentCreateCloseIntent(created: boolean, reachable: boolean): Ag
   if (!created) return "discard";
   return reachable ? "open_agent" : "confirm_delete";
 }
+
+/**
+ * THE THREE WAYS OUT OF `confirm_delete`, in the order they are rendered.
+ *
+ * PART B shipped this confirmation with TWO buttons — "Go back" and "Delete
+ * agent" — and its own header claims *"REQUIRED still never becomes CAGED."*
+ * That claim was false as written. Escape and the backdrop both resolve to
+ * "Go back", the backdrop covers the rail, and Channels blocks the forward
+ * button until a real credential connects. So a customer who does not have a
+ * bot token in front of them had exactly two exits: leave the browser, or
+ * destroy work they had just done. That is a cage with a delete key in it.
+ *
+ * The founder's rule is UNCHANGED and is not weakened here: *"channels cannot
+ * be skipped… you cannot have a fucking agent without channel."* Channels
+ * still BLOCKS advancing to Apps and to finish — `planAgentCreateFooter`'s
+ * forward button is untouched. What this adds is a way to LEAVE while keeping
+ * the agent, which is a different question from whether the sequence may be
+ * completed without one.
+ *
+ * "Leave it for now" is the `open_agent` behaviour made EXPLICIT rather than
+ * reinstated silently. PART B was right that closing must never resolve to it
+ * on its own — that is how an unreachable agent got abandoned with nothing
+ * said. It was wrong to conclude the option should not exist: the agent's own
+ * page renders the "Finish setting up ▸ Connect a channel" band whenever zero
+ * channels are connected (agent-setup-steps.ts), so the state is recoverable
+ * AND visibly labelled as unfinished. A named choice that lands somewhere
+ * saying what is missing is honest; a silent one was not.
+ *
+ * ```
+ * stay    Go back            the DEFAULT — what Escape and the backdrop do.
+ *                            Unchanged, and still first.
+ * leave   Leave it for now   keeps the agent, opens it. Its page flags it.
+ * delete  Delete agent       destroys it. --danger. Still last.
+ * ```
+ *
+ * Ordered data rather than three literals in the JSX so the three properties
+ * that matter can be ASSERTED: that leaving is never first (i.e. never what a
+ * stray Escape or a mis-aimed click resolves to), that exactly one option is
+ * destructive and it is last, and that nothing here calls itself "skip" — the
+ * word the founder rejected, and the one that would make this read as the
+ * channel requirement being waived rather than deferred.
+ */
+export type AgentCreateUnreachableExitId = "stay" | "leave" | "delete";
+
+export type AgentCreateUnreachableExit = {
+  id: AgentCreateUnreachableExitId;
+  label: string;
+  /** Renders `.fleet-btn--danger`, and it is the only one that may. */
+  destructive: boolean;
+};
+
+export const AGENT_CREATE_UNREACHABLE_EXITS: readonly AgentCreateUnreachableExit[] = [
+  { id: "stay", label: "Go back", destructive: false },
+  { id: "leave", label: "Leave it for now", destructive: false },
+  { id: "delete", label: "Delete agent", destructive: true },
+];
 
 /** The surface's own title. It names the thing once the thing exists —
  *  a person on the last step must be able to see, without pressing anything,

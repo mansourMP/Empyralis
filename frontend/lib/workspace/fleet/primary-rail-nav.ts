@@ -109,8 +109,22 @@ export type RailNavItem = {
    *  real agents there is nothing to aggregate — every event class the
    *  activity ledger knows about is agent- or gateway-driven, so Inbox hides
    *  itself from the rail at agent-count-shape.ts's "none" mode (see
-   *  visibleRailItems below). Agents itself carries the same tag for the
-   *  same reason: a picker with nothing in it is worse than no row at all.
+   *  visibleRailItems below).
+   *
+   *  AGENTS IS NO LONGER TAGGED, and that is a PREMISE EXPIRING rather than
+   *  a reversal of MAN-317. The tag was added 2026-08-19 with the reason "a
+   *  picker with nothing in it is worse than no row at all" — true, and it
+   *  described the row's behaviour AT THE TIME: pressing Agents swapped the
+   *  rail itself into a workspace-agents SPACE (primary-rail-space.ts's own
+   *  second kind), so at zero agents it swapped the rail for an empty list.
+   *  That space was deleted 2026-08-21/22 ("Settings is the ONLY space" —
+   *  PrimaryRail.tsx's own comment) and the row became an ordinary link to
+   *  /w/{id}/agents, whose zero state is FirstAgentEmpty: the product's
+   *  BEST teaching state, one press from the rail. Hiding the row now hides
+   *  the front door rather than an empty picker — the opposite of what the
+   *  tag was for. Walked end to end on a real signup: the rail offered no
+   *  route to agent creation at all, and the only ways in were ⌘K or typing
+   *  the URL.
    *
    *  Projects is deliberately NOT tagged: it is the workspace's own data
    *  (CLAUDE.md positioning — "the WORKSPACE is the product"), not a view OF
@@ -124,7 +138,9 @@ export const RAIL_ITEMS: RailNavItem[] = [
   { key: "inbox", label: "Inbox", segment: "inbox", icon: Inbox, chord: "i", aggregatesAgents: true },
   { key: "my-work", label: "My work", segment: "my-work", icon: ListChecks, chord: "m" },
   { key: "projects", label: "Projects", segment: "projects", icon: FolderKanban, chord: "p" },
-  { key: "agents", label: "Agents", segment: "agents", icon: Bot, chord: "a", aggregatesAgents: true },
+  // NOT `aggregatesAgents` — see the field's own doc above. It routes to a
+  // page whose zero state teaches; hiding it hides the front door.
+  { key: "agents", label: "Agents", segment: "agents", icon: Bot, chord: "a" },
   // CONTEXT REMOVED FROM THE RAIL, 2026-08-20. Founder: "all we have to do
   // is to just remove this context button on this left rail... tasks and
   // documents actually inside this good area which I like, it's already

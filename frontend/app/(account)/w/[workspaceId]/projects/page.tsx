@@ -16,6 +16,8 @@ import { breadcrumbCount, deriveStatus, findSageAgent, formatNumber, timeAgo, ty
 // before summarizeStatus() rolls the counts up into one line.
 import { ProjectIcon } from "@/lib/workspace/fleet/fleet-project-identity";
 import { CreateFirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
+import { composerSubmitButtonClass, createButtonClass } from "@/lib/workspace/fleet/create-accent";
+import { planFirstAgentPrompt } from "@/lib/workspace/fleet/workspace-first-run";
 import { FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import { FleetToolbar, type ToolbarFilter } from "@/lib/workspace/fleet/FleetToolbar";
 import { FleetRightPanel, PanelSection, PanelRow } from "@/lib/workspace/fleet/FleetRightPanel";
@@ -160,11 +162,50 @@ export default function ProjectsPage() {
   // Same Sage exclusion as the Agents list: the Operator never counts as a
   // row anywhere, so a project's agent count matches what you'd see if you
   // clicked into it.
-  const { agents: allAgents } = useFleetAgents(workspaceId);
+  const { agents: allAgents, loading: agentsLoading } = useFleetAgents(workspaceId);
   const sageAgent = useMemo(() => findSageAgent(allAgents), [allAgents]);
   const agents = useMemo(
     () => (sageAgent ? allAgents.filter((a) => a.agent_id !== sageAgent.agent_id) : allAgents),
     [allAgents, sageAgent],
+  );
+
+  // ── The first-run offer ───────────────────────────────────────────────────
+  // This page is where a brand-new customer LANDS (/w/{id} redirects here), so
+  // it is the one screen that has to answer "how do I make my first agent".
+  // Which shape — or none — is decided by workspace-first-run.ts; read its
+  // header for the dead end this closes and why the band does not simply
+  // replace the list.
+  //
+  // The two `*Settled` latches are STICKY on purpose and must not be
+  // simplified back to `!loading`. fleet-data.ts's shared cache sets `loading`
+  // true again on EVERY 30s background refetch (runSharedFetch), so a live
+  // `!loading` would flash "no agents in this workspace yet" at an established
+  // workspace twice a minute. "Nothing here" and "haven't been told yet" are
+  // different facts; these say which one we are in.
+  const [projectsSettled, setProjectsSettled] = useState(false);
+  const [agentsSettled, setAgentsSettled] = useState(false);
+  useEffect(() => {
+    if (!loading) setProjectsSettled(true);
+  }, [loading]);
+  useEffect(() => {
+    if (!agentsLoading) setAgentsSettled(true);
+  }, [agentsLoading]);
+  // Archived is a filtered VIEW, never the workspace's own emptiness — a
+  // workspace whose only project is archived still has that project, and
+  // offering "create your first agent" over the archive would be answering a
+  // question nobody asked. `allProjects` (unfiltered by the archive toggle)
+  // is what the plan is asked about.
+  const firstAgentPrompt = useMemo(
+    () =>
+      showArchived
+        ? "none"
+        : planFirstAgentPrompt({
+            projectsKnown: projectsSettled,
+            projectCount: allProjects.length,
+            agentsKnown: agentsSettled,
+            realAgentCount: agents.length,
+          }),
+    [showArchived, projectsSettled, allProjects.length, agentsSettled, agents.length],
   );
 
   const [usageByAgent, setUsageByAgent] = useState<Map<string, { cost: number; tokens: number }>>(new Map());
@@ -258,8 +299,23 @@ export default function ProjectsPage() {
           cluster the Agents and Project-detail pages use, so the corner
           can't drift, just no longer sharing the top line with the
           breadcrumb (U3-E's "one header bar" reading was wrong). */}
+      {/* WHO OWNS THE VIEW'S ONE ACCENT FILL is create-accent.ts's answer, not
+          a literal here. This used to be an unconditional `--accent-fill`,
+          which put it and CreateFirstAgentEmpty's own filled button on screen
+          together on every brand-new workspace — "two accent-filled buttons in
+          one view is a bug", the same defect agents/page.tsx already fixed for
+          its own "New agent". `listIsEmpty` is the FIRST-RUN offer's presence,
+          not `projects.length === 0`: the band renders over a real list, and
+          while it is up it is the primary action. */}
       <HeaderAction>
-        <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setDialogOpen(true)}>
+        <button
+          type="button"
+          className={createButtonClass("header", {
+            listIsEmpty: firstAgentPrompt !== "none",
+            composerOpen: dialogOpen,
+          })}
+          onClick={() => setDialogOpen(true)}
+        >
           <span className="fleet-btn-plus">+</span>
           New project
         </button>
@@ -283,6 +339,21 @@ export default function ProjectsPage() {
 
       <div className="fleet-content-with-panel">
         <div className="fleet-content-main">
+          {/* THE FIRST AGENT IS REACHABLE FROM WHERE A NEW CUSTOMER LANDS.
+              Above the list, never instead of it — the "General" project this
+              workspace was bootstrapped with is real and stays on screen. The
+              band disappears the moment an agent exists, recomputed from the
+              live count with no flag to unset, exactly like every other
+              count-shape consumer here. */}
+          {firstAgentPrompt === "band" && (
+            <CreateFirstAgentEmpty
+              variant="band"
+              workspaceId={workspaceId}
+              onCreated={refresh}
+              title="No agents in this workspace yet."
+              desc=""
+            />
+          )}
           {loading && projects.length === 0 ? (
             // Reuses `.fleet-projects-list`/`.fleet-projects-list-header`/
             // `.fleet-project-row`'s real 6-column grid so the column-title
@@ -558,7 +629,12 @@ function NewProjectDialog({
 
         <div className="fleet-small-dialog-footer">
           <button type="button" className="fleet-btn" onClick={onClose} disabled={busy}>Cancel</button>
-          <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => void create()} disabled={busy || !name.trim()}>
+          {/* Routed through create-accent.ts rather than hardcoding the filled
+              class — same class out, but it is now VISIBLE to that module's
+              own guard that this composer obeys the rule. Its header names
+              exactly this shape as what let TaskComposer and DocumentComposer
+              stay filled while the header button behind them was filled too. */}
+          <button type="button" className={composerSubmitButtonClass()} onClick={() => void create()} disabled={busy || !name.trim()}>
             {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : "Create project"}
           </button>
         </div>

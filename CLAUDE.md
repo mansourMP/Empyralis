@@ -9830,3 +9830,116 @@ that render regardless of current reachability. Two true, differently
 scoped answers about the same agent, not a wiring defect — check whether a
 "disagreement" between two views is a design difference before assuming a
 shared data-plumbing bug.
+
+## A NEW CUSTOMER HAD NO WAY TO CREATE THEIR FIRST AGENT (2026-08-28)
+
+**Three individually-correct decisions composed into a dead end, and every
+one of them was right on its own terms. Nothing was broken; the COMPOSITION
+was.** Found by walking a real signup, not by reading code.
+
+```
+signup ─▶ /w/{ws} ─▶ /w/{ws}/projects            page.tsx redirect
+the rail HIDES Inbox and Agents at 0 agents      primary-rail-nav.ts
+Projects shows CreateFirstAgentEmpty ONLY when
+  projects.length === 0                          projects/page.tsx
+…but every workspace bootstraps a "General"      routes_workspaces.py
+─▶ the teaching state can NEVER fire, and the rail row that reaches the
+   real one (/w/{ws}/agents) is hidden
+```
+
+Measured on a real fresh account before the fix: **19 interactive elements on
+the landing page, zero of them reaching agent creation.** The only ways in
+were ⌘K and typing the URL.
+
+**A `hideAggregations` TAG IS A CLAIM ABOUT WHAT THE ROW OPENS, and it
+expired without anyone noticing.** Agents was tagged `aggregatesAgents` on
+2026-08-19 with the reason *"a picker with nothing in it is worse than no row
+at all"* — TRUE at the time, because the row swapped the rail into a
+workspace-agents SPACE. That space was deleted 2026-08-21/22 ("Settings is
+the ONLY space") and the row became a plain link to a PAGE whose zero state
+is `FirstAgentEmpty` — the best teaching state in the product. From then on
+the tag hid the front door rather than an empty picker. **Before trusting a
+visibility rule, re-check what the thing it hides actually opens now.** Inbox
+keeps its tag; it genuinely has nothing to aggregate.
+
+**THE BAND, NOT THE EMPTY STATE, AND THAT IS THE OUTCOME-HONESTY LAW POINTED
+AT AN EMPTY SCREEN.** The obvious fix — key the centred `CreateFirstAgentEmpty`
+on the AGENT count instead of the project count — renders "No projects yet"
+over a workspace that demonstrably has one. The General project is real and on
+the API response; deleting it from the screen to make room for a call to
+action is the same class of lie as reporting failure on success. So the list
+keeps telling the truth and the offer rides above it as a one-line band
+(`.fleet-first-run`), which is `.fleet-agent-setup`'s own grammar. It differs
+on ONE point deliberately: it OWNS THE VIEW'S ACCENT, because a workspace with
+no agent has no other work to do.
+
+`workspace-first-run.ts`'s `planFirstAgentPrompt` is the whole rule (`full` /
+`band` / `none`), pure + tested, same shape as `agent-count-shape.ts`. Its two
+`*Known` inputs are STICKY LATCHES, never a live `!loading`: fleet-data.ts's
+shared cache re-raises `loading` on EVERY 30s background poll
+(`runSharedFetch`), so a length-only plan flashes "no agents yet" at an
+established workspace twice a minute.
+
+Found and fixed in passing, third instance of a documented defect: the
+Projects page's header "+ New project" was an unconditional
+`fleet-btn--accent-fill`, so it and `CreateFirstAgentEmpty`'s own filled
+button were on screen together on every brand-new workspace. `agents/page.tsx`
+already fixed the identical bug for its own "New agent". Both that button and
+`NewProjectDialog`'s submit now go through `create-accent.ts`. Measured after:
+exactly ONE accent fill in the view.
+
+### "REQUIRED still never becomes CAGED" was false as written
+
+**PART B (2026-08-27) shipped the unreachable-agent confirmation with two
+buttons — "Go back" and "Delete agent" — under a header asserting that
+leaving is never blocked. It was blocked.** Escape and the backdrop both
+resolve to "Go back", the backdrop covers the rail, and Channels disables the
+forward button until a real credential connects. A customer without a bot
+token in front of them could leave the browser or destroy their own work, and
+nothing else.
+
+```
+Go back            the DEFAULT — Escape and the backdrop. unchanged, first.
+Leave it for now   keeps the agent and opens it. NEW.
+Delete agent       --danger. unchanged, last.
+```
+
+**The founder's rule is untouched — Channels still BLOCKS advancing.** Whether
+the SEQUENCE may be completed without a channel and whether a person may LEAVE
+keeping the agent are two different questions, and only the first is his.
+"Leave it for now" is the `open_agent` behaviour made EXPLICIT rather than
+reinstated silently: PART B was right that a dismiss must never resolve there
+on its own, and wrong that the destination should therefore be unreachable —
+the agent's own page renders the setup band whenever zero channels are
+connected, so it lands on the screen that names what is missing.
+
+`AGENT_CREATE_UNREACHABLE_EXITS` (agent-create-wizard.ts) is ordered data, not
+three literals in the JSX, so the three properties that matter are assertable:
+leaving is never first, exactly one option is destructive and it is last, and
+no label says "skip" — the word the founder rejected, and the one that would
+read as the channel requirement being waived rather than deferred.
+
+Verified live end to end on a real fresh signup: Channels' "Next" still
+`disabled`, the three buttons render in order with only Delete carrying
+`--danger`, and pressing "Leave it for now" kept the agent and landed on
+`.../agents/{id}/chat` with the "Finish setting up" band showing.
+
+**Settings ▸ Account is a REAL PAGE MISSING CONTENT, not a dead route — but
+it is currently a dead ROW.** Measured live: `/w/{ws}/settings/account` is the
+FIRST row of the Settings rail and its content area holds ZERO controls
+("Nothing here yet"). It is a deliberate placeholder (`AccountSection.tsx`
+says so) and it is a live redirect TARGET (`app/(account)/settings/account/
+page.tsx`), so deleting the row alone would strand that redirect on an
+unhighlighted empty page. There is already a non-speculative candidate to fill
+it: the light/dark toggle is a personal preference sitting as an account-popover
+row, and "Keyboard shortcuts" is already its own section. Founder's call —
+fill it with the theme preference, or remove the row AND the redirect together.
+
+**A harness note that cost real time.** In the Browser pane neither mouse nor
+keyboard input reached this app's pages — `left_click` by ref and `Tab` both
+left `document.activeElement` as BODY on the signup form. A real signup is
+still reachable: `POST /api/auth/signup` from `javascript_tool` with the
+`empyralis_csrf_token` cookie echoed as the `x-csrf-token` header sets real
+session cookies on the origin. And the session on a disposable stack dies far
+sooner than `ORION_JWT_EXP_SECONDS` (3600) implies — re-login IN THE SAME
+BATCH as the navigation, or the next page bounces to `/login?next=…`.

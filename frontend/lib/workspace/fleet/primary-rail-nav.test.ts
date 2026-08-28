@@ -75,9 +75,17 @@ assert(RAIL_ITEMS[4] === undefined, "there is no fifth rail row -- Context was r
 
 // ── Aggregation tagging ───────────────────────────────────────────────────
 assert(RAIL_ITEMS.find((i) => i.key === "inbox")?.aggregatesAgents === true, "Inbox is tagged as an agent-aggregating surface");
+// INVERTED, not deleted. Agents WAS tagged (2026-08-19) because pressing it
+// swapped the rail into a workspace-agents SPACE, so at zero agents it swapped
+// the rail for an empty picker. That space is gone ("Settings is the ONLY
+// space", 2026-08-21) and the row is now a plain link to /w/{id}/agents, whose
+// zero state is FirstAgentEmpty — the create-your-first-agent teaching state.
+// Hiding the row hid the product's only discoverable route to agent creation
+// for a brand-new customer, confirmed by walking a real signup. Do not re-tag
+// it without first re-checking what the row actually opens.
 assert(
-  RAIL_ITEMS.find((i) => i.key === "agents")?.aggregatesAgents === true,
-  "Agents is tagged as an agent-aggregating surface too — a picker with nothing in it hides itself",
+  !RAIL_ITEMS.find((i) => i.key === "agents")?.aggregatesAgents,
+  "Agents is NOT tagged — it routes to a page whose zero state teaches, so hiding it hides the front door",
 );
 assert(!RAIL_ITEMS.find((i) => i.key === "projects")?.aggregatesAgents, "Projects is never tagged as agent-aggregating");
 assert(
@@ -93,8 +101,16 @@ assert(
 // agents must not invent a second list that could drift from RAIL_ITEMS.
 const hidden = visibleRailItems(true);
 assert(
-  hidden.map((i) => i.key).join(",") === "my-work,projects",
-  `at zero agents both Inbox and Agents hide, got ${hidden.map((i) => i.key).join(",")}`,
+  hidden.map((i) => i.key).join(",") === "my-work,projects,agents",
+  `at zero agents only Inbox hides — Agents is the route to creating one, got ${hidden.map((i) => i.key).join(",")}`,
+);
+// The positive half, asserted separately because "Inbox is gone" and "Agents
+// survives" are two different claims and a joined-string check that drifted
+// could satisfy neither while still reading as one failure.
+assert(!hidden.some((i) => i.key === "inbox"), "Inbox still hides at zero agents — nothing to aggregate");
+assert(
+  hidden.some((i) => i.key === "agents"),
+  "Agents SURVIVES the zero-agent rail — a brand-new customer must have one visible route to their first agent",
 );
 const shown = visibleRailItems(false);
 assert(shown.length === RAIL_ITEMS.length, "with agents present, every rail item is visible");
