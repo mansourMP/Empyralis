@@ -1205,7 +1205,7 @@ def _persist_direct_chat_hosted_usage_with_reservation_guard(
 # at ceiling" is instead surfaced the exact same way this loop already
 # surfaces its OTHER non-crash deliberate stop (tool_loop_detected, a few
 # hundred lines below): an intervention in the final payload plus
-# _finish_trace(outcome="partial"), never a silent failure.
+# _finish_trace(outcome="failed"), never a silent failure.
 _RUN_COST_CEILING_INTERVENTION_KIND = "run_cost_ceiling_reached"
 
 
@@ -1663,7 +1663,7 @@ def stream_provider_backed_direct_chat(
                 task_id=_assigned_task_id,
                 plan=current_plan,
             )
-            _finish_trace(trace_context, outcome="partial", final_message_id=None)
+            _finish_trace(trace_context, outcome=agent_trace_service.TRACE_OUTCOME_FAILED, final_message_id=None)
             yield {
                 "type": "final",
                 "payload": {
@@ -1991,7 +1991,7 @@ def stream_provider_backed_direct_chat(
                             task_id=_assigned_task_id,
                             plan=current_plan,
                         )
-                        _finish_trace(trace_context, outcome="partial", final_message_id=None)
+                        _finish_trace(trace_context, outcome=agent_trace_service.TRACE_OUTCOME_FAILED, final_message_id=None)
                         yield {
                             "type": "final",
                             "payload": {
@@ -2826,7 +2826,7 @@ def stream_provider_backed_direct_chat(
                             task_id=_assigned_task_id,
                             plan=current_plan,
                         )
-                        _finish_trace(trace_context, outcome="partial", final_message_id=None)
+                        _finish_trace(trace_context, outcome=agent_trace_service.TRACE_OUTCOME_FAILED, final_message_id=None)
                         yield {
                             "type": "final",
                             "payload": {
@@ -3345,7 +3345,7 @@ def stream_provider_backed_direct_chat(
         task_id=_assigned_task_id,
         plan=current_plan,
     )
-    _finish_trace(trace_context, outcome="partial", final_message_id=None)
+    _finish_trace(trace_context, outcome=agent_trace_service.TRACE_OUTCOME_FAILED, final_message_id=None)
     platform_paid_identity = _platform_paid_ai_identity(
         availability_payload=availability_payload,
         metadata=metadata,

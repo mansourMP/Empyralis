@@ -4600,7 +4600,12 @@ async def _run_sage_action_loop_v3(
         # Nothing to say and nothing done — the caller regenerates on a
         # different path that never sees this trace, so close it here rather
         # than leaving a trace that reads as "still running" forever.
-        await _finish_sdk_engine_trace("partial")
+        #
+        # PARTIAL, not failed, and that is deliberate: the turn did not go
+        # wrong here, it continued somewhere this trace cannot see. Calling
+        # it failed would report a failure that did not happen — the same
+        # law that makes an errored turn stop calling itself partial.
+        await _finish_sdk_engine_trace(agent_trace_service.TRACE_OUTCOME_PARTIAL)
         return None
     # 2026-07-09 first-run integrity fix, corrected 2026-08-14 (twice: first
     # to stop guessing "disabled tools" for a provider/execution failure,
@@ -4613,8 +4618,13 @@ async def _run_sage_action_loop_v3(
     # more precise message with a vaguer one.
     if (not reply or reply.strip() == GENERIC_ERROR.channel_text) and collected.get("blocked_tools"):
         reply = SAGE_TURN_NO_REPLY_UNKNOWN.channel_text
+    # An errored turn is FAILED, not partial — "partial" claims work
+    # happened, and this branch is reached precisely when the turn carries
+    # an error. The no-error branch is unchanged.
     await _finish_sdk_engine_trace(
-        "partial" if _coerce_text(final_payload.get("error")) else "success"
+        agent_trace_service.TRACE_OUTCOME_FAILED
+        if _coerce_text(final_payload.get("error"))
+        else agent_trace_service.TRACE_OUTCOME_SUCCESS
     )
     return {
         "message": reply,

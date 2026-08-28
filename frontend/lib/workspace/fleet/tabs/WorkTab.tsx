@@ -657,13 +657,20 @@ function findPrecedingCustomerTurn(turns: Turn[], beforeIndex: number): Turn | u
   return undefined;
 }
 
-type WorkStatus = "working" | "waiting" | "done" | "unknown";
+type WorkStatus = "working" | "waiting" | "failed" | "done" | "unknown";
 
 function classifyThreadStatus(entry: TraceMapEntry | null | undefined): WorkStatus {
   if (!entry || !entry.trace) return "unknown";
   const { trace, events } = entry;
   if (!trace.finished_at) return "working";
-  if ((trace.outcome || "").toLowerCase() === "needs_input") return "waiting";
+  const outcome = (trace.outcome || "").toLowerCase();
+  if (outcome === "needs_input") return "waiting";
+  // A run that produced nothing used to be recorded as "partial" and read
+  // here as "done", so a failure and a success rendered identically. The
+  // backend now says `failed` when it means it (agent_trace_service's
+  // TRACE_OUTCOME_* vocabulary); this is the reader that makes that
+  // distinction visible instead of a value nothing looks at.
+  if (outcome === "failed") return "failed";
   const requested = events.some((e) => (e.event_type || "").toLowerCase() === "approval.requested");
   const resolved = events.some((e) => (e.event_type || "").toLowerCase() === "approval.resolved");
   if (requested && !resolved) return "waiting";
@@ -676,6 +683,7 @@ function subLineFor(status: WorkStatus, entry: TraceMapEntry | null | undefined)
   const stepWord = `${steps} step${steps === 1 ? "" : "s"}`;
   if (status === "working") return `${stepWord} · working`;
   if (status === "waiting") return "waiting on approval";
+  if (status === "failed") return `${stepWord} · failed`;
   return `${stepWord} · done`;
 }
 
@@ -1087,7 +1095,14 @@ export function WorkTab({
               const when = t.last_turn_at || t.updated_at || "";
               const entry = traceMap[t.id];
               const status = classifyThreadStatus(entry);
-              const dotTone = status === "working" ? "working" : status === "waiting" ? "degraded" : "unknown";
+              const dotTone =
+                status === "working"
+                  ? "working"
+                  : status === "waiting"
+                    ? "degraded"
+                    : status === "failed"
+                      ? "error"
+                      : "unknown";
               return (
                 <button
                   key={t.id}

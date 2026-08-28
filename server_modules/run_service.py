@@ -2285,13 +2285,18 @@ def transition_live_run_status(
                                 ),
                                 operation=f"trace.failed:{run_id}:{status}",
                             )
+                            # FAILED, not "partial": this branch only runs
+                            # for status in {failed, timeout}, and "partial"
+                            # claims work happened. WorkTab reads only
+                            # needs_input, so a failed run used to render
+                            # identically to a successful one.
                             _emit_trace_call(
                                 agent_trace_service.finish_trace(
                                     trace_context,
-                                    outcome="partial",
+                                    outcome=agent_trace_service.TRACE_OUTCOME_FAILED,
                                     final_message_id=None,
                                 ),
-                                operation=f"trace.finish:{run_id}:partial",
+                                operation=f"trace.finish:{run_id}:failed",
                             )
                 machine_lease_service.reconcile_machine_lease_release(
                     run_id,
@@ -6918,9 +6923,10 @@ async def execute_durable_turn_request(
                 isinstance(exc, HTTPException) and int(getattr(exc, "status_code", 0) or 0) >= 500,
                 None,
             )
+            # The run never started, so nothing was even partly done.
             await agent_trace_service.finish_trace(
                 trace_context,
-                outcome="partial",
+                outcome=agent_trace_service.TRACE_OUTCOME_FAILED,
                 final_message_id=None,
             )
         raise

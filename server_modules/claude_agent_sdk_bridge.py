@@ -1485,9 +1485,35 @@ def translate_sdk_message(
             failed_message = reply or detail or error_code
             if reply and detail:
                 failed_message = f"{reply} ({detail})"
-            failed_event = _envelope("trace.failed", {"code": error_code, "message": failed_message})
-            if failed_event is not None:
-                events.append(failed_event)
+            # ONE failure, ONE trace.failed. The AssistantMessage guard above
+            # already recorded this turn's provider error, with the
+            # provider's own account of it; arriving here with the same
+            # generic fallback code emits a SECOND event that is strictly
+            # less informative, and a reader showing the last one shows the
+            # worse one. Observed live, on one run:
+            #
+            #   seq 1  provider_generation_failed  "The model provider
+            #          returned an error (authentication_failed): …401
+            #          Authentication Fails…"
+            #   seq 2  provider_generation_failed  "HTTP 401"
+            #
+            # Narrow on purpose — it needs BOTH a seen provider error AND
+            # the generic code, so a distinct subtype (error_max_turns,
+            # error_max_budget_usd) still records its own real event, which
+            # says something the first one did not.
+            duplicate_of_provider_error = (
+                state.saw_provider_error and error_code == _PROVIDER_GENERATION_FAILED_CODE
+            )
+            if duplicate_of_provider_error:
+                LOGGER.debug(
+                    "claude_agent_sdk_bridge: suppressing duplicate trace.failed "
+                    "(%r) — the provider error was already recorded for this turn.",
+                    failed_message[:120],
+                )
+            else:
+                failed_event = _envelope("trace.failed", {"code": error_code, "message": failed_message})
+                if failed_event is not None:
+                    events.append(failed_event)
         usage = getattr(message, "usage", None)
         if isinstance(usage, dict):
             payload["usage"] = usage

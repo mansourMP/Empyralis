@@ -230,6 +230,23 @@ def build_ephemeral_envelope(
         return None
 
 
+# ── Trace outcomes ────────────────────────────────────────────────────────
+#
+# There was no way to say a run FAILED. The vocabulary was success /
+# partial / needs_input, so a run that produced nothing was recorded as
+# "partial" — which claims work happened — and WorkTab, which reads only
+# needs_input, rendered a failed trace and a successful one identically as
+# "N steps · done". Two different facts sharing one signal, on the surface
+# whose whole job is saying what an agent did.
+#
+# Written as constants rather than literals at eight call sites because
+# `outcome` is a free-text column with no CHECK constraint: a typo is
+# silently accepted and reads as an unknown outcome forever.
+TRACE_OUTCOME_SUCCESS = "success"       # ran, produced its result
+TRACE_OUTCOME_PARTIAL = "partial"       # some work happened, then it stopped
+TRACE_OUTCOME_FAILED = "failed"         # produced nothing, because it broke
+TRACE_OUTCOME_NEEDS_INPUT = "needs_input"  # stopped waiting on a person
+
 # Every agent trace id is minted in exactly one place —
 # control_plane_repository.create_agent_trace's
 # `f"trace_{uuid.uuid4().hex[:24]}"`. Nothing else may produce one.
