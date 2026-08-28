@@ -36,12 +36,26 @@
 
 /* ── The grid ──────────────────────────────────────────────────────────────
    `auto-fill` rather than a fixed column count, so the same rule serves every
-   width instead of a ladder of media queries. The 300px floor is what caps it
-   at three across: .fleet-content-main is --content-max-wide (1140px) minus
-   32px of padding either side, so a fourth 300px column can never fit — the
-   founder's "in one line there should be only two horizontally, not four" was
-   about a row-shaped card, and the discipline behind it (a face must not be
-   squeezed until its own label wraps) is what the floor enforces here.
+   width instead of a ladder of media queries. The 300px floor is the ONE
+   number that matters: it is the width below which this face stops working
+   (the name ellipsises into the status word), so it is what decides the
+   column count at every viewport rather than a media query ladder — the
+   discipline behind the founder's "in one line there should be only two
+   horizontally, not four", which was about a row-shaped card on a narrower
+   surface.
+
+   The paragraph that used to sit here said the floor "caps it at three
+   across", deriving that from .fleet-content-main's 1140px minus 32px of
+   padding either side. Both halves of that are gone as of 2026-08-28: this
+   page no longer nests .fleet-content-main at all, and its shell takes
+   .fleet-content--cards (1560px), so a 1680-wide laptop lays out FOUR at
+   329.5px each — wider than the 326.7px three-up already shipped at. Do not
+   re-derive a column count here; it is a property of the shell's width, and
+   the shell says so in its own rule.
+
+   --space-4 on both axes: airy BETWEEN cards, dense INSIDE one. The 10px gap
+   the channel tiles use was measured against a 4-up tile and reads as the
+   cheapness the founder named on the Apps grid.
 
    --space-4 on both axes: airy BETWEEN cards, dense INSIDE one. The 10px gap
    the channel tiles use was measured against a 4-up tile and reads as the
@@ -123,10 +137,12 @@
 }
 
 /* ── Line 2: reach ─────────────────────────────────────────────────────────
-   The half a person can act on, and the only line on the face that is allowed
-   to raise its voice. Two lines maximum, then it clips — a task title is
-   arbitrary text and must never grow the card past its neighbours in the same
-   grid row. */
+   The half a person can act on. It used to be described here as "the only
+   line on the face that is allowed to raise its voice"; as of 2026-08-28 it
+   does not raise it at all — see the --attention rule at the bottom of this
+   file for why, and for the one line that puts it back. Two lines maximum,
+   then it clips — a task title is arbitrary text and must never grow the card
+   past its neighbours in the same grid row. */
 .fleet-agent-card-reach {
   display: flex;
   min-width: 0;
@@ -154,13 +170,36 @@
   overflow: hidden;
 }
 
-/* An agent nothing can reach and nothing has been given. Amber, because this
-   is a setup step somebody can take — not a failure, and not something down.
-   It is the same reading `.fleet-channel-card-pill--gateway` and the Apps
-   panel's blocked note already give the same KIND of fact one surface over,
-   so a person meets one colour for "you still have to do this", not three. */
+/* An agent nothing can reach and nothing has been given.
+ *
+ * THE SENTENCE STAYS, THE ALARM COLOUR GOES — founder's call, 2026-08-28,
+ * and the reasoning is this file's own, pointed one rule further in. The
+ * line used to be `var(--warning-text)`, on the argument that amber is the
+ * one colour this product uses for "you still have to do this". That
+ * argument holds for a MINORITY. Measured on a real 40-agent workspace, 25
+ * of the 40 faces carried this exact line — 62% — and at four columns it
+ * repeats down every one of them, so the page reads as a wall of warnings
+ * about a fleet where nothing is actually wrong.
+ *
+ * That is the same test agent-card-face.ts applies to kill `activity_preview`
+ * one level up: "Created is true of every agent that has ever existed, so a
+ * column of it distinguishes nothing." A TREATMENT applied to the majority
+ * distinguishes nothing either, and an attention colour that never means
+ * attention is worse than no colour, because it also trains a person to
+ * ignore the amber that IS exceptional elsewhere (the channel-card gateway
+ * pill, the Apps panel's blocked note — both still amber, both still rare).
+ *
+ * Nothing else changed. `needsAttention` is still computed, the
+ * `--attention` class is still on the card, and the two-slots-may-disagree
+ * contract is untouched: "Ready" + "No channel or tasks yet" still says both
+ * true things. Only the shouting is gone.
+ *
+ * ONE LINE BACK: put `var(--warning-text)` where `var(--text-secondary)` is.
+ * The selector is kept for exactly that reason rather than deleted — it is
+ * the switch, and a deleted rule is a decision the next reader cannot see
+ * was ever made. */
 .fleet-agent-card--attention .fleet-agent-card-reach {
-  color: var(--warning-text);
+  color: var(--text-secondary);
 }
 
 /* ── The filter ────────────────────────────────────────────────────────────

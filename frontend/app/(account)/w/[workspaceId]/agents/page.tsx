@@ -252,7 +252,14 @@ export default function AgentsPage() {
     // rejecting outright on the old workspace home. --wide zeroes the inline
     // margins so the item stretches, and the 1140px cap becomes a real ceiling
     // rather than a target never reached.
-    <main className="fleet-content fleet-content--wide">
+    // --cards rides ON TOP of --wide rather than replacing it: --wide's
+    // `margin-inline: 0` is the load-bearing half (see its own comment and
+    // the paragraph just above), and --cards only raises the ceiling that
+    // half made reachable. Measured at 1680x1050 before it: the grid stopped
+    // at x=1317 while the shell — and this page's own "+ New agent" button —
+    // ran to x=1671, so 354px of the content area was empty and the primary
+    // action floated 354px right of everything it acts on.
+    <main className="fleet-content fleet-content--wide fleet-content--cards">
       {/* WHO OWNS THE VIEW'S ONE ACCENT FILL is decided by create-accent.ts,
           not here — three controls can create an agent and up to two are on
           screen at once (this header button, FirstAgentEmpty's own centred
@@ -270,25 +277,47 @@ export default function AgentsPage() {
         </button>
       </HeaderAction>
 
-      <div className="fleet-content-main">
-        {loading && agents.length === 0 ? (
-          // A card-grid skeleton, not the old row skeleton: a loading state
-          // whose shape is not the shape that arrives is its own small lie,
-          // and it reflows the whole pane the moment real data lands.
-          <AgentCardsSkeleton cards={6} />
-        ) : error && agents.length === 0 ? (
-          <FleetSurfaceError title="Couldn’t load agents" message={error} onRetry={refresh} />
-        ) : agents.length === 0 ? (
-          <FirstAgentEmpty
-            title="No agents yet"
-            desc="Agents do the work — they handle customer chats, run tasks, and use your tools. Create your first one to get started."
-            onCreate={openCreateCard}
-            createCardOpen={cardOpen}
-          />
-        ) : (
-          <AgentCards workspaceId={workspaceId} agents={agents} tasks={tasks} gateways={gateways} />
-        )}
-      </div>
+      {/* NO `.fleet-content-main` WRAPPER, and its absence is the fix rather
+          than an omission. That class is `.fleet-content-with-panel`'s child
+          (Projects' shape): it carries `padding: 28px 32px`, its own
+          `max-width: var(--content-max-wide)`, and `height: 100%; overflow-y:
+          auto` — all three correct INSIDE a `position:relative; overflow:
+          hidden; flex:1` parent, and all three wrong inside `.fleet-content`,
+          which already supplies the padding and the cap and is not a scroll
+          box. Nesting them stacked both, and measured live at 1680x1050:
+
+            padding      28+28 = 56px above the search field, 32+32 = 64px
+                         each side, so the grid started 64px in from the rail
+                         and lost 64px of the width it lays columns out
+                         against
+            scrolling    .fleet-content-main became a SECOND scroller
+                         (scrollHeight 1616 / clientHeight 994) nested inside
+                         the page's own — the exact "second, mis-placed
+                         scrollbar ... floated at the column's right edge in
+                         the middle of the screen" that .fleet-content's own
+                         comment documents having fixed once already, back
+                         because of the nesting rather than because of that
+                         rule
+
+          The branches below are `.fleet-content`'s own children now, so the
+          page has ONE padded shell and ONE scroller. */}
+      {loading && agents.length === 0 ? (
+        // A card-grid skeleton, not the old row skeleton: a loading state
+        // whose shape is not the shape that arrives is its own small lie,
+        // and it reflows the whole pane the moment real data lands.
+        <AgentCardsSkeleton cards={6} />
+      ) : error && agents.length === 0 ? (
+        <FleetSurfaceError title="Couldn’t load agents" message={error} onRetry={refresh} />
+      ) : agents.length === 0 ? (
+        <FirstAgentEmpty
+          title="No agents yet"
+          desc="Agents do the work — they handle customer chats, run tasks, and use your tools. Create your first one to get started."
+          onCreate={openCreateCard}
+          createCardOpen={cardOpen}
+        />
+      ) : (
+        <AgentCards workspaceId={workspaceId} agents={agents} tasks={tasks} gateways={gateways} />
+      )}
 
       {cardOpen && (
         <AgentCreateCard

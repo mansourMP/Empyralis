@@ -167,7 +167,29 @@ export default function MyWorkPage() {
     // to reach it. Same call Hardware and Billing already made for their own
     // dense/table content.
     <main className="fleet-content fleet-content--wide">
-      <div className="fleet-content-main fleet-mywork">
+      {/* NO `.fleet-content-main` WRAPPER — see agents/page.tsx for the full
+          measurement. That class belongs to `.fleet-content-with-panel`
+          (Projects' shape) and carries `padding: 28px 32px`, its own
+          `max-width`, and `height: 100%; overflow-y: auto`. Inside
+          `.fleet-content`, which already supplies the padding and the cap and
+          is not a scroll box, all three are wrong. Measured live at 1680x1050
+          with 16 assigned tasks:
+
+            padding      28+16 = 44px above the first section and 32+20 = 52px
+                         each side, because `.fleet-mywork` overrode the inner
+                         28/32 with its own 16/20/24 — doubled, just not with
+                         matching numbers
+            scrolling    .fleet-content-main was a SECOND scroller
+                         (scrollHeight 1143 / clientHeight 994) nested inside
+                         the page's own
+            clipping     its `overflow-x: hidden` is what this page's own
+                         comment above records CLIPPING the Status column with
+                         no scrollbar. Gone with the wrapper.
+
+          `.fleet-mywork` went with it rather than being kept as a bare hook:
+          its ONLY declaration was that padding, so keeping the class would
+          have left the doubling it caused. This page now takes the same
+          28px/32px gutter every other `.fleet-content` page has. */}
         {notice ? (
           <div className="fleet-page-state-body" role="alert" style={{ color: "var(--warning-text)" }}>
             {notice}
@@ -243,7 +265,7 @@ export default function MyWorkPage() {
             ) : null}
           </>
         )}
-      </div>
+
     </main>
   );
 }

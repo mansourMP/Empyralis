@@ -1582,6 +1582,52 @@ a.fleet-breadcrumb:hover {
   margin-inline: 0;
 }
 
+/* ── A page whose content is an auto-fill CARD GRID ───────────────────────
+   --content-max-wide (1140px) is sized for a DENSE TABLE — its own comment
+   above says so, and a table has an intrinsic width it either gets or
+   clips. An `auto-fill` grid has no such width: it takes whatever it is
+   given and lays out one more column, so a cap it never needed is just
+   space it is forbidden to use. Measured on the Agents grid at 1680x1050
+   before this rule, with 40 real agents:
+
+     content area (.fleet-shell-scroll)   241 -> 1671   1430px
+     grid                                 305 -> 1317   1012px, 3 x 326.7
+     "+ New agent" (this page's own       1561 -> 1671
+      primary action, in the topbar)
+     => 354px of empty content area to the right of every card, with the
+        page's own primary button floating out in it. Nothing below the
+        topbar shared an edge with anything in it.
+
+   1560px is a ceiling, not a target, and it is deliberately above the
+   1430px a 1680-wide laptop actually offers — so on the founder's own
+   screen the grid simply fills the panel (4 x 329, the SAME card width the
+   3-up layout already proved at 326.7 — this buys a column, it does not
+   squeeze the face), while a 2560px monitor still stops at 4 columns
+   instead of laying out seven and reading as a spreadsheet.
+
+   It composes with --wide rather than replacing it: --wide's
+   `margin-inline: 0` is what makes any cap reachable at all (cross-axis
+   auto margins disable stretch — see that rule's comment), so this one only
+   raises the ceiling that fix made meaningful. Written as a compound
+   selector so source order can never decide which max-width wins. */
+.fleet-content--wide.fleet-content--cards {
+  max-width: 1560px;
+  /* THE LAST ROW KEEPS ITS BOTTOM GUTTER, and this line is what buys it.
+     `.fleet-content` is a `<main>`, so a global `main { min-height: 100vh }`
+     gives it a 1050px floor, and its own `flex: 0 1 auto` lets the column
+     flex container shrink it. With a long grid the two meet badly: the box
+     is squeezed from its real content height down to that 100vh floor and
+     the overflow — the padding-bottom included — spills outside the
+     scroller's extent. Measured with 40 agents at 1680x1050: scrolled all
+     the way down, the last card's bottom edge sat exactly ON the panel's
+     bottom edge, 0px of gutter. flex-shrink: 0 lets the box be as tall as
+     its content actually is, so the 28px bottom padding is real again. The
+     surrounding `flex: 0 1 auto` stays as it is — its own comment explains
+     that it exists to stop this box becoming a SECOND scroller, which is a
+     statement about `flex-grow`/`overflow`, not about shrink. */
+  flex-shrink: 0;
+}
+
 .fleet-header {
   display: flex;
   align-items: flex-start;
@@ -12087,7 +12133,14 @@ h2.fleet-sage-console-title {
    sections, each grouped by the project a row belongs to, both rendering the
    SAME TasksList the project board draws, so no row styling lives here: this
    block is spacing and headings only. */
-.fleet-mywork { padding: var(--space-4) var(--space-5) var(--space-6); }
+/* `.fleet-mywork`'s own padding is GONE (2026-08-28) and the class with it.
+   It sat on a div that also carried `.fleet-content-main`, INSIDE
+   `.fleet-content--wide` — so its 16/20/24 overrode the inner shell's 28/32
+   and then stacked on the OUTER shell's 28/32 anyway: 44px above the first
+   section, 52px each side. The wrapper is deleted (see my-work/page.tsx), so
+   this page now takes `.fleet-content`'s own 28/32 gutter like every other
+   page. Nothing else ever matched this selector — `.fleet-mywork-section`
+   and friends are different classes. */
 
 .fleet-mywork-section + .fleet-mywork-section { margin-top: var(--space-6); }
 
