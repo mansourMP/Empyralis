@@ -1235,11 +1235,48 @@ a.fleet-breadcrumb:hover {
    that is replaced takes its CSS with it. A quiet hairline-divided list,
    never cards. */
 
+/* THE LIST USED TO SIT IN ONE 480px COLUMN AT THE FAR LEFT OF A 1430px
+   CONTENT AREA. Founder, 2026-08-29: "in keyboard shortcuts, this must be
+   balanced. The user interface of it is not something that is perfect yet."
+   Measured at 1680x1050 before this rule:
+
+     content area (.fleet-shell-scroll)   241 -> 1671   1430px
+     main (.fleet-content--wide)          241 -> 1381   1140px
+     the list itself                      273 ->  753    480px  (its own cap)
+     => 918px of empty content area to the right of every row.
+
+   The Agents-grid fix (.fleet-content--cards) does not apply here and must
+   not be copied: that raised a CAP because an auto-fill CARD grid answers
+   more width with another column. Seven label/key rows answer more width by
+   putting the label at one edge and the chip 1300px away, which is worse
+   than the dead space. So the rows keep a readable measure and the GROUPS
+   are what use the width.
+
+   `auto-fit` (not auto-fill) is the whole mechanism and it is derived, not a
+   column count somebody chose: it lays out as many 320px tracks as fit,
+   COLLAPSES the ones no group occupies, and `1fr` then hands the leftover to
+   the groups that exist. Two groups in 1076px => 2 x 522px, filling the
+   width; a third group would lay out 3 x 349px on its own. Nothing to edit
+   when the content changes. */
+.fleet-shortcuts-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--space-6) var(--space-8);
+  align-items: start;
+  margin-top: var(--space-3);
+}
+
+/* The first group's title must not take .fleet-detail-section-title's usual
+   top margin — it is the first thing under the topbar, and the grid's own
+   row gap already separates the groups from each other. */
+.fleet-shortcuts-group > .fleet-detail-section-title {
+  margin-top: 0;
+}
+
 .fleet-shortcuts-list {
   display: flex;
   flex-direction: column;
   margin-top: var(--space-3);
-  max-width: 480px;
 }
 
 .fleet-shortcuts-row {
