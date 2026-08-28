@@ -168,7 +168,7 @@ security_tests() {
   local -a test_candidates=(
     "server_modules/tests/test_skill_scanner.py"
     "server_modules/tests/test_tool_broker_guard_service.py"
-    "server_modules/tests/test_sage_memory_red_stripping.py"
+    "server_modules/tests/test_assistant_memory_red_stripping.py"
   )
   local tests=()
   tests=($(existing_paths "${test_candidates[@]}"))

@@ -276,3 +276,282 @@ show up there and does not.
 The `preflight._STATE_HOME_BAKED_AT_IMPORT_EXCEPTIONS` key move was proven
 red-before-green in memory: with the old key the boot check reports a
 violation, with the new key it returns clean.
+
+## Phase 2, batch 8 — test filenames and CSS classes (2026-08-28)
+
+Two rename batches and one comment fix, each committed alone.
+
+| Batch | Domain | Commit |
+|---|---|---|
+| 8a | 40 sage-named pytest files | `ad4c54a9` |
+| 8b | 33 `fleet-sage-*` CSS classes | `3249a26a` |
+| 8e | the governance gate's lying `except` comment | `4473dbd0` |
+
+`server_modules/tests/test_sage_*.py` is down from 42 to 3, and every
+`fleet-sage-*` class name is gone from the product.
+
+### The measurement, and how the deferred test-filename batch was unblocked
+
+Renaming a test file moves the sorted file list that batches 5-7 chunked their
+suite measurement by, which is why they deferred it. The unblocking device is
+an explicit old->new path map used in three places at once:
+
+```
+BEFORE   sorted(git ls-files server_modules/tests/test_*.py)   849 files, 8 chunks
+AFTER    the SAME ordered list with the map applied per entry
+         -> every file stays in the same chunk, same position within it
+```
+
+So the order-dependent hang cannot move around underneath the comparison, and
+the before/after failing sets are directly comparable through the map.
+
+Result: **489 distinct FAILED/ERROR node ids on both sides, set delta 0**
+(75 of them moved). Collection: 10,333 node ids both sides, the map explains
+all 541 that moved, zero added, zero removed.
+
+### Two measurement flaws found in this pass's own instrument
+
+Neither is in the repository. Both are recorded because the next person will
+build the same instrument and hit them.
+
+1. **The previous pass's fix for glued log lines was not enough.** It cut a
+   node id at whitespace. The glue that actually occurs here is an ISO
+   timestamp with NO separator — `...unavailable2026-08-28 21:5...` — so the
+   whitespace cut leaves the date attached. It landed on a DIFFERENT node id in
+   each run, so the naive parse reported **2 regressions and 2 fixes** in
+   `test_session_service.py` where nothing had changed. Cutting the id at the
+   first `yyyy-mm-dd` as well takes both sides to a clean 489/489.
+2. **The snapshot's `frontend_build_routes` section needs a Next build**, and a
+   worktree has none. Built with `next build --webpack` (turbopack refuses the
+   symlinked `node_modules`, exactly as this file records for the dev server).
+   The section is route paths, not hashed chunk names, so it is stable across
+   rebuilds — verified by rebuilding for batch 8b and getting the same 97.
+
+### The contract database is `empyralis_first_customer`
+
+There is no `empyralis` database on this box and `postgres:postgres` is not a
+valid role, so the command in the Step 0 section above exits 2 (`unknown`) —
+which is the three-state behaviour working, not a failure. The local database
+whose public schema is 89 tables / 1,264 columns is `empyralis_first_customer`,
+and 1,264 is the exact figure the batch 5-6 evidence records, so it is the one
+that keeps this measurement comparable with that history. Read-only;
+information_schema only.
+
+### 8a — test filenames
+
+A test is named after its SUBJECT, so the three left behind are the three whose
+subject module still carries the stem: `sage_telegram_hosted_service.py`,
+`routes_sage_telegram_hosted.py`, `personal_channel_sage_bridge_service.py`.
+Where an exact module rename exists the test takes that module's new name.
+ONE name is not a mechanical stem swap and is called out rather than buried:
+`test_sage_heartbeat_runtime_health.py` -> `test_assistant_health_runtime_gate.py`,
+because the mechanical result would have been "assistant_health_runtime_health".
+
+Contract snapshot: EVERY section byte-identical, including
+`persisted_protocol_literals` on the RAW `path:line:value` entries and not only
+on values with the prefix stripped — i.e. no renamed test file contributes a
+collected literal at all. Pure substitution: 23 removed / 23 added / 0
+unexplained; all 40 moves were 100%-similarity renames.
+
+23 pinned references moved with the files across 18 files. Only two are
+executable — `scripts/local_certification_harness.sh` actually runs one, and
+`docs/design/mcp-current-state.md` documents a pytest command line. The rest
+are cross-reference comments, plus 3 in CLAUDE.md. The rewrite uses a
+word-boundary rule so a test FUNCTION sharing a prefix
+(`test_sage_turn_success` vs the `test_sage_turn_adapter` file) is untouched.
+
+Test FUNCTION names containing "sage" are deliberately untouched: they are not
+filenames, and moving them changes node ids the path map cannot express.
+
+### 8b — CSS classes, proven a different way
+
+The snapshot treats a CSS class name as contract and is right to, so this batch
+cannot be proven inert. It is proven by an exact swap instead.
+
+```
+33 distinct tokens   113 occurrences -> 113
+old tokens remaining repo-wide: 0
+new tokens with no old twin:    0
+declared set / used set: byte-identical once expressed in the old names
+   32 declared · 26 used · the same 7 dead rules still dead
+   `launcher-btn` still the one class used without a rule (pre-existing)
+```
+
+One substitution rule (`fleet-sage-` -> `fleet-assistant-`) covers all 33
+because they share the stem, so the swap cannot answer differently for
+`fleet-sage-chat` than for `fleet-sage-chat-list`. Nothing builds one of these
+names by concatenation — the four template literals that carry one keep the
+class part whole.
+
+Snapshot diff: `frontend_css_references` is the ONLY section that moved,
+1368 -> 1368, exactly -22 / +22, every pair a prefix swap.
+
+**In a real browser** (1680x1050, both themes, seeded disposable stack on
+8507/3507 with its own database and placeholder provider keys — the Telegram
+401 in that log is the proof no real bot was touched): the Ask AI console
+opens and renders identically in both themes, and every renamed selector
+resolves to its authored value rather than a default. The decisive check is an
+injected probe element per class read against an unclassed control in the live
+document:
+
+```
+31 of 32 fleet-assistant-* names match a real rule
+   the one that does not is `launcher-btn`, which had no rule before either
+ 0 of 32 fleet-sage-*      names match any rule   <- nothing left orphaned
+```
+
+Not verified visually, and named rather than glossed:
+`fleet-assistant-console-action` / `-actions` and the history-row family only
+render after a real LLM turn has produced a conversation, and this stack's
+provider keys are deliberately blocked. They are covered by the token census,
+the declared/used relation and the probe — not by a screenshot.
+
+**The checked-in baseline is PATCHED, not regenerated.** The CSS surface
+genuinely changes so the baseline must follow, but regenerating the whole file
+would silently rewrite sections this worktree cannot reproduce byte-for-byte
+(`frontend_build_routes` depends on which bundler produced `.next`;
+`database_schema` on which local database was reachable). The patcher applies
+the same one-token substitution to `frontend_css_references` and REFUSES to
+write if any other baseline line would change: 44 lines changed, 0 unrelated.
+The patched baseline then equals a freshly collected snapshot exactly.
+
+### 8e — a comment that named a cause which had stopped being the cause
+
+`unified_governance_gate.evaluate_action_policy`'s Step 3 imports
+`agent_computer_approval_decision_service` inside a `try`, and its
+`except Exception:` explained itself as "capability not recognized by the
+agent-computer risk classifier". That module was DELETED in `0820a732`
+("Remove approval system"), so the import — the first statement in the try —
+always raises `ModuleNotFoundError` (measured, not reasoned). The handler is
+not a fallback: it is the ONLY path, on every call, for every capability.
+
+**Reported, deliberately not fixed:** the handler returns on both branches, so
+lines 268-331 of that function (64 lines, 6 statements — the post-classifier
+registry check and the final `ActionPolicyDecision`, everything that reads
+`approval_decision`) are UNREACHABLE. Deleting the try/except is a decision
+about whether the risk-classifier seam is coming back, so the code is
+untouched and the comment now says so out loud.
+
+### chrome.css CANNOT be deleted, and the premise that it can is wrong by ~10x
+
+Measured before touching anything:
+
+| | |
+|---|---:|
+| `frontend/lib/ui/chrome.css` | **26,533 lines** |
+| distinct class selectors declared | **2,250** |
+| of those, LIVE (a consumer in `.tsx`/`.ts`, or another `.css`) | **348** |
+| CSS custom properties it DEFINES | 196 |
+| of those, read by another file (`--app-accent`, `--app-bg-page`, `--app-font-*`) | **69** |
+| `sage-*` classes declared | 433 |
+| of those, live as a CSS class | **0** |
+
+It is imported globally by `frontend/app/layout.tsx`, it carries `body {}` and
+`textarea {}` rules, `theme-tokens.css` and `landing.css` both name it in their
+own comments as the file they consume tokens from, and two drift tests read it
+by path — `no-focus-ring-drift.test.ts` asserts `--app-shadow-focus` resolves
+to `none` there, and `accent-restraint.test.ts` derives its accent-alias graph
+from it. The 348 live classes are the `app-auth-*` family: the login and signup
+surface, i.e. the product's front door.
+
+The three `sage-*` classes an automated sweep reports as live are all false
+positives: `sage-agent-computer` matches only the HTTP path
+`/api/connections/sage-agent-computer` in `workstation-client.ts`, and
+`sage-unified-card` / `sage-unified-section` match only comments in
+`accent-restraint.test.ts` and an e2e spec. **All 433 are dead as CSS.**
+
+The provable, narrow alternative: **534 rules occupying 3,418 lines (13% of the
+file)** have selectors composed only of dead `sage-*` classes. That is the
+deletion CLAUDE.md's accent-restraint note is actually asking for ("do not
+widen the scan there without deleting the dead CSS first"). Not done here —
+this is a founder decision, and the instruction as given would have taken the
+login screen down.
+
+### docs/PLATFORM-MAP.md: deletable on the standing rule, but it has ~40 referrers
+
+4,819 lines, header pinned to commit `01c6081ce` and dated 2026-07-13, with its
+own graph statistics marked "predates the changes in this refresh". It names
+**122 occurrences of 23 modules that no longer exist**, plus five that never
+existed under those names at all (`sage_service.py`, `sage_events_repository.py`,
+`sage_reporting.py`, `sage_accounting_service.py`, `sage_bridge_service.py`).
+It also carries its own 2026-07-23 note saying the Sage concept is dead.
+
+CLAUDE.md's standing rule says snapshot/audit documents are not kept. The cost
+of applying it here is that roughly 40 "see docs/PLATFORM-MAP.md" pointers go
+dangling, and they are not all in docs — `agent_turn_runtime_service.py`,
+`skills_service.py`, `personal_channels_service.py`, `workspace_context.py`,
+`wechat_official_service.py`, `deployed_agent_service.py`,
+`test_module_reachability.py`, a gateway `.ts` file, `FleetAgentDetail.tsx`,
+`ConnectorPicker.tsx` and 18 brand-asset SVGs all cite it as the explanation
+for why some code is the way it is. Deleting the file is one line; deleting it
+honestly means stripping those clauses in the same commit.
+
+### The single-process hang DID NOT REPRODUCE, and the note above is now a claim with an expiry date
+
+The section "The suite has an order-dependent hang, and it is not new" (above)
+records `test_mcp_oauth_provider.py::test_resolve_workspace_read_only_scope_blocks_writes`
+blocking forever ~5,341 tests into a single 10,333-test run. **Measured again
+on 2026-08-28 at `4473dbd0`, twice, it does not happen.**
+
+```
+PROBE 1  files 1..417 of the sorted list (up to and including the named file)
+         5,348 tests   completed in 348s   no stall
+PROBE 2  ALL 849 files, ONE process -- the exact described condition
+         10,333 tests  completed in 723s   495 failed / 9,663 passed / 174 skipped
+         495 pytest failure LINES de-duplicate to 490 distinct node ids
+```
+
+Both runs were made with `-o faulthandler_timeout=300` armed. pytest's built-in
+faulthandler plugin dumps every thread's stack when one test blocks that long —
+that is the only thing that turns "it hangs" into "it is waiting on X", and
+`pytest-timeout` is not installed here so it is also the only option. **It never
+fired.** `test_mcp_oauth_provider.py` was file 417 of 849 in both runs and
+appears nowhere in either failure list, i.e. it passed.
+
+**Reading the test itself says why a hang there is surprising.** With the
+contextvar set, `mcp_server._resolve_workspace(ctx=None)` returns from its FIRST
+branch, before any `await`:
+
+```
+access_token = get_access_token()        <- a contextvar read, set by the test
+workspace_id = "ws-scoped"               <- non-empty, so ...
+return {...}                             <- ... it returns here. no await at all.
+```
+
+So the coroutine cannot block. Anything that stalls has to be the surrounding
+machinery — `import mcp_server` (a 107KB module that builds the MCP server and
+pulls the FastAPI app in), `asyncio.run()`'s loop setup/teardown, or a lock or
+non-daemon thread left behind by an earlier test in the same process. That is
+also why it is order-dependent rather than a property of the test.
+
+**Order-dependence is real but now tiny, and this is the number worth keeping:**
+
+```
+one process   490 distinct failing node ids
+8 chunks      489
+delta          1, in one direction only
+   ONLY in one process:
+     test_assistant_channel_certification_core.py::DiscordCertification::test_discord_setup_readiness
+   ONLY when chunked:   (none)
+```
+
+**What a fix would need, if it comes back.** Do not start by editing the test.
+Reproduce with `faulthandler_timeout` armed and read the dump — it names the
+frame, and until something has, every explanation is a guess. If it names
+`import mcp_server`, the suspect is this repository's own documented
+`sys.modules["server"]` stand-in leak (an earlier test whose cleanup block never
+ran). If it names `asyncio.run`, the suspect is loop teardown waiting on a
+non-daemon thread or an un-`unref`'d timer from an earlier test, which is the
+same family as the gateway's `ws-client-event-seq-race` hang recorded in
+CLAUDE.md. If it names a socket read, the egress guard in `conftest.py` is the
+place to look, because a blocked connect with no timeout looks exactly like this.
+
+**What can be said today, plainly: the suite is usable in one process at this
+commit — 12 minutes, exit 1 on real failures, no stall.** The chunked
+measurement in this document is still the right instrument for a before/after
+comparison (it isolates module-level state), but it is no longer a workaround
+for an unusable single-process run.
+
+Not ruled out, and stated rather than glossed: a hang that depends on machine
+load, on a concurrently running stack, or on state under `~/.empyralis` that
+differed on the day it was seen. Two clean runs are evidence, not proof.

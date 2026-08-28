@@ -151,7 +151,7 @@ class SageTransparencyEmissionTests(unittest.TestCase):
         type is unconditionally "turn_failed" now. Even a blocked_tools
         entry shaped exactly like a genuine tool-capability denial gets the
         same honest "turn failed" event as any other failure — mirrors
-        test_sage_agent_runtime_service.py's identical collapse on the
+        test_agent_turn_runtime_service.py's identical collapse on the
         chat-reply side (SAGE_TURN_NO_REPLY_UNKNOWN)."""
         events = emit_sage_turn_transparency_events(
             trace_id=self.TRACE_ID,

@@ -89,7 +89,7 @@ A new branch in `skills_service.execute_single_direct_tool_call_async()` (parall
 
 **Empirical confirmation** — ran the dedicated test suite for this feature:
 ```
-python3 -m pytest server_modules/tests/test_sage_mcp_bridge_v1.py -v
+python3 -m pytest server_modules/tests/test_assistant_mcp_bridge_v1.py -v
 ```
 3 of 9 tests **fail against current `main`**, specifically the ones that assert an MCP tool actually executes:
 - `TestApprovedMCPToolExecutes::test_approved_mcp_tool_executes`

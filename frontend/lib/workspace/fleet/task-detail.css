@@ -178,7 +178,7 @@ a.fleet-task-detail-nav-btn:hover {
 
 /* ── 5. The comment composer — a designed surface, not a bare textarea plus
    a button. Deliberately the same idiom as AgentChat's own
-   .fleet-sage-chat-composer (bordered card, borderless auto-growing
+   .fleet-assistant-chat-composer (bordered card, borderless auto-growing
    textarea, circular accent send button that mutes when there's nothing to
    send) so the app has ONE composer language, not two. See
    TaskDetailView.tsx for why there is no attachment control here: there is
@@ -255,7 +255,7 @@ a.fleet-task-detail-nav-btn:hover {
    page meant near the top with a large dead gap below it, unlike a real
    chat composer. Fixed by giving .fleet-task-page-main the exact same
    flex-column shape AgentChat's own chat surface already uses
-   (.fleet-sage-chat / .fleet-sage-chat-list / .fleet-sage-chat-composer,
+   (.fleet-assistant-chat / .fleet-assistant-chat-list / .fleet-assistant-chat-composer,
    fleet-theme.css ~7057-7148) — reused, not reinvented, so this codebase
    keeps ONE "message input pinned to the bottom" pattern instead of two:
      .fleet-task-page-main   → flex column, own scroll suppressed

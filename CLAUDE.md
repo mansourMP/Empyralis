@@ -2185,7 +2185,7 @@ cache it; `external_write_safety` additionally copies its whole namespace
 into its own globals. Fourteen test modules install a stand-in
 `types.ModuleType("server")` carrying a handful of attributes — 67 install
 sites — for the length of one test, each restoring it in its own cleanup
-block (`test_sage_context_files_api.py` never restores at all), and a test
+block (`test_assistant_context_files_api.py` never restores at all), and a test
 that FAILS before reaching that block leaves the stand-in registered. One
 does today
 (`test_runtime_runs_api_canonical_routes.py::test_create_runtime_session_
@@ -4296,8 +4296,8 @@ test. Allowed: loopback, the `DATABASE_URL` host, `curl` at a loopback URL,
 and local CLI capability probes (`claude auth status`). Opt in with
 `@pytest.mark.live_provider` or `EMPYRALIS_TEST_ALLOW_LIVE_PROVIDER_CALLS=1`;
 no test needs either today. Turning it on exposed 12 tests
-(`test_sage_agent_runtime_service.py` ×6, `test_preflight.py` ×3,
-`test_operator_chat.py`, `test_sage_chat_api.py`) that had been calling
+(`test_agent_turn_runtime_service.py` ×6, `test_preflight.py` ×3,
+`test_operator_chat.py`, `test_assistant_chat_api.py`) that had been calling
 providers for real — still open, and each needs a mock, not a weaker
 assertion.
 
@@ -6900,7 +6900,7 @@ BEFORE (measured on production)          AFTER
 .fleet-detail-body  scrollTop 0          .fleet-detail-body  scrollTop 0
   scrollHeight 12,979  ← the PAGE          scrollHeight == clientHeight
   scrolls, lands on message #1              ← nothing to scroll, bounded
-.fleet-sage-chat-list (meant to           .fleet-sage-chat-list is the
+.fleet-assistant-chat-list (meant to           .fleet-assistant-chat-list is the
   scroll internally) never bounded,          REAL scroller, lands exactly
   grew to fit ALL content                    at scrollHeight-clientHeight
 composer position:relative, y≈12,928      composer flex-shrink:0, always
@@ -6912,9 +6912,9 @@ composer position:relative, y≈12,928      composer flex-shrink:0, always
 body` and `.fleet-agent-chat-panel`, so `.fleet-detail-body > .fleet-agent-
 chat-panel` in fleet-theme.css never matched again — the direct-child
 selector that hands the panel its `height:100%` chain (which is what
-bounds `.fleet-sage-chat-list`'s own `overflow-y:auto`) AND the one that
+bounds `.fleet-assistant-chat-list`'s own `overflow-y:auto`) AND the one that
 opts it out of the 820px reading-column cap. With no bounded height,
-`.fleet-sage-chat-list` just grew to fit its whole 12,979px of content, so
+`.fleet-assistant-chat-list` just grew to fit its whole 12,979px of content, so
 `.fleet-detail-body` — the page itself — became the real scroller. Fixed
 by deleting the wrapper: `ChatTab` now applies `display:none` to its OWN
 root div (`.fleet-agent-chat-panel` stays `.fleet-detail-body`'s direct

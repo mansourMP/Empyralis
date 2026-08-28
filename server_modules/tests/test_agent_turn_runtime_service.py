@@ -1473,7 +1473,7 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
         to emit the tool.started/tool.result/final trace events the real
         dispatch layer produces once a model-issued call to an
         mcp-namespaced tool completes (same pattern as
-        server_modules/tests/test_sage_mcp_bridge_v1.py's
+        server_modules/tests/test_assistant_mcp_bridge_v1.py's
         TestApprovedMCPToolExecutes). See test_mcp_tool_calling_wiring.py
         for coverage of the actual dispatch-routing logic.
         """
@@ -3525,7 +3525,7 @@ class EngineAwareCapabilityManifestIntegrationTests(unittest.TestCase):
     _UNSUPPORTED_TOOL_NAMES), while the legacy engine keeps today's
     behavior byte-for-byte. Proves the actual _tool_discovery_available
     plumbing added to handle_sage_chat, not just the compiler unit in
-    isolation (see test_sage_instruction_compiler_service.py for that)."""
+    isolation (see test_instruction_compiler_service.py for that)."""
 
     @staticmethod
     def _run_chat(*, engine_options=None):

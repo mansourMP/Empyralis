@@ -290,7 +290,7 @@ def test_higgsfield_resolves_in_the_catalog() -> None:
 
 def test_higgsfield_catalog_entry_carries_no_fake_support() -> None:
     """Same truth the whole catalog is held to in
-    test_sage_apps_catalog_truth.py: setup_available implies a real
+    test_assistant_apps_catalog_truth.py: setup_available implies a real
     runtime_provider is documented."""
     by_id = {item["id"]: item for item in connection_catalog_service.catalog_items()}
     item = by_id["higgsfield"]

@@ -1858,7 +1858,7 @@ def _restore_server_module_binding():
     Fourteen test modules install a small ``types.ModuleType("server")``
     carrying a handful of attributes -- 67 install sites -- because the real
     ``server`` is enormous and they only need a couple of names from it. Each
-    restores it in its own cleanup block (``test_sage_context_files_api.py``
+    restores it in its own cleanup block (``test_assistant_context_files_api.py``
     never restores at all) -- but a test that FAILS before reaching that block
     leaves the stand-in in ``sys.modules`` for the rest of the session, and
     ``test_runtime_runs_api_canonical_routes.py::test_create_runtime_session_

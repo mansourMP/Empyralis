@@ -578,7 +578,7 @@ class DirectToolConnectorIdentityGateTests(unittest.TestCase):
 # provider/credential resolution, activity/audit logging) are mocked — the
 # specialist-context resolution and session_ctx stamping under test run for
 # real, unmocked. Mirrors the harness in
-# test_sage_agent_runtime_service.py's
+# test_agent_turn_runtime_service.py's
 # SageAgentRuntimeSpecialistProviderResolutionTests, which proves the same
 # seam is a real, working path for a different invariant (credential
 # isolation).

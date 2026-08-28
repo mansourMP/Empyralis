@@ -15,7 +15,7 @@ work it never did (MAN-129).
 
 These tests exercise runs_execution._execute_orion_dag_node(kind=
 "result_generate", ...) directly, mocking only at the execute_sage_turn
-boundary (the same function server_modules/tests/test_sage_turn_adapter.py
+boundary (the same function server_modules/tests/test_agent_turn_adapter.py
 already establishes as the correct mocking seam for this module). A
 companion, deeper integration test
 (test_man129_scheduler_woken_tool_capable_integration.py) drives the same

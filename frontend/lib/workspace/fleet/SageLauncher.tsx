@@ -37,7 +37,7 @@ const VIEW_TITLES: Record<ConsoleView, string> = {
  *
  * ONE PANEL, ONE SIZE
  * -------------------
- * Every view renders inside the same fixed frame (.fleet-sage-console sets
+ * Every view renders inside the same fixed frame (.fleet-assistant-console sets
  * an explicit `height`, not a `max-height`). Short content sits inside that
  * frame; long content scrolls inside it; nothing about switching views or
  * waiting on a fetch may change the panel's outline. Before 2026-08-01 the
@@ -156,16 +156,16 @@ export function SageLauncher({
   if (!sageAgent) return null;
 
   return (
-    <div ref={ref} className={`fleet-sage-launcher${open ? " is-open" : ""}`}>
+    <div ref={ref} className={`fleet-assistant-launcher${open ? " is-open" : ""}`}>
       {open && (
-        <div className="fleet-sage-console" role="dialog" aria-label="Ask AI">
-          <div className="fleet-sage-console-header">
-            <h2 className="fleet-sage-console-title">{VIEW_TITLES[view]}</h2>
-            <div className="fleet-sage-console-actions">
+        <div className="fleet-assistant-console" role="dialog" aria-label="Ask AI">
+          <div className="fleet-assistant-console-header">
+            <h2 className="fleet-assistant-console-title">{VIEW_TITLES[view]}</h2>
+            <div className="fleet-assistant-console-actions">
               {currentHasContent && (
                 <button
                   type="button"
-                  className="fleet-sage-console-action"
+                  className="fleet-assistant-console-action"
                   onClick={startNewConversation}
                   aria-label="New chat"
                   title="New chat"
@@ -176,7 +176,7 @@ export function SageLauncher({
               {hasOtherConversations && (
                 <button
                   type="button"
-                  className={`fleet-sage-console-action${view === "history" ? " is-active" : ""}`}
+                  className={`fleet-assistant-console-action${view === "history" ? " is-active" : ""}`}
                   onClick={() => toggleView("history")}
                   aria-pressed={view === "history"}
                   aria-label="History"
@@ -187,7 +187,7 @@ export function SageLauncher({
               )}
               <button
                 type="button"
-                className="fleet-sage-console-close"
+                className="fleet-assistant-console-close"
                 onClick={onClose}
                 aria-label="Close Ask AI"
               >
@@ -196,7 +196,7 @@ export function SageLauncher({
             </div>
           </div>
 
-          <div className="fleet-sage-console-body">
+          <div className="fleet-assistant-console-body">
             {view === "history" && (
               <SageHistoryPanel
                 conversations={conversations}
@@ -224,7 +224,7 @@ export function SageLauncher({
       )}
       <button
         type="button"
-        className={`fleet-rail-item fleet-sage-launcher-btn${open ? " fleet-rail-item--active" : ""}`}
+        className={`fleet-rail-item fleet-assistant-launcher-btn${open ? " fleet-rail-item--active" : ""}`}
         onClick={() => (open ? onClose() : onOpen())}
         aria-label="Ask AI"
         aria-haspopup="dialog"

@@ -634,7 +634,7 @@ class DiscordDmGatewayHandlerTests(unittest.IsolatedAsyncioTestCase):
     the mention-gated path instead) — added because no test previously
     exercised this handler at all.
 
-    NOTE: test_discord_sage_ingress.py has 5 pre-existing failures at this
+    NOTE: test_discord_assistant_ingress.py has 5 pre-existing failures at this
     baseline commit — it tests an OLDER DM handler location
     (DiscordBotRuntimeService.handle_parsed_event) that a prior refactor
     moved away from; those failures are unrelated to this fix and are left

@@ -6496,7 +6496,7 @@ async def _handle_sage_chat_unguarded(
         # specialist too, per tool_registry_service.ALWAYS_ON_TOOL_NAMES,
         # regardless of whether a brief exists yet); the literal "## Your
         # memory" heading + content stays conditional on memory_context, same
-        # as before — test_sage_agent_runtime_service.py's fresh-agent tests
+        # as before — test_agent_turn_runtime_service.py's fresh-agent tests
         # assert that heading is ABSENT for an empty/untouched MEMORY.md, and
         # that invariant (no fabricated memory content) is preserved here.
         _spec_memory_why = (
