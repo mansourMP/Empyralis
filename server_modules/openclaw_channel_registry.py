@@ -394,7 +394,7 @@ def is_registry_channel_package(npm_package: str) -> bool:
 #                               must be retired in the same change.
 
 # The one authored datum in this module, and it is a DECISION, not a list of
-# channels: which platforms have completed CHANNEL-ADOPTION-PLAN.md step 6's
+# channels: which platforms have completed the OpenClaw channel adoption step 6's
 # port -> verify -> swap -> delete. Empty until a channel has actually been
 # driven with real credentials through OpenClaw and its first-party runtime is
 # being retired in the same change. Adding an id here without deleting the

@@ -2,7 +2,7 @@
  * Decides whether an outbound `message_sending` event is the synthetic
  * "no model credentials configured" failure OpenClaw's own embedded agent
  * loop produces on every inbound turn (the deliberate hack this bridge
- * relies on — see CHANNEL-ADOPTION-PLAN.md's "THE HACK" section) versus a
+ * relies on — see the OpenClaw channel adoption's "THE HACK" section) versus a
  * real reply that must never be touched.
  *
  * WHY THIS IS A STRING MATCH, NOT A STRUCTURAL CHECK (read before editing):

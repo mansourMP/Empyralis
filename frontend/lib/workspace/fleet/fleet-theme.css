@@ -909,7 +909,7 @@ a.fleet-breadcrumb:hover {
   bottom: 8px;
   width: 2px;
   border-radius: 2px;
-  /* UI-CONTRACT used to carve the active nav bar out as the accent's second
+  /* the design rules used to carve the active nav bar out as the accent's second
      legitimate home. The founder closed that carve-out on 2026-08-21
      ("purple only on primary buttons"), so the bar is neutral. It was never
      the active row's only signal — the --rail-active fill and weight 500
@@ -2416,7 +2416,7 @@ a.fleet-breadcrumb:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-primary);
-  /* 500, not 600. UI-CONTRACT §1 allows exactly two weights in product
+  /* 500, not 600. the design rules allow exactly two weights in product
      chrome, and 600 here also inverted the emphasis inside the panel: a
      STATIC value (a date, a creator) came out heavier than the interactive
      picker sitting two rows above it, which renders at 500. */
@@ -3332,7 +3332,7 @@ a.fleet-breadcrumb:hover {
 }
 
 /* The card whose panel is currently open. Neutral, never --accent: a card
-   grid is a picker, and UI-CONTRACT reserves the accent for the page's one
+   grid is a picker, and the design rules reserve the accent for the page's one
    primary action and the top-level nav bar — not for "selected". No checkmark
    here on purpose; a tick on a channel card face would read as "connected",
    which is a different fact the pill already owns, and CLAUDE.md fixes that
@@ -3467,7 +3467,7 @@ a.fleet-breadcrumb:hover {
 /* The founder's one authored "start here". Deliberately NOT a second pill:
    it rides inside the same single secondary line as "3 ways to connect"
    (.fleet-channel-card-ways), so the face still reads as icon + label + one
-   status pill. NEUTRAL text on a neutral wash: UI-CONTRACT already said
+   status pill. NEUTRAL text on a neutral wash: the design rules already say
    "badges, chips, and pills are neutral, full stop", and the founder closed
    the last of the accent's non-button homes on 2026-08-21. The word
    "Recommended" was always what carried this, never the tint. */
@@ -4117,7 +4117,7 @@ a.fleet-breadcrumb:hover {
    all carried font-weight 550 while .fleet-mywork-empty h2 — the same
    concept, an empty-state title — carried 500. A census of the fleet CSS
    found EIGHT distinct weights in use (400/500/550/600/640/650/680/700)
-   where UI-CONTRACT §1 allows two. 550/640/650/680 are values nobody chose;
+   where the design rules allow two. 550/640/650/680 are values nobody chose;
    they are what a design drifts into. Normalised to the token. */
 .fleet-empty-title {
   font-size: 15px;
@@ -5483,7 +5483,7 @@ a.fleet-breadcrumb:hover {
   background: var(--bg-card-hover);
 }
 
-/* Neutral, not accent. UI-CONTRACT §10 names this exact case: "Selected/
+/* Neutral, not accent. the design rules name this exact case: "Selected/
    active (a toolbar toggle, a picker option, a filter) is a neutral fill
    (--bg-inset) plus a font-weight bump (400->500), never accent text or an
    accent background — INCLUDING inside an otherwise exclusive picker like a
@@ -8549,7 +8549,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
     gap: var(--space-3);
   }
 
-  /* UI-CONTRACT §4: "Count: 12px muted, SAME LINE (`Agents · 4`, not a
+  /* the design rules: "Count: 12px muted, SAME LINE (`Agents · 4`, not a
      second row)". Measured on a project page at 375px, "· 0 agents" broke
      onto a second line and pushed the mobile breadcrumb to 34.8px inside a
      48px bar, with the title clipped behind the primary action. */
@@ -8589,7 +8589,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
      room for 48px of text, so it rendered as "P…" — an ellipsis of one
      letter, which names nothing — while stealing that width from the page
      title, which then truncated to "Marketin". The chevron alone IS the
-     back affordance at this size (UI-CONTRACT §4's topbar spec is
+     back affordance at this size (the design rules's topbar spec is
      hamburger / title+count / action, with no back label), and the link
      keeps its full `aria-label="Back to {parent}"`, so nothing is lost to
      a screen reader. */
@@ -9365,7 +9365,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
 }
 
 .fleet-board-column-title {
-  /* 500 per UI-CONTRACT §1 — a column header is chrome, and it already
+  /* 500 per the design rules — a column header is chrome, and it already
      carries a status ring and a count to distinguish it from the cards. */
   font-weight: var(--weight-medium);
   color: var(--text-primary);
@@ -9788,7 +9788,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
 }
 
 /* MEASURED, 2026-08-21: these rendered ALL-CAPS at weight 600, which
-   UI-CONTRACT §1 forbids twice over ("sentence case everywhere", "weights
+   the design rules forbid twice over ("sentence case everywhere", "weights
    are 400 or 500 ONLY"). They also disagreed with each other on tracking:
    measured -0.12px here versus +0.36px on .fleet-task-page-side-title, for
    what is visually the same label — because the `.fleet-root h2` reset
@@ -9833,7 +9833,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
 
 /* MEASURED, 2026-08-21: every comment used to be a bordered, 8px-rounded,
    filled CARD, floated 14px apart — eight of them down an activity feed is
-   eight boxes to read past. UI-CONTRACT §10 is explicit: "Hairline lists,
+   eight boxes to read past. the design rules are explicit: "Hairline lists,
    not cards. A list row is a border-bottom hairline in a flat list, not a
    bordered/shadowed card per row." Flat now: no border box, no radius, no
    fill, one hairline between entries and none after the last. The feed
@@ -10371,7 +10371,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   border-radius: 999px;
   background: var(--border-strong);
 }
-/* A toggle is UI-CONTRACT's own named example of what the accent is not for.
+/* A toggle is the design rules' own named example of what the accent is not for.
    --text-primary against the off state's --border-strong is a much larger
    step than accent-vs-border ever was, and the --bg-card knob keeps its
    contrast against it in both themes. */

@@ -62,7 +62,7 @@
      tab component's own 28px — left a 221px content column inside a 375px
      screen. 41% of the phone was padding, which is why "Capability preset"
      broke onto two lines and every value crowded the right edge.
-     UI-CONTRACT §8 says it plainly: a dialog on mobile is a FULL-SCREEN
+     the design rules say it plainly: a dialog on mobile is a FULL-SCREEN
      sheet, not a desktop centred dialog shrunk to fit. Full-bleed here
      hands ~74px back to the content and squares the corners against the
      device edge, which is what makes it read as a sheet rather than a

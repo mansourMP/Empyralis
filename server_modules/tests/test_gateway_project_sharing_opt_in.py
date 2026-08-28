@@ -13,7 +13,7 @@ gateway_project_sharing_opted_in), stored in the SQLite gateway_registrations
 row's `metadata.project_sharing_opt_in` — SQLite is the LIVE store for this
 table (see gateway_state_repository.GATEWAY_STATE_DB_FILE and every read/
 write in this module going through sqlite3); the Postgres `gateway_
-registrations` table CHANNEL-GATEWAY-PLAN.md and MAN-307 document is a
+registrations` table the channel-gateway hardening and MAN-307 document is a
 stale, unrelated table that nothing in this module reads or writes.
 
 These tests exercise the repository layer directly against a real temp

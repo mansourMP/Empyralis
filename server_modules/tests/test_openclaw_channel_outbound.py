@@ -1,5 +1,5 @@
 """OpenClaw-transported channel outbound — the CLOUD half of
-CHANNEL-ADOPTION-PLAN.md step 3.
+the OpenClaw channel adoption step 3.
 
 WHAT THIS FILE IS ACTUALLY DEFENDING
 ------------------------------------

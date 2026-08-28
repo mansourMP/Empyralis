@@ -1,7 +1,7 @@
 /**
  * The loopback intake the OpenClaw bridge plugin POSTs to.
  *
- * CHANNEL-ADOPTION-PLAN.md step 2, gateway half. The plugin runs inside
+ * the OpenClaw channel adoption step 2, gateway half. The plugin runs inside
  * OpenClaw's process (third-party code, on the customer's machine) and has
  * NO Empyralis cloud credential by design — see the bridge plugin's
  * src/config.ts. It hands each mapped inbound event to this listener over

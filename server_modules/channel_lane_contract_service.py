@@ -64,7 +64,7 @@ PERSONAL_CHANNEL_SPECS: Dict[str, Dict[str, str]] = {
 
 # ── OpenClaw-transported channels ────────────────────────────────────────
 #
-# CHANNEL-ADOPTION-PLAN.md step 2. An OpenClaw gateway runs as a channel
+# the OpenClaw channel adoption step 2. An OpenClaw gateway runs as a channel
 # TRANSPORT ONLY on the customer's own machine, next to the Empyralis
 # gateway; its brain/memory/skills/UI are off. Inbound arrives at our
 # bridge plugin's `message_received` tap, is POSTed to the Empyralis
@@ -283,7 +283,7 @@ OPENCLAW_PERSONAL_CHANNEL_SPECS: Dict[str, Dict[str, str]] = {
         # "preview", not "live", for EVERY channel on this transport — a
         # property of the transport itself, not a per-channel judgement, so
         # there is no list to keep honest. No platform here has been driven
-        # with real credentials yet (CHANNEL-ADOPTION-PLAN.md step 5).
+        # with real credentials yet (the OpenClaw channel adoption step 5).
         #
         # Promotion does not happen in this file. "Proven live" is an
         # OBSERVED fact — a real message through a real connection — and it

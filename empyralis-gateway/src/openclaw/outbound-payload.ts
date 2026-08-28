@@ -1,6 +1,6 @@
 /**
  * Pure mapping + outcome classification for the OpenClaw outbound leg
- * (CHANNEL-ADOPTION-PLAN.md step 3). The mirror image of
+ * (the OpenClaw channel adoption step 3). The mirror image of
  * ./inbound-payload.ts: no socket, no `ws`, no `node:http` here, so every
  * rule below is testable without a live gateway.
  *

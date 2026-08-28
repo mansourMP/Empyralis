@@ -1,9 +1,0 @@
-URL: https://example.com/
-Title: Example Domain
-Screenshot: .orion-artifacts/local-execution/browser/7df69f1b-2fee-4f65-b3c5-4a0e5caf917d-browser-1.png
-
-Text preview:
-Example Domain This domain is for use in documentation examples without needing permission. Avoid use in operations. Learn more
-
-Links:
-- https://iana.org/domains/example | Learn more

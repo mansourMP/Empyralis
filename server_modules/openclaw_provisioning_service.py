@@ -1,4 +1,4 @@
-"""Cloud half of OpenClaw provisioning (CHANNEL-ADOPTION-PLAN.md step 4).
+"""Cloud half of OpenClaw provisioning (the OpenClaw channel adoption step 4).
 
 Turns Empyralis's STORED policy into a `openclaw.provision` capability
 invocation on the gateway that runs the customer's OpenClaw instance. Dispatch

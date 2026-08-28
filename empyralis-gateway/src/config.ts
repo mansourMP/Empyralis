@@ -47,7 +47,7 @@ export interface GatewayConfig {
    *  endpoint (`http://127.0.0.1:8790/openclaw/inbound`). */
   openclawBridgePort: number;
   /**
-   * The OUTBOUND leg (CHANNEL-ADOPTION-PLAN.md step 3): where the local
+   * The OUTBOUND leg (the OpenClaw channel adoption step 3): where the local
    * OpenClaw gateway's own WebSocket listens, and its own auth token.
    *
    * This is a DIFFERENT secret from `openclawBridgeToken` above and must
@@ -66,7 +66,7 @@ export interface GatewayConfig {
   openclawGatewayUrl: string;
   openclawGatewayToken?: string;
   /**
-   * PROVISIONING (CHANNEL-ADOPTION-PLAN.md step 4).
+   * PROVISIONING (the OpenClaw channel adoption step 4).
    *
    * `openclawProfile` is the `--profile <name>` this box's OpenClaw instance
    * runs under, i.e. `~/.openclaw-<name>`. ONE ISOLATED INSTANCE PER

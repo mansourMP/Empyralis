@@ -1,8 +1,0 @@
-{
-  "kind": "screenshot",
-  "label": "run-browser-approved-browser-1.png",
-  "message": "Artifact source file was removed before durable storage.",
-  "deleted_path": ".orion-artifacts/local-execution/browser/run-browser-approved-browser-1.png",
-  "tool": "browser_automation.interactive",
-  "summary": "Capture https://example.com/private"
-}

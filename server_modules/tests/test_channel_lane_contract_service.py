@@ -109,7 +109,7 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
         # Every transported channel is "preview" — a property of the
         # transport, not a per-channel judgement, so there is no list to keep
         # honest. Nothing here has been driven with real credentials yet
-        # (CHANNEL-ADOPTION-PLAN.md step 5).
+        # (the OpenClaw channel adoption step 5).
         self.assertEqual({entry["stage"] for entry in openclaw_catalog}, {"preview"})
         # No transported channel may collide with a first-party one, and the
         # active/superseded split must be a partition — an id on both sides

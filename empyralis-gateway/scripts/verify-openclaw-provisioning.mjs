@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * CHANNEL-ADOPTION-PLAN.md step 4's live proof: runs the REAL
+ * the OpenClaw channel adoption step 4's live proof: runs the REAL
  * OpenClawProvisioner (compiled from src/openclaw/provisioning/) against a
  * REAL `openclaw` install, under an ISOLATED throwaway profile, and prints
  * exactly what it did.

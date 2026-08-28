@@ -1,6 +1,6 @@
 /**
  * Installing the CHANNEL PLUGINS a provisioned OpenClaw instance needs
- * (CHANNEL-ADOPTION-PLAN.md step 5).
+ * (the OpenClaw channel adoption step 5).
  *
  * THE GAP THIS CLOSES
  * -------------------

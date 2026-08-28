@@ -2,7 +2,7 @@
 routes_personal_channels.py), added 2026-08-07 alongside
 personal_channels_service.update_agent_group_policy_config /
 _persist_agent_group_policy_config finally getting a real caller — see
-CHANNEL-GATEWAY-PLAN.md §4/§5. Unit coverage of the gate itself already
+the channel-gateway hardening §4/§5. Unit coverage of the gate itself already
 lives in test_personal_channels_group_policy.py; this file proves the
 HTTP surface: auth/ownership enforcement through a REAL FastAPI TestClient
 (not just a code read), that a write actually persists, and that a fresh

@@ -1,6 +1,6 @@
 /**
  * The OpenClaw version pin, and the loud failure when the installed CLI is
- * not it (CHANNEL-ADOPTION-PLAN.md step 4).
+ * not it (the OpenClaw channel adoption step 4).
  *
  * WHY A PIN AT ALL — three things in steps 1-3 are TRANSCRIPTIONS, not
  * negotiated contracts, and every one of them silently becomes wrong if the

@@ -207,7 +207,7 @@ class WeChatHostedEnvelopeTests(unittest.IsolatedAsyncioTestCase):
 
 class WeChatOfficialGate1Tests(unittest.IsolatedAsyncioTestCase):
     """Gate 1 (THE ACTUAL FIX): handle_inbound_callback used to route every
-    signature-verified sender straight to dispatch (CHANNEL-GATEWAY-PLAN.md
+    signature-verified sender straight to dispatch (the channel-gateway hardening
     §5a) — Tencent's callback contract is 1:1 with no groups, so signature
     verification alone was the entire authorization story. An unpaired
     OpenID must now get a pairing prompt back over WeChat and must NEVER
@@ -529,7 +529,7 @@ class SlackDmGate1Tests(unittest.TestCase):
     own comment says a DM "always triggers" — that was true structurally but
     never checked WHO was DMing the app. Before this change, any Slack user
     who opened a DM with the installed app got a full agent turn, no pairing,
-    no allowlist (CHANNEL-GATEWAY-PLAN.md §5a). An unpaired DM sender must
+    no allowlist (the channel-gateway hardening §5a). An unpaired DM sender must
     now get a pairing prompt back in the DM and must NEVER reach
     route_inbound_channel_message (Slack's chokepoint into
     execute_sage_turn). A non-DM (channel/group) message is untouched by

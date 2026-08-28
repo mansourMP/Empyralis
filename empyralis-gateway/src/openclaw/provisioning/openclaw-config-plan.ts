@@ -416,7 +416,7 @@ export const OPENCLAW_BRIDGE_PLUGIN_ID = "empyralis-bridge";
 
 // ── The security lockdown ─────────────────────────────────────────────────
 //
-// CHANNEL-ADOPTION-PLAN.md's SECURITY LOCKDOWN section, as code rather than
+// the OpenClaw channel adoption's SECURITY LOCKDOWN section, as code rather than
 // prose, so a future edit to the generator that drops one of these fails a
 // test instead of shipping. Context for why none of it is negotiable: tens of
 // thousands of OpenClaw gateways were found internet-exposed leaking API keys

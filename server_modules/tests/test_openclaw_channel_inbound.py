@@ -1,5 +1,5 @@
 """OpenClaw-transported channel inbound — the CLOUD half of
-CHANNEL-ADOPTION-PLAN.md step 2.
+the OpenClaw channel adoption step 2.
 
 WHAT THESE TESTS ARE ACTUALLY DEFENDING
 ---------------------------------------

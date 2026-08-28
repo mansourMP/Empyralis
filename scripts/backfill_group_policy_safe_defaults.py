@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Group-policy safe-defaults backfill — see CHANNEL-GATEWAY-PLAN.md §5
+"""Group-policy safe-defaults backfill — see the channel-gateway hardening §5
 step 2 / §7a, and personal_channels_service.py's DEFAULT_GROUP_POLICY_MODE
 comment for the full incident writeup this migration follows from.
 
@@ -7,7 +7,7 @@ WHAT THIS DOES
 --------------
 Before 2026-08-07, personal_channels_service._persist_agent_group_policy_config
 had zero callers anywhere in the codebase — no owner could EVER configure
-group_policy for their agent (see CHANNEL-GATEWAY-PLAN.md §4). Every
+group_policy for their agent (see the channel-gateway hardening §4). Every
 existing WhatsApp Personal / Telegram Personal agent binding today
 therefore has NO explicit group_policy entry for either channel; its live
 behavior comes entirely from the code-level
@@ -15,7 +15,7 @@ DEFAULT_GROUP_POLICY_MODE/DEFAULT_REQUIRE_MENTION fallback.
 
 That fallback flipped, in the same build that adds the write path, from
 open/require_mention=False to allowlist/require_mention=True — the
-incident this whole plan exists to fix (CHANNEL-GATEWAY-PLAN.md §1/§4).
+incident this whole plan exists to fix (the channel-gateway hardening §1/§4).
 The flip alone ALREADY changes every existing unconfigured agent's live
 behavior the moment the new code deploys, purely because "unconfigured"
 stopped being a safe state to leave anyone in.
@@ -69,7 +69,7 @@ against any database whose name does not contain "test" (see
 _refuse_unless_disposable_test_database below) — the same guard
 server_modules/tests/conftest.py enforces for the whole pytest session
 (MAN-139/MAN-202). This script has NO override flag for that guard, on
-purpose: per CHANNEL-GATEWAY-PLAN.md §7a, "Backfilling existing channel
+purpose: per the channel-gateway hardening §7a, "Backfilling existing channel
 bindings to the new defaults" requires the founder's explicit approval,
 and that decision is not this script's — or the agent that wrote it's —
 to make. Running this against a real workspace's database is a deliberate,
@@ -153,7 +153,7 @@ def _database_url_unsafe_reason(raw_url: str) -> str:
 
 def _refuse_unless_disposable_test_database() -> None:
     """Called ONLY on --apply. No override flag, deliberately — see the
-    module docstring's SAFETY section and CHANNEL-GATEWAY-PLAN.md §7a."""
+    module docstring's SAFETY section and the channel-gateway hardening §7a."""
     raw_url = str(os.environ.get("DATABASE_URL") or "").strip()
     if not raw_url:
         print("ABORT: DATABASE_URL is not set. --apply requires an explicit, disposable test database.")
@@ -164,7 +164,7 @@ def _refuse_unless_disposable_test_database() -> None:
             f"ABORT: refusing to --apply against this DATABASE_URL ({unsafe_reason}).\n"
             "This script will only ever WRITE against a database whose name contains 'test'.\n"
             "Backfilling real workspace data requires the founder's explicit approval and a\n"
-            "deliberate, separate run — see CHANNEL-GATEWAY-PLAN.md §7a."
+            "deliberate, separate run — see the channel-gateway hardening §7a."
         )
         raise SystemExit(1)
 

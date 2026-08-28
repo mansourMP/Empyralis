@@ -300,7 +300,7 @@ class SmsInboundWebhookTests(unittest.IsolatedAsyncioTestCase):
     async def test_webhook_unpaired_number_never_routes_to_agent(self) -> None:
         """Gate 1 (THE ACTUAL FIX): before this change, any phone number that
         texted a bound Twilio number reached the agent turn directly — no
-        pairing, no allowlist (CHANNEL-GATEWAY-PLAN.md §5a). An unpaired
+        pairing, no allowlist (the channel-gateway hardening §5a). An unpaired
         number must now get a pairing prompt back over SMS and must NEVER
         reach route_inbound_channel_message (the SMS chokepoint into
         execute_sage_turn)."""

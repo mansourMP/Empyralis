@@ -206,7 +206,7 @@ function xmlEscape(value: string): string {
 /**
  * What a supervised program looks like, independent of WHICH program it is.
  *
- * Generalized 2026-08-08 for CHANNEL-ADOPTION-PLAN.md step 4: the co-located
+ * Generalized 2026-08-08 for the OpenClaw channel adoption step 4: the co-located
  * OpenClaw gateway needs exactly this supervision (start on login, restart on
  * crash, audited-and-repaired unit file) and there must not be a second
  * implementation of it. The renderers, the drift audit

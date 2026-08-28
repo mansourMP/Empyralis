@@ -1,7 +1,7 @@
 /**
  * Runs the REAL empyralis-gateway OpenClawGatewayClient (compiled from
  * src/openclaw/openclaw-gateway-client.ts) against a REAL OpenClaw gateway,
- * and invokes the REAL `message.action` RPC — CHANNEL-ADOPTION-PLAN.md
+ * and invokes the REAL `message.action` RPC — the OpenClaw channel adoption
  * step 3's live proof.
  *
  * It lives beside the step-1/2 harnesses because this directory is the
