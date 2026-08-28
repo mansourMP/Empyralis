@@ -360,6 +360,18 @@ export default function SignupPage() {
                 : 'Choose the live sign-in path you want now. You can connect the rest later from inside Empyralis.'}
             </p>
           </div>
+          {/* Same rule as the login screen: rendered only when Google is
+              positively available. It used to render always — disabled the
+              moment it could not be used — under a caption saying so, AND
+              labelled "Live now", which was flatly false on a control that
+              could not be pressed. "Live now" does not come back when the
+              button does: a rendered, enabled button already says it
+              works, and a temporal claim in copy only goes stale.
+              `providers.google.enabled` defaults optimistically to true
+              and is only ever narrowed by the real listAuthProviders
+              response, so `!== true` means "loaded, and disabled" rather
+              than "not loaded yet" — the two are not collapsed here. */}
+          {isHydrated && providers.google?.enabled === true ? (
           <div className="app-auth-provider-stack">
             <div className="app-auth-social-stack">
               <AppButton
@@ -367,24 +379,21 @@ export default function SignupPage() {
                 tone="secondary"
                 className="app-auth-social"
                 onClick={() => googleLogin()}
-                disabled={submitting || !isHydrated || providers.google?.enabled !== true}
+                disabled={submitting}
               >
                 <GoogleProviderIcon className="app-auth-provider-mark" />
                 <span className="app-auth-social__content">
                   <span className="app-auth-social__title">Continue with Google</span>
-                  <span className="app-auth-social__meta">Live now · quickest account start</span>
                 </span>
               </AppButton>
             </div>
-            {providers.google?.enabled !== true ? (
-              <p className="app-auth-provider-note">Google sign-up is unavailable in this environment right now. Use email below and connect other sign-in methods later.</p>
-            ) : null}
             <div className="app-auth-divider">
               <span aria-hidden="true" />
               <span>or continue with email</span>
               <span aria-hidden="true" />
             </div>
           </div>
+          ) : null}
           <label className="app-auth-field">
             <span className="app-auth-field__label">Name</span>
             <span className="app-auth-input-shell">
