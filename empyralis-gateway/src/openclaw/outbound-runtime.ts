@@ -1,5 +1,5 @@
 /**
- * The gateway half of OpenClaw outbound (CHANNEL-ADOPTION-PLAN.md step 3).
+ * The gateway half of OpenClaw outbound (the OpenClaw channel adoption step 3).
  *
  * WHY THIS IS A PersonalChannelRuntime AND NOT A NEW DISPATCH PATH
  * ---------------------------------------------------------------

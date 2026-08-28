@@ -280,7 +280,7 @@ class GroupPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision["reason"], "group_no_mention")
 
     async def test_unresolved_identity_fallback_is_split_from_the_resolved_agent_default(self) -> None:
-        """UPDATED 2026-08-07 (CHANNEL-GATEWAY-PLAN.md §5 step 2), then
+        """UPDATED 2026-08-07 (the channel-gateway hardening §5 step 2), then
         UPDATED AGAIN 2026-08 ("the last unscoped channels") once Signal/
         iMessage/WeChat-personal gained real identity resolution
         (_resolve_local_bridge_agent_id) -- these two cases remain

@@ -1,7 +1,0 @@
-URL: http://127.0.0.1:52196/index.html
-Title: Session Sequence
-Session profile: -
-Screenshot: .orion-artifacts/local-execution/browser/d383d0ce-9325-489c-93fc-745b745e36a0-browser-1.png
-
-Text preview:
-Browser Session Smoke Alpha Beta Save Sequence no-file

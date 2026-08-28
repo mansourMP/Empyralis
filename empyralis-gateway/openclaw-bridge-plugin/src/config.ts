@@ -23,7 +23,7 @@
  * The local intake endpoint itself (empyralis-gateway listening on
  * `EMPYRALIS_BRIDGE_ENDPOINT_URL` and forwarding into its existing
  * `publisher.publishEvent("channel.inbound", ...)` path) is step 2/4
- * work — CHANNEL-ADOPTION-PLAN.md's "INBOUND WIRING" / "PROVISIONING" —
+ * work — the OpenClaw channel adoption's "INBOUND WIRING" / "PROVISIONING" —
  * and does not exist yet. Today this plugin talks to whatever
  * `EMPYRALIS_BRIDGE_ENDPOINT_URL` points at (a mock listener in dev/test).
  * Never log `EMPYRALIS_BRIDGE_TOKEN`'s value, anywhere, for any reason.

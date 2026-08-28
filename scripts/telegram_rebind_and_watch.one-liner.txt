@@ -1,1 +1,0 @@
-cd /Users/mansur/Multi_Agent_Orchestrator_Project && bash scripts/telegram_rebind_and_watch.sh

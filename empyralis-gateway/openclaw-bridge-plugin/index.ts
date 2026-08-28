@@ -2,7 +2,7 @@
  * Empyralis Bridge — an OpenClaw plugin that turns the OpenClaw gateway
  * running it into a channel transport for Empyralis.
  *
- * See ../../CHANNEL-ADOPTION-PLAN.md for the full design and the reason
+ * See the OpenClaw channel adoption for the full design and the reason
  * this exists at all (do not relitigate it here). Short version:
  *
  *   inbound   OpenClaw receives a channel message

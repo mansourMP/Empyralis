@@ -2,7 +2,7 @@
  * A live, authenticated WebSocket session to the OpenClaw gateway running
  * on this same machine, used for exactly one thing: invoking
  * `message.action` to deliver an Empyralis agent's reply out through an
- * OpenClaw-transported channel (CHANNEL-ADOPTION-PLAN.md step 3).
+ * OpenClaw-transported channel (the OpenClaw channel adoption step 3).
  *
  * WHY A PERSISTENT SOCKET AND NOT AN HTTP CALL
  * --------------------------------------------
@@ -151,7 +151,7 @@ export function assertLoopbackWebSocketUrl(rawUrl: string): URL {
   if (!LOOPBACK_HOSTS.has(host)) {
     throw new Error(
       `OpenClaw gateway URL must point at loopback (got host "${parsed.hostname}"). ` +
-        "An OpenClaw gateway reachable off-box is never an acceptable configuration — see CHANNEL-ADOPTION-PLAN.md's SECURITY LOCKDOWN.",
+        "An OpenClaw gateway reachable off-box is never an acceptable configuration — see the OpenClaw channel adoption's SECURITY LOCKDOWN.",
     );
   }
   return parsed;

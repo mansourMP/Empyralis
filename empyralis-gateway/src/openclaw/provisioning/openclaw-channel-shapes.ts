@@ -201,7 +201,7 @@ function schemaEnumValues(node: unknown): string[] | undefined {
  * Compares OPENCLAW_CHANNEL_POLICY_SHAPES against a live
  * `openclaw config schema` document, for the channels being provisioned.
  *
- * Also answers CHANNEL-ADOPTION-PLAN.md step 4's explicit instruction to
+ * Also answers the OpenClaw channel adoption step 4's explicit instruction to
  * "audit every channel you enable for a similar per-channel hook suppression
  * rather than assuming WhatsApp is the only one": rather than hard-coding
  * "only WhatsApp has pluginHooks", it reads every enabled channel's
@@ -640,7 +640,7 @@ export function resolveOpenClawChannelKeySupport(
 /**
  * Every `channels.<id>.pluginHooks.<flag>` boolean the installed schema
  * declares for the given channels. Provisioning sets all of them to true —
- * WhatsApp's `messageReceived` is the one CHANNEL-ADOPTION-PLAN.md names
+ * WhatsApp's `messageReceived` is the one the OpenClaw channel adoption names
  * (without it the `message_received` hook is suppressed ENTIRELY and nothing
  * on the Empyralis side can compensate), but nothing here is WhatsApp-
  * specific, so any channel that grows the same switch is handled the day it

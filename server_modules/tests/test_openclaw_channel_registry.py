@@ -288,7 +288,7 @@ class OpenClawOverlapResolutionTests(unittest.TestCase):
         self.assertIn("wecom", active)
 
     def test_cut_over_list_names_exactly_the_four_platforms_retired_2026_08_14(self) -> None:
-        """CHANNEL-ADOPTION-PLAN.md step 6: port -> verify -> swap -> delete.
+        """the OpenClaw channel adoption step 6: port -> verify -> swap -> delete.
 
         Moving an id into OPENCLAW_CUT_OVER_CHANNEL_IDS is the swap, and the
         first-party implementation for every id in it must be gone in the

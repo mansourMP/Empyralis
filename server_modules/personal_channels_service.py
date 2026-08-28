@@ -94,7 +94,7 @@ IMESSAGE_PERSONAL_PROVIDER = "bluebubbles_local_bridge"
 # _OpenClawPersonalChannelHandler for every key here automatically.
 LOCAL_BRIDGE_PERSONAL_CHANNELS: Dict[str, Dict[str, str]] = {}
 
-# ── OpenClaw-transported channels (CHANNEL-ADOPTION-PLAN.md step 2) ───────
+# ── OpenClaw-transported channels (the OpenClaw channel adoption step 2) ───────
 #
 # These are local-bridge channels in every sense that matters to this
 # module: a separate process on the owner's own machine speaks the platform
@@ -488,7 +488,7 @@ def normalize_openclaw_gate_facts(message: Dict[str, Any]) -> Dict[str, Any]:
     UNKNOWN GROUP-NESS IS TREATED AS A GROUP. Treating it as a DM would
     route the message to Gate 1, whose default for a resolved binding is
     DM_POLICY_OPEN — i.e. a stranger in a public group would get a turn.
-    That is precisely the incident in CHANNEL-GATEWAY-PLAN.md §1. Treating
+    That is precisely the incident in the channel-gateway hardening §1. Treating
     it as a group routes it to Gates 2 and 3, whose defaults are allowlist
     and require-mention. Strict side of the union, always.
 
@@ -2003,7 +2003,7 @@ async def _handle_dm_policy_blocked(
 # to have it.
 #
 # SUPERSEDED 2026-08-07 for the two DEFAULT_* constants below (see
-# CHANNEL-GATEWAY-PLAN.md §4/§5 for the full incident writeup) — Ruling A's
+# the channel-gateway hardening §4/§5 for the full incident writeup) — Ruling A's
 # philosophy is NOT overturned by this, and neither is Ruling B: the agent
 # still gets full group context on every turn it IS given, and this gate
 # still keys ONLY on platform-computed addressing facts (was this message
@@ -2048,7 +2048,7 @@ async def _handle_dm_policy_blocked(
 # PERMANENT state for local-bridge channels (identity resolves for them
 # now, in the common case), but it remains reachable — an ambiguous or
 # not-yet-claimed preferred_gateway_id (see _resolve_local_bridge_agent_id),
-# or any lookup failure — and per CHANNEL-GATEWAY-PLAN.md §"the last
+# or any lookup failure — and per the channel-gateway hardening §"the last
 # unscoped channels", any path that can still produce a genuinely unknown
 # identity must fail CLOSED, not open. See
 # _unresolved_identity_group_policy_config's own docstring for the fix
@@ -2057,7 +2057,7 @@ GROUP_POLICY_OPEN = "open"
 GROUP_POLICY_ALLOWLIST = "allowlist"
 GROUP_POLICY_DISABLED = "disabled"
 GROUP_POLICY_MODES = {GROUP_POLICY_OPEN, GROUP_POLICY_ALLOWLIST, GROUP_POLICY_DISABLED}
-# Resolved-but-unconfigured default — SAFE, per CHANNEL-GATEWAY-PLAN.md §5
+# Resolved-but-unconfigured default — SAFE, per the channel-gateway hardening §5
 # step 2 (2026-08-07): matches OpenClaw's consistent default across every
 # channel, not Telegram's legacy-open behavior. A brand-new agent binding,
 # or an existing one whose owner has never touched group_policy, now
@@ -2107,7 +2107,7 @@ def _unresolved_identity_group_policy_config(channel_key: str = "") -> Dict[str,
       install-lookup failure — see _resolve_local_bridge_agent_id's own
       docstring), and for THESE channels it now fails CLOSED
       (GROUP_POLICY_DISABLED/require_mention=True): this was literally the
-      incident (CHANNEL-GATEWAY-PLAN.md's "the last unscoped channels") — an
+      incident (the channel-gateway hardening's "the last unscoped channels") — an
       unresolved identity defaulting open, permanently and unconfigurably,
       let an agent reply unprompted in a large public group until the
       account got banned. A genuinely unknown local-bridge identity has no
@@ -2179,7 +2179,7 @@ async def _persist_agent_group_policy_config(
     config: Dict[str, Any],
 ) -> bool:
     """Write path. Had zero callers anywhere in the codebase until
-    2026-08-07 (see CHANNEL-GATEWAY-PLAN.md §4) — wired to a real PATCH
+    2026-08-07 (see the channel-gateway hardening §4) — wired to a real PATCH
     route via update_agent_group_policy_config below, the validating
     public wrapper routes_personal_channels.py calls; do not call this
     private function directly from a route, call the wrapper instead so a
@@ -2252,7 +2252,7 @@ async def update_agent_group_policy_config(
     allowlist axis + Gate 3's require_mention lever) — the validating,
     route-callable counterpart to _persist_agent_group_policy_config, which
     had zero callers anywhere before this build (see
-    CHANNEL-GATEWAY-PLAN.md §4). routes_personal_channels.py's PATCH
+    the channel-gateway hardening §4). routes_personal_channels.py's PATCH
     .../group-policy route is the only intended caller; call this instead
     of _persist_agent_group_policy_config directly so a bad `mode` gets a
     real error instead of being silently coerced to the default by

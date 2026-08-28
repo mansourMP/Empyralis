@@ -1,7 +1,0 @@
-URL: http://127.0.0.1:51653/index.html
-Title: Session Persisted
-Session profile: smoke-browser-profile
-Screenshot: .orion-artifacts/local-execution/browser/8fda8cca-9bec-447c-870c-b9a76ee2df73-browser-1.png
-
-Text preview:
-Browser Session Smoke Alpha Beta Save Persisted no-file

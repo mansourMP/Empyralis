@@ -512,7 +512,7 @@ async function main(): Promise<void> {
     fullAccessLocallyEnabled: config.shellFullAccessLocallyEnabled,
     dockerImage: config.shellSandboxDockerImage,
   });
-  // Outbound leg for OpenClaw-transported channels (CHANNEL-ADOPTION-PLAN.md
+  // Outbound leg for OpenClaw-transported channels (the OpenClaw channel adoption
   // step 3). The session is opened only when OpenClaw's own gateway token is
   // configured; the runtimes are registered whenever this box is an OpenClaw
   // transport box at all (same condition as the capability advertisement
@@ -580,7 +580,7 @@ async function main(): Promise<void> {
   // just above) — set once, here, before the one-time
   // supportedCapabilities() computation below.
   setCliSetupLocallyEnabled(config.cliSetupLocallyEnabled);
-  // Same shape again (CHANNEL-ADOPTION-PLAN.md step 2): whether this box
+  // Same shape again (the OpenClaw channel adoption step 2): whether this box
   // transports channels through a co-located OpenClaw gateway is a static
   // local configuration fact — the presence of the shared bridge secret —
   // and must be known before the one-time supportedCapabilities()
@@ -636,7 +636,7 @@ async function main(): Promise<void> {
     personalChannelRuntimes,
     stateDir: config.stateDir,
   });
-  // OpenClaw provisioning (CHANNEL-ADOPTION-PLAN.md step 4), through the
+  // OpenClaw provisioning (the OpenClaw channel adoption step 4), through the
   // shared builder, which the root installer also uses at install time — the
   // port, the bridge endpoint and the plugin path are derived there, once, so
   // the two callers cannot provision a box against a different port than it
@@ -777,7 +777,7 @@ async function main(): Promise<void> {
   // client exists.
   llmRuntime.setEventPublisher((payload) => client.publishEvent("tool.invoke.chunk", payload));
 
-  // OpenClaw bridge intake (CHANNEL-ADOPTION-PLAN.md step 2). Constructed
+  // OpenClaw bridge intake (the OpenClaw channel adoption step 2). Constructed
   // only when the shared secret is configured — there is no unauthenticated
   // mode, so an unset EMPYRALIS_BRIDGE_TOKEN means the listener simply does
   // not exist, and the OpenClaw plugin's POSTs pile up in its own durable
@@ -941,7 +941,7 @@ async function main(): Promise<void> {
             });
           });
         }
-        // Boot-time OpenClaw provisioning (CHANNEL-ADOPTION-PLAN.md step 4).
+        // Boot-time OpenClaw provisioning (the OpenClaw channel adoption step 4).
         //
         // TWO JOBS, one call. On a box with a stored policy it re-asserts it
         // against whatever the local OpenClaw config actually says now —

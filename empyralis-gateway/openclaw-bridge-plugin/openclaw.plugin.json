@@ -1,7 +1,7 @@
 {
   "id": "empyralis-bridge",
   "name": "Empyralis Bridge",
-  "description": "Turns this OpenClaw gateway into a channel transport for Empyralis: forwards every inbound channel message to Empyralis over HTTP, and suppresses the synthetic no-credentials agent reply this deployment deliberately produces. See CHANNEL-ADOPTION-PLAN.md.",
+  "description": "Turns this OpenClaw gateway into a channel transport for Empyralis: forwards every inbound channel message to Empyralis over HTTP, and suppresses the synthetic no-credentials agent reply this deployment deliberately produces. See the OpenClaw channel adoption.",
   "version": "0.1.0",
   "contracts": {
     "gatewayMethodDispatch": ["authenticated-request"]

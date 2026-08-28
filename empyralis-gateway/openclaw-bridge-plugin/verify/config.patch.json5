@@ -25,7 +25,7 @@
 // after gateway_start, so empyralis-bridge's real registered handlers run
 // end to end inside a real gateway process without needing a real channel
 // account. See verify/synthetic-inbound-driver/index.ts and
-// CHANNEL-ADOPTION-PLAN.md for what this does and does not prove.
+// the OpenClaw channel adoption for what this does and does not prove.
 //
 // Tear down: pkill the gateway and listener processes, then
 // `rm -rf ~/.openclaw-empyralis-bridge-verify` (never touch ~/.openclaw or

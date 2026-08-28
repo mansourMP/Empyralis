@@ -150,7 +150,7 @@ export function buildOpenClawSupervisedEnv(params: {
  *     supervision that exists. See ./openclaw-binary-path.ts.
  *
  * The argv is OpenClaw's own documented headless boot, verified live under an
- * isolated profile (CHANNEL-ADOPTION-PLAN.md's feasibility table). `--token`
+ * isolated profile (the OpenClaw channel adoption's feasibility table). `--token`
  * is deliberately NOT passed: argv is world-readable via `ps`, and the token
  * is already in the config file this provisioning run wrote.
  */

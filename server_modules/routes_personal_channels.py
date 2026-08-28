@@ -319,7 +319,7 @@ async def send_local_bridge_personal_message(
 # Wires personal_channels_service.update_agent_group_policy_config /
 # _persist_agent_group_policy_config to a real route — both had zero
 # callers anywhere in the codebase before this build (see
-# CHANNEL-GATEWAY-PLAN.md §4: the write path existed, but nothing could
+# the channel-gateway hardening §4: the write path existed, but nothing could
 # ever call it, so Gate 2 was permanently stuck open for every agent). The
 # read path (_load_agent_group_policy_config) was already wired into the
 # live inbound handlers; this route is the missing other half.
@@ -393,7 +393,7 @@ async def update_personal_channel_group_policy(
                 "allowlist_size": len(updated.get("allowlist") or []),
             },
         )
-        # CHANNEL-ADOPTION-PLAN.md step 4. For an OpenClaw-transported channel
+        # the OpenClaw channel adoption step 4. For an OpenClaw-transported channel
         # the policy just saved here is NOT what decides whether a message ever
         # arrives — OpenClaw's own config runs first and can block-dispatch
         # before any Empyralis gate sees it. Push the new policy to the box now,
@@ -888,7 +888,7 @@ async def _reconcile_openclaw_after_policy_change(
     agent_id: str,
     current_user,
 ):
-    """CHANNEL-ADOPTION-PLAN.md step 4, identical to the group-policy route's
+    """the OpenClaw channel adoption step 4, identical to the group-policy route's
     own post-save push and factored out so the two axes cannot drift into
     saving the same kind of setting and only one of them taking effect.
 

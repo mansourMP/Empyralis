@@ -39,7 +39,7 @@ test("does not match a plain mention of a missing API key without the FailoverEr
   );
 });
 
-// ── Collision with the OUTBOUND path (CHANNEL-ADOPTION-PLAN.md step 3) ────
+// ── Collision with the OUTBOUND path (the OpenClaw channel adoption step 3) ────
 //
 // `message_sending` fires on EVERY outbound delivery OpenClaw performs —
 // including the ones Empyralis originates through `message.action`. So this

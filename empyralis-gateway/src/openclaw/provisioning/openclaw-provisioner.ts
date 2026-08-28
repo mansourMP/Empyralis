@@ -1,7 +1,7 @@
 /**
  * Provisioning, end to end: locate + version-pin -> generate config ->
  * lock down -> apply -> verify by read-back -> audit -> supervise ->
- * report (CHANNEL-ADOPTION-PLAN.md step 4).
+ * report (the OpenClaw channel adoption step 4).
  *
  * ═══════════════════════════════════════════════════════════════════════════
  * THE DRIFT DECISION, AND WHY IT IS THIS ONE
@@ -37,7 +37,7 @@
  *          same lie this module exists to prevent. `openclaw config patch`
  *          answers "Restart the gateway to apply." Some paths hot-reload
  *          (their `config.schema.lookup` reports a `reloadKind` per path, not
- *          yet surveyed — CHANNEL-ADOPTION-PLAN.md still lists it UNVERIFIED);
+ *          yet surveyed — the OpenClaw channel adoption still lists it UNVERIFIED);
  *          the rest need the process to come back. This module does NOT
  *          restart it, for two reasons that are both hard rules rather than
  *          conveniences:

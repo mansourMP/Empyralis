@@ -1,4 +1,4 @@
-"""Cloud half of CHANNEL-ADOPTION-PLAN.md step 4.
+"""Cloud half of the OpenClaw channel adoption step 4.
 
 The thing these tests exist to protect is narrow and specific: the policy that
 reaches the box must be the policy the LIVE INBOUND GATES read, for EVERY

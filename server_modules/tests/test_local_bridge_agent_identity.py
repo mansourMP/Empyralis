@@ -1,5 +1,5 @@
 """Tests for Signal/iMessage/WeChat-personal agent-identity resolution
-(CHANNEL-GATEWAY-PLAN.md "the last unscoped channels").
+(the channel-gateway hardening "the last unscoped channels").
 
 Before this build, `_resolve_agent_id_for_inbound` had no lookup branch for
 `LOCAL_BRIDGE_PERSONAL_CHANNELS` at all -- every inbound Signal/iMessage/

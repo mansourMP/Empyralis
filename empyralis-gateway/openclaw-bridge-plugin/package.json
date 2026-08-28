@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "OpenClaw plugin: turns an OpenClaw gateway into a channel transport for Empyralis. Runs inside OpenClaw's own process — see ../../CHANNEL-ADOPTION-PLAN.md for why. No runtime dependency on any @openclaw/* package; only the public `openclaw` package's documented plugin contract (used for local dev types/tests, never bundled).",
+  "description": "OpenClaw plugin: turns an OpenClaw gateway into a channel transport for Empyralis. Runs inside OpenClaw's own process — see the OpenClaw channel adoption for why. No runtime dependency on any @openclaw/* package; only the public `openclaw` package's documented plugin contract (used for local dev types/tests, never bundled).",
   "openclaw": {
     "extensions": [
       "./index.ts"

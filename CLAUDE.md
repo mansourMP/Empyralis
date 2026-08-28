@@ -29,6 +29,7 @@ When you learn something durable, add ONE line. A paragraph is archaeology.
 - **Isolation covers files and git — not ports, browser tabs, the scratchpad, or `~/.empyralis/state`.** Pick a non-default port up front, scope browser calls to your own `tabId`, give logs a session-unique name, and never kill a process on a default port assuming it is yours.
 - Worktree setup: symlink `venv/` and `empyralis-runtime-kernel/target/`. Do NOT symlink `frontend/node_modules` — Turbopack refuses a symlink outside its pinned root; use `npm run dev:e2e` (webpack) or a real install.
 - Never commit `frontend/next-env.d.ts` or `frontend/tsconfig.json`.
+- **Never create, edit, move or copy a secret** — an `.env`, an OAuth secret, an API key, a token. Not into a worktree, not to a gitignored path, not "just for this throwaway checkout". If running something needs a credential you don't have, ask for it in the person's own shell. One well-guarded secret becomes five unguarded copies exactly this way.
 - A branch is merged or deleted. Left behind, its work gets rebuilt from scratch by someone else.
 - **When a system is being replaced, stop building on it.** An outgoing system's defect is one line to the founder, never a fix. There are no production users on the gateway — do not invent a customer base to justify the work.
 - Adopt a system whole or argue against adopting it; never curate a subset and call it adoption.
