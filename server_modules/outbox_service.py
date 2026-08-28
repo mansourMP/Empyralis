@@ -241,6 +241,8 @@ def emit_run_transition_event(
     to_state: str,
     actor: str,
     trace_id: str = "",
+    agent_install_id: str = "",
+    failure_reason: str = "",
     persist_outbox_event_fn: Optional[Callable[..., Any]] = None,
 ) -> OutboxEvent:
     run_token = str(run_id or "").strip()
@@ -269,9 +271,47 @@ def emit_run_transition_event(
             "to_state": to_token,
             "actor": str(actor or "").strip() or "runtime",
             "emitted_at": _utc_now_iso(),
+            # Identity and cause travel WITH the transition.
+            #
+            # This payload used to be exactly the five keys above, so every
+            # downstream row said "Run <uuid> failed." and nothing else: the
+            # ledger's install_id was NULL (activity_ledger_service reads it
+            # from metadata["agent_install_id"], which nothing ever set), and
+            # the reason — which existed on the run record at this very call
+            # site — was dropped. A person saw "Run failed", could not tell
+            # which agent, and had no route to why.
+            #
+            # metadata is the key notification_service already merges through
+            # to the ledger writer, so nothing between here and the row needs
+            # to learn a new field name.
+            "metadata": _run_transition_metadata(
+                agent_install_id=agent_install_id,
+                failure_reason=failure_reason,
+            ),
         },
         persist_outbox_event_fn=persist_outbox_event_fn,
     )
+
+
+def _run_transition_metadata(
+    *,
+    agent_install_id: str,
+    failure_reason: str,
+) -> Dict[str, Any]:
+    """Only facts that are actually known. An absent key is not an empty one.
+
+    A "" install id written into the row is indistinguishable from an agent
+    that could not be resolved, and a consumer would render an empty name
+    rather than fall back. Omit instead.
+    """
+    metadata: Dict[str, Any] = {}
+    install_token = str(agent_install_id or "").strip()
+    if install_token:
+        metadata["agent_install_id"] = install_token
+    reason_token = str(failure_reason or "").strip()
+    if reason_token:
+        metadata["failure_reason"] = reason_token[:1000]
+    return metadata
 
 
 def emit_artifact_created_event(

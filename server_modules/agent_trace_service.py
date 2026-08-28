@@ -230,6 +230,34 @@ def build_ephemeral_envelope(
         return None
 
 
+# Every agent trace id is minted in exactly one place —
+# control_plane_repository.create_agent_trace's
+# `f"trace_{uuid.uuid4().hex[:24]}"`. Nothing else may produce one.
+_AGENT_TRACE_ID_PREFIX = "trace_"
+
+
+def is_linkable_trace_id(trace_id: Any) -> bool:
+    """Does this id name a row a reader could actually open?
+
+    "The run has a trace id" and "there is a trace to open" are two
+    different facts, and one field was carrying both.
+    ``run_service._run_trace_id`` falls back to an OpenTelemetry span id
+    (32 bare hex chars, no prefix) when a run has no agent trace of its
+    own. That is correct for log correlation and useless as a link: it has
+    no row in ``agent_traces``, so ``GET /api/agent-traces/{id}`` answers
+    404 and a UI that linked it would render a dead control.
+
+    So a caller building a LINK asks this; a caller doing correlation
+    keeps using the raw value. The prefix is the discriminator because it
+    is generated in exactly one place, and
+    ``test_failed_run_identity.py`` asserts a freshly minted id satisfies
+    this predicate while an OTel-shaped one does not — the generator and
+    the check read from different sources.
+    """
+    token = str(trace_id or "").strip()
+    return token.startswith(_AGENT_TRACE_ID_PREFIX) and len(token) > len(_AGENT_TRACE_ID_PREFIX)
+
+
 async def start_trace(
     *,
     workspace_id: str,
