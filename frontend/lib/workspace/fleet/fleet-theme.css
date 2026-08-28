@@ -1235,11 +1235,48 @@ a.fleet-breadcrumb:hover {
    that is replaced takes its CSS with it. A quiet hairline-divided list,
    never cards. */
 
+/* THE LIST USED TO SIT IN ONE 480px COLUMN AT THE FAR LEFT OF A 1430px
+   CONTENT AREA. Founder, 2026-08-29: "in keyboard shortcuts, this must be
+   balanced. The user interface of it is not something that is perfect yet."
+   Measured at 1680x1050 before this rule:
+
+     content area (.fleet-shell-scroll)   241 -> 1671   1430px
+     main (.fleet-content--wide)          241 -> 1381   1140px
+     the list itself                      273 ->  753    480px  (its own cap)
+     => 918px of empty content area to the right of every row.
+
+   The Agents-grid fix (.fleet-content--cards) does not apply here and must
+   not be copied: that raised a CAP because an auto-fill CARD grid answers
+   more width with another column. Seven label/key rows answer more width by
+   putting the label at one edge and the chip 1300px away, which is worse
+   than the dead space. So the rows keep a readable measure and the GROUPS
+   are what use the width.
+
+   `auto-fit` (not auto-fill) is the whole mechanism and it is derived, not a
+   column count somebody chose: it lays out as many 320px tracks as fit,
+   COLLAPSES the ones no group occupies, and `1fr` then hands the leftover to
+   the groups that exist. Two groups in 1076px => 2 x 522px, filling the
+   width; a third group would lay out 3 x 349px on its own. Nothing to edit
+   when the content changes. */
+.fleet-shortcuts-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--space-6) var(--space-8);
+  align-items: start;
+  margin-top: var(--space-3);
+}
+
+/* The first group's title must not take .fleet-detail-section-title's usual
+   top margin — it is the first thing under the topbar, and the grid's own
+   row gap already separates the groups from each other. */
+.fleet-shortcuts-group > .fleet-detail-section-title {
+  margin-top: 0;
+}
+
 .fleet-shortcuts-list {
   display: flex;
   flex-direction: column;
   margin-top: var(--space-3);
-  max-width: 480px;
 }
 
 .fleet-shortcuts-row {
@@ -1263,6 +1300,75 @@ a.fleet-breadcrumb:hover {
   border-radius: 4px;
   padding: 1px 6px;
   white-space: nowrap;
+}
+
+/* ── Settings ▸ Account (the settings/account page) ── */
+/* AccountSection.tsx. Personal settings only — the ones that belong to the
+   PERSON, not the workspace. Two groups today ("You", "Appearance"), stacked
+   rather than laid out in the auto-fit grid the shortcuts page next door
+   uses: those are two parallel reference lists of the same kind, these are a
+   read-only identity row and a picker, and putting them side by side would
+   imply a symmetry that isn't there. */
+
+/* ONE COLUMN WIDTH FOR THE WHOLE PAGE, and it is the same 560px the
+   appearance row below settles at. Measured first: .fleet-list-row stretches
+   to its container, so the single identity row rendered 1076px wide while the
+   picker under it stopped at 560 — two blocks sharing neither edge, and a
+   lone full-width row reads as an empty bar rather than as a list (which is
+   what that class is shaped for, and why it is right in Workspace ▸ Members,
+   where rows stack). Capping the section keeps both blocks on one left edge
+   AND one right edge. */
+.fleet-account-sections {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  margin-top: var(--space-3);
+  max-width: 560px;
+}
+
+/* Airy between groups, dense inside one: .fleet-detail-section-title carries
+   a top margin meant for a run of sections inside one flow, and the flex gap
+   above is already doing that job here. */
+.fleet-account-sections > section > .fleet-detail-section-title {
+  margin-top: 0;
+}
+
+/* The three appearance options, side by side. `auto-fit` + minmax is the same
+   idiom .fleet-shortcuts-groups uses and for the same reason — the track
+   count follows the option count instead of being a number somebody chose,
+   so the row stays correct if a fourth ever exists, and every option drops to
+   its own full-width row on a narrow viewport rather than being squeezed.
+   The cards themselves are plain .fleet-wizard-option, unchanged: selection
+   is that class's border-steps-to-text-primary plus its drawn checkmark, the
+   house signal, never a hue. */
+.fleet-theme-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  max-width: 560px;
+}
+
+/* A theme card is one line, so it centres its label instead of inheriting
+   .fleet-wizard-option's top-left stack (which is built for a label with a
+   description under it). The right padding stays exactly as the base rule
+   set it — that is the checkmark's reserved lane, and reclaiming it would
+   make the label jump sideways the moment you pick one. */
+.fleet-theme-options > .fleet-wizard-option {
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+}
+
+/* The unverified-email remediation: one sentence, one button, and the
+   outcome line the button writes. Wraps rather than clipping, so a long
+   provider message never pushes the button off the edge. */
+.fleet-account-verify {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+  margin-top: var(--space-3);
 }
 
 /* ── System health rail control (MAN-107) ── */

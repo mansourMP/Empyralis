@@ -4,6 +4,41 @@ import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fet
 
 // "Connect an MCP app" — MCP Phase B UI.
 //
+// WHAT THIS IS, AND WHY IT IS NOT THE AGENT "Apps" TAB (2026-08-29). The two
+// look alike on screen and are different mechanisms end to end. Traced, not
+// assumed:
+//
+//                    this section                    an agent's Apps tab
+//   store            mcp_servers.json on disk        vault_credentials +
+//                    (mcp_registry_service)          agent_connector_bindings
+//                                                    (Postgres)
+//   scope            (workspace_id, server_id)       (agent_install_id,
+//                    — no agent column at all          connector_key)
+//   what you add     ANY remote server, by URL       one of 76 named apps
+//                                                    (no URL field exists)
+//   who can call it  the master/Ask AI turn only     the bound agent
+//
+// Two consequences worth keeping in mind before changing anything here.
+//
+// (1) The Apps tab WRITES INTO THIS REGISTRY, one-way. Completing an OAuth app
+//     connection registers a row per APP_MCP_SERVER_MAP endpoint
+//     (connection_oauth_service._register_mcp_servers_for_provider), which is
+//     why a "Google · Calendar, Drive, Gmail" card appears here that nobody
+//     added on this page. cameFromAppConnection() below makes that legible.
+//     Nothing flows the other way: routes_fleet.fleet_agent_connectors filters
+//     to lane "work_app_connector", so a URL-added server can never show up in
+//     Apps.
+//
+// (2) NO SPECIALIST AGENT CAN CALL THESE TOOLS. Verified by driving the real
+//     function, not by reading it: list_workspace_mcp_direct_tool_payloads
+//     emits connector_id "mcp", and
+//     agent_turn_runtime_service._filter_registry_for_specialist keeps an
+//     entry only when its connector is in that agent's own
+//     agent_connector_bindings — and "mcp" is never a connector_key (grepped:
+//     zero writers). specialist_toolset is None only for the master/Sage turn,
+//     where the filter never runs. So the copy on this page says Ask AI, and
+//     must keep saying Ask AI until that filter changes.
+//
 // Backend contract (verified file:line, server_modules/agent_registry_api.py):
 //   GET    /agent-registry/mcp/servers                       list_mcp_servers        :874
 //   PUT    /agent-registry/mcp/servers/{server_id}            save_mcp_server         :913
@@ -228,6 +263,22 @@ function groupServers(servers: McpServerRecord[]): ServiceGroup[] {
   // as unrelated rows in the list refresh.
   groups.sort((a, b) => a.servers[0].id.localeCompare(b.servers[0].id));
   return groups;
+}
+
+/** Did this row appear because someone connected an APP, rather than because
+ *  someone pasted a URL into the form above?
+ *
+ *  This is the founder's own question about the "Google · Calendar, Drive,
+ *  Gmail" card ("what is this doing here?"), and it has a derived answer that
+ *  needs no new backend field: a server row registered by an OAuth app
+ *  connection carries the credential id of the grant that produced it
+ *  (connection_oauth_service._register_mcp_servers_for_provider passes
+ *  credential_id for every entry in APP_MCP_SERVER_MAP), and handleAdd's PUT
+ *  above never sends one. So credential_id is present exactly when the row
+ *  came from somewhere other than this page — which is the one fact that
+ *  makes a card nobody remembers creating legible. */
+function cameFromAppConnection(group: ServiceGroup): boolean {
+  return group.servers.some((s) => Boolean(s.credential_id));
 }
 
 function groupStatusText(group: ServiceGroup): string {
@@ -463,8 +514,8 @@ export function McpServersSection({ workspaceId }: { workspaceId: string }) {
     <>
       <h2 className="fleet-detail-section-title" style={{ marginTop: "var(--space-6)" }}>MCP servers</h2>
       <p className="fleet-subtitle" style={{ marginTop: 0 }}>
-        Connect a remote MCP server by URL. Tools are enabled automatically once a server connects — only
-        money-moving, destructive, or third-party-messaging actions need your explicit approval first.
+        A server the Apps catalog doesn&apos;t carry, added by URL and shared by the whole workspace.
+        Tools here are available to Ask AI; to give one agent its own tools, use that agent&apos;s Apps tab.
       </p>
 
       {error ? (
@@ -528,7 +579,15 @@ export function McpServersSection({ workspaceId }: { workspaceId: string }) {
             <Server size={20} strokeWidth={1.75} />
           </div>
           <div className="fleet-empty-title">No MCP servers connected</div>
-          <div className="fleet-empty-desc">Paste a server URL above to give this workspace's agents new tools.</div>
+          {/* Was "…to give this workspace's agents new tools", which is the
+              one claim this surface cannot back: a workspace MCP server's
+              tools carry connector_id "mcp", and
+              agent_turn_runtime_service._filter_registry_for_specialist keeps
+              an entry only when its connector is in the agent's
+              agent_connector_bindings — where "mcp" is never a connector_key.
+              So they reach the master/Ask AI turn and no specialist agent.
+              Verified by driving the real filter, not by reading it. */}
+          <div className="fleet-empty-desc">Paste a server URL above to give Ask AI new tools.</div>
         </div>
       ) : (
         <div className="fleet-list">
@@ -547,6 +606,7 @@ export function McpServersSection({ workspaceId }: { workspaceId: string }) {
               .pop();
             const buckets = bucketizeTools(group);
             const primaryEndpoint = group.servers.length === 1 ? group.servers[0].endpoint : "";
+            const fromApp = cameFromAppConnection(group);
 
             return (
               <div key={group.key} className="fleet-list-row" style={{ flexDirection: "column", alignItems: "stretch", cursor: "default" }}>
@@ -569,6 +629,7 @@ export function McpServersSection({ workspaceId }: { workspaceId: string }) {
                     <span className="fleet-list-row-title">{group.title}</span>
                     <span className="fleet-list-row-desc">
                       {group.servers.length > 1 ? `${group.subtitle} · ${totalTools} tools` : (primaryEndpoint ? hostFromUrl(primaryEndpoint) : group.subtitle)}
+                      {fromApp ? " · Added by connecting the app, not from this page" : ""}
                     </span>
                   </span>
                   <span className="fleet-list-row-meta">{groupStatusText(group)}</span>
