@@ -2170,6 +2170,8 @@ import {
   planDoors,
   type ChannelDoor,
 } from "./channel-doors";
+import { TelegramHostedPanel, useHostedTelegramStatus } from "./TelegramHostedPanel";
+import { hostedDoorSupported } from "./telegram-hosted-pairing";
 import { planUnifiedChannelGrid } from "./channel-platform";
 import { isChannelRecommended } from "./channel-popularity";
 import {
@@ -2646,12 +2648,34 @@ export function ChannelsTab({
   // catalog item from the grid pill" shape); full_account's comes from the live
   // pairing status polled just above, already scoped to whichever channel is on
   // screen.
+  // Hosted Telegram ("Empyralis bot") — the platform's own shared bot. Read
+  // only while this card's banner is open, which is also the only place its
+  // door face and setup panel can appear, so an ordinary Channels tab makes no
+  // extra request. Two readers below need it BEFORE the door is picked: the
+  // face (so a paired workspace says so without being clicked into) and
+  // availability (so a deployment with no hosted bot shows no dead button).
+  const hostedTelegram = useHostedTelegramStatus(
+    workspaceId,
+    expanded === "sage_telegram_hosted",
+  );
+  const hostedTelegramPaired = hostedTelegram.status?.paired === true;
+  // null = we haven't found out yet, and that must never read as "no" — see
+  // hostedDoorSupported and channel-doors' own three-valued input.
+  const hostedTelegramSupported = hostedDoorSupported(hostedTelegram.status);
+
   const isDoorConnected = (door: ChannelDoor): boolean =>
-    expanded === "sage_telegram_hosted" && door.key === "byo_bot"
-      ? telegramBotConnected
-      : door.key === "full_account"
-        ? fullAccountDoorConnected
-        : false;
+    expanded === "sage_telegram_hosted" && door.key === "hosted_bot"
+      ? hostedTelegramPaired
+      : expanded === "sage_telegram_hosted" && door.key === "byo_bot"
+        ? telegramBotConnected
+        : door.key === "full_account"
+          ? fullAccountDoorConnected
+          : false;
+  // The deployment axis, per door. Only the hosted door depends on something
+  // this installation provides; every other door passes undefined and behaves
+  // exactly as it did before this existed.
+  const doorDeploymentSupported = (door: ChannelDoor): boolean | null | undefined =>
+    door.key === "hosted_bot" ? hostedTelegramSupported : undefined;
   // Hardware is a fact about a door, so it is answered the same way for the
   // picker face and for a direct-mode channel that has no face — never
   // discovered at two different moments depending on which path the customer
@@ -2659,7 +2683,11 @@ export function ChannelsTab({
   const doorHardware = (door: ChannelDoor) =>
     channelDoorHardwareState(door, { hasHardware: !!agentGatewayId, doorConnected: isDoorConnected(door) });
   const doorAvailable = (door: ChannelDoor) =>
-    isChannelDoorAvailable(door, { hasHardware: !!agentGatewayId, doorConnected: isDoorConnected(door) });
+    isChannelDoorAvailable(door, {
+      hasHardware: !!agentGatewayId,
+      doorConnected: isDoorConnected(door),
+      deploymentSupported: doorDeploymentSupported(door),
+    });
   // A direct-mode door the agent cannot complete must read as unavailable
   // instead of rendering a setup form that only fails once it's on screen —
   // this is the one-door half of the same "no dead controls" rule the picker
@@ -3455,7 +3483,14 @@ export function ChannelsTab({
                     const connected = isDoorConnected(door);
                     const hardware = doorHardware(door);
                     const hardwareNote = channelDoorHardwareNote(hardware);
-                    const available = hardware !== "missing";
+                    // Both axes, through the shared rule — a door can be
+                    // unwalkable because THIS AGENT lacks a computer, or
+                    // because THIS INSTALLATION doesn't provide it (the
+                    // hosted Telegram bot). Either way it renders inert with
+                    // its own reason instead of a pick that fails after it is
+                    // made.
+                    const available = doorAvailable(door);
+                    const deploymentBlocked = doorDeploymentSupported(door) === false;
                     const face = (
                       <>
                         <span className="fleet-wizard-option-label">
@@ -3478,6 +3513,14 @@ export function ChannelsTab({
                         {hardwareNote ? (
                           <span className={`fleet-wizard-option-note${available ? "" : " fleet-wizard-option-note--gateway"}`}>
                             <Cpu size={11} strokeWidth={2} aria-hidden /> {hardwareNote}
+                          </span>
+                        ) : null}
+                        {/* The deployment fact, on the face, before the pick —
+                            the same rule the hardware note follows. Says why
+                            it is inert, not merely that it is. */}
+                        {deploymentBlocked ? (
+                          <span className="fleet-wizard-option-note fleet-wizard-option-note--gateway">
+                            <AlertTriangle size={11} strokeWidth={2} aria-hidden /> Not set up on this installation
                           </span>
                         ) : null}
                       </>
@@ -3532,20 +3575,61 @@ export function ChannelsTab({
                    action would fail. */}
               {activeDoor && !activeDoorAvailable ? (
                 <div className="fleet-door-unavailable">
-                  <p className="fleet-door-unavailable-title">
-                    <Cpu size={14} strokeWidth={2} aria-hidden /> {activeDoor.label} needs a computer
-                  </p>
-                  <p className="fleet-channel-expand-hint">{channelDoorUnavailableReason(activeDoor)}</p>
-                  {/* The same real next step the transported panel offers, so
-                      a person meets one behaviour rather than two depending on
-                      which half of the grid the card came from. */}
-                  {hardwareHref ? (
-                    <Link className="fleet-btn fleet-btn--accent" href={hardwareHref}>
-                      Set up a computer
-                    </Link>
-                  ) : null}
+                  {/* Two different reasons a door is inert, and they must not
+                      share a sentence: this AGENT has no computer, or this
+                      INSTALLATION doesn't offer the door at all. Sending
+                      someone to the Hardware tab for the second one would be a
+                      confidently wrong next step — pairing a computer fixes
+                      nothing about a bot token the deployment never set. */}
+                  {doorDeploymentSupported(activeDoor) === false ? (
+                    <>
+                      <p className="fleet-door-unavailable-title">
+                        <AlertTriangle size={14} strokeWidth={2} aria-hidden /> {activeDoor.label} isn&apos;t set up here
+                      </p>
+                      <p className="fleet-channel-expand-hint">
+                        {channelDoorUnavailableReason(activeDoor, { deploymentSupported: false })}
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <p className="fleet-door-unavailable-title">
+                        <Cpu size={14} strokeWidth={2} aria-hidden /> {activeDoor.label} needs a computer
+                      </p>
+                      <p className="fleet-channel-expand-hint">{channelDoorUnavailableReason(activeDoor)}</p>
+                      {/* The same real next step the transported panel offers, so
+                          a person meets one behaviour rather than two depending on
+                          which half of the grid the card came from. */}
+                      {hardwareHref ? (
+                        <Link className="fleet-btn fleet-btn--accent" href={hardwareHref}>
+                          Set up a computer
+                        </Link>
+                      ) : null}
+                    </>
+                  )}
                 </div>
               ) : null}
+
+              {/* Telegram: the Empyralis-run bot — no BotFather, no token.
+                   Hangs off the same `setupDoorKey` waist every other setup
+                   form here does, so it cannot be reached while the picker is
+                   still asking, nor while the door is unavailable.
+
+                   NOTE, and it is on the door's own face too: this pairing is
+                   WORKSPACE-scoped and answers as the workspace assistant, not
+                   as this agent — the backend passes no specialist_context
+                   (see telegram-hosted-pairing.ts's header for the trace).
+                   connection_catalog_service.py's own comment on this tile
+                   calls that "a real, separate gap, not fixed here", and it is
+                   still open. */}
+              {activePlatform.id === "sage_telegram_hosted" && setupDoorKey === "hosted_bot" && (
+                <TelegramHostedPanel
+                  workspaceId={workspaceId}
+                  status={hostedTelegram.status}
+                  statusError={hostedTelegram.statusError}
+                  refresh={hostedTelegram.refresh}
+                  onConnectedChange={handleChannelsChanged}
+                />
+              )}
 
               {/* Telegram: BYO bot token */}
               {activePlatform.id === "sage_telegram_hosted" && setupDoorKey === "byo_bot" && (
