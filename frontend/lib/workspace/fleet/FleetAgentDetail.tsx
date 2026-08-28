@@ -227,7 +227,7 @@ const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
 // nothing was deleted (founder: "the rest must not be deleted" — true of
 // every section except Overview itself, which the founder separately asked
 // removed outright), it just isn't equal-billing top-level nav anymore
-// (UI-CONTRACT: "a surface must earn its place").
+// (the design rules: "a surface must earn its place").
 //
 // Persona and Memory left Configure a second time on 2026-08-19 — see the
 // Profile sheet comment below (~line 1420) for the founder's own words and
@@ -242,7 +242,7 @@ const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
 // them in. "general" (identity/schedule, ex-Overview) stays in Brain — it's
 // still "what/how it thinks", the same theme that already justified moving
 // Model/Capabilities/Skills off the top strip, so it didn't need a fourth
-// group invented just to hold it (UI-CONTRACT: "most configuration is set
+// group invented just to hold it (the design rules: "most configuration is set
 // once and does not deserve equal billing").
 const CONFIGURE_GROUPS: { id: string; label: string; tabs: TabId[] }[] = [
   { id: "brain", label: "Brain", tabs: ["general", "model", "capabilities", "skills"] },

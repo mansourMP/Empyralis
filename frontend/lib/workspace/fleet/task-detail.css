@@ -342,7 +342,7 @@ a.fleet-task-detail-nav-btn:hover {
 /* A person's name renders at 500 everywhere it appears on this page — the
    activity actor, the assignee chip, and the comment author are one concept
    and were rendering at 600/600/600 against the comment author's 500 after
-   the type pass. UI-CONTRACT §1: 400 or 500 only. */
+   the type pass. the design rules: 400 or 500 only. */
 .fleet-task-detail-actor-name {
   overflow: hidden;
   text-overflow: ellipsis;
