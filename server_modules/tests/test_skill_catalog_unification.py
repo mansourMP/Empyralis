@@ -29,7 +29,7 @@ from server_modules import direct_chat_operator_binding_service
 from server_modules import direct_tool_execution_service
 from server_modules import installed_skills
 from server_modules import rust_runtime_kernel_client
-from server_modules import sage_instruction_compiler_service
+from server_modules import instruction_compiler_service
 from server_modules import assistant_skills_api
 from server_modules import skill_registry
 from server_modules import skills_registry
@@ -460,8 +460,8 @@ class ProgressiveDisclosureTests(_SkillFixtureMixin, unittest.TestCase):
             body=f"# Leak Check Skill\n\n{marker}\n\nA very long procedure body follows..." + ("x" * 2000),
         )
         capabilities = assistant_skills_api.build_sage_capabilities_payload(workspace_id="ws-1", tenant_id="t-1")
-        manifest = sage_instruction_compiler_service.build_model_capability_manifest(capabilities)
-        text = sage_instruction_compiler_service._capability_manifest_text(manifest)
+        manifest = instruction_compiler_service.build_model_capability_manifest(capabilities)
+        text = instruction_compiler_service._capability_manifest_text(manifest)
 
         # The Level-1 hint (name/description/skill_id) must be present...
         self.assertIn("leak-check-skill", text)
@@ -478,7 +478,7 @@ class ProgressiveDisclosureTests(_SkillFixtureMixin, unittest.TestCase):
             body=f"# Bundle Leak Check\n\n{marker}",
         )
         capability_payload = assistant_skills_api.build_sage_capabilities_payload(workspace_id="ws-1", tenant_id="t-1")
-        bundle = sage_instruction_compiler_service.build_sage_instruction_bundle(
+        bundle = instruction_compiler_service.build_sage_instruction_bundle(
             workspace_id="ws-1",
             message="what skills do you have?",
             capability_payload=capability_payload,

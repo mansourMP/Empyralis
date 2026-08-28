@@ -12,7 +12,7 @@ from server_modules.workspace_context import read_workspace_context_files
 # workspace_context.py's ALLOWED_CONTEXT_FILENAMES and
 # docs/design/root-taxonomy-removal-scope.md) -- dropped from this order so
 # the direct-chat/BYO-model and deployed-fleet-agent surfaces this adapter
-# serves stop injecting them, matching sage_instruction_compiler_service.py's
+# serves stop injecting them, matching instruction_compiler_service.py's
 # equivalent change for the Sage-native surface. (SELF_MODEL.md/LIFE_STORY.md
 # below are a separate, pre-existing issue -- dead names that were never in
 # workspace_context.ALLOWED_CONTEXT_FILENAMES even before this change, so any
