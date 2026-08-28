@@ -582,10 +582,13 @@ which is exactly what the founder was looking at.
 
 **THE TWO SLOTS MAY DISAGREE, AND THAT IS THE POINT.** A healthy agent nothing
 can reach reads `Ready` + `No channel or tasks yet`, because both are true: its
-brain works and nothing will ever ask it anything. Slot 2 carries the amber
-attention treatment there — it is the half a person can act on. Collapsing them
-would have to lie about one, the same law this file states for delivery
-outcomes and invite mail.
+brain works and nothing will ever ask it anything. Slot 2 is the half a person
+can act on. Collapsing them would have to lie about one, the same law this file
+states for delivery outcomes and invite mail. (Slot 2 USED to carry an amber
+attention treatment there; the founder removed the colour on 2026-08-28 once it
+turned out to be the majority state — see "The grid stopped 354px short of its
+own header" at the end of this section. The two-slot contract is unchanged; only
+the paint is.)
 
 **Nothing is fabricated and nothing new is fetched.** Tasks come from
 `useFleetWorkspaceTasks` (one workspace-wide call PrimaryRail/Inbox/My work
@@ -638,6 +641,89 @@ so an agent whose reach line is a task does not match its own channel name —
 deliberate, since the alternative is survivors with no visible reason to be
 there. And a PROJECT's `/agents` tab is still a bare hairline row list of
 names, now visibly inconsistent with this grid; unifying it is its own change.
+
+### The grid stopped 354px short of its own header (2026-08-28)
+
+**The founder could see it and could not name it: *"the spacing is just not
+correct. Nope, not something that could be the final product."* Measured at
+1680x1050 with 40 real agents, it was horizontal, not the vertical band he
+described:**
+
+| | before | after |
+| --- | --- | --- |
+| grid width / content-area width | 1012 / 1430 | 1366 / 1430 |
+| columns | 3 x 326.7px | 4 x 329.5px |
+| dead space right of the grid | **354px** | 32px (a gutter) |
+| "+ New agent" right edge vs grid right edge | +354px | +32px |
+| topbar divider -> first card | 108px | 80px |
+| bottom gutter under the last row | 0px | 28px |
+| columns at 1280 | 2 x 443px | 3 x 311px |
+
+The page's own primary button sat 354px to the right of everything it acts
+on. **Two causes, and the first was structural:** this page nested
+`.fleet-content-main` inside `.fleet-content--wide`. That class belongs to
+`.fleet-content-with-panel` (Projects' shape, zero padding of its own), so
+nesting it stacked `padding: 28px 32px` twice AND gave the box
+`height: 100%; overflow-y: auto` inside a parent that is not a scroll box —
+a SECOND scroller (1616 / 994), the "second, mis-placed scrollbar at the
+column's right edge in the middle of the screen" `.fleet-content`'s own
+comment records fixing once already, back by nesting rather than by that rule.
+
+The rest was the 1140px cap, which is sized for a DENSE TABLE and says so.
+An auto-fill card grid has no intrinsic width — it takes what it is given and
+lays out another column — so a cap it never needed is space it is forbidden
+to use. `.fleet-content--wide.fleet-content--cards` raises the ceiling to
+1560px: above what a 1680 laptop offers, so the grid fills the panel there,
+while a 2560 monitor still stops at 4 columns rather than laying out seven.
+Card width went 326.7 -> 329.5, i.e. a column bought, not a face squeezed.
+
+**`flex-shrink: 0` on that same rule is not cosmetic.** `main { min-height:
+100vh }` plus `.fleet-content`'s own `flex: 0 1 auto` squeezed the box below
+its content height, so scrolled to the bottom the last card sat exactly ON
+the panel edge with no gutter at all.
+
+**THE AMBER REACH LINE IS GONE — founder's call, and the sentence stays.**
+25 of 40 faces (62%) carried the identical `No channel or tasks yet` in
+`--warning-text`, and at four columns it repeats down every one of them, so a
+fleet where nothing is wrong reads as a wall of warnings. That is
+`agent-card-face.ts`'s own argument against `activity_preview` pointed one
+rule further in: a treatment applied to the MAJORITY distinguishes nothing,
+and an attention colour that never means attention also trains a person to
+ignore the amber that IS exceptional (the channel-card gateway pill, the Apps
+blocked note — both still amber, both still rare). `needsAttention`, the
+`--attention` class and the two-slots-may-disagree contract are all
+untouched; only the colour changed. **One line back:** `var(--warning-text)`
+where `var(--text-secondary)` is, in agent-cards.css's `--attention` rule,
+which is kept for exactly that reason rather than deleted.
+
+**THE SAME NESTING WAS ON TWO SIBLING PAGES and both are fixed** —
+`my-work` (44px top / 52px inset / a real nested scroller at 1143 / 994, plus
+the `overflow-x: hidden` its own comment records CLIPPING the Status column)
+and `context` (56 / 64). Both now take `.fleet-content`'s single 28/32 gutter.
+`.fleet-mywork`'s only declaration was the padding that caused its half of
+the doubling, so the class went with the wrapper.
+
+**`/w/{ws}/context` had been rendering a BLANK PANE since 2026-08-20** — no
+`<main>` in the DOM at all, zero console errors — and finding that is what
+blocked the nesting fix on that page. Context left `RAIL_ITEMS` that day on
+the founder's call, `FleetShellDecider`'s `SHELL_SEGMENTS` derives from
+`RAIL_ITEMS`, and nobody hand-listed the segment in `NON_RAIL_SHELL_SEGMENTS`
+— so the route `primary-rail-nav.ts` promises is "live and unlinked" rendered
+nothing for eight days. Exactly the trap that list's own header documents for
+`"settings"`, hit again by the same mechanism. **When a segment leaves
+RAIL_ITEMS it must ARRIVE in NON_RAIL_SHELL_SEGMENTS in the same commit**;
+`primary-rail-nav.test.ts` now asserts it for `context` as it already did for
+`settings`, because its existing loop can only catch the opposite mistake.
+
+**Recorded, deliberately NOT fixed: the topbar has `padding-right: 0`.**
+Measured at 1680x1050: the breadcrumb starts at x=261 (`padding-left: 20px`)
+and "+ New agent" ends at x=1671, flush to the panel edge, while every
+`.fleet-content` page's own content stops 32px short at x=1639. So the header
+row and the content below it share NEITHER edge — 44px out on the left, 32px
+on the right, on every page in the app, not just this one. Changing it is a
+whole-app alignment decision and must not ride in on a single page's fix.
+Whoever takes it: the numbers above are the measurement, and the topbar is
+`.fleet-shell-topbar` in fleet-theme.css.
 
 ## Rail spaces: the rail is where you pick (2026-08-16)
 
@@ -4103,8 +4189,30 @@ ISOLATED by `isolation: "worktree"`     SHARED across every session on the box
   the working tree                        localhost ports  (8001 / 3000 / 3011 ...)
   the branch, the index, HEAD             Browser-pane TABS and their cookies
   uncommitted edits                       ~/.empyralis/state  (see below)
+                                          the SCRATCHPAD, between sibling agents
                                           Docker, launchd, the founder's own apps
 ```
+
+**THE SCRATCHPAD IS SHARED BETWEEN SIBLING AGENTS OF ONE SESSION, so a log
+FILENAME collides even when the worktree does not — and the symptom is
+traffic in your log that is not yours (2026-08-28).** Two agents in the same
+session both redirected their dev server to `<scratchpad>/frontend.log`. The
+second one then read requests for a workspace id that did not exist in its own
+database, concluded an external browser was polling its ports, and MOVED PORTS
+to be a good citizen. Nothing was polling anything: `lsof <logfile>` named the
+OTHER agent's `next-server` PID holding the same path open for writing.
+
+```
+WRONG READ   "someone is hitting my server"     ─▶ moved ports, ~4 minutes
+RIGHT READ   lsof <the log file>                ─▶ two writers, one path
+```
+
+So: **give every long-running process a log name unique to your agent**
+(`a74-frontend.log`, not `frontend.log`), and before concluding that a
+stranger is driving your stack, run `lsof` on the log — a shared APPEND is
+indistinguishable from a shared PORT when all you have is the text. The port
+half of this rule still stands on its own; this is a second, quieter way to
+reach the same wrong conclusion.
 
 Nothing was lost either time — a backend restarts, a tab re-authenticates — but
 both are silent to the victim and present as an unrelated bug ("my stack died",

@@ -54,6 +54,27 @@ const NON_RAIL_SHELL_SEGMENTS = [
   // leaving the user stuck on a blank /sage with no navigation. Removing this
   // was the actual bug behind that, not the redirect logic itself.
   "sage",
+  // Context left the RAIL on 2026-08-20 (founder: documents live inside their
+  // project; /context was a cross-project lens and "a surface must earn its
+  // place"). primary-rail-nav.ts's own comment promises the ROUTE "stays live
+  // and unlinked, the same treatment /agents, /conversations and /people
+  // already get" — and it did not: the segment was removed from RAIL_ITEMS,
+  // this list derives from RAIL_ITEMS, and nobody hand-listed it here. So
+  // every visit to /w/{ws}/context rendered the rail and NOTHING ELSE, with
+  // no `<main>` in the DOM at all, from that day until 2026-08-28.
+  //
+  // Exactly the silent-blank trap this list's own header documents for
+  // "settings", hit again by the same mechanism eight days later. Measured
+  // live before the fix: `document.querySelector('.fleet-content')` null,
+  // `document.querySelector('main')` null, zero console errors — a page that
+  // renders nothing looks identical to one that was never routed.
+  //
+  // When a segment leaves RAIL_ITEMS it must ARRIVE here in the same commit,
+  // or the route it promises to keep alive is dead. Nothing enforces that
+  // ordering — primary-rail-nav.test.ts asserts the opposite direction (a
+  // rail item must NOT also be hand-listed), which stays correct and cannot
+  // catch this.
+  "context",
 ];
 
 const SHELL_SEGMENTS = new Set([

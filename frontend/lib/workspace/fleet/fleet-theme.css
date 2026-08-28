@@ -12133,7 +12133,14 @@ h2.fleet-sage-console-title {
    sections, each grouped by the project a row belongs to, both rendering the
    SAME TasksList the project board draws, so no row styling lives here: this
    block is spacing and headings only. */
-.fleet-mywork { padding: var(--space-4) var(--space-5) var(--space-6); }
+/* `.fleet-mywork`'s own padding is GONE (2026-08-28) and the class with it.
+   It sat on a div that also carried `.fleet-content-main`, INSIDE
+   `.fleet-content--wide` — so its 16/20/24 overrode the inner shell's 28/32
+   and then stacked on the OUTER shell's 28/32 anyway: 44px above the first
+   section, 52px each side. The wrapper is deleted (see my-work/page.tsx), so
+   this page now takes `.fleet-content`'s own 28/32 gutter like every other
+   page. Nothing else ever matched this selector — `.fleet-mywork-section`
+   and friends are different classes. */
 
 .fleet-mywork-section + .fleet-mywork-section { margin-top: var(--space-6); }
 

@@ -150,6 +150,17 @@ assert(
   /"settings",/.test(deciderSource.slice(deciderSource.indexOf("NON_RAIL_SHELL_SEGMENTS"))),
   '"settings" is hand-listed in NON_RAIL_SHELL_SEGMENTS now that it is not a rail item',
 );
+// Context left RAIL_ITEMS on 2026-08-20 and was NOT hand-listed here, so
+// /w/{ws}/context rendered the rail and a blank pane — no `<main>` in the DOM
+// at all — for eight days. Same mechanism as "settings" above, same eight-line
+// gap between removing a rail item and keeping its route alive. This assertion
+// exists because the loop above can only catch the OPPOSITE mistake (a rail
+// item listed twice); nothing structural notices a segment that is in neither
+// source, which is precisely the state that renders nothing.
+assert(
+  /"context",/.test(deciderSource.slice(deciderSource.indexOf("NON_RAIL_SHELL_SEGMENTS"))),
+  '"context" is hand-listed in NON_RAIL_SHELL_SEGMENTS — its route is deliberately live and unlinked, and without this it renders a blank pane',
+);
 
 // ── The shortcuts reference derives from THIS list ────────────────────────
 // The old hand-kept list advertised "Go to Conversations · G C" and "Go to

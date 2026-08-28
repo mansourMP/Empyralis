@@ -130,7 +130,22 @@ export default function ContextPage() {
     // Projects/Agents/My work already use for their own list/table content
     // — actually apply. Same call as those pages, not a new pattern.
     <main className="fleet-content fleet-content--wide">
-      <div className="fleet-content-main">
+      {/* NO `.fleet-content-main` WRAPPER — see agents/page.tsx for the full
+          measurement. That class is `.fleet-content-with-panel`'s child and
+          carries `padding: 28px 32px`, its own `max-width:
+          var(--content-max-wide)`, and `height: 100%; overflow-y: auto`;
+          inside `.fleet-content`, which already supplies the padding and the
+          cap and is not a scroll box, all three are wrong. Measured live at
+          1680x1050: 28+28 = 56px above the Tree/Activity toggle and 32+32 =
+          64px each side.
+
+          Its 1140px cap was the one that actually cost this page something.
+          The comment above says `.fleet-doc-tree`'s own cap is 1400px — that
+          is this page's stated intent, and the inner shell was overriding it
+          260px short. `.fleet-content--wide`'s cap is `--content-max-wide`
+          (1140px) as well, so the tree still does not reach 1400 here; that
+          is a cap question for whoever wants it, not a nesting bug, and it is
+          now decided in ONE place instead of silently twice. */}
         {/* Tree | Activity — see the file header. A plain button pair, not
             real links (this is a display mode the reader picks per visit,
             same posture TaskViewOptions' own layout toggle takes — see
@@ -208,7 +223,7 @@ export default function ContextPage() {
             hrefFor={hrefFor}
           />
         )}
-      </div>
+
     </main>
   );
 }
