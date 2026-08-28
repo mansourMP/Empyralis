@@ -6209,8 +6209,8 @@ async def _handle_sage_chat_unguarded(
             # detect it here so the agent gets the Hardware tier and tools.
             if not _has_hardware:
                 try:
-                    from server_modules import sage_agent_computer_selection_service
-                    _selection = sage_agent_computer_selection_service.get_selection(
+                    from server_modules import agent_computer_selection_service
+                    _selection = agent_computer_selection_service.get_selection(
                         workspace_id=normalized_workspace_id,
                         user_id=actor_user_id,
                     )

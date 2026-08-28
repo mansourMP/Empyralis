@@ -413,7 +413,7 @@ _STATE_HOME_BAKED_AT_IMPORT_EXCEPTIONS: Dict[str, str] = {
     "kill_switch_gate.py": "bakes _EMPYRALIS_STATE_HOME + derived _KILL_SWITCH_FILE at import time",
     "personal_channels_repository.py": "bakes EMPYRALIS_STATE_HOME at import time",
     "runtime_config.py": "bakes EMPYRALIS_STATE_HOME at import time -- the root copy agent_registry_repository.py and vault_store.py both import from",
-    "sage_agent_computer_selection_service.py": "bakes EMPYRALIS_STATE_HOME at import time",
+    "agent_computer_selection_service.py": "bakes EMPYRALIS_STATE_HOME at import time",
     "agent_conversation_memory.py": "bakes _STATE_HOME at import time",
     "direct_chat_hosted_usage_service.py": "bakes _STATE_HOME at import time",
     "durable_quota_store.py": "bakes _STATE_HOME at import time",

@@ -1,4 +1,4 @@
-from server_modules import sage_agent_computer_selection_service as service
+from server_modules import agent_computer_selection_service as service
 
 
 def test_set_get_selection_by_workspace_and_user(tmp_path):

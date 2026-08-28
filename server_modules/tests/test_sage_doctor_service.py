@@ -30,7 +30,7 @@ class TestSageDoctorService:
         # Patch individual service calls inside checks
         patchers = [
             patch(
-                "server_modules.sage_agent_computer_selection_service.get_selection",
+                "server_modules.agent_computer_selection_service.get_selection",
                 return_value={"selected_gateway_id": "gw-1"},
             ),
             patch(
@@ -105,7 +105,7 @@ class TestSageDoctorService:
         """When gateways exist but none are online, the check must mention 'offline'."""
         patchers = [
             patch(
-                "server_modules.sage_agent_computer_selection_service.get_selection",
+                "server_modules.agent_computer_selection_service.get_selection",
                 return_value={"selected_gateway_id": "gw-1"},
             ),
             patch(
@@ -182,7 +182,7 @@ class TestSageDoctorService:
         """When Google Workspace vault is empty, next_action must reference OAuth."""
         patchers = [
             patch(
-                "server_modules.sage_agent_computer_selection_service.get_selection",
+                "server_modules.agent_computer_selection_service.get_selection",
                 return_value={"selected_gateway_id": "gw-1"},
             ),
             patch(
@@ -251,7 +251,7 @@ class TestSageDoctorService:
         """Failure/warn checks must not have vague 'not configured' without root cause."""
         patchers = [
             patch(
-                "server_modules.sage_agent_computer_selection_service.get_selection",
+                "server_modules.agent_computer_selection_service.get_selection",
                 return_value=None,
             ),
             patch(
@@ -331,7 +331,7 @@ class TestSageDoctorService:
         """Minimal mocks still produce a complete result without exceptions."""
         patchers = [
             patch(
-                "server_modules.sage_agent_computer_selection_service.get_selection",
+                "server_modules.agent_computer_selection_service.get_selection",
                 return_value=None,
             ),
             patch(
@@ -392,7 +392,7 @@ class TestSageDoctorService:
 
     def test_agent_computer_selection_uses_user_id_not_tenant_id(self):
         with patch(
-            "server_modules.sage_agent_computer_selection_service.get_selection",
+            "server_modules.agent_computer_selection_service.get_selection",
             return_value={"selected_gateway_id": "gw-user"},
         ) as get_selection:
             result = SageDoctorService._check_agent_computer_selection(
