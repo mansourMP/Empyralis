@@ -51,6 +51,7 @@ import { join } from "node:path";
 import {
   AGENT_CREATE_COMMIT_STEP,
   AGENT_CREATE_STEPS,
+  AGENT_CREATE_UNREACHABLE_EXITS,
   agentCreateCloseIntent,
   agentCreateNextStep,
   agentCreatePreviousStep,
@@ -443,6 +444,83 @@ assert(
   agentCreateCloseIntent(true, false) === "confirm_delete",
   "closing AFTER the commit but BEFORE a channel ever connects asks first — an unreachable agent may not be left behind silently",
 );
+
+// ── …and `confirm_delete` offers THREE ways out, not two ──────────────────
+//
+// PART B shipped this confirmation with "Go back" and "Delete agent" only,
+// under a header claiming "REQUIRED still never becomes CAGED". It wasn't:
+// Escape and the backdrop both resolve to "Go back", the backdrop covers the
+// rail, and Channels blocks the forward button — so a customer with no bot
+// token to hand could only leave the browser or destroy their own work.
+//
+// The founder's rule is NOT weakened. Channels still blocks ADVANCING (the
+// forward-button assertions above are untouched); this is about LEAVING while
+// keeping the agent, which is a different question.
+{
+  const ids = AGENT_CREATE_UNREACHABLE_EXITS.map((e) => e.id);
+  assert(ids.length === 3, `three ways out, got ${ids.length} (${ids.join(", ")})`);
+  assert(ids[0] === "stay", "'Go back' is FIRST and stays the default — Escape and the backdrop both resolve to it");
+  assert(ids[1] === "leave", "leaving-and-keeping-it is the middle option, never the default");
+  assert(ids[2] === "delete", "the irreversible option is LAST, unmoved");
+
+  const destructive = AGENT_CREATE_UNREACHABLE_EXITS.filter((e) => e.destructive);
+  assert(destructive.length === 1, "exactly one option is destructive");
+  assert(destructive[0]?.id === "delete", "and it is the delete — nothing else may render --danger");
+
+  const byId = (id: string) => AGENT_CREATE_UNREACHABLE_EXITS.find((e) => e.id === id);
+  // The two pre-existing labels are UNCHANGED — the brief was explicit that
+  // the third option must not reorder or soften them.
+  assert(byId("stay")?.label === "Go back", "the 'Go back' label is untouched");
+  assert(byId("delete")?.label === "Delete agent", "the 'Delete agent' label is untouched");
+
+  // "Skip" is the word the founder rejected for channels. A label carrying it
+  // here would read as the channel requirement being waived rather than the
+  // agent being left unfinished — two different claims, and only one is true.
+  assert(
+    AGENT_CREATE_UNREACHABLE_EXITS.every((e) => !/skip/i.test(e.label)),
+    "no exit calls itself 'skip' — the channel requirement is deferred, never waived",
+  );
+  // Each label states its own outcome; none of them is a bare "OK"/"Yes".
+  assert(
+    AGENT_CREATE_UNREACHABLE_EXITS.every((e) => e.label.trim().split(/\s+/).length >= 2),
+    "every label names what it does rather than agreeing with a question",
+  );
+}
+
+{
+  const source = readFileSync(join(__dirname, "AgentCreateCard.tsx"), "utf8");
+  assert(source.includes("UnreachableAgentCloseDialog"), "CANARY: AgentCreateCard.tsx was actually read");
+  // Rendered FROM the rule. Three literals in the JSX would let the order and
+  // the danger tone drift away from everything asserted above.
+  assert(
+    source.includes("AGENT_CREATE_UNREACHABLE_EXITS.map("),
+    "the dialog renders from the ordered rule, never three hand-written buttons",
+  );
+  // "Leave it for now" is the open_agent behaviour made EXPLICIT. It must
+  // reach `finish()` — the same call the reachable close makes — or it would
+  // silently discard the agent it promises to keep. Scoped to the callback's
+  // OWN body (up to its dependency array), never a byte window: a loose
+  // window spills into the delete handler that sits right after it and
+  // reports the opposite of the truth.
+  const leaveBody = source.match(/const leaveUnreachableForNow = useCallback\(\(\) => \{([\s\S]*?)\n  \}, \[/);
+  assert(Boolean(leaveBody), "CANARY: the leave callback's own body was isolated");
+  assert(
+    (leaveBody?.[1] ?? "").includes("finish()"),
+    "leaving keeps the agent and opens it — the same finish() the reachable close uses",
+  );
+  assert(
+    !/deleteFleetAgent|confirmDelete/.test(leaveBody?.[1] ?? "x-canary-never-matches"),
+    "leaving never deletes anything",
+  );
+  assert(source.includes("onLeave={leaveUnreachableForNow}"), "the dialog is actually wired to it");
+  // The default is unchanged: Escape and the backdrop still resolve to
+  // "Go back", so a stray keypress can never leave an unreachable agent
+  // behind on its own — the exact silence PART B closed.
+  assert(
+    /e\.key === "Escape"[\s\S]{0,240}onCancel\(\)/.test(source),
+    "Escape still resolves to 'Go back', never to leaving",
+  );
+}
 
 assert(agentCreateSurfaceTitle(false, "Ridge") === "New agent", "before the commit the surface is still 'New agent'");
 assert(

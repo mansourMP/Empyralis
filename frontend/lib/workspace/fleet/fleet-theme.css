@@ -12305,6 +12305,57 @@ h2.fleet-sage-console-title {
   }
 }
 
+/* ── The workspace's own first-run offer ─────────────────────────────────────
+   The band a brand-new customer meets on the page they actually land on. See
+   workspace-first-run.ts for WHEN it renders and why it is a band rather than
+   the centred empty state.
+
+   Same one-line grammar as .fleet-agent-setup above — fact on the left, the
+   one control that acts on it hard right — and deliberately NOT the same
+   weight. That band is deferrable business on a page about something else and
+   spends no accent; this one IS the page's primary action for a workspace
+   with nothing in it, so it carries the view's single accent fill (handed out
+   by create-accent.ts, so the header's "New project" steps down beside it).
+
+   A CARD, not a full-bleed strip: it sits inside .fleet-content-main above a
+   real list, so a bordered surface reads as an offer ABOUT the list rather
+   than as page chrome that got stuck to the top of it. */
+.fleet-first-run {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-card);
+  animation: fleet-fade var(--dur-2) var(--ease-out);
+}
+
+.fleet-first-run-icon {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+/* Takes the leftover room so the button is pinned right on a wide screen and
+   wraps under the sentence rather than crushing it on a narrow one. */
+.fleet-first-run-title {
+  flex: 1 1 220px;
+  min-width: 0;
+  font-size: var(--text-base);
+  color: var(--text-primary);
+}
+
+@media (max-width: 720px) {
+  .fleet-first-run {
+    padding: var(--space-3);
+  }
+}
+
 /* ── The agent create card's own identity ────────────────────────────────────
    2026-08-21. AgentCreateCard borrows TaskComposer's .fleet-composer shell —
    correct, that shell is the "paper, not a form" doctrine and the card is
