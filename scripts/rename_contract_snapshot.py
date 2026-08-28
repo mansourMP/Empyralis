@@ -277,8 +277,45 @@ def collect_contract_literals() -> list[str]:
     """
 
     values: set[str] = {"WIPE SAGE MEMORY", "sage-main", "sage_main_agent"}
+    # WHAT A CONSTANT HOLDS, NOT WHAT IT IS CALLED.
+    #
+    # This hint decides whether a literal is collected at all, so a token here
+    # that is ALSO being renamed makes the guard shrink as the rename it is
+    # verifying proceeds -- the "a check that derives its own expectations from
+    # the thing it checks is blind" failure this repository already documents,
+    # in a new costume. Measured on 2026-08-28: renaming
+    # SAGE_AGENT_COMPUTER_SELECTION_DB_FILE dropped
+    # EMPYRALIS_SAGE_AGENT_COMPUTER_SELECTION_DB and
+    # sage-agent-computer-selection.sqlite3 out of the set (5,015 -> 5,013)
+    # while both strings stayed in the source; restoring the constant name
+    # restored them.
+    #
+    # DB|FILE|PATH|DIR|URL are the fix: a constant naming a database, file,
+    # path, directory or URL holds a persisted LOCATION, and a persisted
+    # location is a contract no matter what the constant is called. That is
+    # what keeps the case above covered after its constant is renamed.
+    #
+    # MESSAGE|USAGE are not new coverage. They are what SAGE was ALREADY
+    # matching by accident -- "MESSAGE" and "USAGE" both contain "sage" -- for
+    # 34 of the 67 constants that depended on that token. Naming them means the
+    # customer-visible prose they hold survives SAGE eventually being removed,
+    # instead of vanishing with it and reading as a coverage loss.
+    #
+    # SAGE ITSELF IS DELIBERATELY STILL HERE, and removing it is the last step
+    # of the rename rather than part of it: 126 values -- persona text, the
+    # /help command list, the compaction notices -- are still held by constants
+    # that are themselves named SAGE_*, so dropping the token today would
+    # discard live coverage rather than relocate it. Keeping it costs nothing
+    # (this list is strictly additive: 4,902 -> 5,489 collected values, zero
+    # lost) and leaves the guard FIRING when one of those constants moves,
+    # which is the behaviour that caught the bug above. Remove SAGE only once
+    # those constants are renamed and their values are covered by a token that
+    # describes what they hold.
     key_hint = re.compile(
-        r"(?:SAGE|ID|KEY|TOKEN|SURFACE|THREAD|ACTION|TYPE|EVENT|CHANNEL|PROTOCOL|FIELD|CONFIRM|EXPORT|WIPE|MODE|STATUS)",
+        r"(?:SAGE|MESSAGE|USAGE"
+        r"|ID|KEY|TOKEN|SURFACE|THREAD|ACTION|TYPE|EVENT|CHANNEL|PROTOCOL|FIELD"
+        r"|CONFIRM|EXPORT|WIPE|MODE|STATUS"
+        r"|DB|FILE|PATH|DIR|URL)",
         re.I,
     )
     confirmation = re.compile(r"^[A-Z][A-Z0-9 _-]{5,}$")
