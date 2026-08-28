@@ -113,42 +113,15 @@ export const CHANNEL_DOORS: Record<string, ChannelDoor[]> = {
   // the card opens straight into Chatbot setup, no picker, nothing to
   // choose between. That absence IS the honest statement that Telegram runs
   // as a bot here — see this door's own body text.
-  // 2026-08-28: the hosted door is BACK, and Telegram is a picker again — but
-  // for a completely different reason than the deleted `full_account` door.
-  // The platform's own shared Telegram bot ("no BotFather, no token") has been
-  // fully built in the backend the whole time and reachable from NOTHING since
-  // TelegramPairPanel.tsx was deleted: the only frontend call to any hosted
-  // endpoint was SystemHealthButton's liveness probe. So the only way to
-  // connect Telegram was to leave the product for BotFather and come back with
-  // a token — on the founder's own #1 launch channel, and on the surface
-  // CLAUDE.md calls the critical path.
-  //
-  // THE TWO DOORS DIFFER IN WHO ANSWERS, and that is what the picker is for:
-  //   byo_bot     your own bot token ─▶ route_agent_inbound  ─▶ THIS agent
-  //   hosted_bot  the shared bot     ─▶ dispatch_sage_reply  ─▶ SAGE
-  // The hosted lane is workspace-scoped and passes no `specialist_context`,
-  // so it answers as the workspace assistant. hosted_bot's body says so in
-  // plain words — see telegram-hosted-pairing.ts's header for the file:line
-  // trace and for why making it agent-aware is unfinished, not impossible.
   sage_telegram_hosted: [
-    {
-      key: "hosted_bot",
-      label: "Empyralis bot",
-      body: "Message the bot Empyralis already runs — nothing to create, nothing to paste. It answers as your workspace assistant, which can reach your projects, tasks and documents, rather than as this agent.",
-      real: true,
-      consequence: {
-        tone: "safe",
-        text: "Connects in one tap. Shared across your workspace, so it replies as your assistant, not as this agent.",
-      },
-    },
     {
       key: "byo_bot",
       label: "Chatbot",
-      body: "This agent runs as a Telegram bot of its own — people message a bot you create in BotFather, never your own Telegram account. Telegram's platform has no way to connect a real personal account to an automated agent, so a bot is the only way to reach this agent directly.",
+      body: "This agent runs as a Telegram bot — people message a bot you create, never your own Telegram account. Telegram's own platform has no way to connect a real personal account to an automated agent, so this is the only way to connect Telegram here.",
       real: true,
       consequence: {
         tone: "safe",
-        text: "Needs a token from BotFather. This agent answers in its own voice, and your own account can't be banned.",
+        text: "Your own account can't be banned. Bots can't read every message in a group.",
       },
     },
   ],
@@ -245,30 +218,10 @@ export function channelDoorHardwareState(
   return "missing";
 }
 
-/** The SECOND axis a door can be unavailable on, and it is not about this
- *  agent at all: some doors depend on something the DEPLOYMENT provides.
- *  Telegram's hosted door needs the platform's own shared bot token to be set
- *  (sage_telegram_hosted_service.is_configured()); a deployment without one
- *  can never complete that pairing, so the door must say so rather than render
- *  a Connect button whose first action returns 503.
- *
- *  THREE VALUES, NOT TWO. `null` means "we have not found out yet", and it
- *  resolves to AVAILABLE: hiding a door because a status call has not landed
- *  is the same "empty vs. could not load" collapse the outcome-honesty law
- *  forbids, and it would flicker the door out of existence on every load.
- *  `undefined` (every pre-existing caller) means the door has no deployment
- *  dependency, so behaviour is byte-for-byte unchanged for them. */
-export type ChannelDoorAvailabilityInput = {
-  hasHardware: boolean;
-  doorConnected: boolean;
-  deploymentSupported?: boolean | null;
-};
-
 export function isChannelDoorAvailable(
   door: ChannelDoor,
-  state: ChannelDoorAvailabilityInput,
+  state: { hasHardware: boolean; doorConnected: boolean },
 ): boolean {
-  if (state.deploymentSupported === false) return false;
   return channelDoorHardwareState(door, state) !== "missing";
 }
 
@@ -289,16 +242,7 @@ export function channelDoorHardwareNote(state: ChannelDoorHardwareState): string
 /** What a door the agent cannot currently complete says INSTEAD of a setup
  *  form. Not a caption under a live-looking control: the control is not
  *  rendered at all. */
-export function channelDoorUnavailableReason(
-  door: ChannelDoor,
-  state?: { deploymentSupported?: boolean | null },
-): string {
-  // The deployment axis is checked FIRST because it outranks hardware: a door
-  // this installation cannot offer at all is not fixed by pairing a computer,
-  // and sending someone to the Hardware tab for it would be a false next step.
-  if (state?.deploymentSupported === false) {
-    return "This one isn't set up here — the Empyralis-run bot isn't configured on this installation. Use the other way in, or ask whoever runs this deployment.";
-  }
+export function channelDoorUnavailableReason(door: ChannelDoor): string {
   return door.requiresHardware
     ? "This one runs on the agent's own computer, and this agent doesn't have one yet. Connect a computer on the Hardware tab, then come back."
     : "This one can't be set up from here yet.";

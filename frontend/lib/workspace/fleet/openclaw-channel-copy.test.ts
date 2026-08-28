@@ -562,31 +562,10 @@ assert(channelDoorHardwareNote("not-required") === null, "a door needing no comp
 // bot here lives in the remaining door's own body text, asserted below.
 const telegramDoorPlan = planChannelDoors("sage_telegram_hosted");
 const telegramDoors: ChannelDoor[] = telegramDoorPlan.doors;
-// 2026-08-28: Telegram is a PICKER again — and this is not the deleted
-// `full_account` door coming back. The second door is `hosted_bot`, the
-// platform's own shared Telegram bot ("no BotFather, no token"), whose backend
-// shipped long ago and was reachable from nothing after TelegramPairPanel.tsx
-// was deleted. Two real doors, so planDoors resolves to a picker with no
-// per-channel special case — the door-count rule doing exactly its job.
-assert(telegramDoorPlan.mode === "picker", "Telegram is a picker again — hosted bot + BYO bot are two real doors");
-assert(telegramDoors.length === 2, "Telegram has exactly two real doors");
+assert(telegramDoorPlan.mode === "direct", "Telegram is single-door (direct mode) now that full_account is gone");
+assert(telegramDoors.length === 1, "Telegram has exactly one real door left");
 const telegramChatbot = telegramDoors.find((d) => d.key === "byo_bot");
-const telegramHosted = telegramDoors.find((d) => d.key === "hosted_bot");
-assert(!!telegramChatbot, "Telegram still has the BYO chatbot door");
-assert(!!telegramHosted, "Telegram has the hosted-bot door");
-assert(
-  !telegramHosted?.requiresHardware,
-  "the hosted door needs no computer — it is the zero-setup path",
-);
-// The doors differ in WHO ANSWERS, which is the consequence a picker exists to
-// state up front. The hosted bot is workspace-scoped and answers as Sage (the
-// backend passes no specialist_context); the BYO bot answers as this agent.
-// See telegram-hosted-pairing.ts's header for the file:line trace, and
-// telegram-hosted-pairing.test.ts for the copy assertions that guard it.
-assert(
-  telegramHosted?.body !== telegramChatbot?.body,
-  "the two Telegram doors say different things on their faces",
-);
+assert(!!telegramChatbot, "Telegram's remaining door is the chatbot");
 assert(telegramChatbot?.consequence?.tone === "safe", "Telegram's chatbot door is toned as the safe one");
 assert(
   !telegramChatbot?.requiresHardware,
