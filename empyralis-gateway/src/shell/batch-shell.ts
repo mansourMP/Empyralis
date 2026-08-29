@@ -39,6 +39,8 @@ export const DEFAULT_BATCH_COMMAND_TIMEOUT_SECONDS = 60;
 export const MAX_BATCH_COMMAND_TIMEOUT_SECONDS = 300;
 export const MAX_BATCH_COMMANDS = 20;
 export const MAX_BATCH_TOTAL_TIMEOUT_SECONDS = 900; // 15 minutes, hard ceiling regardless of per-command budgets
+import { diagnoseKill } from "./kill-diagnosis";
+
 const BATCH_TIMEOUT_OVERHEAD_BASE_SECONDS = 5; // container/shell startup
 const BATCH_TIMEOUT_OVERHEAD_PER_COMMAND_SECONDS = 2; // per-command file I/O + process bookkeeping
 
@@ -193,7 +195,10 @@ export function buildBatchDriverScript(
   return lines.join("\n") + "\n";
 }
 
-export type BatchCommandStatus = "success" | "failed" | "skipped" | "timed_out" | "not_run";
+/** "killed" is its own status and not a flavour of "failed": a command the
+ *  system stopped never reached a result, so reporting it as a failure sends
+ *  somebody to debug a command that was working. See kill-diagnosis.ts. */
+export type BatchCommandStatus = "success" | "failed" | "killed" | "skipped" | "timed_out" | "not_run";
 
 export interface BatchCommandResult {
   index: number;
@@ -231,22 +236,39 @@ export interface RawCommandFileState {
 export function interpretBatchResults(
   specs: BatchCommandSpec[],
   states: Map<number, RawCommandFileState>,
-  opts: { stopOnFailure: boolean; batchTimedOut: boolean },
+  opts: {
+    stopOnFailure: boolean;
+    batchTimedOut: boolean;
+    isolation?: "sandbox" | "host";
+    memoryLimitMb?: number;
+  },
 ): { results: BatchCommandResult[]; stoppedEarly: boolean } {
   let stoppedEarly = false;
   const results = specs.map((spec): BatchCommandResult => {
     const state = states.get(spec.index) ?? { status: "", exitCode: null, stdout: "", stderr: "" };
     if (state.status === "done") {
       const exitCode = state.exitCode;
+      // "done" means the driver recorded a $? for this command — including
+      // 137, which is what the shell reports for a child the kernel killed.
+      // A killed command is not a failed one: it never got to run, let alone
+      // fail, and "failed" with an empty stderr sends somebody looking for a
+      // bug in a command that was working. The driver only ever sees a
+      // numeric $?, never a signal name, so 137 is the whole signal here.
+      const killed = diagnoseKill({
+        exitCode,
+        timedOut: false,
+        isolation: opts.isolation ?? "host",
+        memoryLimitMb: opts.memoryLimitMb,
+      });
       return {
         index: spec.index,
         command: spec.command,
-        status: exitCode === 0 ? "success" : "failed",
+        status: killed ? "killed" : exitCode === 0 ? "success" : "failed",
         ran: true,
         exit_code: exitCode,
         stdout: state.stdout,
         stderr: state.stderr,
-        reason: null,
+        reason: killed ? killed.statement : null,
       };
     }
     if (state.status === "skipped") {
