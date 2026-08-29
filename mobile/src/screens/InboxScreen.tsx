@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { FlatList, RefreshControl, StyleSheet, Text, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ApiError } from '../api/client';
 import {
   cachedInbox,
-  dateParsingReport,
   fetchInbox,
   inboxNeedsYouCount,
   markNotificationRead,
@@ -14,6 +14,7 @@ import {
 } from '../api/inbox';
 import type { Session } from '../api/session';
 import { InboxRow } from '../components/InboxRow';
+import { OverflowMenu, type OverflowItem } from '../components/OverflowMenu';
 import { ScreenHeader, type HeaderAction } from '../components/ScreenHeader';
 import { SkeletonList, SurfaceEmpty, SurfaceFailure } from '../components/SurfaceStates';
 import { Space, Theme, Type } from '../theme';
@@ -21,14 +22,28 @@ import { Space, Theme, Type } from '../theme';
 /**
  * INBOX — "what needs you, across every agent, right now."
  *
- * Every ranking, grouping and reason string on this screen comes out of
- * `inbox-needs-you.ts`, the web's own module, imported unchanged (see
- * src/api/inbox.ts). This file renders; it decides nothing about order or
- * membership. In particular the three groups keep their own internally
- * consistent orders — stuck tasks OLDEST-first, notifications and runs
- * newest-first — which is the module's deliberate design and the reason a
- * task that has sat for seventeen days does not get buried under whatever
- * moved most recently.
+ * ONE FLAT LIST. NO SECTION HEADERS. The previous version shouted
+ * `NEEDS YOUR INPUT 2` / `NOTIFICATIONS 4` / `FAILED RUNS 2` down the
+ * screen; the app we are held to has none, and the founder's verdict on
+ * ours was unambiguous. Headers here were answering a question nobody
+ * asked — a person opening this wants to know what needs them, not how the
+ * three sources it was assembled from are apportioned. Each row already
+ * says which kind it is twice over (its glyph, and the reason it leads its
+ * subtitle with), which is exactly how the reference does it: the reason is
+ * the subtitle, not a header.
+ *
+ * THE GROUPING SURVIVES WHERE IT MATTERS — IN THE ORDER. `planInboxNeedsYou`
+ * ranks the three groups on three different, deliberately incompatible
+ * clocks: stuck tasks OLDEST-first (the founder's own 17-day task is the
+ * reason that rule exists), notifications and runs newest-first. Flattening
+ * is a CONCATENATION in group order and never a merge — re-sorting the
+ * union by timestamp would need one "urgency" score across unrelated units
+ * and would re-bury the exact row this surface was built to surface. Every
+ * item keeps the index the grouped rendering gave it; only the headings
+ * between them are gone.
+ *
+ * Nothing here decides order, membership or wording. That is all
+ * `inbox-needs-you.ts`, imported unchanged (see src/api/inbox.ts).
  */
 export function InboxScreen({
   session,
@@ -47,7 +62,9 @@ export function InboxScreen({
   const [failure, setFailure] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [readIds, setReadIds] = useState<Set<string>>(new Set());
+  const [menuOpen, setMenuOpen] = useState(false);
   const mounted = useRef(true);
+  const insets = useSafeAreaInsets();
 
   useEffect(() => {
     setInboxUser(session.userId);
@@ -90,6 +107,17 @@ export function InboxScreen({
   useEffect(() => {
     void load();
   }, [load]);
+
+  // THE FLATTEN. Concatenation in group order — tasks, then notifications,
+  // then runs — which is the order the grouped rendering drew them in, so
+  // dropping the headings changed no row's position. There is deliberately
+  // no local re-ordering anywhere in this app; ordering belongs to the
+  // shared module, and a second opinion about it is exactly the drift this
+  // app exists to make impossible. Guarded in shared-module-drift.test.mjs.
+  const items = useMemo(() => {
+    if (!data) return [];
+    return [...data.groups.tasks, ...data.groups.notifications, ...data.groups.runs];
+  }, [data]);
 
   // TWO NUMBERS, because they answer different questions and one number
   // would have to lie about one of them.
@@ -143,30 +171,75 @@ export function InboxScreen({
     onCountChange(attention);
   }, [attention, onCountChange]);
 
+  const markAllRead = useCallback(() => {
+    (data?.notifications ?? []).forEach((n) => {
+      if (!n.is_read) onReadNotification(`notification:${n.id}`);
+    });
+  }, [data?.notifications, onReadNotification]);
+
+  // ONE VERB PLUS AN OVERFLOW — the reference's own header shape, and the
+  // fix to a real complaint: a SIGN-OUT ARROW used to sit here as a
+  // top-level action, which is neither this screen's verb nor something to
+  // be one mis-tap from. It is behind "···" now, with Refresh.
+  //
+  // Mark all read is only rendered when there is something to mark. A
+  // "mark all read" over an already-read list is a control whose own label
+  // admits it does nothing — so the container is sometimes one wide, which
+  // is the honest shape rather than a padded pair.
   const actions: HeaderAction[] = [];
-  // Only rendered when there is something to mark. A "mark all read" over an
-  // already-read list is a control whose own label admits it does nothing.
   if (hasUnread) {
     actions.push({
       key: 'read-all',
       icon: 'checkmark-done-outline',
       label: 'Mark all read',
-      onPress: () => {
-        (data?.notifications ?? []).forEach((n) => {
-          if (!n.is_read) onReadNotification(`notification:${n.id}`);
-        });
-      },
+      onPress: markAllRead,
     });
   }
-  actions.push({ key: 'signout', icon: 'log-out-outline', label: 'Sign out', onPress: onSignOut });
+  actions.push({
+    key: 'more',
+    icon: 'ellipsis-horizontal',
+    label: 'More',
+    onPress: () => setMenuOpen(true),
+  });
+
+  const menuItems: OverflowItem[] = [
+    { key: 'refresh', label: 'Refresh', icon: 'refresh-outline', onPress: () => void load() },
+    {
+      key: 'signout',
+      label: 'Sign out',
+      icon: 'log-out-outline',
+      destructive: true,
+      onPress: onSignOut,
+    },
+  ];
+
+  const header = (
+    <>
+      <ScreenHeader title="Inbox" actions={actions} />
+      <OverflowMenu
+        visible={menuOpen}
+        onClose={() => setMenuOpen(false)}
+        items={menuItems}
+        // The header's own height: 4 top + a 44 action container + 12
+        // bottom, then 6 of air — measured from below the status bar, so
+        // the inset is added here rather than inside the Modal, where it
+        // can read as zero.
+        anchorTop={insets.top + 66}
+      />
+    </>
+  );
 
   const nothingKnownYet = !data;
 
   if (nothingKnownYet && failure) {
     return (
       <View style={styles.screen}>
-        <ScreenHeader title="Inbox" actions={actions} />
-        <SurfaceFailure title="Couldn’t load your inbox" message={failure} onRetry={() => void load()} />
+        {header}
+        <SurfaceFailure
+          title="Couldn’t load your inbox"
+          message={failure}
+          onRetry={() => void load()}
+        />
       </View>
     );
   }
@@ -174,135 +247,76 @@ export function InboxScreen({
   if (nothingKnownYet) {
     return (
       <View style={styles.screen}>
-        <ScreenHeader title="Inbox" actions={actions} />
+        {header}
         <SkeletonList />
       </View>
     );
   }
 
-  const { groups } = data;
+  if (count === 0) {
+    return (
+      <View style={styles.screen}>
+        {header}
+        <SurfaceEmpty title="You’re all caught up" body="Nothing is waiting on you right now." />
+      </View>
+    );
+  }
 
   return (
     <View style={styles.screen}>
-      <ScreenHeader title="Inbox" actions={actions} />
-      {count === 0 ? (
-        <SurfaceEmpty
-          title="You’re all caught up"
-          body="Nothing is waiting on you right now."
-        />
-      ) : (
-        <ScrollView
-          contentContainerStyle={styles.list}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={() => void load()}
-              tintColor={Theme.textMuted}
-            />
-          }
-        >
-          {failure ? (
+      {header}
+      <FlatList
+        data={items}
+        keyExtractor={(item) => item.id}
+        contentContainerStyle={styles.list}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => void load()}
+            tintColor={Theme.textMuted}
+          />
+        }
+        ListHeaderComponent={
+          failure ? (
             <Text style={styles.staleNotice}>
               Showing what was last loaded — couldn’t refresh just now.
             </Text>
-          ) : null}
-
-          <Group title="Needs your input" items={groups.tasks} unreadById={unreadById} />
-          <Group
-            title="Notifications"
-            items={groups.notifications}
-            unreadById={unreadById}
-            onPressItem={onReadNotification}
+          ) : null
+        }
+        renderItem={({ item }) => (
+          <InboxRow
+            // Deliberately NOT cast. InboxRow keeps its own copy of the
+            // kind union because the drift test allows exactly one importer
+            // of the shared module — so if `InboxNeedsYouKind` ever grows a
+            // fourth member, this line must fail to compile rather than
+            // render a row with no glyph. A cast here would make that
+            // silent, which is the whole failure mode this app exists to
+            // rule out.
+            kind={item.kind}
+            title={item.title}
+            reason={item.detail}
+            age={timeAgo(item.timestamp)}
+            // Tasks and runs are unattended by definition — they are on this
+            // screen precisely because they are still stuck or still failed.
+            // Only a notification has a read state of its own.
+            unread={unreadById.has(item.id) ? Boolean(unreadById.get(item.id)) : true}
+            onPress={item.kind === 'notification' ? () => onReadNotification(item.id) : undefined}
           />
-          <Group title="Failed runs" items={groups.runs} unreadById={unreadById} />
-
-          {__DEV__ ? <DateParsingProof /> : null}
-        </ScrollView>
-      )}
-    </View>
-  );
-}
-
-type Item = InboxData['groups']['tasks'][number];
-
-function Group({
-  title,
-  items,
-  unreadById,
-  onPressItem,
-}: {
-  title: string;
-  items: readonly Item[];
-  unreadById: Map<string, boolean>;
-  onPressItem?: (id: string) => void;
-}) {
-  if (items.length === 0) return null;
-  return (
-    <View style={styles.group}>
-      <Text style={styles.groupLabel}>
-        {title.toUpperCase()}  {items.length}
-      </Text>
-      {items.map((item) => (
-        <InboxRow
-          key={item.id}
-          title={item.title}
-          reason={item.detail}
-          age={timeAgo(item.timestamp)}
-          // Tasks and runs are unattended by definition — they are on this
-          // screen precisely because they are still stuck or still failed.
-          // Only a notification has a read state of its own.
-          unread={unreadById.has(item.id) ? Boolean(unreadById.get(item.id)) : true}
-          onPress={onPressItem ? () => onPressItem(item.id) : undefined}
-        />
-      ))}
-    </View>
-  );
-}
-
-/**
- * Dev-only, and the reason it exists is the whole point of the exercise: the
- * shared module ranks on `Date.parse`, this backend emits two different date
- * shapes, and the Swift port silently returned nil for both. "Hermes
- * probably handles it" is the same assumption that produced that bug, so the
- * answer is rendered where it can be read off a screenshot.
- */
-function DateParsingProof() {
-  const report = dateParsingReport();
-  return (
-    <View style={styles.proof}>
-      <Text style={styles.proofTitle}>SHARED-MODULE DATE PARSE (dev only)</Text>
-      {report.map((line) => (
-        <Text key={line.label} style={styles.proofLine}>
-          {line.ok ? '✓' : '✗'} {line.label}
-        </Text>
-      ))}
+        )}
+      />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: Theme.bgPage },
-  list: { paddingBottom: 120 },
-  group: { marginBottom: Space.x5 },
-  groupLabel: {
-    ...Type.sectionLabel,
-    color: Theme.textMuted,
-    paddingHorizontal: Space.x5,
-    paddingBottom: Space.x2,
-  },
+  // Clears the floating tab bar (56 + 28 lift) plus air, so the last row is
+  // never parked underneath it.
+  list: { paddingBottom: 110 },
   staleNotice: {
     ...Type.rowSubtitle,
     color: Theme.warning,
     paddingHorizontal: Space.x5,
     paddingBottom: Space.x3,
   },
-  proof: {
-    marginHorizontal: Space.x5,
-    padding: Space.x3,
-    borderRadius: 10,
-    backgroundColor: Theme.bgInset,
-    gap: 3,
-  },
-  proofTitle: { ...Type.sectionLabel, color: Theme.textMuted, fontSize: 10 },
-  proofLine: { ...Type.rowSubtitle, color: Theme.textSecondary, fontSize: 12 },
 });

@@ -37,5 +37,5 @@ const styles = StyleSheet.create({
     paddingBottom: Space.x8,
   },
   title: { ...Type.rowTitle, color: Theme.textSecondary },
-  body: { ...Type.rowSubtitle, color: Theme.textMuted, textAlign: 'center', lineHeight: 19 },
+  body: { ...Type.rowSubtitle, color: Theme.textMuted, textAlign: 'center', lineHeight: 21 },
 });

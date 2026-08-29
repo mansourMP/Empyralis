@@ -19,8 +19,9 @@
  * `inboxSortMillis` returned nil for every real row, every item sorted as 0,
  * and the ranking silently degraded to input order. Here the ORIGINAL
  * `sortMillis` runs, so there is nothing to re-derive and nothing to get
- * wrong — provided the JS engine parses both, which is verified at runtime
- * rather than assumed (see dateParsingReport below).
+ * wrong — provided the JS engine parses both, which is verified rather than
+ * assumed: in the drift test for the shapes, and on the running device for
+ * the engine (see the bottom of this file).
  *
  * This module's own job is only the part that genuinely differs per client:
  * fetching, and answering "where does this row live". Nothing here re-ranks,
@@ -163,19 +164,40 @@ export async function markNotificationRead(
 }
 
 /**
- * A RUNTIME CHECK, NOT AN ASSUMPTION. The whole shared-module claim rests on
- * this engine parsing what this backend actually emits, and "Hermes probably
- * handles it" is exactly the shape of belief that produced the Swift bug.
- * Rendered on the Inbox screen in dev so the answer is observed, not argued.
+ * A RUNTIME CHECK, NOT AN ASSUMPTION — AND IT COSTS NO PIXELS.
+ *
+ * The whole shared-module claim rests on this engine parsing what this
+ * backend actually emits, and "Hermes probably handles it" is exactly the
+ * shape of belief that produced the Swift bug. That used to be answered by
+ * rendering a `SHARED-MODULE DATE PARSE ✓ ✓ ✓` panel on the Inbox — i.e.
+ * engineer scaffolding shipped into a product, on the first screen a person
+ * sees. It is gone.
+ *
+ * The information survives in two better places. `Date.parse` over both real
+ * wire shapes is asserted in shared-module-drift.test.mjs, which is where a
+ * contract about the module belongs. And the ENGINE half — the half a Node
+ * test structurally cannot answer, because Node is V8 and the app is Hermes
+ * — is checked here on the running device and reported to the LOG rather
+ * than to the screen. A passing self-test is not something a person is ever
+ * shown; a failing one is not something they could act on either.
+ *
+ * The symptom if it ever fires is worth knowing, because it is silent: the
+ * ranking degrades to input order, so the oldest stuck task stops leading
+ * and no error appears anywhere.
  */
-export function dateParsingReport(): { label: string; ok: boolean }[] {
-  const samples: [string, string][] = [
-    ['notifications (space, 6dp)', '2026-08-29 06:49:50.180524+00:00'],
-    ['activity ledger (ISO-T, 6dp)', '2026-08-29T06:51:00.518261Z'],
-    ['tasks (space, 6dp, offset)', '2026-08-12 09:15:00.123456+00:00'],
-  ];
-  return samples.map(([label, value]) => ({
-    label,
-    ok: Number.isFinite(Date.parse(value)),
-  }));
+const WIRE_DATE_SHAPES = [
+  '2026-08-29 06:49:50.180524+00:00', // notifications: SPACE separator, 6 fractional digits
+  '2026-08-29T06:51:00.518261Z', // activity ledger: ISO-T, 6 fractional digits
+  '2026-08-12 09:15:00.123456+00:00', // tasks
+];
+
+if (__DEV__) {
+  const unparsed = WIRE_DATE_SHAPES.filter((sample) => !Number.isFinite(Date.parse(sample)));
+  if (unparsed.length > 0) {
+    console.warn(
+      `[inbox] this engine cannot parse ${unparsed.length} of the backend's date shapes ` +
+        `(${unparsed.join(', ')}). The shared module ranks on Date.parse, so its order has ` +
+        'silently degraded to input order.',
+    );
+  }
 }

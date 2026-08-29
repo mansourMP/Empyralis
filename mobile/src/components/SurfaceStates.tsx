@@ -20,15 +20,25 @@ import { Radius, Space, Theme, Type } from '../theme';
  *   failure is reported beside it.
  */
 
-export function SkeletonList({ rows = 5 }: { rows?: number }) {
+/** The skeleton mirrors InboxRow's real geometry — 40pt well, 13pt gutter,
+ *  69pt pitch. A loading state built to different measurements makes the
+ *  list visibly jump the moment content arrives, which reads as a glitch
+ *  rather than as loading. */
+export function SkeletonList({ rows = 6 }: { rows?: number }) {
   return (
     <View accessibilityLabel="Loading" style={styles.skeletonWrap}>
       {Array.from({ length: rows }).map((_, i) => (
         <View key={i} style={styles.skeletonRow}>
-          <View style={styles.skeletonDot} />
+          <View style={styles.skeletonWell} />
           <View style={styles.skeletonText}>
             <View style={[styles.skeletonBar, { width: `${62 + ((i * 11) % 26)}%` }]} />
-            <View style={[styles.skeletonBar, styles.skeletonBarShort, { width: `${34 + ((i * 7) % 18)}%` }]} />
+            <View
+              style={[
+                styles.skeletonBar,
+                styles.skeletonBarShort,
+                { width: `${34 + ((i * 7) % 18)}%` },
+              ]}
+            />
           </View>
         </View>
       ))}
@@ -72,16 +82,21 @@ export function SurfaceEmpty({ title, body }: { title: string; body: string }) {
 }
 
 const styles = StyleSheet.create({
-  skeletonWrap: { paddingTop: Space.x2 },
+  skeletonWrap: { paddingTop: Space.x1 },
   skeletonRow: {
-    minHeight: 56,
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: Space.x5,
-    paddingVertical: Space.x2,
+    paddingVertical: 14,
   },
-  skeletonDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: Theme.bgLift, marginRight: 10 },
-  skeletonText: { flex: 1, gap: 6 },
+  skeletonWell: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: Theme.bgCard,
+    marginRight: 13,
+  },
+  skeletonText: { flex: 1, gap: 7 },
   // bgCard, not bgInset: over a pure-black page an inset trough composites
   // dark enough to disappear, which is how a "loading" state reads as an
   // empty one.
@@ -97,7 +112,7 @@ const styles = StyleSheet.create({
     paddingBottom: Space.x8,
   },
   centerTitle: { ...Type.rowTitle, color: Theme.textSecondary, marginTop: Space.x1 },
-  centerBody: { ...Type.rowSubtitle, color: Theme.textMuted, textAlign: 'center', lineHeight: 19 },
+  centerBody: { ...Type.rowSubtitle, color: Theme.textMuted, textAlign: 'center', lineHeight: 21 },
   retry: {
     marginTop: Space.x3,
     paddingHorizontal: Space.x5,

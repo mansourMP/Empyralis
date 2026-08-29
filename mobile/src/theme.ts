@@ -37,6 +37,13 @@ export const Theme = {
   bgRail: '#191919',
   bgCard: '#1C1C1C',
   bgLift: '#242424', // a pressed/selected fill that still reads as the same family
+  // MEASURED off the reference, not chosen: #2E2E2E is the fill Linear uses
+  // for both a list row's icon well and the pill behind a selected tab.
+  // bgLift (#242424) was tried there first and is 8 levels off bgCard, which
+  // on a black page is a selection nobody can see — the reference's own
+  // delta is ~20. One value, because in the reference both are literally the
+  // same surface: "lifted off the page enough to read as a control".
+  bgRaised: '#2E2E2E',
 
   // Hairlines. Opaque rather than alpha where they sit on a known surface,
   // so what renders is knowable instead of a function of what is behind it.
@@ -48,8 +55,13 @@ export const Theme = {
   textPrimary: '#F4F4F5',
   textSecondary: '#CECECE',
   textMuted: '#9A9A9A',
-  // A read row dims as a whole rather than changing its background.
+  // A read row dims as a whole rather than changing its background. TWO
+  // levels, because the reference keeps the title/subtitle hierarchy INSIDE
+  // the dimmed state (measured: title 120, subtitle 91) — collapsing them
+  // to one grey makes a read row read as a single smudge instead of a row
+  // that is still legible, just no longer asking for anything.
   textDimmed: '#6E6E6E',
+  textDimmedDeep: '#5B5B5B',
 
   // The one accent, spent on the one primary action in a view.
   accent: '#A56DDE', // oklch(64% 0.17 305), dark theme
@@ -72,15 +84,26 @@ export const Space = {
   x8: 32,
 } as const;
 
+/**
+ * SIZES ARE MEASURED OFF THE REFERENCE, not picked. Each was read twice, by
+ * two independent methods, from a 3x screenshot of the app we are being held
+ * to — cap height / 0.72, and again from the rendered width of a known
+ * string — and the two agreed:
+ *
+ *   title      cap 53px -> 24.5pt   "Inbox" 187px wide -> 24pt bold
+ *   rowTitle   cap 36px -> 16.7pt
+ *
+ * `title` was 32 and `rowTitle` 15, so the header shouted and the rows
+ * whispered — a third again too much separation between them. There is no
+ * `tab` size any more: the tab bar carries icons only.
+ */
 export const Type = {
   // Large bold left title, the header idiom.
-  title: { fontSize: 32, fontWeight: '700' as const, letterSpacing: -0.5 },
-  sectionLabel: { fontSize: 12, fontWeight: '600' as const, letterSpacing: 0.6 },
-  rowTitle: { fontSize: 15, fontWeight: '500' as const },
-  rowSubtitle: { fontSize: 13, fontWeight: '400' as const },
+  title: { fontSize: 24, fontWeight: '700' as const, letterSpacing: -0.4 },
+  rowTitle: { fontSize: 17, fontWeight: '600' as const, letterSpacing: -0.2 },
+  rowSubtitle: { fontSize: 15, fontWeight: '400' as const },
   body: { fontSize: 15, fontWeight: '400' as const },
   button: { fontSize: 15, fontWeight: '600' as const },
-  tab: { fontSize: 11, fontWeight: '500' as const },
 } as const;
 
 export const Radius = {

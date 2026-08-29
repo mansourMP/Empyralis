@@ -1,38 +1,60 @@
 import { Ionicons } from '@expo/vector-icons';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { Radius, Space, Theme, Type } from '../theme';
+import { Radius, Space, Theme } from '../theme';
 
 /**
- * THE TAB BAR, per the design language read off Linear's real app:
+ * THE TAB BAR: a floating dark pill lifted off the bottom edge, four items,
+ * the selected one marked by a lighter PILL BEHIND IT. Then a SEPARATE,
+ * DETACHED round button to its right.
  *
- *   a FLOATING dark pill lifted off the bottom edge, four items, the
- *   selected one marked by a lighter PILL BEHIND IT — never by colour.
- *   Then a SEPARATE, DETACHED round button to its right.
+ *      [ ▣   ▤•   ◎   ◈ ]   ( ✦ )
  *
- *      [ Projects   Inbox•   My work   Agents ]   ( Ask AI )
+ * ICONS ONLY — NO LABELS, and that was the founder's own note against the
+ * reference. Four words under four icons is a caption strip explaining
+ * glyphs that are already the standard ones; the reference carries none,
+ * and dropping them is what lets the bar be 56pt instead of 58 with two
+ * lines crammed in. The label survives as `accessibilityLabel`, which is
+ * where a name a sighted person does not need still has to exist.
  *
- * ASK AI IS DETACHED ON PURPOSE, and its position is the argument. Linear
- * puts their agent exactly there: always reachable, never a place you ARE.
- * Putting it inside the pill would make it a fifth destination and imply
- * the app has a chat surface — which this product explicitly does not
- * ("messaging would never be done inside this platform"). Outside the pill
- * it reads as an action, which is what it is.
+ * MEASURED: pill 272 x 56pt, 28pt side margins, 28pt off the bottom;
+ * selected pill ~70pt wide, fill #2E2E2E against the bar's own #1C1C1C.
+ * That 20-level delta is the whole selection signal and it is why
+ * `bgRaised` had to exist — `bgLift` is 8 levels off bgCard and simply
+ * does not read on a black page.
  *
- * SELECTION IS WEIGHT AND SHAPE, NEVER HUE. The lighter pill plus a
- * brightened label carries it. This is the same rule the web settled after
- * five passes — `--accent` belongs to the single primary action in a view,
- * and a tab is navigation, not a primary action. There is deliberately no
- * violet anywhere in this file.
+ * SELECTION IS WEIGHT AND SHAPE, NEVER HUE. The lighter pill, plus a FILLED
+ * glyph where the others are outlines. This is the same rule the web
+ * settled after five passes — `--accent` belongs to the single primary
+ * action in a view, and a tab is navigation, not a primary action. There is
+ * deliberately no violet anywhere in this file.
+ *
+ * ASK AI IS DETACHED ON PURPOSE, and its position is the argument. The
+ * reference puts its agent exactly there: always reachable, never a place
+ * you ARE. Putting it inside the pill would make it a fifth destination and
+ * imply the app has a chat surface — which this product explicitly does not
+ * ("messaging would never be done inside this platform").
  */
 export type TabKey = 'projects' | 'inbox' | 'mywork' | 'agents';
 
-const TABS: { key: TabKey; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
-  { key: 'projects', label: 'Projects', icon: 'albums-outline' },
-  { key: 'inbox', label: 'Inbox', icon: 'file-tray-outline' },
-  { key: 'mywork', label: 'My work', icon: 'checkmark-circle-outline' },
-  { key: 'agents', label: 'Agents', icon: 'sparkles-outline' },
+/** Outline when idle, solid when selected — the shape half of the
+ *  selection signal, so it never rests on fill colour alone. */
+const TABS: {
+  key: TabKey;
+  label: string;
+  icon: keyof typeof Ionicons.glyphMap;
+  iconSelected: keyof typeof Ionicons.glyphMap;
+}[] = [
+  { key: 'projects', label: 'Projects', icon: 'albums-outline', iconSelected: 'albums' },
+  { key: 'inbox', label: 'Inbox', icon: 'file-tray-outline', iconSelected: 'file-tray' },
+  {
+    key: 'mywork',
+    label: 'My work',
+    icon: 'checkmark-circle-outline',
+    iconSelected: 'checkmark-circle',
+  },
+  { key: 'agents', label: 'Agents', icon: 'sparkles-outline', iconSelected: 'sparkles' },
 ];
 
 export function TabBar({
@@ -54,7 +76,10 @@ export function TabBar({
   const insets = useSafeAreaInsets();
 
   return (
-    <View style={[styles.wrap, { paddingBottom: Math.max(insets.bottom, Space.x3) }]}>
+    // Measured 28pt off the physical bottom — less than the 34pt home-
+    // indicator inset, which is why this is not simply `insets.bottom`.
+    // Floored at 12 so a device with no inset at all still lifts the bar.
+    <View style={[styles.wrap, { paddingBottom: Math.max(insets.bottom - 6, Space.x3) }]}>
       <View style={styles.pill}>
         {TABS.map((tab) => {
           const selected = !askAiActive && tab.key === active;
@@ -73,15 +98,23 @@ export function TabBar({
             >
               <View>
                 <Ionicons
-                  name={tab.icon}
+                  name={selected ? tab.iconSelected : tab.icon}
                   size={20}
-                  color={selected ? Theme.textPrimary : Theme.textMuted}
+                  color={selected ? Theme.textPrimary : Theme.textSecondary}
                 />
-                {showBadge ? <View style={styles.badge} /> : null}
+                {showBadge ? (
+                  // The ring matches the surface the badge actually sits
+                  // on. Hard-coding bgCard leaves a visible dark halo the
+                  // moment the Inbox tab is the selected one — which, on
+                  // the tab that carries the badge, is most of the time.
+                  <View
+                    style={[
+                      styles.badge,
+                      { borderColor: selected ? Theme.bgRaised : Theme.bgCard },
+                    ]}
+                  />
+                ) : null}
               </View>
-              <Text style={[styles.label, selected && styles.labelSelected]} numberOfLines={1}>
-                {tab.label}
-              </Text>
             </Pressable>
           );
         })}
@@ -98,13 +131,17 @@ export function TabBar({
           pressed && styles.askAiPressed,
         ]}
       >
-        <Ionicons name="chatbubble-ellipses-outline" size={20} color={Theme.textPrimary} />
+        <Ionicons
+          name={askAiActive ? 'chatbubble-ellipses' : 'chatbubble-ellipses-outline'}
+          size={20}
+          color={Theme.textPrimary}
+        />
       </Pressable>
     </View>
   );
 }
 
-const BAR_HEIGHT = 58;
+const BAR_HEIGHT = 56;
 
 const styles = StyleSheet.create({
   wrap: {
@@ -115,42 +152,39 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: Space.x2,
-    paddingHorizontal: Space.x4,
+    gap: 9,
+    paddingHorizontal: 28,
   },
   pill: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     height: BAR_HEIGHT,
-    paddingHorizontal: Space.x1 + 2,
+    paddingHorizontal: Space.x1,
     borderRadius: Radius.pill,
     backgroundColor: Theme.bgCard,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: Theme.border,
   },
   tab: {
     flex: 1,
+    alignSelf: 'stretch',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 2,
-    paddingVertical: Space.x1 + 2,
     marginVertical: Space.x1 + 1,
     borderRadius: Radius.pill,
   },
-  tabSelected: { backgroundColor: Theme.bgLift },
-  label: { ...Type.tab, color: Theme.textMuted },
-  labelSelected: { color: Theme.textPrimary },
+  tabSelected: { backgroundColor: Theme.bgRaised },
   badge: {
     position: 'absolute',
-    top: -1,
-    right: -3,
-    width: 8,
-    height: 8,
-    borderRadius: 4,
+    top: -2,
+    right: -4,
+    width: 9,
+    height: 9,
+    borderRadius: 4.5,
     backgroundColor: Theme.unread,
-    borderWidth: 1.5,
-    borderColor: Theme.bgCard,
+    // Ringed in the surface it sits on, so it stays a distinct dot rather
+    // than merging into the glyph underneath it. The colour is supplied at
+    // the call site because that surface changes with selection.
+    borderWidth: 2,
   },
   askAi: {
     width: BAR_HEIGHT,
@@ -159,10 +193,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: Theme.bgCard,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: Theme.border,
   },
-  askAiPressed: { backgroundColor: Theme.bgLift },
+  askAiPressed: { backgroundColor: Theme.bgRaised },
   // Same weight-and-shape treatment the selected tab pill uses. No hue.
-  askAiActive: { backgroundColor: Theme.bgLift, borderColor: Theme.borderStrong },
+  askAiActive: { backgroundColor: Theme.bgRaised },
 });
