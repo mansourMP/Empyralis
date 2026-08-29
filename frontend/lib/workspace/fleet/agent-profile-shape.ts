@@ -14,6 +14,37 @@
  * side by side). Copying Telegram's tab NAMES would be imitating the
  * surface of the surface rather than the gesture it exists for.
  *
+ * ── SKILLS MOVED HERE FROM CONFIGURE ▸ BRAIN, 2026-08-28 ────────────────
+ * The founder went looking for Skills and could not find it. It had been
+ * grouped with Model and Capabilities under "Brain", which is described in
+ * FleetAgentDetail's own comment as "what it thinks with" — and a skill is
+ * not that. `SkillsTab` is a name, a description and a body of instructions,
+ * delivered to the engine as a real SKILL.md: authored prose about what this
+ * agent knows how to do. That is the same KIND of thing as the two segments
+ * already here, and the three of them finally read as one question:
+ *
+ * ```
+ *   Persona          who it is          the system prompt
+ *   Skills           what it knows how to do   procedures it follows
+ *   Memory & Files   what it knows      notes, facts, files
+ * ```
+ *
+ * Configure keeps the set-once TECHNICAL configuration it was described as
+ * holding — Model, Capabilities, Channels, Apps, Context, Hardware. No new
+ * group was invented to hold Skills, because none of Brain / Reach ("how
+ * it's reached, and what it can reach out to") / Compute ("what it runs on")
+ * fits it, and a fourth group holding one item is a surface that has not
+ * earned its place. This is also the more FINDABLE home: the Profile opens
+ * by tapping the agent's own name in the header, rather than sitting three
+ * levels down a "⋯" menu.
+ *
+ * The MASTER keeps Skills, and that asymmetry with Persona is deliberate
+ * rather than an oversight: Persona is excluded for the master because
+ * nothing ever reads what it saves (specialist_runtime_context returns None
+ * for that install), which would make it a dead control. Skills had no such
+ * guard in Configure and rendered for every agent — so keeping it for the
+ * master is preserving the behaviour that shipped, not extending it.
+ *
  * PROFILE_TAB_IDS mirrors CONFIGURE_TAB_IDS's own role in
  * FleetAgentDetail.tsx (a set of [tab] route segments that render inside a
  * sheet instead of as a top-level tab) — kept in its own pure module rather
@@ -21,9 +52,13 @@
  * re-deriving it, the same discipline primary-rail-nav.ts already applies
  * one surface over.
  */
-export type AgentProfileSegmentId = "persona" | "memory";
+export type AgentProfileSegmentId = "persona" | "skills" | "memory";
 
-export const PROFILE_TAB_IDS: ReadonlySet<AgentProfileSegmentId> = new Set(["persona", "memory"]);
+export const PROFILE_TAB_IDS: ReadonlySet<AgentProfileSegmentId> = new Set([
+  "persona",
+  "skills",
+  "memory",
+]);
 
 export function isProfileTab(tabId: string): tabId is AgentProfileSegmentId {
   return (PROFILE_TAB_IDS as ReadonlySet<string>).has(tabId);
@@ -44,7 +79,7 @@ export function isProfileTab(tabId: string): tabId is AgentProfileSegmentId {
  * pick.
  */
 export function planAgentProfileSegments(isMaster: boolean): AgentProfileSegmentId[] {
-  return isMaster ? ["memory"] : ["persona", "memory"];
+  return isMaster ? ["skills", "memory"] : ["persona", "skills", "memory"];
 }
 
 /** The first (default) segment a fresh Profile open should land on. */

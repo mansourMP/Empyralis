@@ -56,9 +56,30 @@ assert(
 const payload = buildQuickCreateAgentPayload("proj_123");
 assert(payload.project_id === "proj_123", "payload carries the resolved project id");
 assert(payload.name === "", "name is blank -- the server assigns a pool name, never the client");
-assert(payload.capability_preset === "standard", "capability_preset is the only non-reserved creatable default");
-assert(payload.purpose_preset === "internal_assistant", "purpose_preset defaults to the safe, non-customer-facing preset");
-assert(payload.audience === "owner", "audience defaults to the safer, less-blaming assumption");
+
+// The two preset assertions below used to prove these values were LITERALS in
+// the builder. They are now proving something stronger and more useful: that
+// the step-1 job picker's default ("General") still resolves to exactly the
+// values every agent has always been created with. Repointed rather than
+// deleted -- a caller that passes no job must not have silently changed
+// behaviour, and that is the one thing worth a red test here.
+assert(payload.capability_preset === "standard", "no job given -> capability_preset standard, unchanged from before the picker");
+assert(payload.purpose_preset === "internal_assistant", "no job given -> purpose_preset internal_assistant, unchanged from before the picker");
+assert(
+  !("audience" in payload),
+  "audience is NOT sent -- fleet_create_agent derives it from purpose_preset; a copy of that map here would be a second opinion about one fact",
+);
+
+// And a job actually changes them, or the picker writes the default anyway --
+// the "built, tested, never wired" defect this codebase has most of.
+const supportPayload = buildQuickCreateAgentPayload("proj_123", "", "", null, "support");
+assert(supportPayload.purpose_preset === "customer_facing", "a customer-facing job posts customer_facing");
+const researchPayload = buildQuickCreateAgentPayload("proj_123", "", "", null, "research");
+assert(researchPayload.capability_preset === "knowledge", "the knowledge job posts capability_preset knowledge");
+assert(
+  buildQuickCreateAgentPayload("proj_123", "", "", null, "nonsense").purpose_preset === "internal_assistant",
+  "an unrecognised job id falls back to General rather than posting nothing",
+);
 
 // A second call with a different project must not leak state between calls
 // -- this is a pure function, not a stateful builder.
