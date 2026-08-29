@@ -51,10 +51,20 @@ export function InboxScreen({
 
   useEffect(() => {
     setInboxUser(session.userId);
+  }, [session.userId]);
+
+  // Its OWN effect, with no dependencies, and it re-arms on the way in.
+  // Folded into the effect above, the cleanup would fire whenever the user
+  // id changed rather than only on unmount, latching `mounted` false for the
+  // rest of the screen's life — and under StrictMode's deliberate
+  // mount/unmount/mount it would latch false before the first load ever ran,
+  // so the screen would sit on its skeleton forever with no error anywhere.
+  useEffect(() => {
+    mounted.current = true;
     return () => {
       mounted.current = false;
     };
-  }, [session.userId]);
+  }, []);
 
   const load = useCallback(async () => {
     setRefreshing(true);
