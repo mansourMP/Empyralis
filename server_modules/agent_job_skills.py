@@ -59,14 +59,20 @@ from __future__ import annotations
 import uuid
 from typing import Any, Dict, List, Sequence
 
-# Every external command a body below tells the agent to run. Kept as data
-# rather than left implicit in prose so the installer-drift test has an
-# actual set to compare against the installer's own source — the expected set
-# and the actual set from different places, never one file confirming itself.
+# Every external tool a body below tells the agent to reach for. Kept as data
+# rather than left implicit in prose so the installer-drift test has an actual
+# set to compare against the installer's own source — the expected set and the
+# actual set from different places, never one file confirming itself.
 #
-# `python3` carries the library work (pandas/duckdb/pypdf/openpyxl); the
-# libraries themselves are asserted separately, by import name.
-REQUIRED_BINARIES: frozenset = frozenset({"pdftotext", "python3"})
+# The declaration is checked in BOTH directions, and the second direction is
+# the one that caught a mistake on the day it was written: a name here that no
+# body actually uses is a package installed on every customer's box for
+# nothing, and a tool a body names that is missing here is a promise the
+# installer was never held to. `python3` itself is deliberately absent — no
+# procedure names the binary, they express Python through imports, and
+# apt_install_system_deps has installed it unconditionally since long before
+# any of this.
+REQUIRED_BINARIES: frozenset = frozenset({"pdftotext"})
 REQUIRED_PYTHON_IMPORTS: frozenset = frozenset({"pandas", "duckdb", "pypdf", "openpyxl"})
 
 
@@ -95,6 +101,14 @@ pdftotext -layout invoice.pdf -
 `-layout` is not optional. It preserves column positions, which is what keeps
 a quantity in the quantity column instead of running every field of a line
 into one string. For one page of a long document, add `-f 3 -l 3`.
+
+Know how many pages you are reading before you start, so a truncated read is
+distinguishable from a short invoice:
+
+```python
+import pypdf
+print(len(pypdf.PdfReader("invoice.pdf").pages))
+```
 
 Now decide whether you actually got anything:
 

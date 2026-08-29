@@ -258,6 +258,12 @@ install_docker() {
   # provisioned droplet came up paired and "online" while unable to run a
   # single shell command.
   #
+  # SUPERSEDED 2026-08-22 and the beacons below were still saying the old
+  # thing: Docker now decides HOW a command runs, never WHETHER. No Docker
+  # means the command runs on the host and works. Every failure here is a
+  # change of isolation, not a lost capability, and none of them may be
+  # reported as one.
+  #
   # Distro packaging (docker.io), not Docker's get.docker.com convenience
   # script: one already-mirrored apt package, no extra apt repo, no GPG key
   # fetch, no curl-pipe-to-root — and it is everything the sandboxed
@@ -281,7 +287,7 @@ install_docker() {
     # would be there.
     if ! apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends docker.io; then
       log "WARNING: docker.io install failed"
-      report_beacon 0 "docker.io install failed; shell.execute and filesystem.read_write need Docker and will stay unavailable until it is installed manually"
+      report_beacon 0 "docker.io install failed; commands on this computer will run directly on it instead of inside a container"
       return 1
     fi
   else
@@ -303,7 +309,7 @@ install_docker() {
   # very first gateway process picks up the membership, no restart needed.
   if ! usermod -aG docker "${SERVICE_USER}"; then
     log "WARNING: could not add ${SERVICE_USER} to the docker group"
-    report_beacon 0 "could not add ${SERVICE_USER} to the docker group; shell.execute and filesystem.read_write will stay unavailable"
+    report_beacon 0 "could not add ${SERVICE_USER} to the docker group; commands on this computer will run directly on it instead of inside a container"
     return 1
   fi
 
@@ -321,8 +327,105 @@ install_docker() {
   done
 
   log "WARNING: docker was installed but 'docker info' did not succeed as ${SERVICE_USER} after ${attempt} attempts"
-  report_beacon 0 "docker installed but 'docker info' did not succeed as ${SERVICE_USER} after ${attempt} attempts; shell.execute and filesystem.read_write may take longer to come online, or check 'systemctl status docker' on the server"
+  report_beacon 0 "docker installed but 'docker info' did not succeed as ${SERVICE_USER} after ${attempt} attempts; commands will run directly on this computer until it does — check 'systemctl status docker' on the server"
   return 1
+}
+
+install_data_toolchain() {
+  # WHAT A BOOKKEEPING AGENT NEEDS ON THE MACHINE, AND WHY IT IS NOT A DOCKER
+  # IMAGE.
+  #
+  # Founder's ruling, 2026-08-28: *"I don't think we should do something about
+  # it, it's going to be just there if this specific person needs it. I don't
+  # want to do this shit anymore about this Docker."* So the toolchain is a
+  # property of the BOX — installed once, present for every agent on it —
+  # rather than a custom sandbox image somebody has to build, publish, pin and
+  # keep current.
+  #
+  # The thing it buys, and it is the whole product claim: a PDF invoice
+  # carries a text layer holding the exact characters the supplier's system
+  # wrote. `pdftotext -layout` reads them. An agent without it opens the page
+  # as an image and transcribes what the digits look like, which at nine point
+  # type is a coin flip between 3 and 8 on every figure, and is also about
+  # five times the tokens. Measured on a real 10-page, 260-line invoice, the
+  # text path recovered 1,040 of 1,040 numbers exactly.
+  #
+  # server_modules/agent_job_skills.py names each of these commands in a real
+  # procedure. test_agent_computer_toolchain.py reads THIS function's source
+  # and fails if a body ever names something this function does not install —
+  # a skill that tells an agent to run a command the machine does not have is
+  # a lie, and it is a silent one.
+  #
+  # APT WHERE APT HAS IT, pip only for the two it does not. An apt package is
+  # dpkg-managed, upgrades with the box, and does not have to argue with
+  # PEP 668. `--break-system-packages` is reserved for duckdb and pypdf, which
+  # ship no Debian package: this is a single-purpose appliance box we
+  # provision and own, not a developer's laptop, and the alternative — a venv
+  # plus a PATH entry in /etc/profile.d — silently disappears the moment
+  # anything invokes a NON-login shell, which is exactly the failure this
+  # whole task is about not shipping.
+  #
+  # DELIBERATELY NON-FATAL, same posture as install_docker: an agent that
+  # cannot read invoices must still come up able to do everything else. Each
+  # failure returns 1 and reports an advisory (terminal=0) beacon.
+  #
+  # NOT ON macOS. A Mac gets its gateway from the desktop app, which never
+  # runs this script, so a paired Mac has whatever its owner already has.
+  # That gap is real and is not closed here.
+  if [[ "${EMPYRALIS_INSTALL_SKIP_TOOLCHAIN:-0}" == "1" ]]; then
+    log "skipping the data toolchain because EMPYRALIS_INSTALL_SKIP_TOOLCHAIN=1"
+    return 0
+  fi
+
+  log "installing the document and data toolchain"
+  # poppler-utils    pdftotext/pdfinfo — reading a PDF's own text layer
+  # python3-pandas   tables, dates, money columns
+  # python3-openpyxl .xlsx, which is what a bank or an accountant actually
+  #                  sends; without it pandas.read_excel raises on every file
+  # python3-pip      the two below have no Debian package
+  if ! apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends \
+    poppler-utils \
+    python3-pandas \
+    python3-openpyxl \
+    python3-pip; then
+    log "WARNING: the document and data toolchain failed to install"
+    report_beacon 0 "the document and data toolchain (pdftotext, pandas) failed to install; this Agent Computer works, but an agent on it cannot read invoices or spreadsheets until it is installed"
+    return 1
+  fi
+
+  # duckdb  queries a CSV or Parquet file where it sits. pandas loads a whole
+  #         file into memory at several times its size, and on a box with a
+  #         memory limit that ends as a command killed with no output — the
+  #         reconciliation procedure tells an agent to reach for this above
+  #         about 50 MB for exactly that reason.
+  # pypdf   page counts, splitting, and the one honest answer to "does this
+  #         PDF have a text layer at all".
+  if ! pip3 install --break-system-packages --no-input --quiet duckdb pypdf; then
+    log "WARNING: duckdb/pypdf install failed"
+    report_beacon 0 "duckdb and pypdf failed to install; an agent on this computer can still read PDFs and spreadsheets, but has no way to work with a data file too large to load into memory"
+    return 1
+  fi
+
+  # Verify what is actually there, the way the agent will reach it — as
+  # SERVICE_USER, through a shell, not as root and not through the
+  # interpreter this script happens to be running under. An install that
+  # exits 0 and leaves an import broken is the one outcome worth catching
+  # here, because everything downstream of it fails much later and says
+  # something else.
+  local missing=""
+  sudo -u "${SERVICE_USER}" sh -lc 'command -v pdftotext >/dev/null 2>&1' || missing="${missing} pdftotext"
+  local mod
+  for mod in pandas openpyxl duckdb pypdf; do
+    sudo -u "${SERVICE_USER}" sh -lc "python3 -c 'import ${mod}'" >/dev/null 2>&1 || missing="${missing} ${mod}"
+  done
+  if [[ -n "${missing}" ]]; then
+    log "WARNING: toolchain installed but unavailable to ${SERVICE_USER}:${missing}"
+    report_beacon 0 "the document and data toolchain installed but is not reachable by the agent (missing:${missing}); an agent on this computer will say it cannot read a document rather than guessing at one"
+    return 1
+  fi
+
+  log "document and data toolchain is installed and reachable"
+  return 0
 }
 
 openclaw_node_dir() {
@@ -1044,7 +1147,13 @@ main() {
   # cannot get Docker still finishes provisioning with every other
   # capability. install_docker already reports its own advisory beacon on
   # failure, so this is just a local log line for whoever reads the console.
-  install_docker || log "continuing without a confirmed-ready Docker sandbox — shell.execute and filesystem.read_write will stay unavailable until this is resolved"
+  install_docker || log "continuing without a Docker sandbox — commands will run directly on this computer instead"
+  set_phase data_toolchain "installing document and data tools"
+  # Non-fatal by design (see install_data_toolchain's own header): a box that
+  # cannot get these still finishes provisioning with every capability it had
+  # before they existed. The agent-side procedures check for each tool before
+  # using it and say they cannot read a document rather than guessing at one.
+  install_data_toolchain || log "continuing without the document and data toolchain — an agent here cannot read invoices or spreadsheets until it is installed"
   set_phase gateway_download "downloading Agent Computer"
   install_release_artifacts
   set_phase channel_transport "setting up messaging channels"
