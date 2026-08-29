@@ -255,6 +255,41 @@ const legacy = planInboxNeedsYou({
 assert(legacy.runs[0].title === "Run failed", "without agentNameFor the row keeps its plain title");
 assert(legacy.runs[0].detail !== null, "the summary still reaches the row without any resolver");
 
+// ── every row: the TITLE names a thing, the SUBTITLE names the reason ────
+// This rule held for tasks and runs and was INVERTED for notifications, and
+// nothing here noticed — the only assertions were on notificationTitle() in
+// isolation, never on which FIELD of the row it lands in. It surfaced when the
+// mobile Inbox dropped its section headers: four consecutive rows titled
+// "Commented on your task" with the actual task name truncated away. A label
+// carried by most rows distinguishes nothing.
+{
+  const g = planInboxNeedsYou({
+    stuckTasks: [
+      { id: "s1", title: "Ship the picker", status: "blocked", assignee_user_id: ME, updated_at: "2026-08-01T00:00:00Z" },
+    ],
+    notifications: [
+      { id: "n1", source_event_type: "task_comment", body: 'New comment on "Ship the picker"', created_at: "2026-08-02T00:00:00Z" },
+    ],
+    blockedRuns: [],
+    userId: ME,
+    taskHrefFor,
+    agentHrefFor,
+  });
+
+  assert(g.notifications.length === 1, "a notification row is produced");
+  assert(
+    g.notifications[0].title === 'New comment on "Ship the picker"',
+    "the notification TITLE names the thing, not the category",
+  );
+  assert(
+    g.notifications[0].detail === "Commented on your task",
+    "the notification SUBTITLE carries the reason — matching task and run rows",
+  );
+
+  assert(g.tasks.length === 1 && g.tasks[0].title === "Ship the picker", "a task row titles the thing");
+  assert(g.tasks[0].detail === "Blocked", "a task row puts the reason in the subtitle");
+}
+
 if (failed > 0) {
   console.error(`\n${failed} failed, ${passed} passed`);
   process.exit(1);

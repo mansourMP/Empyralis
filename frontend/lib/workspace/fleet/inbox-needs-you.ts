@@ -189,8 +189,20 @@ export function planInboxNeedsYou(input: {
     .map((n) => ({
       kind: "notification" as const,
       id: `notification:${n.id}`,
-      title: notificationTitle(n),
-      detail: n.body || null,
+      // The REASON goes in the subtitle, the THING goes in the title —
+      // the same shape the task and run rows above and below already use.
+      // This was inverted, and with the mobile Inbox's section headers gone
+      // the inversion became visible: four rows in a row titled "Commented on
+      // your task" and three titled "Mentioned you", each with the actual
+      // task name truncated away in the grey line. A label carried by most
+      // rows distinguishes nothing — the same argument that retired
+      // `activity_preview` on the agent cards and took the colour off the
+      // amber reach line. `body` names a real thing ("New comment on
+      // \"Review Metro watchFolders setup\""); notificationTitle is a
+      // category. Falls back to the category when body is empty, because a
+      // blank title is worse than a repeated one.
+      title: (n.body || "").trim() || notificationTitle(n),
+      detail: notificationTitle(n),
       timestamp: n.created_at || null,
       href: taskHrefFor(n.task_id),
     }));
