@@ -132,3 +132,10 @@ src-tauri/resources/gateway-node-modules/
 # the repo, reintroducing the exact defect that script exists to fix) and it
 # can carry a throwaway localhost updater endpoint from a verification run.
 src-tauri/tauri.release.conf.json
+
+# Next regenerates this on every build and rewrites its routes import to match
+# the build mode — `.next/dev/types` under a dev server, `.next/types` under a
+# production build. Tracking it meant the committed copy was whoever ran a dev
+# server last, every production build left the deploy checkout dirty, and every
+# subsequent `git merge --ff-only` ABORTED until someone discarded it by hand.
+frontend/next-env.d.ts
