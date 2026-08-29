@@ -121,7 +121,7 @@ import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { getErrorMessage } from "@/lib/ui/api-error";
 import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
 
-import { AGENT_CREATE_DEFAULT_JOB, agentCreateJobPresets } from "./agent-create-job";
+import { AGENT_CREATE_DEFAULT_JOB, agentCreateJobPresets, resolveAgentCreateJob } from "./agent-create-job";
 import type { FleetProject } from "./fleet-data";
 import { refreshFleetAgents, resolveAgentProjectId } from "./fleet-data";
 
@@ -147,6 +147,15 @@ export type QuickCreateAgentPayload = {
   capability_preset: string;
   project_id: string;
   purpose_preset: string;
+  /** The job id itself, alongside the two presets it resolves to — because
+   *  the presets cannot carry it back. Four of the six jobs share
+   *  internal_assistant/standard, so a server reading only the pair cannot
+   *  tell Bookkeeping from Operations, and it has to: `job` is what selects
+   *  this agent's seeded skill library (server_modules/agent_job_skills.py).
+   *  Always sent, including "general" — an absent key would mean "a caller
+   *  that predates jobs", which is a different fact from "the job that
+   *  narrows nothing". */
+  job: string;
   /** Omitted entirely when there is no pick — an ABSENT key means "use the
    *  server's own seed", which is a different fact from an empty object and
    *  must not be collapsed into one. */
@@ -186,6 +195,7 @@ export function buildQuickCreateAgentPayload(
     name,
     instructions,
     project_id: projectId,
+    job: resolveAgentCreateJob(jobId).id,
     // Both presets from the ONE place that knows them. Defaulting `jobId` to
     // General rather than re-typing the two literals here is what keeps a
     // caller that never heard of jobs (a direct call, a test) on exactly the

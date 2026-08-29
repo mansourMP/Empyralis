@@ -151,7 +151,9 @@ When you learn something durable, add ONE line. A paragraph is archaeology.
 `test_default_engine_credit_debit`, `test_authority_mandate_service`,
 `test_run_state_scope_fails_closed`, `test_tool_name_secret_redaction`, `test_reload_isolation`,
 `test_provider_failure_classification`, `test_failed_run_identity`,
-`test_trace_outcome_honesty`, `test_invite_existing_member`.
+`test_trace_outcome_honesty`, `test_invite_existing_member`,
+`test_agent_job_skills`, `test_agent_computer_toolchain` (a skill body may not
+name a tool `install-agent-computer.sh` does not install).
 
 When a guard exists, do not restate its rule here — extend the guard instead.
 
@@ -162,5 +164,6 @@ When a guard exists, do not restate its rule here — extend the guard instead.
 - Whether `channel_concurrency_service` — a complete lease/quota gate with zero production callers and rotted tests — is revived or deleted.
 - Tier pricing. $20/$100/$200 was thinking aloud, explicitly not final.
 - Whether a gateway may auto-update itself unattended. The mechanism is built and safe; nothing is enabled in production.
+- The accounting toolchain (pdftotext, pandas, duckdb) is installed on the HOST. On a Linux box where Docker is running, `shell.execute` lands in a stock `debian:bookworm-slim` with no Python and no network, so it is unreachable there — a Mac and a Docker-less box are fine. Closing it means a custom sandbox image (ruled out — "I don't want to do this shit anymore about this Docker") or running these commands host-side. Recommendation: leave it; the procedures check before they use and say they cannot read a document rather than guessing at one.
 
 When he raises a product question, add it here in the same turn. Do not answer it with a guess, and do not let it live only in chat.

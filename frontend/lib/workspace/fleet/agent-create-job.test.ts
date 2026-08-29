@@ -288,5 +288,54 @@ assert(
   "the purpose->audience map is not transcribed into TypeScript",
 );
 
+// ── The JOB ID reaches the server, and the server knows every id ─────────
+// A job seeds two presets AND a skill library, and only the first half can be
+// checked by looking at the presets: four of the six jobs resolve to the same
+// pair, so `job` is the only field that says which one was picked. It
+// therefore has to be on the wire, and the two id vocabularies have to agree
+// — a Python map keyed on a job id this file never defines seeds nothing,
+// forever, silently, which is exactly the shape of bug this test file exists
+// to catch one level up.
+const JOB_SKILLS_PY = readRepoFile("server_modules/agent_job_skills.py");
+assert(
+  JOB_SKILLS_PY.includes("JOB_SKILLS") && JOB_SKILLS_PY.includes("seed_skills_for_job"),
+  "CANARY: agent_job_skills.py was read and still declares JOB_SKILLS/seed_skills_for_job",
+);
+
+// The keys of JOB_SKILLS, read out of the Python source rather than restated.
+const PY_JOB_KEYS = (() => {
+  const block = JOB_SKILLS_PY.split("JOB_SKILLS: Dict[str, List[Dict[str, str]]] = {")[1] ?? "";
+  return [...block.matchAll(/^    "([a-z_]+)": \[/gm)].map((m) => m[1]);
+})();
+assert(PY_JOB_KEYS.length > 0, "CANARY: the JOB_SKILLS map was parsed and is not empty");
+
+const TS_JOB_IDS = new Set(AGENT_CREATE_JOBS.map((j) => j.id as string));
+for (const key of PY_JOB_KEYS) {
+  assert(
+    TS_JOB_IDS.has(key),
+    `agent_job_skills.py seeds job "${key}", which is a real job id here`,
+  );
+}
+
+// The product claim itself, and the reason this feature exists: the
+// bookkeeping job ships procedures. A rename of that id on either side takes
+// the library with it and nothing else would notice.
+assert(
+  PY_JOB_KEYS.includes("bookkeeping") && TS_JOB_IDS.has("bookkeeping"),
+  "the bookkeeping job exists on both sides and carries a seeded skill library",
+);
+
+// The wire. Sending only the presets would collapse Bookkeeping into
+// Operations before the request ever left the browser.
+assert(/job:\s*resolveAgentCreateJob\(/.test(QUICK_CREATE_TS), "the payload builder sends the job id");
+assert(
+  readRepoFile("server_modules/routes_fleet.py").includes("job=body.job"),
+  "the create route forwards `job` to fleet_create_agent",
+);
+assert(
+  FLEET_TOOLS_PY.includes("seed_skills_for_job(job)"),
+  "fleet_create_agent actually seeds the job's skills — built-and-never-wired is the defect this repo has most of",
+);
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

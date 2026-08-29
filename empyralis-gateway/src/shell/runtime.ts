@@ -9,6 +9,7 @@ import { checkFilesystemPathPolicy, checkShellCommandPolicy } from "./command-po
 import { buildDockerRunArgs, DEFAULT_SANDBOX_IMAGE, DOCKER_WORKSPACE_PATH, spawnDockerRun } from "./docker-sandbox";
 import { describeDockerAutostartOutcome, ensureDockerReady, type DockerAutostartOutcome } from "./docker-autostart";
 import { resolveExecution, type ResolvedExecution } from "./execution-isolation";
+import { diagnoseKill, killDiagnosisFields } from "./kill-diagnosis";
 import {
   buildBatchDriverScript,
   computeBatchTimeoutSeconds,
@@ -316,6 +317,17 @@ export class GatewayShellRuntime {
         stdout: result.stdout.trim(),
         stderr: result.stderr.trim(),
         timed_out: result.timedOut,
+        // A container the cgroup limit killed exits 137 and writes nothing.
+        // Without this the agent is handed that number and no reason for it —
+        // and a real annual ledger is exactly the size that produces it.
+        ...killDiagnosisFields(
+          diagnoseKill({
+            exitCode: result.exitCode,
+            timedOut: result.timedOut,
+            isolation: "sandbox",
+            memoryLimitMb: this.config.memoryMb,
+          }),
+        ),
         execution_mode: "sandbox",
         isolation: execution.isolation,
         isolation_statement: execution.statement,
@@ -340,6 +352,18 @@ export class GatewayShellRuntime {
       stdout: result.stdout.trim(),
       stderr: result.stderr.trim(),
       timed_out: result.timedOut,
+      // On the host a killed command reports exit_code null with an empty
+      // stderr — literally nothing. No memory limit is named here because we
+      // set none; inventing one would be fabricating the number the whole
+      // diagnosis rests on.
+      ...killDiagnosisFields(
+        diagnoseKill({
+          exitCode: result.exitCode,
+          signal: result.signal,
+          timedOut: result.timedOut,
+          isolation: "host",
+        }),
+      ),
       execution_mode: execution.mode,
       isolation: execution.isolation,
       isolation_statement: execution.statement,
@@ -449,6 +473,8 @@ export class GatewayShellRuntime {
         const { results, stoppedEarly } = interpretBatchResults(specs, states, {
           stopOnFailure,
           batchTimedOut,
+          isolation: "sandbox",
+          memoryLimitMb: this.config.memoryMb,
         });
         return {
           commands: results,
@@ -483,6 +509,7 @@ export class GatewayShellRuntime {
       const { results, stoppedEarly } = interpretBatchResults(specs, states, {
         stopOnFailure,
         batchTimedOut,
+        isolation: "host",
       });
       return {
         commands: results,
@@ -564,6 +591,19 @@ export class GatewayShellRuntime {
         stdin: mode === "write" || mode === "append" ? content : undefined,
       });
       if (result.exitCode !== 0) {
+        // A read of a file bigger than the container's memory limit is killed
+        // by the cgroup and exits 137 having written nothing at all, so the
+        // fallback message here used to be the entire diagnosis: "exited with
+        // code 137". This throw IS what the model reads, so the reason goes
+        // in it rather than only onto a result field this branch never
+        // returns.
+        const killed = diagnoseKill({
+          exitCode: result.exitCode,
+          timedOut: result.timedOut,
+          isolation: "sandbox",
+          memoryLimitMb: this.config.memoryMb,
+        });
+        if (killed) throw new Error(killed.statement);
         throw new Error(result.stderr.trim() || `filesystem.read_write exited with code ${result.exitCode}`);
       }
       return {
@@ -627,6 +667,12 @@ function filesystemInnerArgs(mode: string, relativePath: string): string[] {
 
 interface HostRunResult {
   exitCode: number | null;
+  /** The signal that killed it, when there was one. Node hands this to the
+   *  close handler alongside the code and it used to be dropped on the floor
+   *  — which is why a command the system killed reported `exit_code: null`,
+   *  an empty stderr and nothing else. It is the only thing that explains
+   *  that row. See kill-diagnosis.ts. */
+  signal: NodeJS.Signals | null;
   stdout: string;
   stderr: string;
   timedOut: boolean;
@@ -657,11 +703,11 @@ function runOnHost(command: string, cwd: string, timeoutSeconds: number): Promis
       clearTimeout(timer);
       reject(error);
     });
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({ exitCode: code, stdout, stderr, timedOut });
+      resolve({ exitCode: code, signal, stdout, stderr, timedOut });
     });
   });
 }

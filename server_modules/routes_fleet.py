@@ -2111,6 +2111,12 @@ class FleetCreateAgentRequest(BaseModel):
     purpose_preset: str = ""
     audience: str = ""  # "owner" | "external" — facing flag for the create-agent wizard; derived from purpose_preset when omitted (see fleet_tools._AUDIENCE_BY_PURPOSE_PRESET)
     capability_preset: str = "standard"  # Phase 5B: knowledge | standard
+    # The create card's job id (agent-create-job.ts). Carries ONE more fact
+    # than the two presets can: four of the six jobs share a preset pair, so
+    # the pair cannot say which one was picked. Seeds the agent's starting
+    # skills server-side (agent_job_skills.JOB_SKILLS) — the skill BODIES
+    # never travel on this request in either direction.
+    job: str = ""
     project_id: str = ""  # Phase 7B: assign to a project at creation
     # The creation surface's own model pick — {mode, provider, model} only,
     # validated by fleet_tools.validate_create_time_model_choice. Named
@@ -2145,6 +2151,7 @@ async def fleet_create_agent_route(
             purpose_preset=body.purpose_preset,
             audience=body.audience,
             capability_preset=body.capability_preset,
+            job=body.job,
             project_id=body.project_id,
             model_choice=body.model_choice,
         )

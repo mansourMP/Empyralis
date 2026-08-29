@@ -2606,6 +2606,7 @@ async def fleet_create_agent(
     purpose_preset: str = "",
     audience: str = "",
     capability_preset: str = "standard",
+    job: str = "",
     project_id: str = "",
     enabled_tools: Optional[List[str]] = None,
     connectors: Optional[List[str]] = None,
@@ -2622,9 +2623,11 @@ async def fleet_create_agent(
     resolver gates on; when omitted it's derived from purpose_preset (see
     _AUDIENCE_BY_PURPOSE_PRESET). `capability_preset` (knowledge | standard)
     seeds hardware/tools/model/subagents/context DEFAULTS; 'operator' is
-    reserved (Sage-class) and not creatable via this flow. All fields remain
-    overridable afterward except a knowledge agent's policy-locked hardware
-    access.
+    reserved (Sage-class) and not creatable via this flow. `job` is the
+    create card's own job id (agent-create-job.ts) and seeds this agent's
+    starting skills from agent_job_skills.JOB_SKILLS — an unknown or empty
+    job seeds none, which is the normal case. All fields remain overridable
+    afterward except a knowledge agent's policy-locked hardware access.
 
     `model_choice` is the creation surface's own narrow model pick —
     {mode, provider, model}, nothing else (see
@@ -2632,6 +2635,7 @@ async def fleet_create_agent(
     seed_specialist_metadata's default; given and invalid, the whole create
     is refused rather than committing an agent on a model nobody picked.
     """
+    from server_modules import agent_job_skills as _agent_job_skills
     from server_modules import agent_registry_repository as repo
     from server_modules import capability_presets as _caps
 
@@ -2704,6 +2708,24 @@ async def fleet_create_agent(
         clean_instructions = _PURPOSE_PRESET_INSTRUCTIONS[clean_preset]
     if clean_instructions:
         meta["instructions"] = clean_instructions
+
+    # The JOB's own procedure library (agent_job_skills.py), seeded here for
+    # the same reason `purpose_preset` seeds instructions two lines up: the
+    # wire carries an id, the server owns the text. Most jobs have none and
+    # get [] — which is why this only writes the key when there is something
+    # to write, keeping "General" byte-for-byte the agent it was before this
+    # existed rather than one carrying an empty skills array.
+    #
+    # NOT routed through _normalize_skills_patch: that is the SAVE-TIME gate
+    # over caller-supplied input, and this input is not caller-supplied — it
+    # is this repo's own authored asset, held to the same caps by
+    # test_agent_job_skills.py, which reads fleet_tools' own constants rather
+    # than restating them. Running it through the patch validator would make
+    # a create fail on an authoring mistake that a test already catches, at
+    # the one moment a person is watching.
+    _job_skills = _agent_job_skills.seed_skills_for_job(job)
+    if _job_skills:
+        meta["skills"] = _job_skills
     if enabled_tools:
         meta["enabled_tools"] = [str(t).strip() for t in enabled_tools if str(t).strip()]
     if connectors:
