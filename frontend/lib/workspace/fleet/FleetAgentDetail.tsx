@@ -1120,11 +1120,11 @@ export function FleetAgentDetail({
   // agent is runnable when its brain can't produce a turn.
   //
   // agentDisplayStatus wraps that with the SAME "an in-progress assigned
-  // task means Working" enrichment AgentCards.tsx/AgentsBoard.tsx/
-  // AgentsGroupedList.tsx already apply (agent-view-options.ts) — this page
-  // used to call the bare deriveAgentStatus, which is why the grid one click
-  // away could read "Working" while this header, for the same agent at the
-  // same moment, read "Ready". "Working" has ONE definition in this product
+  // task means Working" enrichment AgentsBoard.tsx/AgentsGroupedList.tsx
+  // already apply (agent-view-options.ts) — this page used to call the bare
+  // deriveAgentStatus, which is why another surface one click away could
+  // read "Working" while this header, for the same agent at the same
+  // moment, read "Ready". "Working" has ONE definition in this product
   // (CLAUDE.md) and this is the last surface that had not adopted it.
   // useFleetWorkspaceTasks is the SAME shared, workspace-wide cache
   // PrimaryRail/Inbox/My work already poll — reusing it here costs no extra

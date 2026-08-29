@@ -1,210 +1,33 @@
-/* ── The workspace Agents surface: cards in the content area ───────────────
+/* ── The workspace Agents surface: the page's shared toolbar/search/empty-
+ * state rules ───────────────────────────────────────────────────────────
  *
- * WHAT THIS REPLACES, AND WHY IT IS NOT A REDECORATION.
+ * THIS FILE KEPT ITS OLD NAME ON PURPOSE. It used to hold the Cards layout's
+ * own face rules too (`.fleet-agent-card-grid`, `.fleet-agent-card`, its
+ * head/sigil/name/state/reach cells, the `--attention` treatment) — that
+ * layout, its component (AgentCards.tsx), and every one of those rules are
+ * DELETED, 2026-08-30, on the founder's own reversal: *"i do not want cards
+ * thing default should be list ... i only want to see list and board!"*
  *
- * `.fleet-agents-conversation-list` was a persistent picker column beside a
- * pane whose entire content was the sentence "Pick an agent to watch it
- * work." It existed to sit next to a chat, and chat is gone from the platform
- * (CLAUDE.md, "THE PLATFORM IS NOT A CHAT PRODUCT"). With the rail already
- * offering "Agents", the column was also a second picker in the content area
- * — the one arrangement "the rail is where you pick; the content is what you
- * picked" rules out.
- *
- * So the picker column and its detail pane are deleted, and the content area
- * shows the agents themselves, the way the workspace's other first-class
- * things are shown. The founder: *"maybe just like as we show this project we
- * would show also the agents as well."*
- *
- * ```
- * BEFORE                                AFTER
- *  ┌────────┬───────────────────┐        ┌────────┐ ┌────────┐ ┌────────┐
- *  │ Support│                   │        │ ◇ Supp…│ │ ◇ Bill…│ │ ◇ Docs…│
- *  │ Billing│  Pick an agent    │        │ ● Ready│ │ ! Offl…│ │ ● Work…│
- *  │ Docs   │  to watch it work.│        │ No cha…│ │ Answer…│ │ GEN-12…│
- *  │ …×19   │                   │        └────────┘ └────────┘ └────────┘
- *  └────────┴───────────────────┘         a card face = state + reach
- *   a contact list for agents              …and nothing else
- *   nobody can talk to
- * ```
+ * What is LEFT is everything that was never about the grid's own face: the
+ * one toolbar row (search left, view options right), the search input's own
+ * width cap, and the narrowed-to-nothing empty state. Those are drawn by
+ * agents/page.tsx directly and used by BOTH remaining layouts (Board and
+ * List), not by any one component — AgentCards.tsx was simply the file that
+ * happened to `import "./agent-cards.css"` first, so this import moved to
+ * page.tsx itself rather than the rules moving to a differently-named file
+ * for no functional reason. Renaming it is free to do later; it was not done
+ * here to keep this change's diff about the Cards layout, not a file move.
  *
  * EVERY VALUE BELOW IS A SHARED TOKEN. No new colour, no new radius, no new
- * duration, and no `var(--accent…)` anywhere in this file — the accent belongs
- * to the filled primary button ("+ New agent", in the topbar) and to nothing
- * else, and lib/ui/accent-restraint.test.ts fails the build if that slips.
- * Emphasis here is WEIGHT and SHAPE, per the house pattern.
+ * duration, and no `var(--accent…)` anywhere in this file — the accent
+ * belongs to the filled primary button ("+ New agent", in the topbar) and to
+ * nothing else, and lib/ui/accent-restraint.test.ts fails the build if that
+ * slips.
  */
 
-/* ── The grid ──────────────────────────────────────────────────────────────
-   `auto-fill` rather than a fixed column count, so the same rule serves every
-   width instead of a ladder of media queries. The 300px floor is the ONE
-   number that matters: it is the width below which this face stops working
-   (the name ellipsises into the status word), so it is what decides the
-   column count at every viewport rather than a media query ladder — the
-   discipline behind the founder's "in one line there should be only two
-   horizontally, not four", which was about a row-shaped card on a narrower
-   surface.
-
-   The paragraph that used to sit here said the floor "caps it at three
-   across", deriving that from .fleet-content-main's 1140px minus 32px of
-   padding either side. Both halves of that are gone as of 2026-08-28: this
-   page no longer nests .fleet-content-main at all, and its shell takes
-   .fleet-content--cards (1560px), so a 1680-wide laptop lays out FOUR at
-   329.5px each — wider than the 326.7px three-up already shipped at. Do not
-   re-derive a column count here; it is a property of the shell's width, and
-   the shell says so in its own rule.
-
-   --space-4 on both axes: airy BETWEEN cards, dense INSIDE one. The 10px gap
-   the channel tiles use was measured against a 4-up tile and reads as the
-   cheapness the founder named on the Apps grid.
-
-   --space-4 on both axes: airy BETWEEN cards, dense INSIDE one. The 10px gap
-   the channel tiles use was measured against a 4-up tile and reads as the
-   cheapness the founder named on the Apps grid. */
-.fleet-agent-card-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  gap: var(--space-4);
-}
-
-/* ── The card ──────────────────────────────────────────────────────────────
-   A real <a>, not a div with onClick: primary navigation is real links, so
-   cmd-click and middle-click work. The whole face is the target — there is no
-   second control on it, so nothing has to be excluded from the hit area and
-   no stopPropagation is involved. */
-.fleet-agent-card {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: var(--space-3);
-  padding: var(--space-4);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-  background: var(--bg-card);
-  color: inherit;
-  text-decoration: none;
-  transition: background 120ms ease-out, border-color 120ms ease-out;
-}
-
-/* Hover, and the SAME treatment for a keyboard cursor — never a ring. There
-   is no focus ring in this product (founder, 2026-08-21, said three times;
-   "the objection is the rectangle"), and the cost of that is written down in
-   CLAUDE.md: some controls end up byte-identical focused and unfocused, so a
-   keyboard user cannot tell where they are. Eighteen identical cards is
-   exactly that case.
-
-   What is allowed, and is what this is, is the line the neutral-ring sweep
-   drew for itself: CHANGE a border/outline drawn BECAUSE something is
-   focused; LEAVE hover/active styling that a :focus-visible selector merely
-   SHARES. Nothing is drawn AROUND the card here — the card's own surface and
-   edge step up by exactly the amount a mouse hover already moves them, which
-   is a state, not chrome. A mouse user's experience is unchanged. */
-.fleet-agent-card:hover,
-.fleet-agent-card:focus-visible {
-  background: var(--bg-card-hover);
-  border-color: var(--border-strong);
-}
-
-/* Line 1: the sigil, the name, and the state. */
-.fleet-agent-card-head {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: var(--space-3);
-}
-
-.fleet-agent-card-sigil {
-  display: flex;
-  flex-shrink: 0;
-  align-items: center;
-  justify-content: center;
-}
-
-/* The name takes the room, the state keeps its own. A long agent name
-   ellipsises rather than pushing the state word off the card's end. */
-.fleet-agent-card-name {
-  min-width: 0;
-  flex: 1;
-  overflow: hidden;
-  font-size: var(--text-base);
-  font-weight: var(--weight-medium);
-  color: var(--text-primary);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.fleet-agent-card-state {
-  flex-shrink: 0;
-}
-
-/* ── Line 2: reach ─────────────────────────────────────────────────────────
-   The half a person can act on. It used to be described here as "the only
-   line on the face that is allowed to raise its voice"; as of 2026-08-28 it
-   does not raise it at all — see the --attention rule at the bottom of this
-   file for why, and for the one line that puts it back. Two lines maximum,
-   then it clips — a task title is arbitrary text and must never grow the card
-   past its neighbours in the same grid row. */
-.fleet-agent-card-reach {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: var(--space-2);
-  font-size: var(--text-sm);
-  line-height: 1.45;
-  color: var(--text-secondary);
-}
-
-.fleet-agent-card-reach-icon {
-  width: 14px;
-  height: 14px;
-  flex-shrink: 0;
-  border-radius: 3px;
-  object-fit: contain;
-}
-
-.fleet-agent-card-reach-text {
-  min-width: 0;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  overflow: hidden;
-}
-
-/* An agent nothing can reach and nothing has been given.
- *
- * THE SENTENCE STAYS, THE ALARM COLOUR GOES — founder's call, 2026-08-28,
- * and the reasoning is this file's own, pointed one rule further in. The
- * line used to be `var(--warning-text)`, on the argument that amber is the
- * one colour this product uses for "you still have to do this". That
- * argument holds for a MINORITY. Measured on a real 40-agent workspace, 25
- * of the 40 faces carried this exact line — 62% — and at four columns it
- * repeats down every one of them, so the page reads as a wall of warnings
- * about a fleet where nothing is actually wrong.
- *
- * That is the same test agent-card-face.ts applies to kill `activity_preview`
- * one level up: "Created is true of every agent that has ever existed, so a
- * column of it distinguishes nothing." A TREATMENT applied to the majority
- * distinguishes nothing either, and an attention colour that never means
- * attention is worse than no colour, because it also trains a person to
- * ignore the amber that IS exceptional elsewhere (the channel-card gateway
- * pill, the Apps panel's blocked note — both still amber, both still rare).
- *
- * Nothing else changed. `needsAttention` is still computed, the
- * `--attention` class is still on the card, and the two-slots-may-disagree
- * contract is untouched: "Ready" + "No channel or tasks yet" still says both
- * true things. Only the shouting is gone.
- *
- * ONE LINE BACK: put `var(--warning-text)` where `var(--text-secondary)` is.
- * The selector is kept for exactly that reason rather than deleted — it is
- * the switch, and a deleted rule is a decision the next reader cannot see
- * was ever made. */
-.fleet-agent-card--attention .fleet-agent-card-reach {
-  color: var(--text-secondary);
-}
-
 /* ── The page's one toolbar row ────────────────────────────────────────────
-   Search LEFT, view options RIGHT — one row, whichever of the three layouts
-   is on screen. It is a row rather than two stacked bands because the founder
+   Search LEFT, view options RIGHT — one row, whichever of the two layouts is
+   on screen. It is a row rather than two stacked bands because the founder
    already rejected exactly that on this page's ancestor: chrome that does not
    pay for itself. It is also NOT `.fleet-content-toolbar`, which carries its
    own `padding: 0 32px`; this row lives inside `.fleet-content`, which already
@@ -212,10 +35,10 @@
    doubling measured and removed here on 2026-08-28.
 
    The search sits at the top, above the content it filters, and is drawn on
-   the SAME surface as the cards — both corrections the founder made on the
-   Apps grid, which had the identical shape (a search over many faces). A
-   filled --bg-inset slab reads heavier than the things it acts on; it is a
-   filter, not the thing you came for. */
+   the SAME surface as the rows/cards below it — both corrections the founder
+   made on the Apps grid, which had the identical shape (a search over many
+   faces). A filled --bg-inset slab reads heavier than the things it acts on;
+   it is a filter, not the thing you came for. */
 .fleet-agent-surface-toolbar {
   display: flex;
   align-items: center;
@@ -258,14 +81,10 @@
 }
 
 /* ── Phone ─────────────────────────────────────────────────────────────────
-   One card per row below 560px — the same breakpoint and the same call the
-   Apps/Channels grids make. The 300px floor would already produce one column
-   at 375px; this states it rather than leaving it to arithmetic that changes
-   the day the content frame's padding does. */
+   The same 560px breakpoint the Apps/Channels grids and the deleted grid's
+   own rule used — the search field goes full width once there is no room
+   left to share with anything else on the row. */
 @media (max-width: 560px) {
-  .fleet-agent-card-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
   .fleet-agent-card-search {
     flex: 1;
   }

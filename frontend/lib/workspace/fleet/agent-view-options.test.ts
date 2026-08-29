@@ -2,7 +2,7 @@
  * VIEW OPTIONS FOR THE WORKSPACE AGENTS PAGE — the rule, and the two things a
  * behavioural test structurally cannot see.
  *
- * WHY THIS FILE EXISTS AT ALL. The Cards/Board/List switch has been wired,
+ * WHY THIS FILE EXISTS AT ALL. The Cards/Board/List switch was wired,
  * unwired and re-wired on this page inside six days, and the reason it was
  * pulled the second time was never the switch: both alternative renderings
  * drew `activity_preview`, a LIFECYCLE VERB, so every board card and every
@@ -12,12 +12,19 @@
  * surfaces put it back one click away, and the founder reported two
  * disagreeing layouts on one screen.
  *
+ * CARDS ITSELF IS GONE, 2026-08-30, on a separate and later founder call:
+ * *"i do not want cards thing default should be list ... i only want to see
+ * list and board!"* AgentCards.tsx and the "cards" layout value are deleted;
+ * List is now the default. `agentCardReach` (agent-card-face.ts) is
+ * untouched and still the ONE reach rule both remaining layouts draw — that
+ * module was never the Cards grid itself, only the shared face logic every
+ * rendering reads, so deleting the grid must not touch it.
+ *
  * So the assertions below are in two halves. The behavioural half pins the
  * vocabulary and the maths. The structural half pins the things that made
  * this regress: the lifecycle verb is GONE rather than merely unused, both
- * renderings read the shared reach rule, the three components are IMPORTED
- * AND RENDERED rather than importable-and-dead, and the card grid is still
- * the default.
+ * renderings read the shared reach rule, the two components are IMPORTED AND
+ * RENDERED rather than importable-and-dead, and List is still the default.
  *
  * Run: npx tsx lib/workspace/fleet/agent-view-options.test.ts
  */
@@ -95,18 +102,22 @@ function agent(over: Record<string, unknown> = {}): any {
   };
 }
 
-// ── THREE LAYOUTS, AND CARDS LEADS ────────────────────────────────────────
+// ── TWO LAYOUTS, AND LIST LEADS (Cards removed 2026-08-30) ────────────────
 assert(
-  AGENT_LAYOUT_OPTIONS.map((o) => o.value).join(",") === "cards,board,list",
-  `exactly three layouts, cards first — got ${AGENT_LAYOUT_OPTIONS.map((o) => o.value).join(",")}`,
+  AGENT_LAYOUT_OPTIONS.map((o) => o.value).join(",") === "list,board",
+  `exactly two layouts, list first — got ${AGENT_LAYOUT_OPTIONS.map((o) => o.value).join(",")}`,
 );
 assert(
-  AGENT_LAYOUT_OPTIONS.map((o) => o.label).join("|") === "Cards|Board|List",
+  AGENT_LAYOUT_OPTIONS.map((o) => o.label).join("|") === "List|Board",
   "each carries the human word, not the token",
 );
 assert(
-  DEFAULT_AGENT_VIEW_OPTIONS.layout === "cards",
-  "the DEFAULT is the settled card grid — a reader who never opens the popover sees no change",
+  !AGENT_LAYOUT_OPTIONS.some((o) => (o.value as string) === "cards"),
+  `cards is not a legal layout any more — the founder's own words: "i only want to see list and board"`,
+);
+assert(
+  DEFAULT_AGENT_VIEW_OPTIONS.layout === "list",
+  "the DEFAULT is List — a reader who never opens the popover lands on the row list, not a grid",
 );
 assert(
   DEFAULT_AGENT_VIEW_OPTIONS.grouping === "none",
@@ -131,12 +142,11 @@ for (const option of AGENT_LAYOUT_OPTIONS) {
   );
 }
 
-// ── DISPLAY PROPERTIES: none on a card face ───────────────────────────────
-assert(
-  displayPropertiesFor("cards").length === 0,
-  "a card face is two facts and refuses a third — there is nothing on it to toggle",
-);
-for (const surface of ["board", "list"] as const) {
+// ── DISPLAY PROPERTIES: both surfaces offer the same six ──────────────────
+// Cards used to be the exception here — a card face is two facts and refuses
+// a third, so it offered nothing to toggle. With Cards gone, List and Board
+// are the whole vocabulary and both get every field.
+for (const surface of AGENT_LAYOUT_OPTIONS.map((o) => o.value)) {
   assert(
     displayPropertiesFor(surface).map((p) => p.key).join(",") ===
       "brain,placement,channels,lastActive,cost,status",
@@ -175,10 +185,10 @@ assert(
   !agentViewStorageKey("ws1").includes("task-view"),
   "…in its OWN namespace, never Tasks' — the two features can never clobber each other",
 );
-store.set("fleet:agent-view:v1:ws1", JSON.stringify({ layout: "list", grouping: "none" }));
+store.set("fleet:agent-view:v1:ws1", JSON.stringify({ layout: "board", grouping: "none" }));
 assert(
-  readAgentViewOptions("ws1").layout === "cards",
-  "a v1 blob (where 'list' meant the card grid) is not read under v2 — the default stands",
+  readAgentViewOptions("ws1").layout === "list",
+  "a v1 blob lives under a DIFFERENT key entirely and is never read — the v2 default (List) stands, not whatever the v1 blob says (if it were read, this would come back 'board')",
 );
 
 writeAgentViewOptions("ws1", opts({ layout: "board", grouping: "project", ordering: "cost", direction: "asc" }));
@@ -187,15 +197,26 @@ assert(
   roundTripped.layout === "board" && roundTripped.grouping === "project" && roundTripped.ordering === "cost" && roundTripped.direction === "asc",
   "a real choice round-trips through localStorage",
 );
+// THE REAL-WORLD CASE THIS FIX EXISTS FOR: an existing reader's blob still
+// says `layout: "cards"` — the value this popover offered, and defaulted to,
+// until 2026-08-30. It must coerce to the new default rather than crashing
+// or rendering nothing (oneOf's allow-list no longer contains it).
+store.set("fleet:agent-view:v2:ws1", JSON.stringify({ layout: "cards", grouping: "none", ordering: "last_active" }));
+const stale = readAgentViewOptions("ws1");
+assert(
+  stale.layout === "list",
+  `a stored "cards" (no longer a legal value) coerces to the new default (List), got "${stale.layout}"`,
+);
+
 store.set("fleet:agent-view:v2:ws1", JSON.stringify({ layout: "kanban", grouping: "moon", ordering: "vibes" }));
 const bogus = readAgentViewOptions("ws1");
 assert(
-  bogus.layout === "cards" && bogus.grouping === "none" && bogus.ordering === DEFAULT_AGENT_VIEW_OPTIONS.ordering,
-  "a value outside the vocabulary falls back to the default rather than being trusted",
+  bogus.layout === "list" && bogus.grouping === "none" && bogus.ordering === DEFAULT_AGENT_VIEW_OPTIONS.ordering,
+  "any other value outside the vocabulary falls back to the default rather than being trusted",
 );
 store.set("fleet:agent-view:v2:ws1", "{not json");
-assert(readAgentViewOptions("ws1").layout === "cards", "unparsable storage is the default, never a throw");
-assert(readAgentViewOptions("").layout === "cards", "no workspace id is the default, and writes nothing");
+assert(readAgentViewOptions("ws1").layout === "list", "unparsable storage is the default, never a throw");
+assert(readAgentViewOptions("").layout === "list", "no workspace id is the default, and writes nothing");
 
 // ── GROUPING ──────────────────────────────────────────────────────────────
 const three = [agent(), agent({ agent_id: "b", label: "Beta" }), agent({ agent_id: "c", label: "Gamma" })];
@@ -266,10 +287,10 @@ assert(
 assert(orderDirectionLabel("cost", "desc") === "Highest first", "the direction toggle says what it DOES, not 'desc'");
 assert(orderDirectionLabel("name", "asc") === "A to Z", "…in the reader's words for that key");
 
-// ── ONE STATUS, THREE SURFACES ────────────────────────────────────────────
-// The claim the Board/List/cards trio rests on, asserted rather than
-// commented: agentDisplayStatus and the card face agree, so an agent cannot
-// read "Working" on one layout and "Ready" one click away.
+// ── ONE STATUS, EVERY SURFACE ──────────────────────────────────────────────
+// The claim the Board/List pair rests on, asserted rather than commented:
+// agentDisplayStatus and the card face agree, so an agent cannot read
+// "Working" on one layout and "Ready" one click away.
 const activeTask = [{ id: "t1", status: "in_progress", assignee_agent_id: "ainstall_a" }];
 for (const [label, a, tasks] of [
   ["a ready agent holding an in-progress task", agent(), activeTask],
@@ -338,30 +359,39 @@ assert(
 const AGENTS_DIR = new URL("../../../app/(account)/w/[workspaceId]/agents/", import.meta.url);
 const pageSource = readFileSync(new URL("page.tsx", AGENTS_DIR), "utf8");
 assert(pageSource.length > 500, "CANARY: the Agents page source was actually read");
-for (const component of ["AgentCards", "AgentsBoard", "AgentsGroupedList", "AgentViewOptions"] as const) {
+assert(
+  !existsSync(new URL("./AgentCards.tsx", import.meta.url)),
+  "AgentCards.tsx is DELETED, not merely unimported — an importable-and-dead component is how a rejected layout comes back",
+);
+assert(
+  !pageSource.includes('from "@/lib/workspace/fleet/AgentCards"') && !/<AgentCards\b/.test(pageSource),
+  "…and the page no longer imports or renders it (a historical mention in a comment explaining the deletion is fine)",
+);
+for (const component of ["AgentsBoard", "AgentsGroupedList", "AgentViewOptions"] as const) {
   assert(
     new RegExp(`<${component}\\b`).test(pageSource),
     `the page RENDERS ${component} — built-and-never-wired is this codebase's most common defect`,
   );
 }
 assert(
-  /viewOptions\.layout === "board"/.test(pageSource) && /viewOptions\.layout === "list"/.test(pageSource),
-  "…and branches on the persisted layout rather than a second opinion grown on the page",
+  /viewOptions\.layout === "board"/.test(pageSource),
+  "…and branches on the persisted layout (Board) rather than a second opinion grown on the page",
+);
+assert(!/layout === "cards"/.test(pageSource), "…and carries no branch for the deleted cards layout");
+assert(
+  !/viewOptions\.layout === "list"/.test(pageSource),
+  "List has no explicit condition of its own — it is the unconditional fall-through, the exact slot Cards used to occupy as the old default",
 );
 assert(
-  /query=\{query\}/.test(pageSource),
-  "ONE search serves all three layouts — a filter that exists on one view and not the others is a control that vanishes when you switch",
-);
-assert(
-  !/const \[query, setQuery\]/.test(read("./AgentCards.tsx")),
-  "…so the grid no longer owns its own query state",
+  /value=\{query\}/.test(pageSource) && (pageSource.match(/value=\{query\}/g) || []).length === 1,
+  "ONE search input, drawn once at the page level rather than once per layout — a filter that exists on one view and not the other is a control that vanishes when you switch",
 );
 // "nothing matched your filter" and "there is nothing here" are different
 // facts. Both AgentsBoard and AgentsGroupedList return null on an empty list,
 // so without this branch a query that matches nothing renders a blank pane.
 assert(
   /No agents match/.test(pageSource) && /listAgents\.length === 0/.test(pageSource),
-  "a query that matches nothing says so on EVERY layout, not just the card grid",
+  "a query that matches nothing says so on every layout",
 );
 
 // ── STRUCTURAL: the deleted toolbar wrapper stays deleted ────────────────
@@ -388,6 +418,14 @@ assert(
 assert(
   !/\.fleet-content-toolbar/.test(cardsCss),
   "…and is NOT .fleet-content-toolbar, which carries its own 32px padding and would double .fleet-content's",
+);
+assert(
+  !/\.fleet-agent-card-grid\s*\{/.test(cardsCss) && !/\.fleet-agent-card\s*\{/.test(cardsCss),
+  "the deleted grid's own face rules (.fleet-agent-card-grid, .fleet-agent-card) are gone from this file — only the toolbar/search/empty-state rules List and Board still use remain",
+);
+assert(
+  pageSource.includes("agent-cards.css"),
+  "the page imports this stylesheet DIRECTLY now that AgentCards.tsx (its old importer) is deleted — otherwise the toolbar/search/empty-state rules never load at all",
 );
 
 console.log(`\n${passed} passed, ${failed} failed`);

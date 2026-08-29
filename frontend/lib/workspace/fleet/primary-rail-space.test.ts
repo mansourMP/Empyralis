@@ -292,7 +292,8 @@ assert(!/workspace-agents/.test(railSource), "PrimaryRail no longer references a
 assert(!/workspaceAgentsSpaceLinks/.test(railSource), "PrimaryRail no longer renders a workspace-agents pick-list");
 
 // The picker lives in the content area instead — and as of fix/agents-surface
-// it is the AGENTS THEMSELVES, as cards, rather than a persistent column
+// it is the AGENTS THEMSELVES (as a row list, by default since 2026-08-30;
+// cards was the original shape and is gone) rather than a persistent column
 // beside a pane. That column was deleted for two independent reasons, either
 // of which alone would be enough: it existed to sit beside a CHAT (which left
 // the platform entirely), and with the rail already offering "Agents" it was a
@@ -314,7 +315,11 @@ assert(
   "no agents layout re-wraps the agent's own page in a second picker column",
 );
 assert(
-  agentsPageSource.includes('from "@/lib/workspace/fleet/AgentCards"'),
+  !agentsPageSource.includes('from "@/lib/workspace/fleet/AgentCards"') && !existsSync(new URL("./AgentCards.tsx", import.meta.url)),
+  "AgentCards.tsx (the deleted Cards layout) is gone and the page carries no import of it",
+);
+assert(
+  agentsPageSource.includes('from "@/lib/workspace/fleet/AgentsGroupedList"'),
   "the workspace Agents index shows the agents in the content area — not a prompt to pick from a list that is elsewhere",
 );
 assert(
@@ -335,8 +340,9 @@ for (const component of ["AgentsBoard", "AgentsGroupedList", "AgentViewOptions"]
     `…and RENDERS it, rather than importing it and never reaching the branch`,
   );
 }
-// The default must still be the card grid. A layout switch that quietly moved
-// everyone off the settled surface would satisfy every assertion above.
+// The default must still be List (Cards is gone, 2026-08-30). A layout
+// switch that quietly moved everyone off the settled surface would satisfy
+// every assertion above.
 assert(
   /DEFAULT_AGENT_VIEW_OPTIONS/.test(agentsPageSource) && /readAgentViewOptions\s*\(/.test(agentsPageSource),
   "the layout comes from the shared, persisted vocabulary — not a second opinion grown on the page",

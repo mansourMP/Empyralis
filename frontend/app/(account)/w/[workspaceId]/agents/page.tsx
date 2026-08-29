@@ -16,7 +16,6 @@ import { deriveAgentStatus, useWorkspaceGateways } from "@/lib/workspace/fleet/g
 import { breadcrumbCount, findSageAgent } from "@/lib/workspace/fleet/fleet-presentation";
 import { quickCreateAgentChatPath } from "@/lib/workspace/fleet/agent-quick-create";
 import { AgentCreateCard } from "@/lib/workspace/fleet/AgentCreateCard";
-import { AgentCards, AgentCardsSkeleton } from "@/lib/workspace/fleet/AgentCards";
 import { AgentsBoard } from "@/lib/workspace/fleet/AgentsBoard";
 import { AgentsGroupedList } from "@/lib/workspace/fleet/AgentsGroupedList";
 import { AgentViewOptions } from "@/lib/workspace/fleet/AgentViewOptions";
@@ -35,6 +34,12 @@ import { HeaderAction, useBreadcrumbBadge } from "@/lib/workspace/fleet/Breadcru
 import { planAgentCountShape } from "@/lib/workspace/fleet/agent-count-shape";
 import { shouldRedirectToSoloAgent } from "@/lib/workspace/fleet/agent-solo-redirect";
 import { createButtonClass } from "@/lib/workspace/fleet/create-accent";
+// AgentCards.tsx (the Cards layout) is DELETED, 2026-08-30 — this page was
+// its only renderer, and this stylesheet was its only importer. It still
+// holds the toolbar/search/empty-state rules BOTH remaining layouts use
+// (agent-cards.css's own header explains why the file kept its old name),
+// so importing it moved here rather than disappearing with the component.
+import "../../../../../lib/workspace/fleet/agent-cards.css";
 
 /**
  * The workspace Agents surface.
@@ -69,9 +74,10 @@ import { createButtonClass } from "@/lib/workspace/fleet/create-accent";
  * The count-decided shapes are unchanged and still come from
  * planAgentCountShape, never a second rule: 0 real agents -> FirstAgentEmpty,
  * exactly 1 -> straight into that agent (a grid of one is worse than no grid,
- * the same call this codebase makes for a table of one), 2+ -> the grid.
+ * the same call this codebase makes for a table of one), 2+ -> this surface
+ * (List by default).
  *
- * VIEW OPTIONS — CARDS · BOARD · LIST (2026-08-29, on the founder's own ask).
+ * VIEW OPTIONS — LIST · BOARD (wired 2026-08-29; Cards removed 2026-08-30).
  * *"inside this projects I have this thing that shows board and list,
  * ordering, display properties etcetera. But in agents I had it as well, but
  * you just removed it... There should be also two different user interfaces —
@@ -80,47 +86,52 @@ import { createButtonClass } from "@/lib/workspace/fleet/create-accent";
  * persists per workspace under its own `fleet:agent-view:*` key, never
  * touching Tasks' `fleet:task-view:*`.
  *
- * THE CARD GRID IS STILL THE DEFAULT and is a REAL layout value, not the
- * absence of one. Board and List are somewhere you switch to and can switch
- * back from. That is the correction to how this shipped in 78e3eabd: it
- * spelled the default as `layout: "list", grouping: "none"`, which was
- * accurate when that branch rendered the flat table and became a lie the day
- * it rendered cards — the popover's "List" chip lit up over a grid.
+ * LIST IS THE DEFAULT, AND IT IS A REAL LAYOUT VALUE, not the absence of one
+ * — the discipline the deleted Cards layout established, which List
+ * inherits. A card grid (AgentCards.tsx) briefly WAS this default, on the
+ * founder's own ask (2026-08-22 -> 2026-08-29). It is DELETED outright,
+ * 2026-08-30, on a later and more specific one: *"i do not want cards thing
+ * default should be list ... i only want to see list and board!"* The
+ * component, its `"cards"` layout value, and the CSS rules only it used are
+ * gone. The shared face logic every rendering still reads —
+ * agent-card-face.ts's `agentCardReach` and `planAgentCards` — is untouched:
+ * it was never the grid itself, only what fed it, and Board/List have always
+ * read it directly (see `listAgents` below).
  *
- * IT WAS UNWIRED ONCE (MAN-370, 2026-08-28) AND THE REASON WAS REAL: both
- * new renderings drew `agentActivityPreviewText`, the
- * "Created"/"Configured" lifecycle-verb line that "THE AGENTS SURFACE IS
- * CARDS" (CLAUDE.md, 2026-08-22) records the founder rejecting live. A
- * column of "Created" is true of every agent that has ever existed and
- * therefore says nothing, and putting it back one click from the grid built
- * to replace it is what produced his report of two disagreeing layouts.
- * Fixed at the source rather than by hiding the views: both now render
+ * IT WAS UNWIRED ONCE BEFORE THIS (MAN-370, 2026-08-28) AND THE REASON WAS
+ * REAL: both Board and List drew `agentActivityPreviewText`, the
+ * "Created"/"Configured" lifecycle-verb line the card grid was built to
+ * replace. A column of "Created" is true of every agent that has ever
+ * existed and therefore says nothing, and putting it back one click from the
+ * grid was what produced the founder's report of two disagreeing layouts.
+ * Fixed at the source rather than by hiding the views: both render
  * agent-card-face.ts's own REACH line (the task it is on > tasks waiting >
  * where it answers > neither), and `agentActivityPreviewText` is DELETED so
- * it cannot be reached for again. The three renderings therefore cannot
- * disagree about any agent — they share one status vocabulary
- * (agentDisplayStatus) and one reach rule.
+ * it cannot be reached for again. That guard survives the Cards removal
+ * unchanged — List and Board still cannot disagree about any agent, sharing
+ * one status vocabulary (agentDisplayStatus) and one reach rule.
  *
  * WHAT THIS RESTORATION DELIBERATELY DID NOT DO is revert 69a01d81. Since
  * that commit this page gained `.fleet-content--cards` (the 1560px cap that
  * closed a measured 354px gap between the grid and its own "+ New agent"
- * button, 3 columns -> 4), lost a doubled page shell that was stacking padding
- * and nesting a second scrollbar, and dropped the amber from a reach line 25
- * of 40 cards carried. All of that is intact; the view options are wired on
- * top of it.
+ * button) — List keeps that exact class/cap now that it is the default,
+ * since the gap it closed was a shell-width problem, not a Cards-specific
+ * one — lost a doubled page shell that was stacking padding and nesting a
+ * second scrollbar, and dropped the amber from a reach line the majority of
+ * cards carried. All of that is intact.
  */
 /**
- * Board- and list-shaped skeletons, in those surfaces' OWN real classNames.
- * A saved layout persists across visits (readAgentViewOptions), so the very
- * first paint on a fresh load can already be Board or List — falling back to
- * the card-grid skeleton there means the page opens as a grid and reflows into
- * a different shape the instant the fetch resolves, which is the same small
- * lie AgentCardsSkeleton's own comment names for the default case.
+ * Board- and list-shaped skeletons, in those surfaces' OWN real classNames —
+ * the only two shapes now that AgentCardsSkeleton (and the grid it stood in
+ * for) is deleted with AgentCards.tsx. A saved layout persists across visits
+ * (readAgentViewOptions), so the very first paint on a fresh load can already
+ * be Board — falling back to the List skeleton there would mean the page
+ * opens as a list and reflows into columns the instant the fetch resolves,
+ * the same small lie a wrong-shaped skeleton always is.
  */
 const SHELL_MODIFIER: Record<AgentViewOptionsState["layout"], string> = {
-  cards: "fleet-content--cards",
-  board: "fleet-content--agent-board",
   list: "fleet-content--cards",
+  board: "fleet-content--agent-board",
 };
 
 function AgentsBoardSkeleton() {
@@ -216,10 +227,10 @@ export default function AgentsPage() {
     [workspaceId],
   );
 
-  // ONE search, shared by all three layouts. It used to live inside
-  // AgentCards, which made it a filter that vanished the moment you switched
-  // view — and a control that exists on one layout and not the others is the
-  // same defect as a control that does nothing.
+  // ONE search, shared by both layouts. It used to live inside AgentCards
+  // (the deleted card grid), which made it a filter that vanished the moment
+  // you switched view — and a control that exists on one layout and not the
+  // other is the same defect as a control that does nothing.
   const [query, setQuery] = useState("");
 
   // Bucketed ONCE for every layout — see groupTasksByAgent. Board and List
@@ -257,19 +268,20 @@ export default function AgentsPage() {
 
   const projectById = useMemo(() => new Map<string, FleetProject>(projects.map((p) => [p.id, p])), [projects]);
 
-  // Board and List get the SAME filtered set the card grid would show, run
-  // through planAgentCards — one query rule for the whole page, and it is the
-  // shared one (agent-card-face.ts's matchesAgentCardQuery, which matches the
-  // name and the reach line, i.e. exactly what these surfaces now draw).
-  // Computed only for those two layouts; AgentCards runs the identical call
-  // on the identical inputs for itself, so the two can never disagree.
+  // Board and List — the only two layouts now — both run through
+  // planAgentCards for the filtered set: one query rule for the whole page,
+  // and it is the shared one (agent-card-face.ts's matchesAgentCardQuery,
+  // which matches the name and the reach line, i.e. exactly what these
+  // surfaces draw). The rank planAgentCards also computes is discarded here
+  // on purpose — see sortAgentsForView's own header — in favour of the
+  // reader's own Ordering choice, which is what the deleted Cards grid never
+  // offered.
   const listAgents = useMemo(() => {
-    if (viewOptions.layout === "cards") return [];
     const matching = planAgentCards(agents, (a) => deriveAgentStatus(a, gateways), tasksByAgent, query).map(
       (c) => c.agent,
     );
     return sortAgentsForView(matching, viewOptions.ordering, viewOptions.direction, cost);
-  }, [agents, gateways, tasksByAgent, query, viewOptions.layout, viewOptions.ordering, viewOptions.direction, cost]);
+  }, [agents, gateways, tasksByAgent, query, viewOptions.ordering, viewOptions.direction, cost]);
 
   // Board and List navigate the same way a card's own <Link> does
   // (rememberLastViewedAgent + the workspace-scoped agent route, no project id
@@ -431,14 +443,16 @@ export default function AgentsPage() {
     // action floated 354px right of everything it acts on.
     //
     // THE PAGE HAS ONE WIDTH, and only the Board is shaped differently:
-    //   cards + list  --cards' 1560px ceiling. Capping the list at the
-    //                 narrower --content-max-wide instead was measured and
-    //                 rejected — the gear jumped 290px sideways on a layout
-    //                 switch and 290px of content area sat empty beside every
-    //                 row (see that rule's own comment).
-    //   board         full-bleed and full-height: the columns scroll, the page
-    //                 does not, or a tall column pushes its own heading off
-    //                 the top of the screen.
+    //   list   --cards' 1560px ceiling (the class name outlived the layout it
+    //          was named for — Cards is gone, List inherited the class along
+    //          with the problem it solved). Capping the list at the narrower
+    //          --content-max-wide instead was measured and rejected — the
+    //          gear jumped 290px sideways on a layout switch and 290px of
+    //          content area sat empty beside every row (see that rule's own
+    //          comment).
+    //   board  full-bleed and full-height: the columns scroll, the page does
+    //          not, or a tall column pushes its own heading off the top of
+    //          the screen.
     <main className={`fleet-content fleet-content--wide ${SHELL_MODIFIER[viewOptions.layout]}`}>
       {/* WHO OWNS THE VIEW'S ONE ACCENT FILL is decided by create-accent.ts,
           not here — three controls can create an agent and up to two are on
@@ -526,14 +540,9 @@ export default function AgentsPage() {
         // branches below switch on: a loading state whose shape is not the
         // shape that arrives is its own small lie, and it reflows the whole
         // pane the moment real data lands. A saved layout can already be
-        // Board or List on the very first paint.
-        viewOptions.layout === "board" ? (
-          <AgentsBoardSkeleton />
-        ) : viewOptions.layout === "list" ? (
-          <AgentsListSkeleton />
-        ) : (
-          <AgentCardsSkeleton cards={6} />
-        )
+        // Board on the very first paint; List (the default) is everything
+        // else, including a reader who never touched the popover.
+        viewOptions.layout === "board" ? <AgentsBoardSkeleton /> : <AgentsListSkeleton />
       ) : error && agents.length === 0 ? (
         <FleetSurfaceError title="Couldn’t load agents" message={error} onRetry={refresh} />
       ) : agents.length === 0 ? (
@@ -543,12 +552,13 @@ export default function AgentsPage() {
           onCreate={openCreateCard}
           createCardOpen={cardOpen}
         />
-      ) : listAgents.length === 0 && viewOptions.layout !== "cards" ? (
+      ) : listAgents.length === 0 ? (
         // A QUERY THAT MATCHED NOTHING IS NOT AN EMPTY WORKSPACE, and both of
-        // these components return null on an empty list — a blank pane with no
-        // sentence in it. The card grid already says this (AgentCards' own
-        // .fleet-agent-card-none); Board and List say it in the same words, on
-        // the same class, so the three never disagree about what happened.
+        // these components return null on an empty list — a blank pane with
+        // no sentence in it. Board and List say so in the same words, on the
+        // same class (.fleet-agent-card-none, kept in agent-cards.css after
+        // the deleted card grid's own face rules were trimmed out of it), so
+        // the two never disagree about what happened.
         <div className="fleet-agent-card-none">No agents match “{query.trim()}”.</div>
       ) : viewOptions.layout === "board" ? (
         <AgentsBoard
@@ -559,7 +569,13 @@ export default function AgentsPage() {
           display={viewOptions.display}
           onSelect={goToAgent}
         />
-      ) : viewOptions.layout === "list" ? (
+      ) : (
+        // List is the only other value AgentLayout can hold — see
+        // agent-view-options.ts — so this fall-through is exhaustive, not a
+        // guess at what's left over. It is also DEFAULT_AGENT_VIEW_OPTIONS'
+        // own layout, so everyone who never opens the popover sees exactly
+        // this: the row list, ungrouped, agent-card-face.ts's own reach line
+        // on every row.
         <AgentsGroupedList
           workspaceId={workspaceId}
           agents={listAgents}
@@ -571,10 +587,6 @@ export default function AgentsPage() {
           display={viewOptions.display}
           onSelect={goToAgent}
         />
-      ) : (
-        // The default, and unchanged: everyone who never opens the popover
-        // sees exactly the grid agent-card-face.ts decides.
-        <AgentCards workspaceId={workspaceId} agents={agents} tasks={tasks} gateways={gateways} query={query} />
       )}
 
       {cardOpen && (

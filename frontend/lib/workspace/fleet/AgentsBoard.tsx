@@ -99,10 +99,10 @@ export function AgentsBoard({
   gateways: FleetGateway[];
   costByAgent: Map<string, number>;
   /** Per-agent tasks (agent-card-face.ts's groupTasksByAgent, computed once
-   *  at the page level off the same shared workspace-tasks fetch AgentCards
-   *  already uses) — needed so agentStatusGroup/agentDisplayStatus can fold
-   *  an in-progress task into "Working" the same way the card grid and
-   *  PrimaryRail's footer pulse already do. Without this, an agent with a
+   *  at the page level off the same shared workspace-tasks fetch this whole
+   *  page already uses) — needed so agentStatusGroup/agentDisplayStatus can
+   *  fold an in-progress task into "Working" the same way agent-card-face.ts
+   *  and PrimaryRail's footer pulse already do. Without this, an agent with a
    *  real in-progress task read "Ready" on its own Board card while sitting
    *  in a column literally labelled "Working" one row up — the exact "two
    *  surfaces disagree" bug CLAUDE.md already documents fixing elsewhere. Also
