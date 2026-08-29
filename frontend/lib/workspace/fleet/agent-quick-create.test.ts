@@ -10,6 +10,7 @@
  */
 
 import type { FleetProject } from "./fleet-data";
+import { AGENT_CREATE_JOBS } from "./agent-create-job";
 import {
   buildQuickCreateAgentPayload,
   quickCreateAgentChatPath,
@@ -74,8 +75,18 @@ assert(
 // the "built, tested, never wired" defect this codebase has most of.
 const supportPayload = buildQuickCreateAgentPayload("proj_123", "", "", null, "support");
 assert(supportPayload.purpose_preset === "customer_facing", "a customer-facing job posts customer_facing");
-const researchPayload = buildQuickCreateAgentPayload("proj_123", "", "", null, "research");
-assert(researchPayload.capability_preset === "knowledge", "the knowledge job posts capability_preset knowledge");
+// ...and the capability preset is the one thing a job may NOT change. Asserted
+// HERE, at the payload that actually goes over the wire, and not only in
+// agent-create-job.ts's own test -- this is the boundary where a weaker agent
+// would really be requested. Founder, 2026-08-29: "fundamentally all agents
+// must be the same ... underneath every other agent is going to be the same."
+for (const job of AGENT_CREATE_JOBS) {
+  const jobPayload = buildQuickCreateAgentPayload("proj_123", "", "", null, job.id);
+  assert(
+    jobPayload.capability_preset === "standard",
+    `the "${job.id}" job posts capability_preset standard -- a job is a label, never a weaker agent`,
+  );
+}
 assert(
   buildQuickCreateAgentPayload("proj_123", "", "", null, "nonsense").purpose_preset === "internal_assistant",
   "an unrecognised job id falls back to General rather than posting nothing",

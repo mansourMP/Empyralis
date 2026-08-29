@@ -19,8 +19,8 @@
  *     operator          ─▶ the workspace's OWN agent. never offered here.
  *
  *   capability_preset   capability_presets.py  seeds hardware/model/context
- *     standard          ─▶ the normal baseline    <-- was hardcoded, forever
- *     knowledge         ─▶ hardware "none", POLICY-LOCKED
+ *     standard          ─▶ the normal baseline. THE ONLY ONE A JOB MAY USE.
+ *     knowledge         ─▶ hardware "none", POLICY-LOCKED. never offered here.
  *     operator          ─▶ reserved, `is_creatable` refuses it
  * ```
  *
@@ -37,33 +37,38 @@
  * not decoration — `purpose_preset` seeds instructions all by itself, so a
  * job that seeds better ones is doing that system's own job better.
  *
- * ── WHY THE PICKER SITS BELOW PLACEMENT ──────────────────────────────────
- * `knowledge` policy-locks hardware to "none", and `fleet_configure_agent`
- * REFUSES a hardware patch on such an install ("knowledge_agent_hardware_
- * locked", fleet_tools.py). So on a machine placement a knowledge job commits
- * an agent and then fails the placement PATCH — "created, but where it runs
- * couldn't be saved". That is a dead control that bills you for the privilege.
+ * ── A JOB MAY NOT MAKE AN AGENT WEAKER ───────────────────────────────────
+ * Every job carries `standard`, so every agent this picker creates is the
+ * same agent underneath and the job is a label on the front of it. That is
+ * the founder ruling quoted at `resolveSelectedAgentCreateJob`, and it is
+ * enforced by an invariant test rather than by prose here.
  *
- * It is not fixed by hiding the job somewhere clever. It is fixed by ASKING IN
- * THE ORDER THE DEPENDENCY RUNS, which is the identical argument that already
- * put placement first in the sequence:
+ * It used to be otherwise. "Research and answers" carried `knowledge`, which
+ * policy-locks hardware to "none" — and `fleet_configure_agent` then REFUSES
+ * any hardware patch on that install forever after. Two things fell out of
+ * it. A machine placement plus that job committed an agent and then failed
+ * its own placement PATCH ("created, but where it runs couldn't be saved"),
+ * so the picker needed a placement-derived gate to hide the job. And anybody
+ * who picked it on cloud got an agent that could never be given a machine,
+ * with no way back except deleting it. The gate fixed the first and could
+ * not touch the second, because the second was not a bug in the gate — it
+ * was the preset.
+ *
+ * Both are gone with the preset. The step ORDER is unchanged:
  *
  * ```
  *   name             what it is called
  *      │
- *   where it runs    ─▶ decides which jobs can honestly be offered
- *      │
- *   what it is for   ─▶ decides the two presets, and seeds the words
+ *   where it runs    ─▶ still first: step 2 cannot honestly offer
+ *      │                subscription/local brains without it
+ *   what it is for   ─▶ decides the purpose preset, and seeds the words
  *      │
  *   what it does     the words, editable
  * ```
  *
- * A picker whose options can be invalidated by a control BELOW it is the
- * dishonesty the placement-first rule exists to prevent; putting the job
- * above placement would recreate it one screen down. `agentCreateJobsForPlacement`
- * is the gate, and it derives from the capability preset rather than a
- * hand-set per-job flag — so a seventh job built on `knowledge` is covered on
- * the day it is written, not on the day someone remembers.
+ * — but placement no longer constrains this step at all, so the job could sit
+ * anywhere below the name. It stays here because moving a shipped step for no
+ * behavioural reason costs more than it returns.
  *
  * ── THE SEED NEVER OVERWRITES A PERSON'S OWN WORDS ───────────────────────
  * `planAgentCreateJobInstructions` fills the field only while it is still
@@ -73,10 +78,13 @@
  * line: silently keeping what someone typed needs neither.
  */
 
-/** Every capability preset a normal create may request —
- *  `capability_presets.CREATABLE_CAPABILITY_PRESETS`. "operator" is reserved
- *  (Sage-class) and `is_creatable` refuses it, so it is absent here. */
-export type AgentCreateCapabilityPreset = "standard" | "knowledge";
+/** The one capability preset this picker may request.
+ *
+ *  `capability_presets.CREATABLE_CAPABILITY_PRESETS` also contains
+ *  "knowledge", and the backend still honours it — but no JOB may select it
+ *  (see this module's header). "operator" is reserved (`is_creatable`
+ *  refuses it) and was never here. */
+export type AgentCreateCapabilityPreset = "standard";
 
 /** The purpose presets this surface offers — `fleet_tools._VALID_PURPOSE_PRESETS`
  *  minus "operator", which names the workspace's OWN coordinating agent and is
@@ -172,13 +180,9 @@ export const AGENT_CREATE_JOBS: readonly AgentCreateJob[] = [
   {
     id: "research",
     label: "Research and answers",
-    body: "Reads what you give it and answers from it. Never gets a shell.",
+    body: "Reads what you give it and answers from it, citing the source.",
     purposePreset: "internal_assistant",
-    // The one job that is not "standard", and the reason the picker is gated
-    // on placement at all. `knowledge` policy-locks hardware to "none" — a
-    // real, enforced guarantee, not a default, so it is worth stating on the
-    // face as the second half of that one line.
-    capabilityPreset: "knowledge",
+    capabilityPreset: "standard",
     seedInstructions:
       "You read the documents and notes this team gives you and answer questions from " +
       "them. Cite which document an answer came from. When the material does not " +
@@ -213,53 +217,31 @@ export function resolveAgentCreateJob(id: string): AgentCreateJob {
 }
 
 /**
- * Whether this capability preset policy-locks hardware access to "none".
+ * Every job's capability preset, and there is only one.
  *
- * The LOCK ITSELF is the backend's — `capability_presets.CAPABILITY_PRESETS
- * [<id>]["hardware_locked"]`, enforced by `fleet_configure_agent`, which
- * refuses any `hardware_access != "none"` patch on such an install. This is a
- * genuine cross-language duplicate of one fact (a browser cannot ask Python),
- * so it is stated ONCE here and `agent-create-job.test.ts` reads the Python
- * source to prove the two agree — the expected set and the actual set from
- * different places, never one file confirming itself.
+ * Founder, 2026-08-29: *"fundamentally all agents must be the same. All
+ * agents, I mean — financial or marketing or whatever, underneath every
+ * other agent is going to be the same. The same capabilities, the same
+ * things… we are just making it like marketing agent or this or that just to
+ * make it easier for this specific person to see or to pick."*
+ *
+ * So a job is words, not a cage: it seeds instructions and skills, and it
+ * derives `audience` through `purpose_preset`. It may not hand somebody a
+ * structurally weaker agent, which is what `knowledge` did — hardware
+ * "none" and POLICY-LOCKED (unchangeable afterwards without a preset
+ * change), a cheap model tier, subagents off, an 8k context ceiling. Every
+ * one of those is a SETTING that Configure already owns and anyone may
+ * change; none of them is an identity welded on at creation.
+ *
+ * `agent-create-job.test.ts` asserts the invariant directly, which is why
+ * there is no longer a placement gate here: with no job able to lock
+ * hardware, nothing this picker emits can be invalidated by the placement
+ * above it, so the filter it used to need would be a guard against a state
+ * the type no longer permits. Adding a seventh job on any other preset
+ * fails that test with this paragraph's reason attached.
  */
-export function capabilityPresetLocksHardware(preset: AgentCreateCapabilityPreset): boolean {
-  return preset === "knowledge";
-}
-
-/**
- * The jobs that can honestly be created on this placement.
- *
- * A hardware-locked job on a machine placement is not a slower path or a
- * warning — it is an agent that commits and then fails its own placement
- * PATCH. So it is not offered, which is what "no dead controls" means when
- * the control would have taken your money first.
- *
- * `needsMachine` rather than a placement id, so this module never learns the
- * placement vocabulary: agent-create-placement.ts owns which buckets need a
- * box, and a fourth bucket added there needs no edit here.
- */
-export function agentCreateJobsForPlacement(needsMachine: boolean): readonly AgentCreateJob[] {
-  if (!needsMachine) return AGENT_CREATE_JOBS;
-  return AGENT_CREATE_JOBS.filter((j) => !capabilityPresetLocksHardware(j.capabilityPreset));
-}
-
-/** Whether this job survives the placement above it. */
-export function agentCreateJobAllowed(id: string, needsMachine: boolean): boolean {
-  return agentCreateJobsForPlacement(needsMachine).some((j) => j.id === resolveAgentCreateJob(id).id);
-}
-
-/**
- * The job that is actually selected, once the placement has had its say.
- *
- * A job the placement no longer allows falls back to General rather than
- * leaving a selection nobody can see — and General is the honest landing
- * spot, because it is the one job that narrows nothing. The person's typed
- * prose is NOT touched by this; see `planAgentCreateJobInstructions`.
- */
-export function resolveSelectedAgentCreateJob(id: string, needsMachine: boolean): AgentCreateJobId {
-  const job = resolveAgentCreateJob(id);
-  return agentCreateJobAllowed(job.id, needsMachine) ? job.id : AGENT_CREATE_DEFAULT_JOB;
+export function resolveSelectedAgentCreateJob(id: string): AgentCreateJobId {
+  return resolveAgentCreateJob(id).id;
 }
 
 /** The two preset fields a job contributes to the create request. Named for

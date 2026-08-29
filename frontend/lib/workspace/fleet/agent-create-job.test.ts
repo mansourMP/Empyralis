@@ -19,10 +19,7 @@ import path from "node:path";
 import {
   AGENT_CREATE_DEFAULT_JOB,
   AGENT_CREATE_JOBS,
-  agentCreateJobAllowed,
   agentCreateJobPresets,
-  agentCreateJobsForPlacement,
-  capabilityPresetLocksHardware,
   instructionsArePristine,
   planAgentCreateJobInstructions,
   resolveAgentCreateJob,
@@ -158,56 +155,63 @@ function backendPresetLocksHardware(presetId: string): boolean {
   return /"hardware_locked":\s*True/.test(block);
 }
 assert(backendPresetLocksHardware("knowledge"), "CANARY: the knowledge preset block is findable and still declares a lock");
-for (const presetId of backendCreatablePresets) {
-  assert(
-    capabilityPresetLocksHardware(presetId as "standard" | "knowledge") === backendPresetLocksHardware(presetId),
-    `capabilityPresetLocksHardware agrees with capability_presets.py for "${presetId}"`,
-  );
-}
-// And the enforcement that makes the lock matter is still there — without this
-// refusal the placement gate below would be protecting against nothing.
+// The backend lock is REAL and still enforced. That is precisely why no job
+// may carry the preset that trips it — see the invariant below.
 assert(
   /knowledge_agent_hardware_locked/.test(FLEET_TOOLS_PY),
   "fleet_configure_agent still refuses a hardware patch on a locked install",
 );
-
-// ── The placement gate ────────────────────────────────────────────────────
-
-const cloudJobs = agentCreateJobsForPlacement(false);
-const machineJobs = agentCreateJobsForPlacement(true);
-
-assert(cloudJobs.length === AGENT_CREATE_JOBS.length, "a cloud placement offers every job");
-assert(machineJobs.length < cloudJobs.length, "a machine placement offers fewer — the gate is not a no-op");
 assert(
-  machineJobs.every((j) => !capabilityPresetLocksHardware(j.capabilityPreset)),
-  "no hardware-locked job survives a machine placement",
-);
-assert(
-  cloudJobs.some((j) => capabilityPresetLocksHardware(j.capabilityPreset)),
-  "the hardware-locked job IS offered on cloud — the gate narrows, it does not delete the job",
-);
-assert(machineJobs.some((j) => j.id === "general"), "General survives every placement");
-assert(
-  agentCreateJobAllowed("research", false) && !agentCreateJobAllowed("research", true),
-  "the knowledge job is allowed on cloud and refused on a machine",
+  backendCreatablePresets.has("standard"),
+  "CANARY: capability_presets.py was read and still offers `standard` to a create",
 );
 
-// The gate is DERIVED, not a per-job flag: every job that locks hardware is
-// filtered, so a future seventh job built on `knowledge` is covered the day it
-// is written. Asserted by property rather than by naming "research".
+// ── THE INVARIANT: a job is a label, never a weaker agent ─────────────────
+// Founder, 2026-08-29: "fundamentally all agents must be the same … underneath
+// every other agent is going to be the same. The same capabilities, the same
+// things … we are just making it like marketing agent or this or that just to
+// make it easier for this specific person to see or to pick."
+//
+// A job may therefore differ in WORDS (seedInstructions), in AUDIENCE (via
+// purpose_preset) and in SKILLS (agent_job_skills.py) — never in capability.
+// If you are adding a job and this fails, you are about to hand somebody a
+// structurally weaker agent; put the difference in the prose or the skills.
+// The old `knowledge` job is what this exists to stop coming back: hardware
+// "none" and POLICY-LOCKED forever after, cheap model tier, subagents off, an
+// 8k context ceiling — every one of which Configure already owns as a setting
+// anybody can change.
+
 assert(
-  AGENT_CREATE_JOBS.filter((j) => capabilityPresetLocksHardware(j.capabilityPreset)).every(
-    (j) => !agentCreateJobAllowed(j.id, true),
-  ),
-  "EVERY hardware-locking job is gated, not just the one that exists today",
+  AGENT_CREATE_JOBS.every((j) => j.capabilityPreset === "standard"),
+  "EVERY job carries the standard capability preset — a job may not make an agent weaker",
+);
+assert(
+  !backendPresetLocksHardware("standard"),
+  "and `standard`, read from capability_presets.py itself, locks nothing",
+);
+// Read off the JOBS, not off the type: widening the type back out while every
+// job still says "standard" must not slip past by testing the type alone.
+assert(
+  new Set(AGENT_CREATE_JOBS.map((j) => j.capabilityPreset)).size === 1,
+  "there is exactly ONE capability preset across all jobs, so no job can drift",
 );
 
-// ── Falling back never strands a selection ────────────────────────────────
+// The jobs must still DIFFER where they are allowed to — otherwise the rule
+// above has quietly turned the picker into six identical cards.
+assert(
+  new Set(AGENT_CREATE_JOBS.map((j) => j.purposePreset)).size > 1,
+  "jobs still differ by audience — the invariant constrains capability, not purpose",
+);
+assert(
+  new Set(AGENT_CREATE_JOBS.map((j) => j.seedInstructions)).size === AGENT_CREATE_JOBS.length,
+  "every job still seeds DIFFERENT words — the picker did not collapse into one card",
+);
 
-assert(resolveSelectedAgentCreateJob("research", false) === "research", "a legal pick is kept");
-assert(resolveSelectedAgentCreateJob("research", true) === "general", "an illegal pick falls back to General, never to nothing");
-assert(resolveSelectedAgentCreateJob("support", true) === "support", "an unaffected pick survives a machine placement");
-assert(resolveSelectedAgentCreateJob("nonsense-id", false) === "general", "an unknown id resolves to General");
+// ── Resolving a selection never strands it ───────────────────────────────
+
+assert(resolveSelectedAgentCreateJob("research") === "research", "a real pick is kept");
+assert(resolveSelectedAgentCreateJob("support") === "support", "and so is another");
+assert(resolveSelectedAgentCreateJob("nonsense-id") === "general", "an unknown id resolves to General");
 assert(resolveAgentCreateJob("nonsense-id").id === "general", "resolve never throws and never returns undefined");
 
 // ── The seed never overwrites a person's own words ────────────────────────
@@ -255,8 +259,8 @@ const CARD_TSX = readRepoFile("frontend/lib/workspace/fleet/AgentCreateCard.tsx"
 const QUICK_CREATE_TS = readRepoFile("frontend/lib/workspace/fleet/agent-quick-create.ts");
 
 assert(CARD_TSX.includes("agent-create-job"), "CANARY: AgentCreateCard.tsx was read and imports the job module");
-assert(/agentCreateJobsForPlacement\(/.test(CARD_TSX), "the surface renders the PLACEMENT-FILTERED job list, not the raw one");
-assert(/resolveSelectedAgentCreateJob\(/.test(CARD_TSX), "the surface resolves the selection through the placement gate");
+assert(/AGENT_CREATE_JOBS/.test(CARD_TSX), "the surface renders the job list from the module, not a hand-written copy");
+assert(/resolveSelectedAgentCreateJob\(/.test(CARD_TSX), "the surface resolves the selection through the module, not by hand");
 assert(/planAgentCreateJobInstructions\(/.test(CARD_TSX), "the surface uses the pristine-only seed rule");
 assert(/agentCreateJobPresets\(/.test(CARD_TSX + QUICK_CREATE_TS), "the presets reach the create payload");
 

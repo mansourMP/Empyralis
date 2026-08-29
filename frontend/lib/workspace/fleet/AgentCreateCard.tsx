@@ -43,11 +43,11 @@
  * picker is those two systems given a screen; the rules are in
  * agent-create-job.ts and nothing new was added to the backend.
  *
- * It sits BETWEEN placement and the prose field, which is a dependency and
- * not a layout preference — the `knowledge` job policy-locks hardware, so on
- * a machine placement it is a control that commits an agent and then fails
- * its own placement PATCH. Asking in the order the dependency runs is the
- * same argument that put placement first in the whole sequence.
+ * It sits BETWEEN placement and the prose field. That used to be a hard
+ * dependency (the `knowledge` job policy-locked hardware and so could not be
+ * honestly offered on a machine placement); since 2026-08-29 no job carries
+ * that preset, every job is the same agent underneath, and the position is
+ * simply where the step already is.
  *
  * ── AND WHAT IT MUST NOT BRING BACK: the project question ────────────────
  * The deleted FleetCreateAgentWizard's Placement step carried a "Which
@@ -202,7 +202,6 @@ import {
   hardwareNodeLabel,
   hardwareNodeOnline,
   nodesForPlacement,
-  placementNeedsNode,
   planAgentCreatePlacement,
   type AgentCreatePlacement,
   type HardwareNodeLike,
@@ -220,7 +219,7 @@ import {
 } from "./agent-create-wizard";
 import {
   AGENT_CREATE_DEFAULT_JOB,
-  agentCreateJobsForPlacement,
+  AGENT_CREATE_JOBS,
   planAgentCreateJobInstructions,
   resolveSelectedAgentCreateJob,
 } from "./agent-create-job";
@@ -562,23 +561,13 @@ export function AgentCreateCard({
     availableNodeCount: placementNodes.length,
   });
 
-  // ── The job, once the placement above it has had its say ────────────────
-  // `knowledge` policy-locks hardware to "none" and fleet_configure_agent
-  // REFUSES a hardware patch on such an install — so that job on a machine
-  // placement would commit an agent and then fail its own placement PATCH.
-  // It is not offered there. See agent-create-job.ts's header for why this
-  // is the same argument that already put placement first in the sequence.
-  const placementNeedsMachine = placementNeedsNode(placement);
-  const jobOptions = useMemo(
-    () => agentCreateJobsForPlacement(placementNeedsMachine),
-    [placementNeedsMachine],
-  );
-  // Never render (or post) a selection the placement no longer allows. A
-  // dropped pick falls back to General — but the INSTRUCTIONS it seeded are
-  // deliberately left alone: those words are still perfectly good
-  // instructions, and quietly emptying a field because a control elsewhere
-  // moved is exactly the silent overwrite this surface must not do.
-  const selectedJobId = resolveSelectedAgentCreateJob(jobId, placementNeedsMachine);
+  // ── The job ─────────────────────────────────────────────────────────────
+  // Every job now carries the `standard` capability preset, so the placement
+  // above cannot invalidate any of them and this list never narrows. See
+  // agent-create-job.ts's header for the preset that used to make it narrow
+  // and why it no longer exists here.
+  const jobOptions = AGENT_CREATE_JOBS;
+  const selectedJobId = resolveSelectedAgentCreateJob(jobId);
   const pickJob = useCallback((nextId: string) => {
     setJobId(nextId);
     setInstructions((current) => planAgentCreateJobInstructions(current, nextId));
