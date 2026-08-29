@@ -212,7 +212,13 @@ def find_orphans(
 def _iter_corpus_files() -> list[Path]:
     files = []
     for p in ROOT.rglob("*.py"):
-        if any(part in EXCLUDED_DIR_NAMES for part in p.parts):
+        # RELATIVE to ROOT, never the absolute path. An agent worktree lives
+        # at <repo>/.claude/worktrees/<id>/, and ".claude" is excluded below —
+        # so matching absolute parts excluded every file in the repo and this
+        # scan found NOTHING. Its own canary caught that rather than reporting
+        # a clean pass on an empty corpus, but the guard was still dead for
+        # every agent working the way CLAUDE.md requires, which is all of them.
+        if any(part in EXCLUDED_DIR_NAMES for part in p.relative_to(ROOT).parts):
             continue
         files.append(p)
     return files
