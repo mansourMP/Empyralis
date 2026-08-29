@@ -43,7 +43,7 @@ export function InboxScreen({
   // is tracked separately from `refreshing` on purpose — only "nothing is
   // known yet" may draw a skeleton, because a spinner over content already
   // on screen lies about what is known.
-  const [data, setData] = useState<InboxData | null>(() => cachedInbox());
+  const [data, setData] = useState<InboxData | null>(() => cachedInbox(session.userId));
   const [failure, setFailure] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [readIds, setReadIds] = useState<Set<string>>(new Set());

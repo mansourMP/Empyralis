@@ -60,7 +60,18 @@ export type InboxData = {
  * is true and reports the failure separately, rather than blanking.
  */
 let snapshot: InboxData | null = null;
-export function cachedInbox(): InboxData | null {
+let snapshotUserId: string | null = null;
+
+/**
+ * KEYED BY USER, and that is not defensive padding. Sign out, sign in as
+ * someone else, and the screen's own `useState(() => cachedInbox())` paints
+ * on the first frame — before any effect has run and before the new user's
+ * fetch returns. An unkeyed cache shows one person the previous person's
+ * inbox for that frame. Returning null for a mismatch is what makes the
+ * local-first read safe rather than merely fast.
+ */
+export function cachedInbox(userId: string | null): InboxData | null {
+  if (!userId || userId !== snapshotUserId) return null;
   return snapshot;
 }
 
@@ -114,6 +125,7 @@ export async function fetchInbox(workspaceId: string, token: string): Promise<In
   });
 
   snapshot = { groups, notifications, fetchedAt: Date.now() };
+  snapshotUserId = currentUserId;
   return snapshot;
 }
 
@@ -122,8 +134,19 @@ export async function fetchInbox(workspaceId: string, token: string): Promise<In
  *  up filed under your name). */
 let currentUserId: string | null = null;
 export function setInboxUser(userId: string | null): void {
-  if (userId !== currentUserId) snapshot = null;
+  if (userId !== currentUserId) {
+    snapshot = null;
+    snapshotUserId = null;
+  }
   currentUserId = userId;
+}
+
+/** Called on sign-out. Dropping the snapshot is not optional: it is the only
+ *  copy of one person's inbox this process holds. */
+export function forgetInbox(): void {
+  snapshot = null;
+  snapshotUserId = null;
+  currentUserId = null;
 }
 
 export async function markNotificationRead(

@@ -3,6 +3,7 @@ import { StatusBar } from 'expo-status-bar';
 import { StyleSheet, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
+import { forgetInbox } from './src/api/inbox';
 import { clearSession, loadStoredSession, type Session } from './src/api/session';
 import { TabBar, type TabKey } from './src/components/TabBar';
 import { InboxScreen } from './src/screens/InboxScreen';
@@ -34,6 +35,10 @@ export default function App() {
   }, []);
 
   const signOut = useCallback(() => {
+    // Drop the in-memory inbox as well as the keychain entry. It is the only
+    // copy of this person's inbox the process holds, and the next sign-in
+    // paints from cache on its first frame.
+    forgetInbox();
     void clearSession();
     setSession(null);
     setInboxCount(0);
