@@ -4,7 +4,7 @@
  * THE AGENT-CREATION SURFACE — a real, sequential setup flow, in FOUR steps.
  *
  * ```
- *  1 Identity & placement   name · what it does · where it runs
+ *  1 Identity & placement   name · where it runs · WHAT IT IS FOR · what it does
  *  2 Brain                  who pays ▸ provider ▸ model
  *      └── "Create agent" ──▶ the agent becomes real here
  *  3 Channels               how people reach it, optional
@@ -31,6 +31,23 @@
  * them honest — placement FIRST, because "Your subscription" and "Run
  * locally" both route the brain through a Gateway on a real machine, and
  * offering them to a cloud-only agent is a control that cannot be completed.
+ *
+ * ── "WHAT IT IS FOR" — two shipped backend systems, reachable from nowhere ─
+ * `purpose_preset` (seeds instructions, DERIVES audience) and
+ * `capability_preset` (seeds hardware/model/context) have both shipped, are
+ * both validated, and were typed as LITERALS in buildQuickCreateAgentPayload
+ * — "internal_assistant" and "standard" — for every agent this product has
+ * ever created. Founder, 2026-08-28: *"I want this specific agent to be great
+ * at specific work… not because of the AI model, but because of tools and
+ * others. People don't know what they need until you tell them."* The job
+ * picker is those two systems given a screen; the rules are in
+ * agent-create-job.ts and nothing new was added to the backend.
+ *
+ * It sits BETWEEN placement and the prose field, which is a dependency and
+ * not a layout preference — the `knowledge` job policy-locks hardware, so on
+ * a machine placement it is a control that commits an agent and then fails
+ * its own placement PATCH. Asking in the order the dependency runs is the
+ * same argument that put placement first in the whole sequence.
  *
  * ── AND WHAT IT MUST NOT BRING BACK: the project question ────────────────
  * The deleted FleetCreateAgentWizard's Placement step carried a "Which
@@ -185,6 +202,7 @@ import {
   hardwareNodeLabel,
   hardwareNodeOnline,
   nodesForPlacement,
+  placementNeedsNode,
   planAgentCreatePlacement,
   type AgentCreatePlacement,
   type HardwareNodeLike,
@@ -200,6 +218,12 @@ import {
   planAgentCreateFooter,
   type AgentCreateStepId,
 } from "./agent-create-wizard";
+import {
+  AGENT_CREATE_DEFAULT_JOB,
+  agentCreateJobsForPlacement,
+  planAgentCreateJobInstructions,
+  resolveSelectedAgentCreateJob,
+} from "./agent-create-job";
 import { createAgentQuickly } from "./agent-quick-create";
 import { deleteFleetAgent } from "./agent-delete";
 import { ChannelsTab, ConnectorsTab, isChannelConnected } from "./FleetAgentDetail";
@@ -404,6 +428,10 @@ export function AgentCreateCard({
   const [typedName, setTypedName] = useState("");
   const [suggestedName, setSuggestedName] = useState("");
   const [instructions, setInstructions] = useState("");
+  // WHAT THIS AGENT IS FOR — the two preset axes that had been literals in
+  // buildQuickCreateAgentPayload since creation was rewritten. The RULES live
+  // in agent-create-job.ts (pure + tested); this only holds the pick.
+  const [jobId, setJobId] = useState<string>(AGENT_CREATE_DEFAULT_JOB);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [closing, setClosing] = useState(false);
@@ -533,6 +561,28 @@ export function AgentCreateCard({
     nodesKnown,
     availableNodeCount: placementNodes.length,
   });
+
+  // ── The job, once the placement above it has had its say ────────────────
+  // `knowledge` policy-locks hardware to "none" and fleet_configure_agent
+  // REFUSES a hardware patch on such an install — so that job on a machine
+  // placement would commit an agent and then fail its own placement PATCH.
+  // It is not offered there. See agent-create-job.ts's header for why this
+  // is the same argument that already put placement first in the sequence.
+  const placementNeedsMachine = placementNeedsNode(placement);
+  const jobOptions = useMemo(
+    () => agentCreateJobsForPlacement(placementNeedsMachine),
+    [placementNeedsMachine],
+  );
+  // Never render (or post) a selection the placement no longer allows. A
+  // dropped pick falls back to General — but the INSTRUCTIONS it seeded are
+  // deliberately left alone: those words are still perfectly good
+  // instructions, and quietly emptying a field because a control elsewhere
+  // moved is exactly the silent overwrite this surface must not do.
+  const selectedJobId = resolveSelectedAgentCreateJob(jobId, placementNeedsMachine);
+  const pickJob = useCallback((nextId: string) => {
+    setJobId(nextId);
+    setInstructions((current) => planAgentCreateJobInstructions(current, nextId));
+  }, []);
 
   const activeProvider =
     brainMode === "platform"
@@ -831,6 +881,7 @@ export function AgentCreateCard({
         name.trim(),
         instructions.trim(),
         brainPlan.modelChoice,
+        selectedJobId,
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not create the agent.");
@@ -887,6 +938,7 @@ export function AgentCreateCard({
     instructions,
     name,
     placementPlan.patch,
+    selectedJobId,
     projects,
     saveApiKey,
     workspaceId,
@@ -1118,20 +1170,6 @@ export function AgentCreateCard({
               </div>
 
               <div className="agent-create-group">
-                <label className="agent-create-label" htmlFor="agent-create-instructions">
-                  What this agent does
-                </label>
-                <textarea
-                  id="agent-create-instructions"
-                  className="agent-create-input"
-                  value={instructions}
-                  rows={3}
-                  placeholder="Optional. Editable anytime from Configure."
-                  onChange={(e) => setInstructions(e.currentTarget.value)}
-                />
-              </div>
-
-              <div className="agent-create-group">
                 <span className="agent-create-label">Where it runs</span>
                 <div className="agent-create-options">
                   {AGENT_CREATE_PLACEMENTS.map((p) => (
@@ -1175,6 +1213,45 @@ export function AgentCreateCard({
                       </button>,
                     )
                   ))}
+              </div>
+
+              {/* WHAT IT IS FOR — sits BELOW placement and ABOVE the words it
+                  fills, because that is the order the dependency actually
+                  runs in: placement decides which jobs can honestly be
+                  offered, the job decides the two presets and seeds the
+                  prose. A picker whose options can be invalidated by a
+                  control beneath it is the dishonesty the placement-first
+                  rule exists to prevent. */}
+              <div className="agent-create-group">
+                <span className="agent-create-label">What it is for</span>
+                <div className="agent-create-options agent-create-options--jobs">
+                  {jobOptions.map((j) => (
+                    <button
+                      key={j.id}
+                      type="button"
+                      className={`agent-create-option${selectedJobId === j.id ? " is-selected" : ""}`}
+                      aria-pressed={selectedJobId === j.id}
+                      onClick={() => pickJob(j.id)}
+                    >
+                      <span className="agent-create-option-label">{j.label}</span>
+                      <span className="agent-create-option-body">{j.body}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="agent-create-group">
+                <label className="agent-create-label" htmlFor="agent-create-instructions">
+                  What this agent does
+                </label>
+                <textarea
+                  id="agent-create-instructions"
+                  className="agent-create-input"
+                  value={instructions}
+                  rows={3}
+                  placeholder="Optional. Editable anytime from Configure."
+                  onChange={(e) => setInstructions(e.currentTarget.value)}
+                />
               </div>
             </>
           )}

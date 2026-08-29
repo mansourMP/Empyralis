@@ -674,6 +674,31 @@
   gap: var(--space-2);
 }
 
+/* THE JOB CARDS GO TWO ACROSS, and that is arithmetic rather than taste.
+   Six single-column option cards are ~330px of the frame's own body on their
+   own, which on the 480px floor leaves the name field and the placement
+   group fighting for what is left and pushes the scroll onto every first
+   step. Two columns halve it. They are the SAME `.agent-create-option` face
+   as placement and brain — same weight-and-checkmark selection, no hue — so
+   this modifier changes the flow direction and nothing else.
+
+   `minmax(0, 1fr)` rather than `1fr`: a grid item's default `min-width:auto`
+   refuses to shrink below its longest unbreakable word, which is what makes
+   a two-column grid silently overflow its container instead of wrapping. */
+.agent-create-options--jobs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+/* One column below the width where two cards stop being able to hold a job
+   title and a line of prose without breaking mid-word. */
+@media (max-width: 560px) {
+  .agent-create-options--jobs {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .agent-create-option {
   position: relative;
   display: flex;

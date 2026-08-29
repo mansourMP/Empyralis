@@ -81,7 +81,11 @@
  *                 documents took for "move to another project" (flagged,
  *                 not shipped, for the identical reason — a project is a
  *                 collaboration boundary, not a filing cabinet).
- *   capability  -- "standard", the only non-reserved creatable preset.
+ *   capability  -- SUPERSEDED 2026-08-28. It was "standard", hardcoded, for
+ *                 every agent ever created here. It is now whatever the JOB
+ *                 picked on step 1 says (agent-create-job.ts) — "standard"
+ *                 for five of the six jobs, "knowledge" for the one that
+ *                 policy-locks hardware off.
  *   placement   -- left UNSET on the create call entirely.
  *                 fleet_create_agent's own capability-preset defaults
  *                 already resolve hardware_access to "none" (cloud-only)
@@ -90,18 +94,20 @@
  *                 hardware_access PATCH was a no-op whenever Placement's
  *                 own default, "Cloud only", was accepted). Configure >
  *                 Hardware covers every other placement afterward.
- *   purpose /   -- "internal_assistant" / "owner", the codebase's own
- *   audience       existing safe default (agent_command_dispatcher.py's own
- *                 documented reasoning: "the safer, less-blaming
- *                 assumption"). Flagged, not quietly accepted: grepping
- *                 this frontend tree found ZERO post-creation controls
- *                 that ever write purpose_preset/audience — the wizard was
- *                 the only writer — so a person who later wants a
+ *   purpose /   -- SUPERSEDED 2026-08-28, and this entry's own flag is what
+ *   audience       got closed. It read: "grepping this frontend tree found
+ *                 ZERO post-creation controls that ever write
+ *                 purpose_preset/audience... so a person who later wants a
  *                 customer-facing agent has no UI path back from this
- *                 default today. That gap belongs in Configure > General
- *                 (FleetAgentDetail.tsx), which a concurrent change owns;
- *                 reported rather than worked around with a second
- *                 creation surface here.
+ *                 default today." There is now a path, and it is at the
+ *                 front rather than buried in Configure: the step-1 job
+ *                 picker sets purpose_preset, and `audience` is no longer
+ *                 sent AT ALL — fleet_create_agent derives it from the
+ *                 purpose preset via its own _AUDIENCE_BY_PURPOSE_PRESET,
+ *                 so a customer-facing job gets "external" because the
+ *                 server says so and not because this file remembered to.
+ *                 Picking General still yields internal_assistant/owner,
+ *                 byte-for-byte the old default.
  *   model       -- whatever capability_presets seeds by default for
  *                 "standard" — editable immediately from Configure >
  *                 Model, same as before this change.
@@ -115,6 +121,7 @@ import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { getErrorMessage } from "@/lib/ui/api-error";
 import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
 
+import { AGENT_CREATE_DEFAULT_JOB, agentCreateJobPresets } from "./agent-create-job";
 import type { FleetProject } from "./fleet-data";
 import { refreshFleetAgents, resolveAgentProjectId } from "./fleet-data";
 
@@ -132,10 +139,14 @@ export type QuickCreateModelChoice = {
 export type QuickCreateAgentPayload = {
   name: string;
   instructions: string;
+  /** Both presets now come from the JOB the person picked on step 1 (see
+   *  agent-create-job.ts). They were literals here — "standard" and
+   *  "internal_assistant" — for every agent this product has ever created,
+   *  which is what made two shipped, validated backend systems reachable
+   *  from no screen. */
   capability_preset: string;
   project_id: string;
   purpose_preset: string;
-  audience: string;
   /** Omitted entirely when there is no pick — an ABSENT key means "use the
    *  server's own seed", which is a different fact from an empty object and
    *  must not be collapsed into one. */
@@ -169,14 +180,18 @@ export function buildQuickCreateAgentPayload(
   name: string = "",
   instructions: string = "",
   modelChoice: QuickCreateModelChoice | null = null,
+  jobId: string = AGENT_CREATE_DEFAULT_JOB,
 ): QuickCreateAgentPayload {
   const payload: QuickCreateAgentPayload = {
     name,
     instructions,
-    capability_preset: "standard",
     project_id: projectId,
-    purpose_preset: "internal_assistant",
-    audience: "owner",
+    // Both presets from the ONE place that knows them. Defaulting `jobId` to
+    // General rather than re-typing the two literals here is what keeps a
+    // caller that never heard of jobs (a direct call, a test) on exactly the
+    // behaviour it had before the picker existed — and keeps that promise
+    // checkable in one place instead of two that can drift.
+    ...agentCreateJobPresets(jobId),
   };
   if (modelChoice) payload.model_choice = modelChoice;
   return payload;
@@ -239,13 +254,14 @@ export async function createAgentQuickly(
   name: string = "",
   instructions: string = "",
   modelChoice: QuickCreateModelChoice | null = null,
+  jobId: string = AGENT_CREATE_DEFAULT_JOB,
 ): Promise<{ agentId: string; projectId: string }> {
   const projectId = resolveQuickCreateProjectId(currentProjectId, projects);
   const res = await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents`, {
     method: "POST",
     credentials: "include",
     headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
-    body: JSON.stringify(buildQuickCreateAgentPayload(projectId, name, instructions, modelChoice)),
+    body: JSON.stringify(buildQuickCreateAgentPayload(projectId, name, instructions, modelChoice, jobId)),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data?.ok === false) {

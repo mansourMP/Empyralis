@@ -245,7 +245,13 @@ const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
 // group invented just to hold it (the design rules: "most configuration is set
 // once and does not deserve equal billing").
 const CONFIGURE_GROUPS: { id: string; label: string; tabs: TabId[] }[] = [
-  { id: "brain", label: "Brain", tabs: ["general", "model", "capabilities", "skills"] },
+  // Skills LEFT this group on 2026-08-28 and is now a Profile segment. The
+  // founder went looking for it and could not find it; grouped here it was
+  // reading as "what it thinks with", and a skill is authored prose about
+  // what an agent knows how to DO. agent-profile-shape.ts's header carries
+  // the full reasoning, including why no fourth Configure group was invented
+  // to hold it.
+  { id: "brain", label: "Brain", tabs: ["general", "model", "capabilities"] },
   // "context" sits in Reach on purpose — this group is literally "how
   // it's reached, and WHAT IT CAN REACH OUT TO", and the project grant is
   // the largest thing an agent can reach out to.
@@ -278,6 +284,9 @@ const CONFIGURE_TAB_IDS = new Set<TabId>(CONFIGURE_GROUPS.flatMap((g) => g.tabs)
 // is a real decision worth a test, not just a membership check.
 const PROFILE_SEGMENT_DEFS: Record<AgentProfileSegmentId, { label: string; icon: LucideIcon }> = {
   persona: { label: "Persona", icon: Bot },
+  // Same BookOpen it carried in the Configure rail — a tab that moves rooms
+  // keeps its face, or people have to learn it twice.
+  skills: { label: "Skills", icon: BookOpen },
   memory: { label: "Memory & Files", icon: Brain },
 };
 
@@ -1588,9 +1597,6 @@ export function FleetAgentDetail({
             {activeTab === "capabilities" && (
               <CapabilitiesTab workspaceId={workspaceId} agentId={agentId} agent={agent} />
             )}
-            {activeTab === "skills" && (
-              <SkillsTab workspaceId={workspaceId} agentId={agentId} agent={agent} onSaved={onRenamed} />
-            )}
             {activeTab === "channels" && (
               <ChannelsTab workspaceId={workspaceId} agentId={agentId} agent={agent} onChannelsChanged={refreshChannels} hardwareHref={tabHref("hardware")} />
             )}
@@ -1702,6 +1708,9 @@ export function FleetAgentDetail({
           <div className="agent-configure-content">
             {activeTab === "persona" && !isMaster && agent && (
               <PersonaEditor workspaceId={workspaceId} agentId={agentId} agent={agent} />
+            )}
+            {activeTab === "skills" && (
+              <SkillsTab workspaceId={workspaceId} agentId={agentId} agent={agent} onSaved={onRenamed} />
             )}
             {activeTab === "memory" && (
               <div className="agent-profile-memory-files">
