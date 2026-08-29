@@ -326,6 +326,86 @@ def _should_persist_direct_chat_result(result: Any) -> bool:
     return bool(reply or interventions)
 
 
+def _is_direct_chat_stream_handoff(result: Any) -> bool:
+    """True for execute_direct_chat_turn_request's own return shape —
+    ``{"kind": "direct_chat_stream", "producer": ..., ...}`` — the ONLY
+    thing that function ever returns (direct_chat_service.py). Same
+    predicate _should_persist_direct_chat_result already uses; pulled out
+    because _finish_orphaned_web_trace below needs it independently of
+    whether a reply/intervention is present.
+    """
+    if not isinstance(result, dict):
+        return False
+    metadata = _metadata_dict(result.get("metadata"))
+    kind = str(result.get("kind") or metadata.get("kind") or "").strip().lower()
+    return kind == "direct_chat_stream"
+
+
+async def _finish_orphaned_web_trace(trace_context: Any, *, outcome: str) -> None:
+    """Close the trace this function opened above (``start_trace`` with
+    ``surface=_trace_surface(channel)`` — "web" for the console/mobile/
+    desktop/api chat surfaces), because nothing downstream ever will.
+
+    Diagnosed 2026-08-15 (commit c027de58, "publish the trace the agent
+    actually produced, and finish it") and left as an explicit follow-up:
+    ``execute_agent_turn_request``'s non-durable branch resolves to
+    ``direct_chat_service.execute_direct_chat_turn_request``, which returns
+    a *description* of a not-yet-run SSE producer — the real generation
+    happens later, off a background thread (``_run_sage``), when the HTTP
+    layer drains that producer. That thread calls ``execute_sage_turn``
+    WITHOUT this trace_context (verified: no ``trace_context=`` keyword at
+    that call site), so ``_run_sage_action_loop_v3`` opens a SECOND,
+    unrelated trace (``surface="sage"``) for the actual tool calls / plan /
+    reply, and closes THAT one on every terminal path. This trace — the one
+    ``_bind_trace_id_to_turn_result`` even stamps onto the turn result —
+    never receives another event and never gets a finish_trace call from
+    anywhere. Confirmed against production: every surface=web row has
+    ``finished_at IS NULL`` (250/250 in the sampled workspace).
+
+    Consequences of leaving it open forever, not one: (1) any reader using
+    this codebase's one signal for "still running" (``finished_at IS
+    NULL``) reads a two-month-old abandoned trace as active forever; (2)
+    ``control_plane_repository.prune_finished_agent_traces`` deliberately
+    never deletes an unfinished row, so this trace and its two events
+    (``trace.started``, ``trace.routed``) accumulate without bound.
+
+    NOT the full fix. The honest repair is one trace per turn — thread
+    THIS SAME trace_context through execute_sage_turn -> handle_sage_chat
+    so _run_sage_action_loop_v3 reuses it instead of opening its own — a
+    four-signature change that also needs provider/model resolved at
+    routing time rather than at open time (this trace's provider/model are
+    NULL precisely because open time is before routing). Out of scope for
+    this pass; recorded here rather than silently dropped.
+
+    outcome=PARTIAL for the hand-off case: this trace's own job (routing)
+    is done, and the turn did not go wrong here — it continues in a trace
+    this code can no longer see. Same law TRACE_OUTCOME_PARTIAL's own
+    definition names (agent_trace_service.py) and the same call
+    _finish_sdk_engine_trace makes for its structurally identical "nothing
+    to report from here" branch (agent_turn_runtime_service.py).
+    outcome=FAILED when agent_turn() raised before ever handing off —
+    nothing else was ever going to receive this trace_context either.
+
+    Only ever meaningful for the non-durable branch: a durable turn's SAME
+    trace_context is threaded into
+    ``run_service.execute_durable_agent_turn_dispatch``, which owns
+    closing it on that path (three finish_trace call sites in
+    run_service.py) — callers of this function gate on that themselves
+    rather than this function re-deriving execution_mode, since by the
+    time a result exists the mode is already known at the call site.
+    """
+    if trace_context is None:
+        return
+    try:
+        await agent_trace_service.finish_trace(
+            trace_context,
+            outcome=outcome,
+            final_message_id=None,
+        )
+    except Exception:
+        pass
+
+
 _THINKING_METADATA_ALLOWLIST = {"reasoning_effort", "reasoning_tokens", "supports_reasoning"}
 _THINKING_METADATA_BLOCKLIST = {
     "thinking",
@@ -1854,6 +1934,14 @@ async def agent_turn(
             )
             trace_id = trace_context.trace_id if trace_context is not None else None
             result = _bind_trace_id_to_turn_result(result, trace_id)
+            if _is_direct_chat_stream_handoff(result):
+                # See _finish_orphaned_web_trace's own docstring: this
+                # result shape means the real generation has not happened
+                # yet and never reaches this trace_context again — close it
+                # here instead of leaving it open forever.
+                await _finish_orphaned_web_trace(
+                    trace_context, outcome=agent_trace_service.TRACE_OUTCOME_PARTIAL
+                )
             if _should_persist_direct_chat_result(result):
                 assistant_request_id = (
                     str(resolved_turn_request.context_hints.get("request_id") or "").strip()
@@ -1891,7 +1979,14 @@ async def agent_turn(
                     },
                 )
             return result
-        except Exception as exc:
+        except BaseException as exc:
+            # BaseException, not Exception: a cancelled request (client
+            # disconnect during the awaits above -> asyncio.CancelledError,
+            # which is a BaseException since Python 3.8, not an Exception)
+            # is a terminal path for this trace exactly like any other
+            # failure, and must close it the same way — `raise` below still
+            # re-raises the original exception unchanged, so cancellation
+            # propagates correctly either way.
             try:
                 span.record_exception(exc)
             except Exception:
@@ -1906,6 +2001,15 @@ async def agent_turn(
                 )
             except Exception:
                 pass
+            # Only for the non-durable branch: a durable turn's SAME
+            # trace_context is owned by run_service.execute_durable_agent_
+            # turn_dispatch on this path (see _finish_orphaned_web_trace's
+            # own docstring) — never race it for the one trace it is
+            # responsible for closing.
+            if str(getattr(resolved_turn_request, "execution_mode", "") or "").strip().lower() != "durable":
+                await _finish_orphaned_web_trace(
+                    trace_context, outcome=agent_trace_service.TRACE_OUTCOME_FAILED
+                )
             raise
 
 
