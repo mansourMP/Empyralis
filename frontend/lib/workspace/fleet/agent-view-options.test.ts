@@ -423,8 +423,15 @@ assert(
   !/\.fleet-agent-card-grid\s*\{/.test(cardsCss) && !/\.fleet-agent-card\s*\{/.test(cardsCss),
   "the deleted grid's own face rules (.fleet-agent-card-grid, .fleet-agent-card) are gone from this file — only the toolbar/search/empty-state rules List and Board still use remain",
 );
+// Match the IMPORT STATEMENT, not the filename anywhere in the file. The
+// first version of this assertion was `pageSource.includes("agent-cards
+// .css")`, which the explanatory COMMENT four lines above the import
+// satisfies all by itself — deleting the real import left the guard green.
+// A check a comment can satisfy is not checking the code. (CLAUDE.md: a
+// check that derives its expectations from the thing it checks is blind
+// and reports "passed".)
 assert(
-  pageSource.includes("agent-cards.css"),
+  /^\s*import\s+["'][^"']*agent-cards\.css["']\s*;?\s*$/m.test(pageSource),
   "the page imports this stylesheet DIRECTLY now that AgentCards.tsx (its old importer) is deleted — otherwise the toolbar/search/empty-state rules never load at all",
 );
 
