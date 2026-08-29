@@ -1,0 +1,22 @@
+{
+  // METRO READS THIS FILE. Expo's metro-config picks `compilerOptions.paths`
+  // up automatically, so an alias added here to satisfy the type-checker
+  // also rewires what the BUNDLER resolves. Pointing `react` at
+  // `@types/react` here type-checked cleanly and produced a bundler that
+  // could not find React at all. So every entry below is correct at RUNTIME,
+  // and anything needed only by `tsc` lives in tsconfig.typecheck.json.
+  //
+  // `@shared/*` is what this app imports — frontend/lib, unchanged, one copy
+  // serving both apps. `@/*` is the web project's own alias, present because
+  // the shared tree uses it internally.
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "paths": {
+      "@shared/*": ["../frontend/lib/*"],
+      "@/*": ["../frontend/*"]
+    }
+  },
+  "include": ["**/*.ts", "**/*.tsx"],
+  "exclude": ["node_modules"]
+}

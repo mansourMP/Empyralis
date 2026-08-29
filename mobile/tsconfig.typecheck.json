@@ -1,0 +1,22 @@
+{
+  // `npm run typecheck` uses THIS, never tsconfig.json — see that file's own
+  // header. Metro reads tsconfig.json's `paths`, so the two aliases below,
+  // which exist only so `tsc` can follow the shared tree, must not live
+  // there: pointing `react` at its own type package is correct for the
+  // type-checker and fatal for the bundler.
+  //
+  // Why `react` needs an alias at all: the shared modules under
+  // frontend/lib resolve packages by walking UP from their own directory —
+  // frontend/node_modules, then the repo root — and in an agent worktree
+  // neither exists. Metro never cared (these are type-only imports, erased
+  // before bundling); tsc does.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@shared/*": ["../frontend/lib/*"],
+      "@/*": ["../frontend/*"],
+      "react": ["./node_modules/@types/react"],
+      "react/*": ["./node_modules/@types/react/*"]
+    }
+  }
+}
