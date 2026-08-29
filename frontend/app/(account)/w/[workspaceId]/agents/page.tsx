@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
+import Link from "next/link";
 
 import {
   resolveAgentProjectId,
@@ -505,6 +506,17 @@ export default function AgentsPage() {
             </div>
           ) : null}
           <div className="fleet-agent-surface-toolbar-spacer" />
+          {/* One level below Agents (CLAUDE.md: "a surface must earn its
+              place"), never a rail item — the workspace-wide reader for
+              agent_traces (WorkLedgerView.tsx / GET /api/agent-traces),
+              which had zero UI callers before this. A real <a> (next/link),
+              not a button + router.push, so cmd-click still opens a new
+              tab — and .fleet-link, never a filled button: this is a
+              secondary destination sharing the row with the view-options
+              gear, not the page's one primary action. */}
+          <Link href={`${base}/agents/work`} className="fleet-link">
+            Work
+          </Link>
           <AgentViewOptions options={viewOptions} onChange={updateViewOptions} />
         </div>
       )}

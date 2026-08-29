@@ -162,6 +162,13 @@ export const STATIC_LABELS: Record<string, string> = {
   // label, which is the same word.
   context: "Context",
   agents: "Agents",
+  // /agents/work — the workspace work ledger (WorkLedgerView.tsx), one
+  // segment below Agents. Distinct from the AGENT_DETAIL_TABS "work" entry
+  // just below (…/agents/{agentId}/work, a per-agent tab alias): that fold
+  // check requires 3+ segments, this route has 2, so the two can never
+  // collide. Named explicitly so this crumb — also this page's real <h1> —
+  // never depends on humanize()'s generic capitalization by coincidence.
+  work: "Work",
   hardware: "Hardware",
   billing: "Usage",
   settings: "Settings",

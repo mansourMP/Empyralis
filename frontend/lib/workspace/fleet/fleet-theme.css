@@ -2306,6 +2306,50 @@ a.fleet-breadcrumb:hover {
   padding: 10px 0 12px;
 }
 
+/* WorkLedgerView.tsx nests its own .fleet-segmented filter row directly
+   inside .fleet-content (unlike Inbox's identical tab strip, which lives in
+   the sibling .fleet-content-toolbar and needs no margin of its own) — same
+   margin-bottom .fleet-agent-surface-toolbar already uses for a toolbar row
+   sitting above other content on a plain .fleet-content page, scoped here so
+   it doesn't reach every other .fleet-segmented usage in the app. */
+.fleet-content > .fleet-segmented {
+  margin-bottom: var(--space-4);
+}
+
+/* Work ledger (WorkLedgerView.tsx) — reuses .fleet-inbox-row's proven row
+   shape (dot + title + time) but needs the FULL-WIDTH, non-split geometry:
+   .fleet-inbox-list's own base rule (above) sizes it as a 30%-wide
+   master-detail column, which is right for Inbox/Work/Memory's split panes
+   and wrong for a single flat ledger. Same reset
+   .fleet-inbox-needsyou-section already applies to ITS OWN list, given its
+   own class name here rather than borrowed — a work ledger is not a
+   "needs you" section and reusing that selector would say it is. */
+.fleet-work-ledger-list {
+  flex: none;
+  min-width: 0;
+  height: auto;
+  overflow: hidden;
+  border-right: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+}
+.fleet-work-ledger-list .fleet-inbox-row:last-child {
+  border-bottom: none;
+}
+
+/* One status dot per row, colored from work-ledger.ts's own
+   WORK_LEDGER_STATUS_COLOR_VAR — the same --task-* tokens the task board
+   uses for the same real-world meaning (in progress / needs input /
+   something's wrong / done). Never --accent: accent-restraint.test.ts
+   reserves violet for the one primary filled button, and a status dot is
+   not that. */
+.fleet-work-ledger-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
 /* The relative anchor the properties drawer overlays against — NOT a flex
    row splitting width with a permanent sibling. The main content sheet is
    this container's only normal-flow child and always renders at full width,
