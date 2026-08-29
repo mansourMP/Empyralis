@@ -183,10 +183,16 @@ for root, _dirs, files in os.walk(verify_dir):
         tables = {row[0] for row in conn.execute(
             "select name from sqlite_master where type='table'"
         )}
-        # agent_memory.py's own schema. A memory database without these is
-        # not a memory database, however well-formed the file is.
-        if not {"memory_entries", "memory_entries_history"} <= tables:
-            print(f"{path}: missing expected memory tables, found {sorted(tables)}", file=sys.stderr)
+        # agent_memory.py's own schema. `memory_entries` is the table that
+        # makes this a memory database and is required. `memory_entries_
+        # history` is NOT required: it is created alongside, but a real
+        # production store was found carrying only `memory_entries` (a
+        # database that has never recorded a revision), and failing that
+        # backup would have refused to protect a genuine, in-use store over
+        # a table it does not need. Requiring the essential table still
+        # rejects an unrelated SQLite file that happens to be named *.db.
+        if "memory_entries" not in tables:
+            print(f"{path}: not a memory database, found {sorted(tables)}", file=sys.stderr)
             sys.exit(1)
         if conn.execute("pragma integrity_check").fetchone()[0] != "ok":
             print(f"{path}: integrity_check failed after restore", file=sys.stderr)
