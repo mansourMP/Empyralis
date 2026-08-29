@@ -81,10 +81,17 @@ export function InboxScreen({
     void load();
   }, [load]);
 
+  // TWO NUMBERS, because they answer different questions and one number
+  // would have to lie about one of them.
+  //
+  //   count      every row on this screen. Decides the empty state — with
+  //              read notifications still in the list (unread_only=false),
+  //              "all caught up" over visible rows would be a flat lie.
+  //   attention  the rows currently showing a dot. Decides the tab badge,
+  //              so the badge means EXACTLY what the dots mean and goes
+  //              quiet as they are dealt with. Using `count` here would
+  //              leave the badge lit forever the moment anything was read.
   const count = data ? inboxNeedsYouCount(data.groups) : 0;
-  useEffect(() => {
-    onCountChange(count);
-  }, [count, onCountChange]);
 
   // Read state lives beside the plan rather than inside it — the shared
   // module's items are documented as carrying stable `kind:id` keys, which
@@ -116,6 +123,15 @@ export function InboxScreen({
   );
 
   const hasUnread = Array.from(unreadById.values()).some(Boolean);
+
+  const attention =
+    (data?.groups.tasks.length ?? 0) +
+    (data?.groups.runs.length ?? 0) +
+    Array.from(unreadById.values()).filter(Boolean).length;
+
+  useEffect(() => {
+    onCountChange(attention);
+  }, [attention, onCountChange]);
 
   const actions: HeaderAction[] = [];
   // Only rendered when there is something to mark. A "mark all read" over an
