@@ -125,7 +125,7 @@ export function WorkLedgerView({ workspaceId }: { workspaceId: string }) {
 
   if (view.kind === "loading") {
     return (
-      <main className="fleet-content">
+      <main className="fleet-content fleet-content--wide">
         <div className="fleet-work-ledger-list" aria-busy="true" aria-label="Loading the work ledger">
           {Array.from({ length: 6 }).map((_, i) => (
             <div key={i} className="fleet-inbox-row" style={{ cursor: "default" }}>
@@ -141,7 +141,7 @@ export function WorkLedgerView({ workspaceId }: { workspaceId: string }) {
 
   if (view.kind === "error") {
     return (
-      <main className="fleet-content">
+      <main className="fleet-content fleet-content--wide">
         <FleetSurfaceError title="Couldn’t load the work ledger" message={view.message} onRetry={refresh} />
       </main>
     );
@@ -149,7 +149,7 @@ export function WorkLedgerView({ workspaceId }: { workspaceId: string }) {
 
   if (view.kind === "empty") {
     return (
-      <main className="fleet-content">
+      <main className="fleet-content fleet-content--wide">
         <div className="fleet-work-empty">
           <ClipboardList size={26} strokeWidth={1.5} />
           <div className="fleet-work-empty-title">No work yet</div>
@@ -162,7 +162,7 @@ export function WorkLedgerView({ workspaceId }: { workspaceId: string }) {
   }
 
   return (
-    <main className="fleet-content">
+    <main className="fleet-content fleet-content--wide">
       <div className="fleet-segmented" role="tablist" aria-label="Filter by status">
         {STATUS_FILTERS.map((filter) => (
           <button
