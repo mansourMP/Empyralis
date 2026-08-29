@@ -39,11 +39,16 @@ export function TabBar({
   active,
   onSelect,
   inboxBadge,
+  askAiActive,
   onAskAi,
 }: {
   active: TabKey;
   onSelect: (key: TabKey) => void;
   inboxBadge: number;
+  /** While Ask AI is open no TAB is where you are, so none of them may read
+   *  as selected — two things claiming to be the current place is the same
+   *  bug as two pickers on one screen. */
+  askAiActive: boolean;
   onAskAi: () => void;
 }) {
   const insets = useSafeAreaInsets();
@@ -52,7 +57,7 @@ export function TabBar({
     <View style={[styles.wrap, { paddingBottom: Math.max(insets.bottom, Space.x3) }]}>
       <View style={styles.pill}>
         {TABS.map((tab) => {
-          const selected = tab.key === active;
+          const selected = !askAiActive && tab.key === active;
           // The badge is a COUNT, not a decoration, so it is only rendered
           // when there is something to count. A "0" would be a control
           // whose own label admits it means nothing.
@@ -85,8 +90,13 @@ export function TabBar({
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="Ask AI"
+        accessibilityState={{ selected: askAiActive }}
         onPress={onAskAi}
-        style={({ pressed }) => [styles.askAi, pressed && styles.askAiPressed]}
+        style={({ pressed }) => [
+          styles.askAi,
+          askAiActive && styles.askAiActive,
+          pressed && styles.askAiPressed,
+        ]}
       >
         <Ionicons name="chatbubble-ellipses-outline" size={20} color={Theme.textPrimary} />
       </Pressable>
@@ -153,4 +163,6 @@ const styles = StyleSheet.create({
     borderColor: Theme.border,
   },
   askAiPressed: { backgroundColor: Theme.bgLift },
+  // Same weight-and-shape treatment the selected tab pill uses. No hue.
+  askAiActive: { backgroundColor: Theme.bgLift, borderColor: Theme.borderStrong },
 });

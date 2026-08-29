@@ -26,6 +26,7 @@ export default function App() {
   const [restoring, setRestoring] = useState(true);
   const [tab, setTab] = useState<TabKey>('inbox');
   const [inboxCount, setInboxCount] = useState(0);
+  const [askAi, setAskAi] = useState(false);
 
   useEffect(() => {
     void (async () => {
@@ -42,6 +43,7 @@ export default function App() {
     void clearSession();
     setSession(null);
     setInboxCount(0);
+    setAskAi(false);
   }, []);
 
   // A blank page while the keychain is read — deliberately nothing, not a
@@ -73,23 +75,30 @@ export default function App() {
     <SafeAreaProvider>
       <View style={styles.root}>
         <SafeAreaView style={styles.safe} edges={['top']}>
-          <View style={[styles.pane, tab !== 'inbox' && styles.hidden]}>
+          <View style={[styles.pane, (askAi || tab !== 'inbox') && styles.hidden]}>
             <InboxScreen session={session} onSignOut={signOut} onCountChange={setInboxCount} />
           </View>
-          {tab === 'projects' ? <StubScreen title="Projects" /> : null}
-          {tab === 'mywork' ? <StubScreen title="My work" /> : null}
-          {tab === 'agents' ? <StubScreen title="Agents" /> : null}
+          {askAi ? <StubScreen title="Ask AI" /> : null}
+          {!askAi && tab === 'projects' ? <StubScreen title="Projects" /> : null}
+          {!askAi && tab === 'mywork' ? <StubScreen title="My work" /> : null}
+          {!askAi && tab === 'agents' ? <StubScreen title="Agents" /> : null}
         </SafeAreaView>
         <TabBar
           active={tab}
-          onSelect={setTab}
-          inboxBadge={inboxCount}
-          onAskAi={() => {
-            // Deliberately inert in Phase 1 and NOT wired to a placeholder
-            // screen: Ask AI is a real per-user surface on the web, and
-            // stubbing it here would put a fake one in front of it. Its
-            // POSITION is what this phase is showing.
+          onSelect={(next) => {
+            setAskAi(false);
+            setTab(next);
           }}
+          inboxBadge={inboxCount}
+          askAiActive={askAi}
+          // Pressing it says it is not built. Doing NOTHING was the first
+          // version and it is worse than a stub: a button that swallows a
+          // press is indistinguishable from a broken one. What Ask AI
+          // becomes on a phone is an open question (it is the one surface on
+          // the web that still has a composer, and whether it keeps one is
+          // undecided) — so this shows its POSITION without guessing at its
+          // contents.
+          onAskAi={() => setAskAi(true)}
         />
       </View>
       <StatusBar style="light" />
