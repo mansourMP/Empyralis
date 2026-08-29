@@ -9,6 +9,7 @@ import { useFleetAgents } from "@/lib/workspace/fleet/fleet-data";
 import { agentDisplayLabel, timeAgo, WORKSPACE_ASSISTANT_LABEL } from "@/lib/workspace/fleet/fleet-presentation";
 import { FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import {
+  excludeAssistantRows,
   filterWorkLedgerRows,
   parseWorkLedgerAgentRef,
   planWorkLedgerView,
@@ -85,7 +86,7 @@ function useWorkspaceAgentTraces(workspaceId: string) {
   return { rows, loading, error, refresh };
 }
 
-const STATUS_FILTERS: WorkLedgerStatusFilter[] = ["all", "working", "waiting", "failed", "done"];
+const STATUS_FILTERS: WorkLedgerStatusFilter[] = ["all", "working", "waiting", "failed", "done", "unknown"];
 
 function StatusDot({ status }: { status: WorkLedgerStatus }) {
   return (
@@ -117,7 +118,11 @@ export function WorkLedgerView({ workspaceId }: { workspaceId: string }) {
     [agents],
   );
 
-  const sorted = useMemo(() => sortWorkLedgerRows(rows), [rows]);
+  // Ask AI is not an agent and does not belong in an agent ledger — see
+  // excludeAssistantRows. Applied BEFORE sorting/counting so every number
+  // on this page counts the same set of rows the list shows.
+  const agentRows = useMemo(() => excludeAssistantRows(rows), [rows]);
+  const sorted = useMemo(() => sortWorkLedgerRows(agentRows), [agentRows]);
   const counts = useMemo(() => workLedgerStatusCounts(sorted), [sorted]);
   const filtered = useMemo(() => filterWorkLedgerRows(sorted, statusFilter), [sorted, statusFilter]);
 

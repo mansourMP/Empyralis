@@ -18,6 +18,8 @@
  */
 
 import {
+  WORK_LEDGER_STALE_AFTER_MS,
+  excludeAssistantRows,
   filterWorkLedgerRows,
   parseWorkLedgerAgentRef,
   planWorkLedgerView,
@@ -53,12 +55,18 @@ const trace = (over: Partial<WorkLedgerTraceShape> & { id?: string } = {}): Work
 
 // ── workLedgerStatus: outcome → displayed state ───────────────────────────
 
+// The fixture's own start, so these two assertions keep testing what they
+// were written to test -- that `finished_at` governs, not `outcome` -- and
+// are not silently retested against the staleness rule added later. That
+// rule gets its own explicit assertions further down.
+const FIXTURE_NOW = Date.parse("2026-08-29T10:05:00Z");
+
 assert(
-  workLedgerStatus(trace({ finished_at: null, outcome: null })) === "working",
+  workLedgerStatus(trace({ finished_at: null, outcome: null }), FIXTURE_NOW) === "working",
   "a trace with no finished_at is still working, regardless of outcome",
 );
 assert(
-  workLedgerStatus(trace({ finished_at: null, outcome: "success" })) === "working",
+  workLedgerStatus(trace({ finished_at: null, outcome: "success" }), FIXTURE_NOW) === "working",
   "finished_at wins over a stray outcome value on an unfinished row",
 );
 assert(
@@ -175,19 +183,19 @@ const mixed: WorkLedgerTraceShape[] = [
   trace({ id: "f2", outcome: "failed" }),
   trace({ id: "d1", outcome: "success" }),
 ];
-const counts = workLedgerStatusCounts(mixed);
+const counts = workLedgerStatusCounts(mixed, FIXTURE_NOW);
 assert(counts.working === 1 && counts.waiting === 1 && counts.failed === 2 && counts.done === 1, `status counts match the fixture, got ${JSON.stringify(counts)}`);
 assert(
-  filterWorkLedgerRows(mixed, "failed").length === 2,
+  filterWorkLedgerRows(mixed, "failed", FIXTURE_NOW).length === 2,
   "filtering to 'failed' returns exactly the failed rows",
 );
 assert(
-  filterWorkLedgerRows(mixed, "all").length === mixed.length,
+  filterWorkLedgerRows(mixed, "all", FIXTURE_NOW).length === mixed.length,
   "'all' returns every row",
 );
 const filterAgree =
-  filterWorkLedgerRows(mixed, "done").length === counts.done &&
-  filterWorkLedgerRows(mixed, "working").length === counts.working;
+  filterWorkLedgerRows(mixed, "done", FIXTURE_NOW).length === counts.done &&
+  filterWorkLedgerRows(mixed, "working", FIXTURE_NOW).length === counts.working;
 assert(filterAgree, "the filter and the counts always agree — one rule, two readers");
 
 // ── planWorkLedgerView: empty vs. could-not-load can never share a state ──
@@ -223,6 +231,83 @@ assert(
   })(),
   "rows present, no error, not loading -> the real rows",
 );
+
+// ── Ask AI is not an agent, and this is an agent ledger ───────────────────
+// Founder, 2026-08-30, on the shipped page: "what is this ask ai doing
+// here?" Every row on his first real load was the assistant. CLAUDE.md:
+// Ask AI and agents are separate systems that may never be mixed.
+
+const MIXED: WorkLedgerTraceShape[] = [
+  trace({ id: "agent-1", root_agent_id: "specialist:inst_a" }),
+  trace({ id: "assistant-sage", root_agent_id: "sage" }),
+  trace({ id: "assistant-main", root_agent_id: "sage_main_agent" }),
+  trace({ id: "agent-2", root_agent_id: "specialist:inst_b" }),
+  trace({ id: "assistant-blank", root_agent_id: "" }),
+];
+const onlyAgents = excludeAssistantRows(MIXED);
+assert(onlyAgents.length === 2, "the assistant is excluded from an AGENT ledger");
+assert(
+  onlyAgents.every((r) => String(r.root_agent_id).startsWith("specialist:")),
+  "every surviving row is a real specialist agent",
+);
+assert(
+  !onlyAgents.some((r) => String(r.id || "").startsWith("assistant")),
+  "no assistant row survives under ANY of its stored ids -- sage, sage_main_agent, or blank",
+);
+// The converse, so the rule cannot pass by emptying the ledger:
+assert(
+  excludeAssistantRows([trace({ id: "x", root_agent_id: "specialist:inst_z" })]).length === 1,
+  "a genuine agent row is KEPT -- the filter narrows, it does not delete the ledger",
+);
+
+// ── "Working" is a claim, and an old unfinished trace cannot support it ───
+// Production had 250 of 250 web traces with no finish, the oldest two
+// months old, every one rendering as "Working". "Still running" and
+// "nobody closed this out" are two different facts; they may not share one
+// signal.
+
+const NOW = Date.parse("2026-08-30T12:00:00Z");
+const freshRunning = trace({
+  id: "fresh",
+  started_at: new Date(NOW - 60_000).toISOString(),
+  finished_at: null,
+  outcome: null,
+});
+const staleRunning = trace({
+  id: "stale",
+  started_at: new Date(NOW - WORK_LEDGER_STALE_AFTER_MS - 60_000).toISOString(),
+  finished_at: null,
+  outcome: null,
+});
+assert(workLedgerStatus(freshRunning, NOW) === "working", "a just-started unfinished run really is working");
+assert(
+  workLedgerStatus(staleRunning, NOW) === "unknown",
+  "an unfinished run past the staleness line reports NO RESULT RECORDED, never 'working'",
+);
+assert(
+  workLedgerStatus(staleRunning, NOW) !== "failed" && workLedgerStatus(staleRunning, NOW) !== "done",
+  "and it does not invent an outcome it never observed either",
+);
+// An unreadable start date must not be declared lost on the strength of a
+// date this code could not parse.
+assert(
+  workLedgerStatus(trace({ id: "nodate", started_at: "not-a-date", finished_at: null, outcome: null }), NOW) === "working",
+  "an unparseable start keeps the optimistic reading rather than guessing",
+);
+// Counts and the list must share ONE clock, or a chip can disagree with
+// the rows beneath it.
+const mixedAges = [freshRunning, staleRunning];
+const c = workLedgerStatusCounts(mixedAges, NOW);
+assert(
+  c.working === 1 && c.unknown === 1,
+  "counts age rows against the SAME clock the list uses",
+);
+assert(
+  filterWorkLedgerRows(mixedAges, "unknown", NOW).length === 1 &&
+    filterWorkLedgerRows(mixedAges, "working", NOW).length === 1,
+  "filtering agrees with the counts for both states",
+);
+
 
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) {

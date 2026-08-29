@@ -127,13 +127,14 @@ export type WorkLedgerTraceShape = {
 
 // ── Outcome → displayed state ───────────────────────────────────────────
 
-export type WorkLedgerStatus = "working" | "waiting" | "failed" | "done";
+export type WorkLedgerStatus = "working" | "waiting" | "failed" | "done" | "unknown";
 
 export const WORK_LEDGER_STATUS_LABEL: Record<WorkLedgerStatus, string> = {
   working: "Working",
   waiting: "Waiting on input",
   failed: "Failed",
   done: "Done",
+  unknown: "No result recorded",
 };
 
 /** The `--task-*` custom properties (lib/ui/theme-tokens.css) this status
@@ -147,13 +148,48 @@ export const WORK_LEDGER_STATUS_COLOR_VAR: Record<WorkLedgerStatus, string> = {
   waiting: "--task-input",
   failed: "--task-blocked",
   done: "--task-done",
+  // Deliberately the MUTED token, not a fifth colour: "we lost track of
+  // this" is an absence of information, and dressing an absence in a
+  // status hue would make it read as a state the run is actually in.
+  unknown: "--text-muted",
 };
 
 /** The one place "what does this trace's outcome mean" is decided. See this
  *  file's own header for why these four branches, in this order, and what
  *  they port from WorkTab.tsx's classifyThreadStatus. */
-export function workLedgerStatus(trace: WorkLedgerTraceShape): WorkLedgerStatus {
-  if (!trace.finished_at) return "working";
+/** How long an unfinished trace may go on claiming to be "Working".
+ *
+ *  A trace with no `finished_at` means one of two genuinely different
+ *  things — the run is still going, or nobody ever closed it out — and
+ *  CLAUDE.md's standing rule is that two different facts may never share
+ *  one signal. Before this constant they did, and the ledger's first
+ *  contact with production showed the cost: 250 of 250 `web`-surface
+ *  traces had no finish, the oldest two months old, and every one of them
+ *  rendered as "Working". A run that started two months ago is not
+ *  working, and a surface that says it is teaches the reader to distrust
+ *  every other row on the page.
+ *
+ *  Six hours is deliberately generous — well past any real turn, including
+ *  a long one on paired hardware — so crossing it is evidence about the
+ *  RECORD rather than about the run. This does not fix the missing finish
+ *  (that is a defect in the writing path, tracked separately); it stops
+ *  this surface from asserting something it cannot know. */
+export const WORK_LEDGER_STALE_AFTER_MS = 6 * 60 * 60 * 1000;
+
+export function workLedgerStatus(
+  trace: WorkLedgerTraceShape,
+  now: number = Date.now(),
+): WorkLedgerStatus {
+  if (!trace.finished_at) {
+    const started = Date.parse(String(trace.started_at || ""));
+    // An unparseable start cannot be aged, so it keeps the optimistic
+    // reading rather than being declared lost on the strength of a date
+    // this code could not read.
+    if (Number.isFinite(started) && now - started > WORK_LEDGER_STALE_AFTER_MS) {
+      return "unknown";
+    }
+    return "working";
+  }
   const outcome = String(trace.outcome || "").trim().toLowerCase();
   if (outcome === "needs_input") return "waiting";
   if (outcome === "failed") return "failed";
@@ -258,9 +294,46 @@ export type WorkLedgerStatusCounts = Record<WorkLedgerStatus, number>;
  *  so they can never be computed from two independently-drifting
  *  expressions (the same discipline inboxNeedsYouCount already applies one
  *  surface over). */
-export function workLedgerStatusCounts(rows: readonly WorkLedgerTraceShape[]): WorkLedgerStatusCounts {
-  const counts: WorkLedgerStatusCounts = { working: 0, waiting: 0, failed: 0, done: 0 };
-  for (const row of rows) counts[workLedgerStatus(row)] += 1;
+/**
+ * THE ASK AI EXCLUSION — this is an AGENT ledger.
+ *
+ * Founder, 2026-08-30, looking at the shipped page: *"what is this ask ai
+ * doing here?"* Every row on his first real load was Ask AI, because
+ * `agent_traces` records the assistant's console turns exactly the way it
+ * records an agent's work, and this surface asked for all of them.
+ *
+ * Ask AI is the assistant inside the platform — the thing you ask how to
+ * create a project. It is not an agent, it has no hardware, and it does no
+ * job on anybody's behalf. CLAUDE.md's standing rule is that the two are
+ * separate systems that may never be mixed, "including its root", and a
+ * ledger that answers "what have my agents done" by listing the assistant's
+ * chat turns is exactly that mixing.
+ *
+ * Filtered HERE, in the module, not at the call site: this is a rule about
+ * what the ledger IS, and a call-site filter is a rule the next author has
+ * to know about rather than one they cannot reach around — the narrow-waist
+ * discipline CLAUDE.md asks for.
+ *
+ * It keys off `parseWorkLedgerAgentRef`, so anything without the
+ * "specialist:" prefix is excluded — the assistant under any of its stored
+ * ids, and any future non-agent originator, without this function needing
+ * to learn a list of names.
+ */
+export function excludeAssistantRows<T extends WorkLedgerTraceShape>(
+  rows: readonly T[],
+): T[] {
+  return rows.filter((row) => parseWorkLedgerAgentRef(row.root_agent_id).kind === "specialist");
+}
+
+export function workLedgerStatusCounts(
+  rows: readonly WorkLedgerTraceShape[],
+  now: number = Date.now(),
+): WorkLedgerStatusCounts {
+  const counts: WorkLedgerStatusCounts = { working: 0, waiting: 0, failed: 0, done: 0, unknown: 0 };
+  // One clock for the whole render: taking Date.now() per row would let a
+  // row cross the staleness line between the count and the list, so a chip
+  // could read "Working - 1" beside a list showing none.
+  for (const row of rows) counts[workLedgerStatus(row, now)] += 1;
   return counts;
 }
 
@@ -273,9 +346,10 @@ export type WorkLedgerStatusFilter = WorkLedgerStatus | "all";
 export function filterWorkLedgerRows<T extends WorkLedgerTraceShape>(
   rows: readonly T[],
   status: WorkLedgerStatusFilter,
+  now: number = Date.now(),
 ): T[] {
   if (status === "all") return rows.slice();
-  return rows.filter((row) => workLedgerStatus(row) === status);
+  return rows.filter((row) => workLedgerStatus(row, now) === status);
 }
 
 // ── Empty vs. could-not-load (the view state a component renders) ─────────
