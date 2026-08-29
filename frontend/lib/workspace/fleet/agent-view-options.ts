@@ -1,21 +1,25 @@
 /**
- * VIEW OPTIONS FOR THE WORKSPACE AGENTS PAGE — Cards/Board/List layout,
- * grouping, ordering, display properties.
+ * VIEW OPTIONS FOR THE WORKSPACE AGENTS PAGE — Board/List layout, grouping,
+ * ordering, display properties.
  *
- * THREE LAYOUTS, AND CARDS IS THE DEFAULT. Tasks has two (board | list)
- * because a task list and a task board are the only two shapes that surface
- * has. Agents has a third that is already settled and already shipped: the
- * CARD GRID (agent-card-face.ts / AgentCards.tsx), which is what this page
- * renders when nobody has touched this popover. Board and List are
- * alternatives you switch INTO; they never displace the default.
+ * TWO LAYOUTS, AND LIST IS THE DEFAULT. Tasks has two (board | list) because
+ * a task list and a task board are the only two shapes that surface has;
+ * Agents now matches it exactly, on the founder's own reversal, 2026-08-30:
+ * *"i do not want cards thing default should be list ... i only want to see
+ * list and board!"* A third layout — the CARD GRID (AgentCards.tsx) — used to
+ * be the default here. It is DELETED, not merely un-defaulted: the component,
+ * its `"cards"` layout value, and the CSS rules only it used are all gone.
+ * agent-card-face.ts is NOT that grid — it is the shared face logic (state +
+ * reach) both remaining renderings still read, and it is untouched.
  *
- * That is also why `layout: "cards"` had to become a real value rather than
- * being spelled `list` + `grouping: "none"`, which is how the first build of
- * this file expressed it. Back then the ungrouped List branch rendered the
- * flat table (AgentsList.tsx); today it renders the card grid, so a popover
- * whose "List" chip lit up over a grid of cards was a control describing a
- * view that was not on screen. Layout says which of the three renderings you
- * are looking at, and it is the only thing that decides.
+ * `layout: "cards"` used to be a real value rather than being spelled `list`
+ * + `grouping: "none"`, which is how the first build of this file expressed
+ * it — back when the ungrouped List branch rendered the flat table
+ * (AgentsList.tsx) and later the card grid, so a popover whose "List" chip
+ * lit up over a grid of cards was a control describing a view that was not on
+ * screen. That history is why `layout` stays its own value rather than being
+ * re-derived from grouping now that only List and Board remain: the same
+ * confusion would recur the instant a third layout returns.
  *
  * A PARALLEL build to task-view-options.ts / TaskViewOptions.tsx, not a
  * generalization of it. The founder's YC demo video already shows the task
@@ -91,18 +95,17 @@ import { formatUsd } from "../../ui/money";
 
 // ── Vocabulary ──────────────────────────────────────────────────────────────
 
-/** Three renderings, and every one of them exists on screen today. "Grouped"
- *  is NOT a fourth — it is the List with a grouping switched on, which is why
- *  grouping is a separate axis (see agentSurfaceFor). */
-export type AgentLayout = "cards" | "board" | "list";
+/** Two renderings, and both exist on screen today. "Grouped" is NOT a third
+ *  — it is the List with a grouping switched on, which is why grouping is a
+ *  separate axis (see agentSurfaceFor). */
+export type AgentLayout = "list" | "board";
 
-/** Rendered by AgentViewOptions.tsx in this order. Data, not three literals
- *  in the JSX, so the popover and `readAgentViewOptions`' own accepted-value
- *  list can never disagree about what a layout is. */
+/** Rendered by AgentViewOptions.tsx in this order. Data, not literals in the
+ *  JSX, so the popover and `readAgentViewOptions`' own accepted-value list
+ *  can never disagree about what a layout is. */
 export const AGENT_LAYOUT_OPTIONS: { value: AgentLayout; label: string }[] = [
-  { value: "cards", label: "Cards" },
-  { value: "board", label: "Board" },
   { value: "list", label: "List" },
+  { value: "board", label: "Board" },
 ];
 
 export type AgentGrouping = "none" | "status" | "project" | "placement";
@@ -117,19 +120,19 @@ export type AgentOrdering = "last_active" | "cost" | "name";
 export type AgentOrderDirection = "asc" | "desc";
 
 /** The six fields a Board card and a List row can draw beside an agent's
- *  name. The card grid offers none of them — see AgentSurface below. */
+ *  name — both layouts offer all six; see AgentSurface below. */
 export type AgentDisplayProperty = "brain" | "placement" | "channels" | "lastActive" | "cost" | "status";
 
-/** Which rendering is on screen — one per layout, so this is now the layout
- *  itself rather than a derived third value. It survives as its own type
- *  because `displayPropertiesFor` answers a question about a RENDERING ("does
- *  this surface actually draw that field"), and keeping the two names apart is
- *  what stops a future fourth layout silently inheriting another's column set.
- *
- *  `displayPropertiesFor("cards")` is always [] — a card face is two facts and
- *  refuses a third (agent-card-face.ts), so there is nothing on it to toggle.
- *  AgentViewOptions.tsx reads that empty array as "hide the Display properties
- *  section", never as "render an empty one". */
+/** Which rendering is on screen — one per layout, so this is the layout
+ *  itself rather than a derived value. It survives as its own type because
+ *  `displayPropertiesFor` answers a question about a RENDERING ("does this
+ *  surface actually draw that field"), and keeping the two names apart is
+ *  what stops a future third layout silently inheriting another's column set
+ *  — the exact trap the deleted Cards layout used to be the exception to
+ *  (`displayPropertiesFor("cards")` was always `[]`, since a card face is two
+ *  facts and refuses a third). With Cards gone, both surfaces get every
+ *  field, but the type is kept separate rather than collapsed into
+ *  AgentLayout for that same reason. */
 export type AgentSurface = AgentLayout;
 
 export type AgentDisplayState = Record<AgentDisplayProperty, boolean>;
@@ -180,8 +183,7 @@ export function orderDirectionLabel(ordering: AgentOrdering, direction: AgentOrd
  * "board" and "list" and on neither of them is anything exempt: unlike tasks,
  * an agent's board card has no interactive control living inside any of these
  * (there is no drag-and-drop here; see AgentsBoard.tsx for why), so nothing
- * needs the exemption the task board's status ring gets. "cards" appears in no
- * row, which is what makes displayPropertiesFor("cards") empty.
+ * needs the exemption the task board's status ring gets.
  */
 export const AGENT_DISPLAY_PROPERTIES: {
   key: AgentDisplayProperty;
@@ -198,11 +200,11 @@ export const AGENT_DISPLAY_PROPERTIES: {
 
 const ALL_DISPLAY_KEYS = AGENT_DISPLAY_PROPERTIES.map((p) => p.key);
 
-/** Everything on, CARDS layout, no grouping — exactly the settled card grid
- *  (agent-card-face.ts), so a reader who never opens the popover sees the page
- *  the founder spent a day getting right and nothing else. */
+/** Everything on, LIST layout, no grouping — the founder's own reversal,
+ *  2026-08-30 ("default should be list"), so a reader who never opens the
+ *  popover lands on the plain row list, ungrouped, every field showing. */
 export const DEFAULT_AGENT_VIEW_OPTIONS: AgentViewOptions = {
-  layout: "cards",
+  layout: "list",
   grouping: "none",
   ordering: "last_active",
   direction: "desc",
@@ -243,7 +245,10 @@ export function resetAgentViewOptions(options: AgentViewOptions): AgentViewOptio
  *  grid", because back then the ungrouped List branch rendered the card grid;
  *  in v2 "list" means the row list. Reading a v1 blob under the v2 vocabulary
  *  would silently move a reader into a view they never picked, so the old key
- *  is simply not read — the default (Cards) is what a v1 reader saw anyway. */
+ *  is simply not read — the default (Cards, at the time) is what a v1 reader
+ *  saw anyway. NOT bumped again for the 2026-08-30 Cards removal: `oneOf`'s
+ *  allow-list already drops any stored `"cards"` and falls back to the
+ *  CURRENT default (List) on its own — see readAgentViewOptions below. */
 const STORAGE_VERSION = 2;
 
 /** `fleet:agent-view:*` — its OWN namespace, never `fleet:task-view:*`, so
@@ -557,12 +562,17 @@ function orderValue(agent: FleetAgent, ordering: AgentOrdering, cost: Map<string
 /**
  * Order a list of agents for the Board and List surfaces. Not mutating — same
  * reasoning as sortTasks: callers hold `agents` straight off the polled cache.
- * THE CARD GRID IS NEVER RUN THROUGH THIS. planAgentCards ranks by attention
- * (blocked > working > unfinished setup > stopped > healthy, alphabetical
- * within), which is a settled decision for that surface — "never recency... a
- * card's position is stable" — and a saved "cost" or "name" ordering must not
- * silently override it. That is also why Ordering is not offered while Cards
- * is the layout (AgentViewOptions.tsx).
+ *
+ * The deleted Cards grid never ran through this: planAgentCards ranks by
+ * attention (blocked > working > unfinished setup > stopped > healthy,
+ * alphabetical within), which was a settled decision for that surface —
+ * "never recency... a card's position is stable" — and Ordering was not even
+ * offered while Cards was the layout, for exactly that reason. That rank is
+ * still computed (planAgentCards is still the shared filter — see
+ * agent-card-face.ts), but nothing renders it any more: page.tsx re-sorts the
+ * filtered set through THIS function before handing it to either remaining
+ * layout, so both are ordered by the reader's own Ordering choice, never by
+ * attention rank.
  */
 export function sortAgentsForView(
   agents: FleetAgent[],

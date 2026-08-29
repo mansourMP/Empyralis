@@ -10,32 +10,24 @@
  * name is its own (`.fleet-agent-view-options*`), and it imports nothing
  * from task-view-options.ts or TaskViewOptions.tsx.
  *
- * THREE LAYOUTS, NOT TWO, AND CARDS LEADS. The card grid is this page's
- * settled default (agent-card-face.ts), so it is a layout you can switch back
- * TO, not an absence you fall into — spelling it as "List with no grouping"
- * is what used to make the "List" chip light up over a grid of cards. The
- * three come from AGENT_LAYOUT_OPTIONS rather than being typed here, so this
- * popover and readAgentViewOptions' accepted-value list cannot disagree.
+ * TWO LAYOUTS, LIST LEADS. Cards — a third layout, and this page's former
+ * default — is DELETED, 2026-08-30, on the founder's own reversal: *"i do not
+ * want cards thing default should be list ... i only want to see list and
+ * board!"* List and Board come from AGENT_LAYOUT_OPTIONS rather than being
+ * typed here, so this popover and readAgentViewOptions' accepted-value list
+ * cannot disagree.
  *
- * WHAT THE CARDS LAYOUT OFFERS BELOW LAYOUT: nothing, and that is the point.
- *
- *   · GROUPING is a List concept. The Board's four columns already ARE the
- *     "status" grouping, always on, and a card grid has no sections at all —
- *     so on both, a grouping picker would be a control that does nothing (the
- *     same rule task-view-options.ts states for Grouping-in-Board).
- *   · ORDERING is hidden on Cards because that grid has its OWN settled
- *     ordering: planAgentCards ranks by attention (blocked > working >
- *     unfinished setup > stopped > healthy), which CLAUDE.md records as a
- *     decision — "never recency... a card's position is stable". A cost/name
- *     sort there would either silently override that or do nothing, and both
- *     are worse than not offering it.
- *   · DISPLAY PROPERTIES is skipped entirely (never rendered as an empty chip
- *     row) on Cards, because a card face is two facts and refuses a third —
- *     there is nothing on it those six toggles could show or hide.
- *
- * So on Cards this popover is the layout switch and nothing else; every other
- * row appears exactly when the layout on screen gives it something to act on,
- * and is never rendered disabled.
+ * GROUPING is a List-only concept: the Board's four columns already ARE the
+ * "status" grouping, always on, so a grouping picker there would be a control
+ * that does nothing (the same rule task-view-options.ts states for
+ * Grouping-in-Board). ORDERING and DISPLAY PROPERTIES are offered on both —
+ * there is no reduced layout left to hide them for; that used to be Cards'
+ * job (a card face is two facts and refuses a third, so it had nothing for
+ * six display toggles to show or hide, and its own settled attention-rank
+ * order — "never recency... a card's position is stable", CLAUDE.md — meant
+ * a saved cost/name Ordering would have either silently overridden it or done
+ * nothing). Every row below still appears exactly when the layout on screen
+ * gives it something to act on, and is never rendered disabled.
  *
  * WHERE THE TRIGGER SITS: in the Agents page's own single toolbar row, pinned
  * right, with the agent search pinned left (.fleet-agent-surface-toolbar,
@@ -48,7 +40,7 @@
  */
 
 import { useEffect, useId, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Columns3, LayoutGrid, Rows3, Settings2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Columns3, Rows3, Settings2 } from "lucide-react";
 
 import {
   AGENT_GROUPING_OPTIONS,
@@ -68,12 +60,10 @@ import {
 
 /** One mark per layout, keyed off the shared vocabulary so a layout added to
  *  AGENT_LAYOUT_OPTIONS without a mark here is a compile error rather than a
- *  blank button. LayoutGrid is the card grid (what it draws), Columns3 the
- *  board, Rows3 the list. */
-const LAYOUT_ICON: Record<AgentLayout, typeof LayoutGrid> = {
-  cards: LayoutGrid,
-  board: Columns3,
+ *  blank button. Columns3 is the board, Rows3 the list. */
+const LAYOUT_ICON: Record<AgentLayout, typeof Columns3> = {
   list: Rows3,
+  board: Columns3,
 };
 
 export function AgentViewOptions({
@@ -112,10 +102,9 @@ export function AgentViewOptions({
   const surface = agentSurfaceFor(options);
   const properties = displayPropertiesFor(surface);
   const dirty = !isDefaultAgentViewOptions(options);
-  // Both are in the file header. Each row renders exactly when the layout on
-  // screen gives it something to act on — never rendered and inert.
+  // Grouping is List-only — see the file header. Ordering has no exception
+  // left to gate on now that Cards is gone, so it always renders below.
   const showGrouping = options.layout === "list";
-  const showOrdering = options.layout !== "cards";
 
   return (
     <div className="fleet-agent-view-options" ref={ref}>
@@ -178,51 +167,49 @@ export function AgentViewOptions({
             </div>
           )}
 
-          {showOrdering && (
-            <div className="fleet-agent-view-options-row">
-              <label className="fleet-agent-view-options-label" htmlFor={orderingId}>
-                Ordering
-              </label>
-              <span className="fleet-agent-view-options-control">
-                <select
-                  id={orderingId}
-                  className="fleet-agent-view-options-select"
-                  value={options.ordering}
-                  onChange={(e) => {
-                    const ordering = e.target.value as AgentOrdering;
-                    // Picking a key also picks the direction that reads right
-                    // for it — same rule TaskViewOptions.tsx applies.
-                    onChange((prev) => ({
-                      ...prev,
-                      ordering,
-                      direction: AGENT_ORDERING_DEFAULT_DIRECTION[ordering],
-                    }));
-                  }}
-                >
-                  {AGENT_ORDERING_OPTIONS.map((o) => (
-                    <option key={o.value} value={o.value}>
-                      {o.label}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  className="fleet-agent-view-options-dir"
-                  title={orderDirectionLabel(options.ordering, options.direction)}
-                  aria-label={`Order: ${orderDirectionLabel(options.ordering, options.direction)}`}
-                  onClick={() =>
-                    onChange((prev) => ({ ...prev, direction: prev.direction === "asc" ? "desc" : "asc" }))
-                  }
-                >
-                  {options.direction === "asc" ? (
-                    <ArrowUp size={13} strokeWidth={2} />
-                  ) : (
-                    <ArrowDown size={13} strokeWidth={2} />
-                  )}
-                </button>
-              </span>
-            </div>
-          )}
+          <div className="fleet-agent-view-options-row">
+            <label className="fleet-agent-view-options-label" htmlFor={orderingId}>
+              Ordering
+            </label>
+            <span className="fleet-agent-view-options-control">
+              <select
+                id={orderingId}
+                className="fleet-agent-view-options-select"
+                value={options.ordering}
+                onChange={(e) => {
+                  const ordering = e.target.value as AgentOrdering;
+                  // Picking a key also picks the direction that reads right
+                  // for it — same rule TaskViewOptions.tsx applies.
+                  onChange((prev) => ({
+                    ...prev,
+                    ordering,
+                    direction: AGENT_ORDERING_DEFAULT_DIRECTION[ordering],
+                  }));
+                }}
+              >
+                {AGENT_ORDERING_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className="fleet-agent-view-options-dir"
+                title={orderDirectionLabel(options.ordering, options.direction)}
+                aria-label={`Order: ${orderDirectionLabel(options.ordering, options.direction)}`}
+                onClick={() =>
+                  onChange((prev) => ({ ...prev, direction: prev.direction === "asc" ? "desc" : "asc" }))
+                }
+              >
+                {options.direction === "asc" ? (
+                  <ArrowUp size={13} strokeWidth={2} />
+                ) : (
+                  <ArrowDown size={13} strokeWidth={2} />
+                )}
+              </button>
+            </span>
+          </div>
 
           {/* Only rendered when THIS rendering actually has toggleable
               properties — an empty "Display properties" heading over zero

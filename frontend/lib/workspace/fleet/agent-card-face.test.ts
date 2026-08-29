@@ -267,8 +267,12 @@ for (const gone of ["AgentConversationList.tsx", "agents-conversation-list.ts", 
 const pageSource = readFileSync(new URL("page.tsx", AGENTS_DIR), "utf8");
 assert(pageSource.length > 500, "CANARY: the Agents page source was actually read");
 assert(
-  pageSource.includes('from "@/lib/workspace/fleet/AgentCards"') && /<AgentCards\b/.test(pageSource),
-  "the Agents page renders the card grid — built, and WIRED",
+  !existsSync(new URL("./AgentCards.tsx", import.meta.url)),
+  "AgentCards.tsx (the deleted Cards layout) no longer exists — deleted, not merely unimported",
+);
+assert(
+  pageSource.includes('from "@/lib/workspace/fleet/AgentsGroupedList"') && /<AgentsGroupedList\b/.test(pageSource),
+  "the Agents page renders the row list — built, and WIRED, and it is what a reader sees by default",
 );
 assert(
   /useFleetWorkspaceTasks\s*\(/.test(pageSource),
@@ -287,22 +291,34 @@ assert(
   "the Operator exclusion and the 0/1/2+ shape still come from the SHARED rules, never a second opinion grown here",
 );
 
-const cardsSource = readFileSync(new URL("./AgentCards.tsx", import.meta.url), "utf8");
-assert(cardsSource.length > 500, "CANARY: AgentCards.tsx was actually read");
+// AgentCards.tsx is gone, so the checks that used to run against it now run
+// against the surfaces that replaced it: the page itself (which computes
+// listAgents off planAgentCards/groupTasksByAgent/deriveAgentStatus — see
+// page.tsx around the `listAgents` useMemo) and the two renderings that
+// actually draw a face (AgentsBoard.tsx / AgentsGroupedList.tsx, both of
+// which import agentCardReach from THIS module rather than reimplementing
+// it — see agent-view-options.test.ts's own structural section for that
+// specific guard).
 assert(
-  /planAgentCards\s*\(/.test(cardsSource) && /groupTasksByAgent\s*\(/.test(cardsSource),
-  "the component renders what THIS module decided rather than deciding for itself",
+  /planAgentCards\s*\(/.test(pageSource) && /groupTasksByAgent\s*\(/.test(pageSource),
+  "the page computes the agent set from THIS module's shared rule rather than deciding for itself",
 );
 assert(
-  /deriveAgentStatus\s*\(/.test(cardsSource),
+  /deriveAgentStatus\s*\(/.test(pageSource),
   "the status comes from the one shared vocabulary (deriveAgentStatus), not a fork of it",
 );
-// No composer, no send, no message input — anywhere on this surface. Chat left
-// the platform; a card grid is the last place it should grow back.
-assert(
-  !/<textarea|onSend|placeholder="Message|sendMessage/i.test(cardsSource),
-  "the Agents surface has no composer of any kind",
-);
+// No composer, no send, no message input — anywhere on this surface. Chat
+// left the platform; neither remaining layout is the place it should grow
+// back.
+const boardSourceForComposerCheck = readFileSync(new URL("./AgentsBoard.tsx", import.meta.url), "utf8");
+const listSourceForComposerCheck = readFileSync(new URL("./AgentsGroupedList.tsx", import.meta.url), "utf8");
+for (const [name, src] of [
+  ["page.tsx", pageSource],
+  ["AgentsBoard.tsx", boardSourceForComposerCheck],
+  ["AgentsGroupedList.tsx", listSourceForComposerCheck],
+] as const) {
+  assert(!/<textarea|onSend|placeholder="Message|sendMessage/i.test(src), `${name} has no composer of any kind`);
+}
 
 const cardsCss = readFileSync(new URL("./agent-cards.css", import.meta.url), "utf8");
 assert(cardsCss.length > 500, "CANARY: agent-cards.css was actually read");
@@ -313,12 +329,16 @@ assert(cardsCss.length > 500, "CANARY: agent-cards.css was actually read");
 // document.
 const cardsCssDecls = cardsCss.replace(/\/\*[\s\S]*?\*\//g, "");
 assert(
-  /\.fleet-agent-card-grid\s*\{/.test(cardsCssDecls),
+  /\.fleet-agent-surface-toolbar\s*\{/.test(cardsCssDecls),
   "CANARY: stripping comments left real rules behind — the two scans below can actually fail",
 );
 assert(
+  !/\.fleet-agent-card-grid\s*\{/.test(cardsCssDecls),
+  "the deleted grid's own face rule (.fleet-agent-card-grid) is gone — this file now holds only the page's shared toolbar/search/empty-state rules",
+);
+assert(
   !/var\(--[a-z-]*accent/.test(cardsCssDecls),
-  "the grid spends NO accent — the view's one filled primary action is the topbar's New agent button",
+  "this stylesheet spends NO accent — the view's one filled primary action is the topbar's New agent button",
 );
 assert(
   !/:focus[^{]*\{[^}]*outline:\s*(?!none)/.test(cardsCssDecls),

@@ -10,8 +10,8 @@
  * FleetAgentDetail.tsx's own header called the BARE deriveAgentStatus, so
  * the workspace grid read "Working" for an agent whose own page, at the
  * same moment, read "Ready". Fixed by having the header enrich with the
- * agent's assigned tasks exactly like AgentCards/AgentsBoard/
- * AgentsGroupedList already do, reusing the SAME shared
+ * agent's assigned tasks exactly like AgentsBoard/AgentsGroupedList
+ * already do, reusing the SAME shared
  * useFleetWorkspaceTasks cache those surfaces poll (no extra request).
  *
  * BUG 2 — while the agent fetch was in flight (or had genuinely failed),
@@ -62,7 +62,7 @@ assert(
 assert(
   /\bagentDisplayStatus\s*\(\s*agent\s*\?\?\s*\{\}\s*,\s*gateways\s*,\s*thisAgentTasks\s*\)/.test(detailSource),
   "the header's status comes from agentDisplayStatus fed this agent's own " +
-    "tasks — the same enrichment AgentCards/AgentsBoard/AgentsGroupedList " +
+    "tasks — the same enrichment AgentsBoard/AgentsGroupedList " +
     "already apply, per agent-view-options.ts's own header comment",
 );
 assert(
