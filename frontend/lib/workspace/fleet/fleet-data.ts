@@ -126,23 +126,24 @@ export type FleetProject = {
   created_at?: string;
 };
 
-/** Resolve the project id to use when linking to an agent's own detail
- *  route — …/w/{ws}/projects/{projectId}/agents/{agentId}/{tab} structurally
- *  requires a non-empty project segment (see
- *  app/(account)/w/[workspaceId]/projects/[projectId]/agents/[agentId]/
- *  [tab]/page.tsx). But an agent's own project_id can be blank: it's a
- *  nullable column (workspace_agent_installs.project_id, ON DELETE SET
- *  NULL) added by the Phase 2 projects migration with no backfill for
- *  agents that already existed, and the fleet-agents list API surfaces it
- *  verbatim (fleet_tools.fleet_list_agents). A link built with that segment
- *  missing collapses to .../projects/agents/{id}/overview — the literal
- *  "agents" folder swallows it as the [projectId] value, stranding the
- *  real agent id with no matching route — and 404s to the global
- *  not-found page (this was the "This route is not available" dead end).
- *  Falling back to the workspace's default project — the same one new
- *  agents resolve to when created without an explicit pick (see
- *  fleet_tools.create_agent's _default_project branch) — keeps the link
- *  live instead of dead-ending. */
+/** Resolve the project id a "New agent" create request should carry —
+ *  `project_id` is still a required field on POST .../fleet/agents
+ *  (fleet_tools.py) even though an agent is completely independent of any
+ *  project once it exists (founder hard rule, 2026-08-30). The only
+ *  remaining caller is resolveQuickCreateProjectId (agent-quick-create.ts),
+ *  which silently seeds that still-required backend field; it is never
+ *  rendered and never used to build a link any more.
+ *
+ *  CORRECTED 2026-08-30: this used to also be the resolver every agent
+ *  LINK ran through, because the (now-deleted) project-scoped route —
+ *  …/w/{ws}/projects/{projectId}/agents/{agentId}/{tab} — structurally
+ *  required a non-empty project segment, and an agent's own project_id can
+ *  be blank (it's a nullable column, workspace_agent_installs.project_id,
+ *  ON DELETE SET NULL, added by the Phase 2 projects migration with no
+ *  backfill for agents that already existed — the fleet-agents list API
+ *  still surfaces it verbatim, fleet_tools.fleet_list_agents). An agent's
+ *  one real address now (/w/{ws}/agents/{agentId}/{tab}) takes no project
+ *  segment at all, so there is nothing left for a missing one to break. */
 export function resolveAgentProjectId(
   projectId: string | undefined,
   projects: FleetProject[],

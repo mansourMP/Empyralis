@@ -143,7 +143,7 @@ export function CreateFirstAgentEmpty({
   function handleAgentCreated(result: { agentId: string; projectId: string }) {
     setCardOpen(false);
     onCreated?.();
-    router.push(quickCreateAgentChatPath({ workspaceId, projectId: result.projectId, agentId: result.agentId }));
+    router.push(quickCreateAgentChatPath({ workspaceId, agentId: result.agentId }));
   }
 
   return (

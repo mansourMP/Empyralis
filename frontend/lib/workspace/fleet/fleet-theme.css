@@ -6518,8 +6518,14 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
    .fleet-cell-muted directly rather than cloning them — one shared visual
    system for "a right-aligned tabular cell", not two that happen to match. */
 .fleet-projects-list {
-  /* U3-H: +Status, same client-derived density the Agents list already has. */
-  --fleet-list-grid: minmax(260px, 1fr) 80px 120px 90px 90px 160px;
+  /* Two columns, 2026-08-30: Agents/Cost/Tokens/Last active/Status were all
+     agent-derived (grouping agents on project_id, a nullable, never-
+     backfilled column that never meant ownership — founder hard rule, "an
+     agent is completely independent of any project") and are gone. Work is
+     the one column left, built from the project's own task_count/
+     document_count — see projects/page.tsx's own FilterState comment for
+     the full history. */
+  --fleet-list-grid: minmax(260px, 1fr) 220px;
   --fleet-list-gap: 16px;
   --fleet-list-padding-x: 16px;
   max-width: 1400px;
@@ -8974,8 +8980,11 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   .fleet-projects-list-header {
     display: none;
   }
-  .fleet-col-agents-count,
-  .fleet-col-tokens,
+  /* .fleet-col-agents-count/.fleet-col-tokens dropped 2026-08-30 along with
+     the columns that carried them (Projects no longer has an Agents or
+     Tokens column at all — see the desktop rule above). .fleet-col-
+     last-active stays: AgentsList.tsx's OWN Last-active column still uses
+     it, and this rule is shared across both lists' mobile collapse. */
   .fleet-col-last-active {
     display: none;
   }

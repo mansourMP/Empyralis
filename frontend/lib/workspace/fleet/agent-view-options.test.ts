@@ -169,7 +169,7 @@ assert(
   !isDefaultAgentViewOptions(opts({ display: { ...DEFAULT_AGENT_VIEW_OPTIONS.display, cost: false } })),
   "a hidden property is dirty",
 );
-const reset = resetAgentViewOptions(opts({ layout: "board", grouping: "project", ordering: "name" }));
+const reset = resetAgentViewOptions(opts({ layout: "board", grouping: "placement", ordering: "name" }));
 assert(reset.layout === "board", "Reset keeps the layout you are looking at");
 assert(
   reset.grouping === "none" && reset.ordering === DEFAULT_AGENT_VIEW_OPTIONS.ordering,
@@ -191,10 +191,13 @@ assert(
   "a v1 blob lives under a DIFFERENT key entirely and is never read — the v2 default (List) stands, not whatever the v1 blob says (if it were read, this would come back 'board')",
 );
 
-writeAgentViewOptions("ws1", opts({ layout: "board", grouping: "project", ordering: "cost", direction: "asc" }));
+// "placement", not "project" (removed 2026-08-30 — see the GROUPING
+// section below): any real, still-valid grouping proves the same
+// round-trip.
+writeAgentViewOptions("ws1", opts({ layout: "board", grouping: "placement", ordering: "cost", direction: "asc" }));
 const roundTripped = readAgentViewOptions("ws1");
 assert(
-  roundTripped.layout === "board" && roundTripped.grouping === "project" && roundTripped.ordering === "cost" && roundTripped.direction === "asc",
+  roundTripped.layout === "board" && roundTripped.grouping === "placement" && roundTripped.ordering === "cost" && roundTripped.direction === "asc",
   "a real choice round-trips through localStorage",
 );
 // THE REAL-WORLD CASE THIS FIX EXISTS FOR: an existing reader's blob still
@@ -242,13 +245,21 @@ assert(
   byStatus.some((section) => section.statusGroup === "offline"),
   "a stopped agent lands in the offline-or-stopped column",
 );
-const byProject = groupAgents(
-  [agent({ project_id: "p1" }), agent({ agent_id: "b", label: "Beta" })],
-  "project",
+
+// "project" GROUPING IS GONE, 2026-08-30 (founder hard rule: "an agent is
+// completely independent of any project"). Inverted, not deleted, so
+// nobody re-adds it believing it was simply forgotten — same convention
+// primary-rail-nav.test.ts uses for a removed destination.
+assert(
+  // Cast through `string` deliberately — "project" is no longer a member
+  // of AgentGrouping at all, so a bare comparison would be a compile
+  // error (no overlap), which is the point.
+  !AGENT_GROUPING_OPTIONS.some((g) => (g.value as string) === "project"),
+  "\"project\" is not an offered grouping — an agent's project_id is not ownership",
 );
 assert(
-  byProject[byProject.length - 1].empty === true,
-  "the no-project catch-all sorts LAST — same convention the tasks grouping uses",
+  (["none", "status", "placement"] as const).every((g) => AGENT_GROUPING_OPTIONS.some((o) => o.value === g)),
+  "the three real groupings survive the removal",
 );
 
 // ── ORDERING ──────────────────────────────────────────────────────────────

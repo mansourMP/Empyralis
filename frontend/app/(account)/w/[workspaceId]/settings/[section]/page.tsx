@@ -7,7 +7,7 @@ import { DEFAULT_SETTINGS_SECTION, isSettingsSection } from "@/lib/workspace/fle
 
 /**
  * Settings, routed by section — mirrors the agent detail pattern
- * (projects/[projectId]/agents/[agentId]/[tab]/page.tsx): the bare
+ * (agents/[agentId]/[tab]/page.tsx): the bare
  * settings/page.tsx redirects here with a default section, this page reads
  * and validates the URL's own [section] segment, and SettingsShell derives
  * everything from that on every render rather than a local copy.

@@ -925,8 +925,6 @@ export function FleetAgentDetail({
   agent,
   agentsLoading,
   agentsError,
-  projectId,
-  projectName,
   backHref,
   backLabel,
   onChat,
@@ -949,31 +947,22 @@ export function FleetAgentDetail({
    *  the same "not yet found" fallback this page already had. */
   agentsLoading?: boolean;
   agentsError?: string | null;
-  /** The URL's own projectId segment — available on first paint,
-   *  independent of the agents fetch. Used to build the chat header's back
-   *  link (AgentDetailHeader below), same "resolved from the route, never
-   *  from a still-loading fetch" contract projectName already follows. */
-  projectId: string;
-  /** Resolved project display name — passed by the routed page (from the URL's
-   *  projectId, so it's available on first paint independent of the agents
-   *  fetch). undefined = still resolving (shows a loading placeholder); pass
-   *  "—" explicitly when there genuinely is no project (e.g. Sage). NEVER
-   *  fall back to the raw project_id here — that's the "raw ids on first
-   *  paint" bug. */
-  projectName?: string;
-  /** Where the header's "‹" goes, and what it is called. Defaults to this
-   *  agent's PROJECT — correct for the project-scoped route, which is the
-   *  door you came through there.
-   *
-   *  The workspace-level route (/w/{ws}/agents/{id}/…) overrides both,
-   *  because "up" from there is the agents list, not a project the reader
-   *  may never have opened. That is what Breadcrumbs.tsx already derives
-   *  for this route (Agents › {agent}), so the two agreeing is the fix, not
-   *  a new opinion — and below 768px it stops being cosmetic: the list pane
-   *  collapses away (agents-split-pane.ts) and this arrow becomes the only
-   *  way back to it. */
-  backHref?: string;
-  backLabel?: string;
+  /** Where the header's "‹" goes, and what it is called. REQUIRED, not
+   *  defaulted — an agent has exactly one real address now
+   *  (/w/{ws}/agents/{id}/…, see agents/[agentId]/[tab]/page.tsx, the ONLY
+   *  caller of this component since the project-scoped twin was deleted
+   *  2026-08-30: an agent is completely independent of any project, so
+   *  there is no second door for "up" to mean something different at).
+   *  "Up" from there is the agents list — that is what Breadcrumbs.tsx
+   *  already derives for this route (Agents › {agent}), so the two
+   *  agreeing is the point — and below 768px it stops being cosmetic: the
+   *  list pane collapses away (agents-split-pane.ts) and this arrow
+   *  becomes the only way back to it. A component with one caller and a
+   *  fallback nobody can reach is a fallback that lies about being needed;
+   *  this used to default to a `/projects/{projectId}` link for a
+   *  project-scoped caller that no longer exists. */
+  backHref: string;
+  backLabel: string;
   onChat: (agentId: string) => void;
   initialTab?: TabId;
   onTabChange?: (tab: TabId) => void;
@@ -1449,8 +1438,8 @@ export function FleetAgentDetail({
         statusTone={status.tone}
         statusLabel={status.label}
         sheetOpen={sheetOpen}
-        backHref={backHref || `/w/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(projectId)}`}
-        backLabel={backLabel || projectName || "Project"}
+        backHref={backHref}
+        backLabel={backLabel}
         configureHref={tabHref(sheetOpen ? activeTab : CONFIGURE_GROUPS[0].tabs[0])}
         profileHref={tabHref(profileOpen ? activeTab : defaultAgentProfileSegment(isMaster))}
         onOpenProperties={() => setPropertiesOpen(true)}

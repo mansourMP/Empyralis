@@ -26,10 +26,18 @@
  * find my agents". His own words when asking for this removal: "we already
  * changed the direction to make it generally better".
  *
- * Same treatment as People above -- the /agents ROUTE under a project stays
- * live and unlinked (deleting it strands bookmarks, and making it a redirect
- * target risks the "a redirect runs ahead of the router" trap CLAUDE.md
- * records). It simply is not offered in the tab bar any more.
+ * UPDATE, 2026-08-30 — the founder hardened this into a HARD RULE: "Agents
+ * must not belong to the project, but it must be actually the opposite —
+ * they are completely independent." Keeping the project-scoped /agents
+ * ROUTE "live and unlinked" (this comment's own earlier posture, same
+ * treatment as People above) was itself a small instance of the thing the
+ * rule now forbids -- a working URL is still a claim that an agent has an
+ * address inside a project. That route (and its [agentId]/[tab] tree) is
+ * DELETED, not merely unlinked; next.config.ts's LEGACY_REDIRECTS sends any
+ * old bookmark straight to the same agent's one real, workspace-level
+ * address instead, which is what actually solves the "stranded bookmark"
+ * concern this comment used to cite as the reason to keep the dead route
+ * around.
  */
 export const PROJECT_TAB_VIEWS = ["tasks", "documents"] as const;
 export type ProjectTabView = (typeof PROJECT_TAB_VIEWS)[number];

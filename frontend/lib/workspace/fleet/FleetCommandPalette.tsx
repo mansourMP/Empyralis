@@ -31,7 +31,7 @@ import {
 } from "lucide-react";
 
 import type { FleetTheme } from "./fleet-preferences";
-import { resolveAgentProjectId, useFleetAgents, useFleetProjects } from "./fleet-data";
+import { useFleetAgents, useFleetProjects } from "./fleet-data";
 import { findSageAgent } from "./fleet-presentation";
 
 type Action = {
@@ -43,12 +43,23 @@ type Action = {
   run: () => void;
 };
 
-// Matches /w/{workspaceId}/projects/{projectId}/agents/{agentId}/{tab} — the
-// one route an agent's detail view renders at (FleetAgentDetail is always
-// variant="page", mounted only from [tab]/page.tsx — there is no modal to
-// probe for). Deriving "are we on an agent, and which tab" from the URL
-// itself means this stays correct through back/forward/deep-links for free.
-const AGENT_DETAIL_RE = /^\/w\/[^/]+\/projects\/([^/]+)\/agents\/([^/]+)\/([^/]+)$/;
+// Matches /w/{workspaceId}/agents/{agentId}/{tab} — an agent's one real
+// address (FleetAgentDetail is always variant="page", mounted only from
+// agents/[agentId]/[tab]/page.tsx — there is no modal to probe for, and no
+// second, project-scoped route any more: an agent is completely
+// independent of any project). Deriving "are we on an agent, and which
+// tab" from the URL itself means this stays correct through
+// back/forward/deep-links for free.
+//
+// CORRECTED 2026-08-30: this used to match ONLY the project-scoped twin
+// (.../projects/{projectId}/agents/{agentId}/{tab}), which that twin's own
+// deletion would have left permanently unmatchable — but it was ALREADY
+// wrong before that: the workspace-level route existed and was the door
+// most agents were actually reached through, and this regex never matched
+// it, so `agentDetail` was silently `null` there and the "This agent"
+// tab-switch cluster below never rendered on it. Fixed as part of the same
+// pass, not a pre-existing correct case to preserve.
+const AGENT_DETAIL_RE = /^\/w\/[^/]+\/agents\/([^/]+)\/([^/]+)$/;
 
 // The tabs an agent detail page renders (see FleetAgentDetail.tsx's TABS),
 // minus Hardware — these are the "switch tab" actions offered here. Chat
@@ -116,7 +127,7 @@ export function FleetCommandPalette({
   const agentDetail = useMemo(() => {
     const m = pathname.match(AGENT_DETAIL_RE);
     if (!m) return null;
-    return { projectId: decodeURIComponent(m[1]), agentId: decodeURIComponent(m[2]), tab: m[3] };
+    return { agentId: decodeURIComponent(m[1]), tab: m[2] };
   }, [pathname]);
 
   // Global Cmd+K binding
@@ -178,7 +189,7 @@ export function FleetCommandPalette({
 
     let thisAgentActions: Action[] = [];
     if (agentDetail) {
-      const agentBase = `${base}/projects/${encodeURIComponent(agentDetail.projectId)}/agents/${encodeURIComponent(agentDetail.agentId)}`;
+      const agentBase = `${base}/agents/${encodeURIComponent(agentDetail.agentId)}`;
       const tabActions: Action[] = AGENT_TABS.filter((t) => t.id !== agentDetail.tab).map((t) => ({
         id: `tab-${t.id}`,
         // The "chat" tab id is the agent's read-only observation surface — the
@@ -203,7 +214,10 @@ export function FleetCommandPalette({
         hint: "open",
         group: "Agents",
         icon: Bot,
-        run: () => go(`${base}/projects/${encodeURIComponent(resolveAgentProjectId(a.project_id, projects))}/agents/${encodeURIComponent(a.agent_id)}/chat`),
+        // An agent is completely independent of any project (founder hard
+        // rule, 2026-08-30) — its one real address never carries a project
+        // segment.
+        run: () => go(`${base}/agents/${encodeURIComponent(a.agent_id)}/chat`),
       }));
 
     const projectActions: Action[] = projects.map((p) => ({
@@ -216,21 +230,28 @@ export function FleetCommandPalette({
     }));
 
     // Mirrors the rail's own destinations (primary-rail-nav's RAIL_ITEMS) —
-    // Inbox and Projects, in the same order — then the two setup surfaces
-    // that are deliberately NOT in the rail. Hardware left the rail in the
-    // 2026-07 repositioning and lives in Settings now; the palette is
-    // exactly where a once-in-a-while destination should still be one
-    // keystroke away, so it keeps its entry, hinted with where it actually
-    // lives.
+    // Inbox, My work, Projects, Agents, in the same order — then the two
+    // setup surfaces that are deliberately NOT in the rail. Hardware left
+    // the rail in the 2026-07 repositioning and lives in Settings now; the
+    // palette is exactly where a once-in-a-while destination should still
+    // be one keystroke away, so it keeps its entry, hinted with where it
+    // actually lives.
     //
-    // "go-conversations"/"go-agents" are GONE (project-as-spine nav,
-    // CLAUDE.md 2026-08-13) — both used to jump to a workspace-wide
-    // aggregation across every project's agents, the exact boundary an
-    // agent belonging to its project must not be reached past. Searching
-    // for a specific agent by name still works (agentActions above, one
-    // keystroke from here) and still opens straight into its chat; there is
-    // just no "browse everything" destination behind ⌘K any more, same as
-    // there is none in the rail.
+    // "go-conversations" is GONE — Conversations still aggregates across
+    // every agent's own conversation thread and stays deliberately off both
+    // the rail and here (primary-rail-nav.test.ts asserts it out). "go-agents"
+    // is NOT gone — CORRECTED 2026-08-30: this used to claim it was removed
+    // as part of a "project-as-spine nav" boundary ("an agent belonging to
+    // its project must not be reached past"), citing a 2026-08-13 decision
+    // that was itself superseded 2026-08-19 when Agents came back onto the
+    // rail as a real, workspace-level, project-independent surface (see
+    // primary-rail-nav.test.ts's own history of that reversal). The entry
+    // was simply never re-added here, so the palette silently violated the
+    // very rule stated two lines below. Searching for a specific agent by
+    // name still works too (agentActions above, one keystroke from here)
+    // and still opens straight into its chat — that is a DIFFERENT action
+    // (jump to one agent) from this one (browse the whole list), same as
+    // "go-projects" below coexists with a project-search result.
     const goToActions: Action[] = [
       { id: "go-inbox", label: "Inbox", group: "Go to", icon: Inbox, run: () => go(`${base}/inbox`) },
       // Same rail order, and present for the same reason every other rail
@@ -239,6 +260,7 @@ export function FleetCommandPalette({
       // of the app.
       { id: "go-my-work", label: "My work", group: "Go to", icon: ListChecks, run: () => go(`${base}/my-work`) },
       { id: "go-projects", label: "Projects", group: "Go to", icon: FolderKanban, run: () => go(`${base}/projects`) },
+      { id: "go-agents", label: "Agents", group: "Go to", icon: Bot, run: () => go(`${base}/agents`) },
       { id: "go-settings", label: "Settings", group: "Go to", icon: Settings, run: () => go(`${base}/settings`) },
       { id: "go-hardware", label: "Hardware", hint: "in settings", group: "Go to", icon: Cpu, run: () => go(`${base}/hardware`) },
     ];

@@ -40,7 +40,11 @@ assert(
 // thing that was deliberately lifted out, and gives two answers to "where do
 // I find my agents". Asserted as its own negative, exactly like People
 // below, so a future edit that quietly re-adds the tab fails here rather
-// than shipping. The per-project /agents ROUTE stays live and unlinked.
+// than shipping. UPDATE, 2026-08-30: the per-project /agents ROUTE — kept
+// "live and unlinked" until now — is DELETED outright (founder hard rule:
+// "an agent is completely independent of any project"); old bookmarks
+// redirect via next.config.ts's LEGACY_REDIRECTS instead. See
+// agent-project-independence.test.ts for the structural guard.
 assert(!(PROJECT_TAB_VIEWS as readonly string[]).includes("agents"), "Agents is NOT a tab");
 
 // Wired, not just built: the page must render its strip FROM this module,

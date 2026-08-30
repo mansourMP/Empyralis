@@ -993,8 +993,11 @@ export function AgentCreateCard({
    *  widely — a filter press on Channels moves it between 4 cards and 21. */
   const embedsFullTab = step === "channels" || step === "apps";
 
+  // An agent's one real address (agent-quick-create.ts's quickCreateAgentChatPath
+  // is the Chat-tab twin of this same rule) — never project-scoped; an agent
+  // is completely independent of any project.
   const agentHref = created
-    ? `/w/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(created.projectId)}/agents/${encodeURIComponent(created.agentId)}/hardware`
+    ? `/w/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(created.agentId)}/hardware`
     : undefined;
 
   const brainOptions = agentCreateBrainOptionsFor(placement);

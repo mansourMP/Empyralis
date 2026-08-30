@@ -5,11 +5,9 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 
 import {
-  resolveAgentProjectId,
   useFleetAgents,
   useFleetProjects,
   useFleetWorkspaceTasks,
-  type FleetProject,
 } from "@/lib/workspace/fleet/fleet-data";
 import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
 import { deriveAgentStatus, useWorkspaceGateways } from "@/lib/workspace/fleet/gateway-box-picker";
@@ -66,10 +64,12 @@ import "../../../../../lib/workspace/fleet/agent-cards.css";
  * "Created" is true of all nineteen of them and therefore says nothing.
  *
  * The agent's own routed page (agents/[agentId]/[tab]) is UNTOUCHED and still
- * carries every tab it had. It simply renders full width now, exactly as its
- * project-scoped twin at .../projects/{pid}/agents/{id}/{tab} already does —
- * that route has never had a layout of its own, so this is a configuration
- * already proven in production rather than a new one.
+ * carries every tab it had. It simply renders full width, same as it always
+ * has — this route has never had a layout of its own. (Its project-scoped
+ * twin, .../projects/{pid}/agents/{id}/{tab}, which used to make the same
+ * comparison point, was deleted 2026-08-30: an agent is completely
+ * independent of any project, so it has exactly one real address now, not
+ * two configured identically.)
  *
  * The count-decided shapes are unchanged and still come from
  * planAgentCountShape, never a second rule: 0 real agents -> FirstAgentEmpty,
@@ -266,8 +266,6 @@ export default function AgentsPage() {
     };
   }, [workspaceId]);
 
-  const projectById = useMemo(() => new Map<string, FleetProject>(projects.map((p) => [p.id, p])), [projects]);
-
   // Board and List — the only two layouts now — both run through
   // planAgentCards for the filtered set: one query rule for the whole page,
   // and it is the shared one (agent-card-face.ts's matchesAgentCardQuery,
@@ -329,11 +327,15 @@ export default function AgentsPage() {
   // never fires a bogus redirect.
   const agentCountMode = useMemo(() => planAgentCountShape(agents.length), [agents.length]);
   const soloAgent = agentCountMode === "solo" ? agents[0] : null;
-  const soloHref = useMemo(() => {
-    if (!soloAgent) return null;
-    const pid = resolveAgentProjectId(soloAgent.project_id, projects);
-    return pid ? `${base}/projects/${encodeURIComponent(pid)}/agents/${encodeURIComponent(soloAgent.agent_id)}/chat` : null;
-  }, [soloAgent, projects, base]);
+  // An agent is completely independent of any project (founder hard rule,
+  // 2026-08-30) — its one real address never carries a project segment.
+  // This used to resolve a project id first (resolveAgentProjectId) and
+  // fall back to null when that failed; there is no fallback case left to
+  // have, so there is nothing left to resolve.
+  const soloHref = useMemo(
+    () => (soloAgent ? `${base}/agents/${encodeURIComponent(soloAgent.agent_id)}/chat` : null),
+    [soloAgent, base],
+  );
   // ?new=1 is the command palette's "New agent" target — it must still create
   // a new agent on a workspace that already has exactly one, not bounce away
   // to that existing one before the create-and-navigate effect below ever
@@ -382,7 +384,7 @@ export default function AgentsPage() {
   }
   function handleAgentCreated(result: { agentId: string; projectId: string }) {
     setCardOpen(false);
-    router.push(quickCreateAgentChatPath({ workspaceId, projectId: result.projectId, agentId: result.agentId }));
+    router.push(quickCreateAgentChatPath({ workspaceId, agentId: result.agentId }));
   }
 
   // Onboarding hand-off: /agents?new=1 opens the card straight away, no
@@ -582,7 +584,6 @@ export default function AgentsPage() {
           gateways={gateways}
           costByAgent={cost}
           tasksByAgent={tasksByAgent}
-          projectById={projectById}
           grouping={viewOptions.grouping}
           display={viewOptions.display}
           onSelect={goToAgent}
