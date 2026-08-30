@@ -75,14 +75,6 @@ const NON_RAIL_SHELL_SEGMENTS = [
   // rail item must NOT also be hand-listed), which stays correct and cannot
   // catch this.
   "context",
-  // MAN-149 operator instrument (/w/{ws}/operator/activation) — reachable
-  // only by direct URL, deliberately never a RAIL_ITEMS destination (same
-  // "live, unlinked route" treatment as "conversations"/"context" above).
-  // Hand-listed here for exactly the reason this file's own header
-  // documents: a segment missing from this set renders the rail and
-  // NOTHING ELSE, silently, with zero console errors and no `<main>` in the
-  // DOM — caught live 2026-08-30 the same way "context" was on 2026-08-28.
-  "operator",
 ];
 
 const SHELL_SEGMENTS = new Set([
