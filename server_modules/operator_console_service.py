@@ -689,7 +689,17 @@ async def get_account_detail(pool: Any, workspace_id: str) -> Optional[Dict[str,
         "created_at": payload.get("created_at"),
         "workspace_status": payload.get("workspace_status"),
         "workspace_type": payload.get("workspace_type"),
-        "owner": payload.get("owner") or {},
+        # Every other jsonb column on this row goes through _decode_json_
+        # object/_decode_json_array (see _rows() below) -- `owner` was the
+        # one field that didn't, and asyncpg returns an undecoded jsonb
+        # column as a raw JSON STRING with no custom type codec registered.
+        # `payload.get("owner") or {}` let that string pass straight through
+        # as the API's "owner" value (a truthy string, not falsy) instead of
+        # the nested {user_id, email, display_name} object every caller
+        # expects -- confirmed live against a real backend (curl through
+        # this route), not just the unit tests, whose own fixture hand-wrote
+        # `owner` as an already-decoded dict and never exercised this path.
+        "owner": _decode_json_object(payload.get("owner")),
         "members": _rows(payload, "members"),
         "agents": _rows(payload, "agents"),
         "projects": _rows(payload, "projects"),

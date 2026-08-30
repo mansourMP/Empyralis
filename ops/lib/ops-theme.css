@@ -1,0 +1,598 @@
+/* ============================================================================
+   Empyralis operator console -- component styles.
+
+   Built on lib/theme-tokens.css (a deliberate COPY of frontend/lib/ui/
+   theme-tokens.css -- see that file's own header comment for why). Every
+   class here is its own component, hand-written for this app rather than
+   reused from frontend/lib/workspace/fleet/fleet-theme.css, which is
+   12,000+ lines entangled with the customer app's chat/board/agent-detail
+   surfaces -- importing any of it would be exactly the "drag in customer
+   UI" the founder said not to do.
+
+   Design rules this file follows (CLAUDE.md, restated because there is no
+   automated guard reaching into ops/ -- frontend/lib/ui/accent-restraint
+   .test.ts and no-focus-ring-drift.test.ts both scan only frontend/):
+
+     - Accent violet appears on AT MOST ONE control per page: the single
+       primary filled button (.ops-btn--primary, used only for a page's own
+       "Retry"). Never on selected states, table headers, or links.
+     - No focus ring. :focus steps a field's OWN border to --text-primary;
+       nothing draws an outline or a spread box-shadow.
+     - Selection/sort state is weight and shape (bold, a border, an arrow
+       glyph), never hue.
+     - Activated-vs-not is drawn with the product's existing STATUS
+       vocabulary (--online-dot / --unknown-dot), which theme-tokens.css's
+       own header names as a separate, allowed exception to "no hue outside
+       the accent" -- the same vocabulary an agent's online/offline dot
+       already uses elsewhere in the product.
+     - Motion: 100-150ms ease-out on state change only (var(--dur-2),
+       var(--ease-out)) -- never on hover color, per theme-tokens.css.
+   ========================================================================== */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg-page);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+}
+
+a {
+  color: inherit;
+}
+
+/* ── Shell ─────────────────────────────────────────────────────────────── */
+
+.ops-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.ops-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  padding: 0 var(--space-6);
+  height: 52px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-page);
+}
+
+.ops-topbar-brand {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-tight);
+  white-space: nowrap;
+}
+
+.ops-topbar-brand-mark {
+  color: var(--text-muted);
+  font-weight: var(--weight-regular);
+}
+
+.ops-nav {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: 1;
+  overflow-x: auto;
+}
+
+.ops-nav-link {
+  display: inline-flex;
+  align-items: center;
+  height: 52px;
+  padding: 0 var(--space-3);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--text-muted);
+  text-decoration: none;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+  transition: color var(--dur-1) var(--ease-out);
+}
+
+.ops-nav-link:hover {
+  color: var(--text-primary);
+}
+
+/* Selection is weight and shape -- a border, never a colored fill. */
+.ops-nav-link[aria-current="page"] {
+  color: var(--text-primary);
+  border-bottom-color: var(--text-primary);
+}
+
+.ops-nav-link:focus-visible {
+  outline: none;
+  color: var(--text-primary);
+}
+
+/* ── Content ───────────────────────────────────────────────────────────── */
+
+.ops-main {
+  flex: 1;
+  width: 100%;
+  max-width: var(--content-max-wide);
+  margin: 0 auto;
+  padding: var(--space-6);
+}
+
+.ops-page-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
+  flex-wrap: wrap;
+}
+
+.ops-page-title {
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-tight);
+  margin: 0;
+}
+
+.ops-page-subtitle {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  margin: 4px 0 0;
+  max-width: 640px;
+}
+
+.ops-page-meta {
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.ops-section-title {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
+  margin: var(--space-6) 0 var(--space-3);
+}
+
+.ops-section-title:first-child {
+  margin-top: 0;
+}
+
+/* ── Stat grid ─────────────────────────────────────────────────────────── */
+
+.ops-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-3);
+}
+
+.ops-stat-card {
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-card);
+}
+
+.ops-stat-card--activation {
+  border-color: var(--border-strong);
+  background: var(--bg-panel);
+}
+
+.ops-stat-value {
+  font-size: var(--text-lg);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+
+.ops-stat-card--activation .ops-stat-value {
+  font-size: 22px;
+}
+
+.ops-stat-label {
+  margin-top: 2px;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.ops-stat-caption {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* ── Page states: loading / forbidden / error ─────────────────────────── */
+
+.ops-page-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: 64px 32px;
+  text-align: center;
+}
+
+.ops-page-state-icon {
+  font-size: 22px;
+  line-height: 1;
+  margin-bottom: var(--space-1);
+}
+
+.ops-page-state-title {
+  font-size: 15px;
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+}
+
+.ops-page-state-body {
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  max-width: 440px;
+}
+
+.ops-skeleton-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--rail-active);
+}
+
+/* ── Buttons ───────────────────────────────────────────────────────────── */
+
+.ops-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--h-control-sm);
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-control);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: border-color var(--dur-1) var(--ease-out);
+}
+
+.ops-btn:hover {
+  border-color: var(--border-strong);
+}
+
+/* The ONE place accent violet may appear: the single primary filled button
+   on a page (Retry on an error state). Nothing else in this app uses it. */
+.ops-btn--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.ops-btn--primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.ops-btn:focus-visible {
+  outline: none;
+  border-color: var(--text-primary);
+}
+
+.ops-btn--primary:focus-visible {
+  border-color: var(--accent-contrast);
+}
+
+/* ── Filters / form controls ───────────────────────────────────────────── */
+
+.ops-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+
+.ops-input,
+.ops-select {
+  height: var(--h-control-sm);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  transition: border-color var(--dur-1) var(--ease-out);
+}
+
+.ops-input {
+  min-width: 220px;
+}
+
+/* No focus ring anywhere in this product -- a field's own border steps up
+   one level instead (see this file's header). */
+.ops-input:focus,
+.ops-select:focus {
+  outline: none;
+  border-color: var(--text-primary);
+}
+
+.ops-filter-label {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  margin-right: -4px;
+}
+
+/* ── Table ─────────────────────────────────────────────────────────────── */
+
+.ops-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+}
+
+.ops-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+.ops-table th,
+.ops-table td {
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border);
+}
+
+.ops-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.ops-table tbody tr:hover {
+  background: var(--bg-card-hover);
+}
+
+.ops-table th {
+  color: var(--text-muted);
+  font-weight: var(--weight-medium);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
+  background: var(--bg-surface-2);
+  position: sticky;
+  top: 0;
+}
+
+.ops-th-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  color: inherit;
+  font: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+
+/* Sort state is weight, never hue -- the active column's label goes to full
+   text-primary weight and shows its direction glyph; every other header
+   stays muted. */
+.ops-th-sort[data-active="true"] {
+  color: var(--text-primary);
+  font-weight: var(--weight-semibold);
+}
+
+.ops-th-sort:focus-visible {
+  outline: none;
+  color: var(--text-primary);
+}
+
+.ops-sort-glyph {
+  font-size: 9px;
+  opacity: 0.7;
+}
+
+.ops-table a.ops-row-link {
+  color: var(--text-primary);
+  font-weight: var(--weight-medium);
+  text-decoration: none;
+}
+
+.ops-table a.ops-row-link:hover {
+  text-decoration: underline;
+}
+
+.ops-cell-muted {
+  color: var(--text-muted);
+}
+
+.ops-table-empty {
+  padding: var(--space-8) var(--space-4);
+  text-align: center;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+/* ── Activity dot: "signed up" vs "actually did something" ───────────────
+   Product status vocabulary (--online-dot / --unknown-dot), not the accent
+   -- see this file's header for why this is the sanctioned exception. */
+
+.ops-activity-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+  background: var(--unknown-dot);
+}
+
+.ops-activity-dot--active {
+  background: var(--online-dot);
+}
+
+/* ── Pills / badges ────────────────────────────────────────────────────── */
+
+.ops-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: var(--weight-medium);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.ops-pill--warn {
+  color: var(--warning-text);
+  border-color: color-mix(in srgb, var(--warning-text) 40%, transparent);
+}
+
+.ops-pill--bad {
+  color: var(--offline-text);
+  border-color: color-mix(in srgb, var(--offline-text) 40%, transparent);
+}
+
+/* ── Hand-rolled bars (funnel / failures / spend) -- no charting library ── */
+
+.ops-bar-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 260px) 1fr auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.ops-bar-row:last-child {
+  border-bottom: none;
+}
+
+.ops-bar-row-label {
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ops-bar-track {
+  height: 10px;
+  border-radius: 4px;
+  background: var(--bg-surface-2);
+  overflow: hidden;
+}
+
+.ops-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  background: var(--text-muted);
+  transition: width var(--dur-2) var(--ease-out);
+}
+
+.ops-bar-fill--flagged {
+  background: var(--offline-dot);
+}
+
+.ops-bar-row-value {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.ops-bar-row-caption {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 1px;
+}
+
+/* Vertical day-over-day strip (spend over time). */
+
+.ops-sparkbars {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 96px;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-card);
+}
+
+.ops-sparkbar {
+  flex: 1;
+  min-width: 3px;
+  border-radius: 2px 2px 0 0;
+  background: var(--text-muted);
+  transition: height var(--dur-2) var(--ease-out);
+}
+
+/* ── Detail sections (account detail page) ────────────────────────────── */
+
+.ops-detail-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+}
+
+.ops-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--space-4);
+}
+
+.ops-back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  text-decoration: none;
+  margin-bottom: var(--space-3);
+}
+
+.ops-back-link:hover {
+  color: var(--text-primary);
+}
+
+/* ── Responsive ────────────────────────────────────────────────────────── */
+
+@media (max-width: 720px) {
+  .ops-main {
+    padding: var(--space-4);
+  }
+  .ops-bar-row {
+    grid-template-columns: 1fr;
+    row-gap: 4px;
+  }
+  .ops-bar-row-value {
+    text-align: left;
+  }
+}

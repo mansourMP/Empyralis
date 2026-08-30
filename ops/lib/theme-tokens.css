@@ -1,0 +1,400 @@
+/* ============================================================================
+   COPIED VERBATIM from frontend/lib/ui/theme-tokens.css, not imported. This
+   app (ops.empyralis.ai) is a completely separate Next.js app from the
+   customer frontend on purpose (see the top-level task this shipped under),
+   so it does not reach across the repo boundary to import a frontend/lib/
+   module -- see next.config.ts's header comment for the full reasoning.
+   Design tokens are pure CSS custom properties with no logic and no
+   customer UI attached, so a copy carries none of the coupling risk an
+   import of frontend/lib/workspace/fleet/fleet-theme.css (12,000+ lines,
+   entangled with the customer app's chat/board/agent-detail surfaces)
+   would. If the source file's palette changes, this copy needs updating by
+   hand -- an accepted, explicit tradeoff for a real app boundary instead of
+   a silent cross-app dependency.
+
+   Everything below this notice is unmodified from the source file.
+   ========================================================================== */
+
+/* ============================================================================
+   Shared theme tokens — the single source of color truth for light/dark.
+   `data-theme` on <html> (set by lib/ui/app-theme.tsx, resolved from the
+   account's globalTheme preference) is the only theme switch in the app.
+   Both the fleet UI (fleet-theme.css) and legacy chrome surfaces
+   (chrome.css) read these variables instead of defining their own colors.
+
+   The palette is a near-neutral grayscale with a single reserved accent —
+   a restrained VIOLET (--accent: oklch(57% 0.155 305), same hue both
+   themes, with derived hover/strong/soft/muted/ring steps) — and the
+   --brand-clay mark exception. (History: this was purple → monochrome →
+   purple again; 2026-07-22 ruling is purple. Apply the latest.)
+   The accent appears almost never, and ONLY in three places: the single
+   primary-action button per surface, focus rings, and the selected-row
+   soft tint (--accent-soft) in two-pane lists — NOT nav items, NOT the tab
+   bar, NOT backgrounds, NOT secondary/destructive buttons. No accent fills
+   on badges, chips, toggles, or hover states — those are neutral
+   washes (--rail-active, --bg-card-hover) with a font-weight bump, not
+   color. Semantic status (online, offline, working, error) is a separate
+   vocabulary (--online-text, --offline-dot, and friends), never "the accent".
+   ========================================================================== */
+
+/* ── Scale tokens (theme-independent) ────────────────────────────────────────
+   Type, spacing (4px grid), radii, control heights, motion. Promoted here as
+   the single source so chrome.css and fleet-theme.css consume the same steps
+   instead of scattered literals. */
+:root {
+  /* Type scale — rem. 14px body is deliberately below the 16px web default:
+     the correct density for an operator tool. */
+  --text-2xs: 0.6875rem;   /* 11px */
+  --text-xs: 0.75rem;      /* 12px */
+  --text-sm: 0.8125rem;    /* 13px */
+  --text-base: 0.875rem;   /* 14px */
+  --text-md: 1rem;         /* 16px */
+  --text-lg: 1.5rem;       /* 24px */
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --tracking-tight: -0.01em;
+  --tracking-wide: 0.04em;
+  --leading-tight: 1.25;
+  --leading-normal: 1.45;
+
+  /* Spacing — 4px grid */
+  --space-1: 0.25rem;   /* 4  */
+  --space-2: 0.5rem;    /* 8  */
+  --space-3: 0.75rem;   /* 12 */
+  --space-4: 1rem;      /* 16 */
+  --space-5: 1.25rem;   /* 20 */
+  --space-6: 1.5rem;    /* 24 */
+  --space-7: 1.75rem;   /* 28 */
+  --space-8: 2rem;      /* 32 */
+  --space-10: 2.5rem;   /* 40 */
+  --space-12: 3rem;     /* 48 */
+  --space-14: 3.5rem;   /* 56 */
+  --space-16: 4rem;     /* 64 */
+
+  /* Radii + control heights — tight, Linear-measured (4-6px controls). Not
+     8/12 (too soft — reads as a generic rounded-SaaS default) and definitely
+     not the 10/14 the fleet surface used to bump these to locally. */
+  --radius-control: 6px;
+  --radius-card: 8px;
+  --radius-pill: 999px;
+  --h-control-sm: 2rem;     /* 32px */
+  --h-control-md: 2.25rem;  /* 36px */
+
+  /* Content widths — centered-column layout (Claude-app-lean), not full-bleed */
+  --content-max: 820px;       /* reading/forms column, Claude-lean */
+  --content-max-wide: 1140px; /* data-table pages need more room */
+
+  /* ── Motion (MAN-126) ───────────────────────────────────────────────────
+     The single source of truth for every duration and curve in the app.
+     Three durations, deliberately: if a change needs a fourth, the change is
+     wrong. Motion here exists to explain a spatial relationship — where a
+     panel came from, that a width is still the same width — and nothing
+     else. Decoration is not a use case.
+
+     What may be animated: transform, opacity, panel width/height (collapse
+     only), scrim fade. What may NOT: colour, background, border-colour,
+     box-shadow. Those are state, and state should read as instant — a
+     150ms colour fade on hover is the single most common way an interface
+     starts to feel laggy. */
+  --dur-1: 90ms;    /* hover, focus ring, press */
+  --dur-2: 140ms;   /* default: panel enter/exit, collapse, disclosure */
+  --dur-3: 200ms;   /* max — overlays/scrims only. Nothing exceeds this. */
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
+  --ease-in:  cubic-bezier(0.4, 0, 1, 1);
+
+  /* Legacy aliases — the three forked motion vocabularies this replaced
+     (theme-tokens' own --motion-*, fleet-theme's --dur-fast/--dur-base,
+     chrome's --transition). Kept pointing at the canonical scale so the
+     ~270 call sites that still reference them resolve to the new values
+     instead of breaking. Do not use these in new code. */
+  --motion-fast: var(--dur-1);
+  --motion-base: var(--dur-2);
+  --motion-slow: var(--dur-3);
+  --dur-fast: var(--dur-1);
+  --dur-base: var(--dur-2);
+  --transition: var(--dur-1) var(--ease-out);
+}
+
+/* Reduced motion, at the app root (MAN-126). The fleet surface has had its
+   own kill-switch for a while; this raises it to the whole document so the
+   legacy chrome.css surfaces are covered by the same guarantee.
+
+   Note what this does NOT do: it kills durations, not effects. A collapsing
+   rail still changes width, a drawer still opens — they just arrive rather
+   than travel. And a resize drag is untouched by design, because it was
+   never animated in the first place: dragging tracks the pointer 1:1 for
+   everyone. transition-delay is zeroed too, so state that is deliberately
+   deferred until an exit finishes (the drawer's `visibility`) flips
+   immediately instead of hanging for a duration that no longer runs. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0s !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+:root,
+html[data-theme="dark"] {
+  /* Dark ramp (MAN-145 charcoal pass, 2026-07-31): the whole scale was
+     re-derived, not spot-patched. Previous ramp bottomed out at #0a0a0c /
+     #0d0d0f — effectively near-black, and every step carried a +2/+3 blue
+     channel (R=13 G=13 B=15, etc.) that read as a cold cast next to Linear
+     (~#191919-#1c1c1c) and the Claude app (~#1f1e1d-#262624), both neutral
+     charcoal. Fix: shift the entire ramp up by a constant +13 (R-channel)
+     so --bg-content lands at #1a1a1a — inside the "#18181a-#1c1c1c" target
+     band — and set every step to true neutral (R=G=B, blue never exceeds
+     red). Every OTHER surface moved by the same +13 and kept its exact
+     original relative spacing (canvas < content < inset < panel≈rail <
+     surface-2 < card < card-hover), so the elevation ordering the comment
+     below describes is unchanged — only the floor moved. */
+  --bg-page: #1a1a1a;
+  --bg-content: #1a1a1a;
+  --bg-rail: #232323;
+  --bg-card: #292929;
+  --bg-card-hover: #2e2e2e;
+  --bg-surface-2: #272727;
+  --bg-inset: #1d1d1d;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --rail-active: rgba(255, 255, 255, 0.06);
+
+  /* Floating-panel chrome (fleet shell): the app canvas the rail sits on,
+     and the raised content panel. Additive — legacy chrome.css ignores them.
+     Dark: canvas recessed a clearer step below the rail+panel elevation
+     (rail already tracks panel's brightness — unchanged) so the floating
+     panel reads as deliberately raised, not a rounding error. */
+  --bg-canvas: #171717;
+  --bg-panel: #222222;
+  --panel-shadow: none;
+
+  /* Text: --text-primary is already ~neutral (1 blue unit, imperceptible,
+     contrast is 12-18:1 regardless — left alone). --text-secondary and
+     --text-muted both carried the same blue cast as the old background
+     ramp (#c9ced6, #71717a — B noticeably > R) and are re-neutralized here.
+     --text-muted is also LIGHTENED (was #71717a): against the old
+     near-black ramp it cleared 4.5:1 only on the very darkest surfaces
+     (4.02-4.09:1 on content/page, i.e. it was already failing AA there) and
+     against the new lighter charcoal ramp it would have dropped as low as
+     2.81:1 on --bg-card-hover. #9a9a9a is the neutral grey whose worst case
+     across every dark surface (content through card-hover) is still >=4.5:1
+     — see measured ratios in the audit this comment accompanies. */
+  --text-primary: #f4f4f5;
+  --text-secondary: #cecece;
+  --text-muted: #9a9a9a;
+
+  /* Accent — strict monochrome, zero chroma. One base OKLCH value; every
+     derived step follows it, so re-tuning the whole ramp means changing a
+     single value. Dark theme: near-white, so the key action button and
+     focus ring read as bright neutral against the dark surfaces — never a
+     hue. */
+  --accent: oklch(64% 0.17 305);  /* violet accent (dark theme — a touch brighter than light so it reads on charcoal) */
+  --accent-hover: color-mix(in oklch, var(--accent) 88%, #ffffff 12%);
+  --accent-strong: color-mix(in oklch, var(--accent) 82%, #ffffff 18%);
+  --accent-contrast: #ffffff;  /* white text/icon on the violet accent surface */
+  --accent-soft: color-mix(in oklch, var(--accent) 14%, transparent);
+  --accent-muted: color-mix(in oklch, var(--accent) 24%, transparent);
+  --accent-ring: color-mix(in oklch, var(--accent) 55%, transparent);
+
+  /* THERE IS NO FOCUS RING IN THIS PRODUCT. Founder decision, 2026-08-21,
+     final, said three times over two passes and last stated as: "I don't
+     need that ring of yours in my platform."
+
+     THE NAME IS A LEFTOVER. This token survives only because two things that
+     are NOT focus indicators borrow it as a neutral hairline colour — the
+     rail/properties resizer's hover line, and .fleet-rail-item--focus, which
+     is the j/k keyboard cursor PrimaryRail sets as a plain className. Zero
+     :focus / :focus-visible rules point at it. Do not read the name as
+     permission to add one.
+
+     THE HISTORY, SO NOBODY RE-RUNS IT. The ring was violet (--accent-ring,
+     1.71-2.36:1 across every surface — below the bar it was supposedly
+     serving). Recoloured to this neutral grey: contrast fixed, still
+     rejected. Made thinner: still rejected, because the objection was never
+     the colour or the weight. A rectangle drawn around whatever the keyboard
+     is touching is chrome he does not want in a product people are meant to
+     pass through, not sit in.
+
+     WHAT REPLACED IT, AND WHAT IT COSTS. A control shows focus with its own
+     styling: a field's border steps up one level and its caret blinks. That
+     is enough for a text input and it is thin for a <select>, which has no
+     caret — the honest cost is written down in CLAUDE.md rather than paid
+     for by putting the ring back. CLAUDE.md's craft doctrine used to say the
+     ring "is the only signal a keyboard user gets"; the founder has
+     explicitly overridden that for this product, and the override is
+     recorded there as his decision. A future pass that "restores
+     accessibility" here is handing him the ring for a fourth time. */
+  --focus-ring: #a1a1a1;
+
+  /* Destructive — one clear red, mirrors --accent's derived-step shape.
+     Reserved for irreversible/stop-it-now confirmations (Stop agent,
+     Delete agent) — a distinct role from --offline-* status color below,
+     even though the hue is a close cousin. Dark theme forks the lightness
+     up from light theme's 58% to 68% (charcoal pass, 2026-07-31): --destructive
+     is used as literal text/border color (.fleet-btn--danger-outline,
+     .fleet-bugreport-error, .fleet-tile--danger), and against the raised
+     charcoal ramp the old 58% value measured 3.7-4.6:1 on --bg-content/
+     --bg-card — under the 4.5:1 AA-normal-text bar. 68% clears 4.5:1 on
+     every dark surface through --bg-card (4.62:1 there, the worst case). */
+  --destructive: oklch(68% 0.19 25);  /* ≈ #f75d59 (dark) */
+  --destructive-hover: color-mix(in oklch, var(--destructive) 84%, #ffffff 16%);
+  --destructive-strong: color-mix(in oklch, var(--destructive) 78%, #ffffff 22%);
+  --destructive-contrast: #ffffff;
+  --destructive-soft: color-mix(in oklch, var(--destructive) 14%, transparent);
+  --destructive-muted: color-mix(in oklch, var(--destructive) 24%, transparent);
+  --destructive-ring: color-mix(in oklch, var(--destructive) 55%, transparent);
+
+  /* Brand mark only — the one place color survives. */
+  --brand-clay: #bc6c4c;
+  --brand-clay-contrast: #fff;
+
+  --online-text: #22c55e;
+  --online-dot: #22c55e;
+  --offline-text: #f87171;
+  --offline-dot: #ef4444;
+  --warning-text: #fbbf24;
+  --unknown-dot: #71717a;
+  /* Ready = healthy but not executing — a calmer, desaturated green, not
+     the vivid "actively working" green and not plain unknown-gray either. */
+  --ready-dot: #5b8c73;
+  --degraded-dot: #f59e0b;
+
+  /* ── Task status vocabulary (kanban board + task list) ────────────────────
+     A SEPARATE semantic ramp from the agent-status tones above, because a
+     task's lifecycle is not an agent's health: seven states that must all be
+     distinguishable side by side as seven board columns. Before this, Needs
+     input and In review both resolved to the same amber and two of the seven
+     columns read identically.
+
+     Assignment mirrors Linear's own semantics:
+       backlog / todo  grey    not started (the column heading, not colour,
+                               separates triaged-out from queued)
+       in progress     amber   an agent is executing
+       needs input     blue    calm — a human is needed, nothing is wrong
+       blocked         red     stopped, something IS wrong
+       in review       green   agent-complete, parked for a human
+       done            violet  the product accent, and Linear's own done state
+
+     Only `done` borrows --accent. That is a deliberate, single exception to
+     the "accent is reserved for the primary action" rule at the top of this
+     file: a completed task IS the product's success state, and Linear draws
+     the same equivalence. */
+  --task-backlog: #8a8f98;
+  --task-todo: #8a8f98;
+  --task-progress: #f2b23e;
+  --task-input: #5e9cf5;
+  --task-blocked: #ef4444;
+  --task-review: #4cb782;
+  /* WAS var(--accent). The founder closed the accent's last non-button home
+     on 2026-08-21 ("purple only on primary buttons"), and a status dot is not
+     a button. This token's own comment already said what Done MEANS — "a
+     completed task IS the product's success state" — so it takes the success
+     hue rather than a grey, which would have collapsed it into --task-backlog
+     / --task-todo. It is a shade deeper than --task-review's green so the two
+     adjacent good states stay apart, and the glyph carries a solid disc + a
+     white check that no other status draws, so the two are separable without
+     colour at all. Revert = put var(--accent) back on both of these lines. */
+  --task-done: #2f9e68;
+
+  /* Priority (Linear's integer convention: 1 urgent … 4 low). Only URGENT
+     carries colour; high/medium/low are grey bar glyphs, so a wall of cards
+     doesn't turn into a wall of colour. */
+  --priority-urgent: #f2683c;
+  --priority-bar: var(--text-secondary);
+  --priority-bar-empty: color-mix(in srgb, var(--text-muted) 40%, transparent);
+
+  /* Board cards float directly on the page in the restyled kanban (no column
+     container behind them), so in LIGHT theme a white card on a white panel
+     needs a whisper of elevation on top of its hairline border. Dark theme
+     already has a real fill step (--bg-card vs --bg-panel) and takes none. */
+  --card-shadow: none;
+}
+
+html[data-theme="light"] {
+  --bg-page: #ffffff;
+  --bg-content: #ffffff;
+  --bg-rail: #f4f4f5;
+  --bg-card: #ffffff;
+  --bg-card-hover: #fafafa;
+  --bg-surface-2: #f0f0f2;
+  --bg-inset: #eeeeef;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.16);
+  --rail-active: rgba(0, 0, 0, 0.05);
+
+  /* Floating-panel chrome (fleet shell) — light: pure-white panel floating on
+     a more clearly soft-grey canvas (rail matches canvas — same bare plane
+     the panel floats over) with a whisper of elevation. */
+  --bg-canvas: #f4f4f5;
+  --bg-panel: #ffffff;
+  --panel-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 2px 8px rgba(0, 0, 0, 0.04);
+
+  --text-primary: #18181b;
+  --text-secondary: #52525b;
+  /* MEASURED, 2026-08-21: #a1a1aa (zinc-400) scored 2.56:1 on --bg-panel
+     (#ffffff) and 2.33:1 on --bg-canvas (#f4f4f5) — both far below WCAG AA's
+     4.5:1 for normal text, and this token carries real content, not
+     decoration: rail sub-labels, the pulse line, the account email, task
+     eyebrows, section labels, comment timestamps and every em-dash "no
+     value" cell. The DARK theme's own --text-muted (#9a9a9a) already
+     clears the bar comfortably (5.17:1 on --bg-card, 5.65 on --bg-panel,
+     6.37 on --bg-canvas), so the two themes were simply never calibrated
+     to the same standard — light was the one nobody checked.
+     #6b6b76 restores parity: 5.27:1 on --bg-panel, 4.71:1 on --bg-canvas.
+     Deliberately not zinc-500 (#71717a), which passes on white (4.85) but
+     lands at 4.33 on the canvas the whole left rail is painted over. */
+  --text-muted: #6b6b76;
+
+  /* Accent — same strict monochrome, zero chroma. Light theme: near-black,
+     darkened further (not lightened) on hover so it stays legible against
+     light surfaces. */
+  --accent: oklch(57% 0.155 305);  /* violet accent (light theme) */
+  --accent-hover: color-mix(in oklch, var(--accent) 88%, #000000 12%);
+  --accent-strong: color-mix(in oklch, var(--accent) 82%, #000000 18%);
+  --accent-contrast: #ffffff;  /* white text/icon on the violet accent surface */
+  --accent-soft: color-mix(in oklch, var(--accent) 10%, transparent);
+  --accent-muted: color-mix(in oklch, var(--accent) 18%, transparent);
+  --accent-ring: color-mix(in oklch, var(--accent) 42%, transparent);
+
+  /* NOT A FOCUS RING — read the long note on --focus-ring in the dark block
+     above. Nothing in this product draws a focus ring (founder, 2026-08-21);
+     this is the light-theme value of a neutral hairline that two non-focus
+     things borrow (the rail resizer, the j/k rail cursor). */
+  --focus-ring: #6f6f6f;
+
+  /* Destructive — same clear red, darken-on-hover like the light accent. */
+  --destructive: oklch(58% 0.19 25);  /* ≈ #d33a3c */
+  --destructive-hover: color-mix(in oklch, var(--destructive) 86%, #000000 14%);
+  --destructive-strong: color-mix(in oklch, var(--destructive) 80%, #000000 20%);
+  --destructive-contrast: #ffffff;
+  --destructive-soft: color-mix(in oklch, var(--destructive) 10%, transparent);
+  --destructive-muted: color-mix(in oklch, var(--destructive) 18%, transparent);
+  --destructive-ring: color-mix(in oklch, var(--destructive) 42%, transparent);
+
+  --online-text: #15803d;
+  --offline-text: #b91c1c;
+  --warning-text: #b45309;
+  --unknown-dot: #a1a1aa;
+  --ready-dot: #4b7a5e;
+
+  /* Task status ramp — same seven roles, darkened so each holds contrast on
+     a white panel. See the dark-theme block above for what each role means. */
+  --task-backlog: #6b7280;
+  --task-todo: #6b7280;
+  --task-progress: #d97706;
+  --task-input: #2563eb;
+  --task-blocked: #dc2626;
+  --task-review: #15803d;
+  --task-done: #0f6b34;
+
+  --priority-urgent: #d9481c;
+  --priority-bar: var(--text-secondary);
+  --priority-bar-empty: color-mix(in srgb, var(--text-muted) 55%, transparent);
+
+  --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
