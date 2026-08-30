@@ -1048,6 +1048,147 @@ class TranslateUserMessageToolResultTests(unittest.TestCase):
         self.assertFalse(tool_result_status.classify_tool_result({"status": "ok"}).failed)
 
 
+class TranslateUserMessageLinkedRecordTests(unittest.TestCase):
+    """The task↔document loop (founder, 2026-08-29: "the task closing and
+    the document changing should surface as one narrated event, not two
+    things you separately notice"). document__write/edit and every
+    project_task__* tool already return the real record it touched
+    (skills_service.py's connector_id == "document"/"project_task" blocks,
+    _document_summary()/_linked()) — these fixtures are that REAL JSON
+    shape, not a re-typed guess at it, so a shape drift in either producer
+    breaks this test rather than passing silently (CLAUDE.md: "a fixture
+    protects a shape, not a path"). `url`/`display_id` are deliberately
+    OMITTED from every fixture here, matching deep_link_service.annotate_
+    task/annotate_document's own documented behavior of omitting the key
+    entirely whenever no public origin is configured (exactly this
+    environment, and exactly a self-hosted deploy with no declared origin)
+    — proving linked_record does not silently depend on a key that is
+    absent on the most common real path.
+    """
+
+    def _seed_started(self, state, trace_context, *, tool_name: str, tool_input: Dict[str, Any]) -> None:
+        started_message = sdk_types.AssistantMessage(
+            content=[sdk_types.ToolUseBlock(id="toolu_1", name=tool_name, input=tool_input)],
+            model="claude-sonnet-4-5",
+        )
+        claude_agent_sdk_bridge.translate_sdk_message(started_message, state=state, trace_context=trace_context)
+
+    def _result_data(self, state, trace_context, *, result_text: str, is_error: bool) -> Dict[str, Any]:
+        result_message = sdk_types.UserMessage(
+            content=[sdk_types.ToolResultBlock(tool_use_id="toolu_1", content=[{"type": "text", "text": result_text}], is_error=is_error)],
+        )
+        events = claude_agent_sdk_bridge.translate_sdk_message(result_message, state=state, trace_context=trace_context)
+        trace_events = [e["payload"] for e in events if e.get("type") == "trace"]
+        return next(p for p in trace_events if p["event_type"] == "tool.result")["data"]
+
+    def test_document_write_carries_linked_record_and_friendly_summary(self):
+        state = claude_agent_sdk_bridge.TranslationState()
+        trace_context = _trace_context()
+        self._seed_started(state, trace_context, tool_name="document__write", tool_input={"title": "Q3 Ledger", "body": "..."})
+        result_text = json.dumps({
+            "ok": True,
+            "document": {
+                "id": "doc_abc123",
+                "title": "Q3 Ledger",
+                "path": "q3-ledger",
+                "project_id": "proj_1",
+                "created_at": "2026-08-29T10:00:00Z",
+                "updated_at": "2026-08-29T10:00:00Z",
+                "updated_by": "ainstall_1",
+            },
+        })
+        data = self._result_data(state, trace_context, result_text=result_text, is_error=False)
+        self.assertEqual(data["linked_record"], {"kind": "document", "id": "doc_abc123", "project_id": "proj_1", "title": "Q3 Ledger"})
+        self.assertEqual(data["summary"], 'Wrote "Q3 Ledger"')
+
+    def test_project_task_update_carries_linked_record_with_status_in_summary(self):
+        state = claude_agent_sdk_bridge.TranslationState()
+        trace_context = _trace_context()
+        self._seed_started(state, trace_context, tool_name="project_task__update", tool_input={"task_id": "task_1", "status": "in_review"})
+        result_text = json.dumps({
+            "ok": True,
+            "task": {
+                "id": "task_1",
+                "title": "Reconcile August",
+                "status": "in_review",
+                "project_id": "proj_1",
+                "priority": 0,
+                "priority_label": "none",
+            },
+        })
+        data = self._result_data(state, trace_context, result_text=result_text, is_error=False)
+        self.assertEqual(data["linked_record"], {"kind": "task", "id": "task_1", "project_id": "proj_1", "title": "Reconcile August"})
+        self.assertEqual(data["summary"], 'Updated "Reconcile August" → in_review')
+
+    def test_document_read_by_id_carries_linked_record_from_raw_document_row(self):
+        # document__read hands the model _document_link(document) -- the RAW
+        # project_documents_repository row (id/tenant_id/workspace_id/
+        # project_id/title/path/created_by/updated_by/metadata/timestamps),
+        # not the narrower _document_summary() shape write/edit return. The
+        # extra keys must not confuse the reader.
+        state = claude_agent_sdk_bridge.TranslationState()
+        trace_context = _trace_context()
+        self._seed_started(state, trace_context, tool_name="document__read", tool_input={"id": "doc_abc123"})
+        result_text = json.dumps({
+            "ok": True,
+            "document": {
+                "id": "doc_abc123",
+                "tenant_id": "default",
+                "workspace_id": "ws-1",
+                "project_id": "proj_1",
+                "title": "Q3 Ledger",
+                "path": "q3-ledger",
+                "created_by": "ainstall_1",
+                "updated_by": None,
+                "metadata": {},
+                "created_at": "2026-08-29T10:00:00Z",
+                "updated_at": "2026-08-29T10:00:00Z",
+                "body": "# Q3 Ledger\n...",
+            },
+        })
+        data = self._result_data(state, trace_context, result_text=result_text, is_error=False)
+        self.assertEqual(data["linked_record"], {"kind": "document", "id": "doc_abc123", "project_id": "proj_1", "title": "Q3 Ledger"})
+        self.assertEqual(data["summary"], 'Read "Q3 Ledger"')
+
+    def test_document_list_and_task_list_labels_carry_no_linked_record(self):
+        # document__list returns "documents" (plural); project_task__
+        # list_labels returns "task_id"/"labels", never a "task" key -- both
+        # must fall through to the generic summary rather than a
+        # linked_record built off the wrong shape.
+        state = claude_agent_sdk_bridge.TranslationState()
+        trace_context = _trace_context()
+        self._seed_started(state, trace_context, tool_name="document__list", tool_input={})
+        data = self._result_data(
+            state, trace_context,
+            result_text=json.dumps({"ok": True, "documents": [{"id": "doc_1", "title": "A", "project_id": "proj_1"}]}),
+            is_error=False,
+        )
+        self.assertNotIn("linked_record", data)
+
+        state2 = claude_agent_sdk_bridge.TranslationState()
+        self._seed_started(state2, trace_context, tool_name="project_task__list_labels", tool_input={})
+        data2 = self._result_data(
+            state2, trace_context,
+            result_text=json.dumps({"ok": True, "labels": ["bug", "urgent"]}),
+            is_error=False,
+        )
+        self.assertNotIn("linked_record", data2)
+
+    def test_failed_document_write_never_carries_linked_record(self):
+        # Defense-in-depth companion to the offline-hardware test above: even
+        # if a failed call's own result text happens to be document-shaped
+        # JSON (a partial write that still echoed an id), a failed tool.result
+        # must never carry a linked_record through to what would render as a
+        # clickable row for work that did not actually succeed.
+        state = claude_agent_sdk_bridge.TranslationState()
+        trace_context = _trace_context()
+        self._seed_started(state, trace_context, tool_name="document__write", tool_input={"title": "Q3 Ledger"})
+        result_text = json.dumps({"ok": False, "document": {"id": "doc_abc123", "title": "Q3 Ledger", "project_id": "proj_1"}})
+        data = self._result_data(state, trace_context, result_text=result_text, is_error=True)
+        self.assertNotIn("linked_record", data)
+        self.assertEqual(data["status"], "failed")
+
+
 class TranslateResultMessageTests(unittest.TestCase):
     def test_successful_result_emits_final_with_reply_and_no_trace_failed(self):
         state = claude_agent_sdk_bridge.TranslationState()

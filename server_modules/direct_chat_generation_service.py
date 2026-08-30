@@ -2577,6 +2577,18 @@ def stream_provider_backed_direct_chat(
                             )
                             if _mcp_detail:
                                 tool_result_data["mcp"] = _mcp_detail
+                            # linked_record: the same document/task-linking
+                            # field the SDK engine's tool.result carries (see
+                            # claude_agent_sdk_bridge.py's identical guard) —
+                            # both engines call the identical
+                            # build_direct_tool_trace_metadata, so both must
+                            # read the same key off it or the two engines'
+                            # WorkTab rendering would diverge for this one
+                            # connector, silently, until someone happened to
+                            # compare them (CLAUDE.md: "the two-engine seam
+                            # keeps diverging").
+                            if not _tool_call_failed and isinstance(completed_trace_metadata.get("linked_record"), dict):
+                                tool_result_data["linked_record"] = dict(completed_trace_metadata.get("linked_record") or {})
                             if completed_hardware_local_gateway:
                                 _hw_labels = {
                                     ("hardware", "shell_exec"): "Shell command",

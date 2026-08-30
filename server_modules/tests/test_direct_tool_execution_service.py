@@ -152,6 +152,107 @@ class DirectToolExecutionServiceTests(unittest.TestCase):
         self.assertIsNone(metadata["browser_screenshot"])
         self.assertEqual(metadata["result_summary"], "Agent Computer is not connected. Open Hardware to connect this Mac.")
 
+    def test_document_write_trace_metadata_carries_linked_record(self) -> None:
+        # The real shape skills_service.py's document__write returns:
+        # _document_summary(created), which is _document_link()'s copy of
+        # {id, title, path, project_id, created_at, updated_at, updated_by}
+        # plus a `url` key ONLY when deep_link_service resolves a public
+        # origin — absent here, matching this test environment (and a
+        # self-hosted deploy with none declared).
+        metadata = service.build_direct_tool_trace_metadata(
+            "document",
+            "write",
+            {"title": "Q3 Ledger", "body": "..."},
+            result_text=json.dumps({
+                "ok": True,
+                "document": {
+                    "id": "doc_abc123",
+                    "title": "Q3 Ledger",
+                    "path": "q3-ledger",
+                    "project_id": "proj_1",
+                    "created_at": "2026-08-29T10:00:00Z",
+                    "updated_at": "2026-08-29T10:00:00Z",
+                    "updated_by": "ainstall_1",
+                },
+            }),
+        )
+        self.assertEqual(
+            metadata["linked_record"],
+            {"kind": "document", "id": "doc_abc123", "project_id": "proj_1", "title": "Q3 Ledger"},
+        )
+        self.assertEqual(metadata["result_summary"], 'Wrote "Q3 Ledger"')
+
+    def test_project_task_update_trace_metadata_carries_linked_record(self) -> None:
+        metadata = service.build_direct_tool_trace_metadata(
+            "project_task",
+            "update",
+            {"task_id": "task_1", "status": "in_review"},
+            result_text=json.dumps({
+                "ok": True,
+                "task": {"id": "task_1", "title": "Reconcile August", "status": "in_review", "project_id": "proj_1"},
+            }),
+        )
+        self.assertEqual(
+            metadata["linked_record"],
+            {"kind": "task", "id": "task_1", "project_id": "proj_1", "title": "Reconcile August"},
+        )
+        self.assertEqual(metadata["result_summary"], 'Updated "Reconcile August" → in_review')
+
+    def test_document_and_task_list_actions_carry_no_linked_record(self) -> None:
+        # "documents"/"labels" are plural collections, never a single real
+        # record -- see _linked_record_from_result's own docstring on why a
+        # linked_record is only ever built off the RESULT, never guessed.
+        doc_list = service.build_direct_tool_trace_metadata(
+            "document", "list", {},
+            result_text=json.dumps({"ok": True, "documents": [{"id": "doc_1", "title": "A", "project_id": "proj_1"}]}),
+        )
+        self.assertIsNone(doc_list["linked_record"])
+        task_labels = service.build_direct_tool_trace_metadata(
+            "project_task", "list_labels", {},
+            result_text=json.dumps({"ok": True, "labels": ["bug", "urgent"]}),
+        )
+        self.assertIsNone(task_labels["linked_record"])
+
+    def test_document_trace_metadata_before_a_result_exists_carries_no_linked_record(self) -> None:
+        # The tool.started call (no result_text yet, since the tool has not
+        # run) -- must not crash on an empty result and must not invent a
+        # link out of the call's own ARGUMENTS (a model can name any id; only
+        # the result proves what actually happened).
+        metadata = service.build_direct_tool_trace_metadata(
+            "document", "write", {"title": "Q3 Ledger", "body": "..."},
+        )
+        self.assertIsNone(metadata["linked_record"])
+
+    def test_document_result_missing_project_id_carries_no_linked_record(self) -> None:
+        # A malformed/legacy result (id present, project_id absent) must not
+        # produce a link WorkTab.tsx's own fleetRecordHref cannot resolve --
+        # both halves of the identity are required or there is no record at
+        # all. Caught independently of the authoring agent: removing this
+        # guard in direct_tool_execution_service.py left the pre-existing
+        # test suite fully green, because nothing exercised this branch.
+        metadata = service.build_direct_tool_trace_metadata(
+            "document",
+            "write",
+            {"title": "Q3 Ledger"},
+            result_text=json.dumps({
+                "ok": True,
+                "document": {"id": "doc_abc123", "title": "Q3 Ledger"},
+            }),
+        )
+        self.assertIsNone(metadata["linked_record"])
+
+    def test_task_result_missing_id_carries_no_linked_record(self) -> None:
+        metadata = service.build_direct_tool_trace_metadata(
+            "project_task",
+            "update",
+            {"task_id": "task_1", "status": "in_review"},
+            result_text=json.dumps({
+                "ok": True,
+                "task": {"title": "Reconcile August", "status": "in_review", "project_id": "proj_1"},
+            }),
+        )
+        self.assertIsNone(metadata["linked_record"])
+
     def test_execute_single_direct_tool_call_handles_memory_tools(self) -> None:
         callbacks = _callbacks()
 

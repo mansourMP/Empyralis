@@ -1373,6 +1373,15 @@ def translate_sdk_message(
                 "summary": result_summary,
                 "execution_environment": trace_meta.get("execution_environment"),
             }
+            # linked_record: the document/task the call actually touched
+            # (build_direct_tool_trace_metadata's document/project_task
+            # branch — id/title/project_id read back off the tool's OWN
+            # result, never off the call's arguments). Only ever set on a
+            # SUCCESSFUL, resolvable result — WorkTab.tsx renders this as a
+            # real link when present and plain text otherwise, so a failed
+            # write must not carry one through to a dead link.
+            if not is_error and isinstance(trace_meta.get("linked_record"), dict):
+                result_data["linked_record"] = dict(trace_meta.get("linked_record") or {})
             result_event = _envelope("tool.result", result_data, tool_call_id=tool_use_id)
             if result_event is not None:
                 events.append(result_event)
