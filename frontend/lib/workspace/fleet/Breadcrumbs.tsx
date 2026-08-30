@@ -192,6 +192,13 @@ export const STATIC_LABELS: Record<string, string> = {
   connectors: "Apps",
   tools: "Tools",
   model: "Model",
+  // MAN-149 operator instrument (app/(account)/w/[workspaceId]/operator/
+  // activation) — live, unlinked (not a PrimaryRail destination, same
+  // treatment /context and /conversations already have). Named explicitly
+  // so this crumb — also the page's real <h1> — never depends on
+  // humanize()'s generic capitalization by coincidence.
+  operator: "Operator",
+  activation: "Activation",
 };
 
 function humanize(segment: string): string {

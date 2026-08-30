@@ -6671,6 +6671,20 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   letter-spacing: -0.01em;
 }
 .fleet-stat-label { margin-top: 2px; font-size: var(--text-xs); color: var(--text-muted); }
+.fleet-stat-caption { margin-top: 2px; font-size: 11px; color: var(--text-muted); }
+
+/* Platform activation page (MAN-149): the "signed up" vs "actually did
+   something" distinction the summary row draws — weight and a stronger
+   border, same discipline the selection/focus rules use ("never hue").
+   Never --accent: accent-restraint.test.ts reserves violet for the single
+   primary filled button, and a stat tile is not that. */
+.fleet-stat-card--activation {
+  border-color: var(--border-strong);
+  background: var(--bg-panel);
+}
+.fleet-stat-card--activation .fleet-stat-value {
+  font-size: 22px;
+}
 
 /* Agent detail rendered as a routed page (not a modal): fill the content
    frame, drop the overlay chrome. Comes after .fleet-detail so it wins. */

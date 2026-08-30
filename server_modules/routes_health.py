@@ -21,6 +21,8 @@ from server_modules import health_core as core
 from server_modules import health_diagnostics as diagnostics
 from server_modules import skills_registry
 from server_modules import db as runtime_db
+from server_modules import control_plane_repository
+from server_modules import platform_activation_service
 
 router = APIRouter()
 
@@ -176,6 +178,31 @@ async def internal_health(current_user=Depends(require_api_key)):
     return scope_internal_health_payload(await core.health(), current_user)
 
 
+async def platform_activation(current_user=Depends(require_api_key)):
+    """MAN-149 ("Activation, not acquisition") -- cross-tenant counts of
+    whether anyone is actually using the platform. Unlike `internal_health`
+    above, there is no honest narrowed view of this for a non-operator: it
+    is either the whole platform's numbers or nothing, so this hard-refuses
+    rather than scoping. `require_api_key` only proves someone is logged
+    in (CLAUDE.md); the real gate is `has_platform_fleet_operator_access`.
+    """
+    if not has_platform_fleet_operator_access(current_user):
+        raise HTTPException(status_code=403, detail="Operator access required.")
+    pool = await control_plane_repository.ensure_control_plane_schema()
+    if pool is None:
+        # "Empty" and "could not load" are different facts (CLAUDE.md) --
+        # a control plane that never came up must never render as a
+        # platform with 0 users.
+        raise HTTPException(
+            status_code=503,
+            detail="Control-plane database is unavailable; activation counts cannot be verified.",
+        )
+    try:
+        return await platform_activation_service.build_platform_activation_snapshot(pool)
+    except platform_activation_service.PlatformActivationScopeBroken as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 router.add_api_route("/contract", core.runtime_contract, methods=['GET'], dependencies=[Depends(get_current_user)])
 router.add_api_route("/memory/health", core.memory_health, methods=['GET'], dependencies=[Depends(require_api_key)])
 router.add_api_route("/memory/search", memory_search, methods=['POST'])
@@ -184,6 +211,7 @@ router.add_api_route("/health", public_health, methods=['GET'])
 router.add_api_route("/health/db", db_health, methods=['GET'], dependencies=[Depends(require_api_key)])
 router.add_api_route("/health/internal", internal_health, methods=['GET'], dependencies=[Depends(require_api_key)])
 router.add_api_route("/health/internal/db", db_health, methods=['GET'], dependencies=[Depends(require_api_key)])
+router.add_api_route("/internal/platform-activation", platform_activation, methods=['GET'], dependencies=[Depends(require_api_key)])
 router.add_api_route("/mobile/handoff", core.mobile_handoff, methods=['GET'], dependencies=[Depends(get_current_user)])
 router.add_api_route("/validation/latest", core.validation_latest, methods=['GET'], dependencies=[Depends(require_api_key)])
 router.add_api_route("/validation/history", core.validation_history, methods=['GET'], dependencies=[Depends(require_api_key)])
