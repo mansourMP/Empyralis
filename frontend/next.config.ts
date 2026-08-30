@@ -37,6 +37,18 @@ const LEGACY_REDIRECTS: { from: string; to: string }[] = [
   // Gateway / computers → hardware.
   { from: `${W}/gateway`, to: `${W}/hardware` },
   { from: `${W}/gateway-activity`, to: `${W}/hardware` },
+  // An agent is completely independent of any project (founder hard rule,
+  // 2026-08-30 — restating and hardening CLAUDE.md's "an agent belongs to
+  // the WORKSPACE, never a project"). The project-scoped agent detail route
+  // (app/.../projects/[projectId]/agents/**) is deleted outright, not just
+  // unlinked — these three keep old bookmarks/deep-links alive by dropping
+  // the now-meaningless project segment and landing on the SAME agent at
+  // its one real, workspace-level address. Safe as next.config redirects
+  // specifically because nothing live remains under this source prefix to
+  // shadow (contrast the `/fleet` trap above, which shadowed a real page).
+  { from: `${W}/projects/:projectId/agents`, to: `${W}/agents` },
+  { from: `${W}/projects/:projectId/agents/:agentId`, to: `${W}/agents/:agentId` },
+  { from: `${W}/projects/:projectId/agents/:agentId/:tab`, to: `${W}/agents/:agentId/:tab` },
 ];
 
 const nextConfig: NextConfig = {

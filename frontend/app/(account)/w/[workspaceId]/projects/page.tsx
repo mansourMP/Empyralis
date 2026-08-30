@@ -7,14 +7,13 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { Bot, Loader2, X } from "lucide-react";
 
-import { useFleetAgents, useFleetProjects, useFleetWorkspace, type FleetProject } from "@/lib/workspace/fleet/fleet-data";
+import { useFleetAgents, useFleetProjects, useFleetWorkspace } from "@/lib/workspace/fleet/fleet-data";
 import { HeaderAction, useBreadcrumbBadge } from "@/lib/workspace/fleet/Breadcrumbs";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { getErrorMessage } from "@/lib/ui/api-error";
-import { breadcrumbCount, deriveStatus, findSageAgent, formatNumber, timeAgo, type AgentStatusTone } from "@/lib/workspace/fleet/fleet-presentation";
-// deriveStatus is used below (statsByProject) to classify each agent's tone
-// before summarizeStatus() rolls the counts up into one line.
+import { breadcrumbCount, findSageAgent, formatNumber } from "@/lib/workspace/fleet/fleet-presentation";
 import { ProjectIcon } from "@/lib/workspace/fleet/fleet-project-identity";
+import { formatProjectWorkSummary } from "@/lib/workspace/fleet/project-work-summary";
 import { CreateFirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
 import { composerSubmitButtonClass, createButtonClass } from "@/lib/workspace/fleet/create-accent";
 import { planFirstAgentPrompt } from "@/lib/workspace/fleet/workspace-first-run";
@@ -24,65 +23,30 @@ import { FleetRightPanel, PanelSection, PanelRow } from "@/lib/workspace/fleet/F
 import { UsageStat, bucketSeries, type UsageBucket } from "@/lib/workspace/fleet/fleet-sparkline";
 import { formatUsd } from "@/lib/ui/money";
 
-// 4 decimal places — same convention as AgentsList/FleetAgentDetail/project
-// detail's money(): real per-turn costs are fractions of a cent.
-const money = (n: number) => formatUsd(n);
-
-type ProjectStats = {
-  agents: number;
-  cost: number;
-  tokens: number;
-  lastActive: string | null;
-  statusCounts: Partial<Record<AgentStatusTone, number>>;
-};
-
-// Working, then anything that needs a look, then the calm states — the
-// read-top-to-bottom-by-urgency order a reader would want from a summary
-// line. Labels are deriveStatus()'s own five words lowercased (plus its
-// "Not deployed" for the unknown tone) so this never drifts from the one
-// status vocabulary every table already shares. "online" never appears
-// here — deriveStatus never returns it, that tone is Hardware's own
-// device-reachability chip, a different domain.
-const STATUS_SUMMARY_ORDER: { tone: AgentStatusTone; label: string }[] = [
-  { tone: "working", label: "working" },
-  { tone: "error", label: "error" },
-  { tone: "stopped", label: "stopped" },
-  { tone: "offline", label: "offline" },
-  { tone: "ready", label: "ready" },
-  { tone: "unknown", label: "not deployed" },
-];
-
-// "4 ready" / "1 working · 3 ready" — every non-zero tone among a project's
-// agents, most-urgent first.
-function summarizeStatus(counts: Partial<Record<AgentStatusTone, number>>): string {
-  return STATUS_SUMMARY_ORDER
-    .map(({ tone, label }) => {
-      const n = counts[tone] ?? 0;
-      return n > 0 ? `${n} ${label}` : null;
-    })
-    .filter((s): s is string => Boolean(s))
-    .join(" · ");
-}
-type SortMode = "last_active" | "cost" | "agents" | "name";
-const SORT_OPTIONS = [
-  { value: "last_active", label: "Last active" },
-  { value: "cost", label: "Cost" },
-  { value: "agents", label: "Agent count" },
-  { value: "name", label: "Name" },
-];
-
-type FilterState = { agents: string; state: string; sort: SortMode };
+// Agents/Cost/Tokens/Last-active/Status columns — and the "Has agents" /
+// "Empty" filter and the "Agent count"/"Cost"/"Last active" sort modes that
+// used to sit beside them — are ALL GONE, 2026-08-30 (founder hard rule: "an
+// agent is completely independent of any project... that's the hard rule!").
+// Every one of them was derived client-side by grouping `agents` on
+// `a.project_id` (a nullable, never-backfilled column — the comment that
+// used to sit here literally said "agents carry project_id", stated as
+// fact). That is not a project fact; it is an agent fact laundered through
+// a project row, and cost/tokens/last-active/status all carried the same
+// lie the count did, not just the count itself. What replaces them: the
+// Work column below, built from `task_count`/`document_count` — real
+// project-owned facts, already returned by this exact endpoint
+// (routes_fleet.fleet_projects), via project-work-summary.ts (a pure
+// module the 2026-08-19 workspace-home rebuild wrote and wired in, then
+// orphaned the day FleetHome itself was deleted — this page is that
+// module's first live caller since).
+type FilterState = { state: string };
 
 // Same URL-backed view state as the Agents/Project-detail lists — so
-// browser-back restores the filtered/sorted view instead of resetting it.
+// browser-back restores the filtered view instead of resetting it.
 function readFiltersFromLocation(): FilterState {
-  if (typeof window === "undefined") return { agents: "all", state: "active", sort: "name" };
+  if (typeof window === "undefined") return { state: "active" };
   const sp = new URLSearchParams(window.location.search);
-  return {
-    agents: sp.get("agents") || "all",
-    state: sp.get("state") || "active",
-    sort: (sp.get("sort") as SortMode) || "name",
-  };
+  return { state: sp.get("state") || "active" };
 }
 
 export default function ProjectsPage() {
@@ -93,7 +57,7 @@ export default function ProjectsPage() {
   const [dialogOpen, setDialogOpen] = useState(false);
 
   const [filterState, setFilterState] = useState<FilterState>(() => readFiltersFromLocation());
-  const { agents: agentsFilter, state: stateFilter, sort } = filterState;
+  const { state: stateFilter } = filterState;
 
   // Archive is only a real option if what you archived stays findable —
   // otherwise it is deletion with extra steps and no undo. The default view
@@ -137,9 +101,7 @@ export default function ProjectsPage() {
       return;
     }
     const sp = new URLSearchParams();
-    if (filterState.agents !== "all") sp.set("agents", filterState.agents);
     if (filterState.state !== "active") sp.set("state", filterState.state);
-    if (filterState.sort !== "name") sp.set("sort", filterState.sort);
     const qs = sp.toString();
     router.replace(`${base}/projects${qs ? `?${qs}` : ""}`);
   }, [filterState, router, base]);
@@ -156,12 +118,10 @@ export default function ProjectsPage() {
     }
   }, [router, base]);
 
-  // Agents/Cost/Tokens/Last-active columns are all derived client-side from
-  // data that already exists elsewhere (agents carry project_id; the
-  // workspace usage rollup carries per-agent cost+tokens) — no new endpoint.
-  // Same Sage exclusion as the Agents list: the Operator never counts as a
-  // row anywhere, so a project's agent count matches what you'd see if you
-  // clicked into it.
+  // Workspace-wide agent facts only, never per-project: the Properties
+  // drawer's own "Agents" total (a genuine workspace-scoped count) and the
+  // first-run prompt's real-agent-count gate below. Same Sage exclusion as
+  // the Agents list — the Operator never counts as a row anywhere.
   const { agents: allAgents, loading: agentsLoading } = useFleetAgents(workspaceId);
   const sageAgent = useMemo(() => findSageAgent(allAgents), [allAgents]);
   const agents = useMemo(
@@ -208,10 +168,12 @@ export default function ProjectsPage() {
     [showArchived, projectsSettled, allProjects.length, agentsSettled, agents.length],
   );
 
-  const [usageByAgent, setUsageByAgent] = useState<Map<string, { cost: number; tokens: number }>>(new Map());
-  // Same /fleet/usage response the per-agent cost map is built from — the
-  // `totals`/`buckets` blocks feed the restored properties drawer below, so
-  // both live off this one fetch instead of a second request.
+  // Workspace-scoped only — the Properties drawer's "Spend today"/"Tokens
+  // today" sparklines below. This used to also build a per-agent cost/token
+  // map (`usageByAgent`) to roll up into a per-PROJECT "Cost this month" /
+  // "Tokens" column; that column is gone with the rest of the agent-derived
+  // stats (see the FilterState comment above), so there is nothing left
+  // that reads a per-agent breakdown of this response.
   const [workspaceTotals, setWorkspaceTotals] = useState<{ usd_cost?: number; total_tokens?: number } | null>(null);
   const [workspaceBuckets, setWorkspaceBuckets] = useState<UsageBucket[]>([]);
   useEffect(() => {
@@ -220,11 +182,6 @@ export default function ProjectsPage() {
       .then((r) => r.json())
       .then((d) => {
         if (cancelled) return;
-        const m = new Map<string, { cost: number; tokens: number }>();
-        for (const a of d?.by_agent || []) {
-          m.set(a.agent_install_id, { cost: Number(a.usd_cost) || 0, tokens: Number(a.total_tokens) || 0 });
-        }
-        setUsageByAgent(m);
         setWorkspaceTotals(d?.totals || null);
         if (Array.isArray(d?.buckets)) setWorkspaceBuckets(d.buckets);
       })
@@ -235,37 +192,7 @@ export default function ProjectsPage() {
   // contract as Agents/Project-detail's drawer.
   const [panelOpen, setPanelOpen] = useState(false);
 
-  const statsByProject = useMemo(() => {
-    const m = new Map<string, ProjectStats>();
-    for (const a of agents) {
-      const pid = (a.project_id || "").trim();
-      if (!pid) continue;
-      const cur = m.get(pid) || { agents: 0, cost: 0, tokens: 0, lastActive: null, statusCounts: {} };
-      cur.agents += 1;
-      const u = usageByAgent.get(a.agent_id);
-      if (u) {
-        cur.cost += u.cost;
-        cur.tokens += u.tokens;
-      }
-      if (a.last_activity && (!cur.lastActive || new Date(a.last_activity) > new Date(cur.lastActive))) {
-        cur.lastActive = a.last_activity;
-      }
-      const tone = deriveStatus(a.hardware_status || "unknown", Boolean(a.stopped?.active), Boolean(a.current_run_id)).tone;
-      cur.statusCounts[tone] = (cur.statusCounts[tone] ?? 0) + 1;
-      m.set(pid, cur);
-    }
-    return m;
-  }, [agents, usageByAgent]);
-
   const filters: ToolbarFilter[] = [
-    {
-      key: "agents", label: "Agents", value: agentsFilter, onChange: (v) => updateFilters({ agents: v }),
-      options: [
-        { value: "all", label: "All projects" },
-        { value: "has_agents", label: "Has agents" },
-        { value: "empty", label: "Empty" },
-      ],
-    },
     {
       key: "state", label: "Show", value: stateFilter, onChange: (v) => updateFilters({ state: v }),
       options: [
@@ -275,13 +202,16 @@ export default function ProjectsPage() {
     },
   ];
 
-  const filtered = useMemo(() => projects.filter((p) => {
-    const count = statsByProject.get(p.id)?.agents ?? 0;
-    if (agentsFilter === "has_agents" && count === 0) return false;
-    if (agentsFilter === "empty" && count > 0) return false;
-    return true;
-  }), [projects, statsByProject, agentsFilter]);
-  const shown = useMemo(() => sortProjects(filtered, sort, statsByProject), [filtered, sort, statsByProject]);
+  // No sort control: "Name" was the only genuine dimension left once
+  // Agent count/Cost/Last active were removed as agent-derived, and a
+  // single-option dropdown that already matches the list's own default
+  // order picks nothing — a dead control (CLAUDE.md: "a control that
+  // cannot be used in the current state is not rendered"). Alphabetical by
+  // name, unconditionally.
+  const shown = useMemo(
+    () => [...projects].sort((a, b) => (a.name || "").localeCompare(b.name || "")),
+    [projects],
+  );
 
   return (
     <main className="fleet-content fleet-content--with-panel">
@@ -327,10 +257,6 @@ export default function ProjectsPage() {
             back to Active is the browser's back button. */}
         <FleetToolbar
           filters={projects.length > 0 || showArchived ? filters : undefined}
-          sortOptions={projects.length > 0 ? SORT_OPTIONS : undefined}
-          sortValue={sort}
-          sortDefault="name"
-          onSortChange={(v) => updateFilters({ sort: v as SortMode })}
           panelOpen={panelOpen}
           onTogglePanel={() => setPanelOpen((v) => !v)}
           usageWorkspaceId={workspaceId}
@@ -356,27 +282,19 @@ export default function ProjectsPage() {
           )}
           {loading && projects.length === 0 ? (
             // Reuses `.fleet-projects-list`/`.fleet-projects-list-header`/
-            // `.fleet-project-row`'s real 6-column grid so the column-title
+            // `.fleet-project-row`'s real 2-column grid so the column-title
             // row (never reserved by the old bare `FleetListSkeleton`) and
             // each row's per-column x-offsets land in the same place the
             // real list renders into, not just the same row height.
             <div className="fleet-projects-list" aria-busy="true" aria-label="Loading">
               <div className="fleet-projects-list-header" aria-hidden>
                 <span>Project</span>
-                <span className="is-right fleet-col-agents-count">Agents</span>
-                <span className="is-right">Cost this month</span>
-                <span className="is-right fleet-col-tokens">Tokens</span>
-                <span className="is-right fleet-col-last-active">Last active</span>
-                <span className="is-right">Status</span>
+                <span className="is-right">Work</span>
               </div>
               {[0, 1, 2, 3].map((i) => (
                 <div key={i} className="fleet-project-row" style={{ cursor: "default" }}>
                   <span className="fleet-skeleton-bar" style={{ width: `${45 + (i % 3) * 12}%`, height: 13 }} />
-                  <span className="fleet-skeleton-bar" style={{ width: 24, height: 12, marginLeft: "auto" }} />
-                  <span className="fleet-skeleton-bar" style={{ width: 48, height: 12, marginLeft: "auto" }} />
-                  <span className="fleet-skeleton-bar" style={{ width: 48, height: 12, marginLeft: "auto" }} />
-                  <span className="fleet-skeleton-bar" style={{ width: 60, height: 12, marginLeft: "auto" }} />
-                  <span className="fleet-skeleton-bar" style={{ width: 64, height: 18, marginLeft: "auto", borderRadius: 999 }} />
+                  <span className="fleet-skeleton-bar" style={{ width: 96, height: 12, marginLeft: "auto" }} />
                 </div>
               ))}
             </div>
@@ -393,25 +311,20 @@ export default function ProjectsPage() {
               title="No projects yet"
               desc="Projects keep your agents organized. Create your first agent and its project is set up for you."
             />
-          ) : shown.length === 0 ? (
-            <div className="fleet-page-state-body">No projects match these filters.</div>
           ) : (
             <div className="fleet-projects-list">
               <div className="fleet-projects-list-header" aria-hidden>
                 <span>Project</span>
-                <span className="is-right fleet-col-agents-count">Agents</span>
-                <span className="is-right">Cost this month</span>
-                <span className="is-right fleet-col-tokens">Tokens</span>
-                <span className="is-right fleet-col-last-active">Last active</span>
-                <span className="is-right">Status</span>
+                <span className="is-right">Work</span>
               </div>
               {shown.map((p) => {
-                const stats = statsByProject.get(p.id);
-                const agentsCount = stats?.agents ?? 0;
-                const cost = stats?.cost ?? 0;
-                const tokens = stats?.tokens ?? 0;
-                const lastActive = stats?.lastActive ?? null;
-                const statusSummary = stats ? summarizeStatus(stats.statusCounts) : "";
+                // Real project-owned facts (routes_fleet.fleet_projects
+                // composes both alongside the row itself, same one-query
+                // shape as the old agent_count) — never agent-derived, so
+                // this carries no trace of the "agents carry project_id"
+                // lie the removed columns did.
+                const workSummary = formatProjectWorkSummary(p.task_count, p.document_count);
+                const hasWork = (p.task_count ?? 0) > 0 || (p.document_count ?? 0) > 0;
                 return (
                   <Link key={p.id} href={`${base}/projects/${encodeURIComponent(p.id)}`} className="fleet-project-row">
                     <span className="fleet-project-cell-name">
@@ -419,25 +332,11 @@ export default function ProjectsPage() {
                       <span className="fleet-project-cell-name-text">
                         <span className="fleet-project-cell-name-title">{p.name || p.id}</span>
                         {p.description && <span className="fleet-project-cell-name-desc">{p.description}</span>}
-                        <span className="fleet-agent-meta-mobile">
-                          {`${agentsCount} ${agentsCount === 1 ? "agent" : "agents"} · ${formatNumber(tokens)} tok · ${lastActive ? timeAgo(lastActive) : "never"}`}
-                        </span>
+                        <span className="fleet-agent-meta-mobile">{workSummary}</span>
                       </span>
                     </span>
-                    {/* Cost this month is the one column that carries full
-                        emphasis (Linear discipline: one value per row, not
-                        five at equal weight) — Agents/Tokens/Last active/
-                        Status all dim to fleet-cell-secondary. A zero/empty
-                        value still drops further to fleet-cell-muted, same
-                        as before. */}
-                    <span className={`fleet-agent-cell-right fleet-col-agents-count fleet-cell-secondary${agentsCount > 0 ? "" : " fleet-cell-muted"}`}>{agentsCount}</span>
-                    <span className={`fleet-agent-cell-right${cost > 0 ? "" : " fleet-cell-muted"}`}>{money(cost)}</span>
-                    <span className={`fleet-agent-cell-right fleet-col-tokens fleet-cell-secondary${tokens > 0 ? "" : " fleet-cell-muted"}`}>{formatNumber(tokens)}</span>
-                    <span className={`fleet-agent-cell-right fleet-col-last-active fleet-cell-secondary${lastActive ? "" : " fleet-cell-muted"}`}>
-                      {lastActive ? timeAgo(lastActive) : "never"}
-                    </span>
-                    <span className={`fleet-agent-cell-right fleet-cell-secondary${statusSummary ? "" : " fleet-cell-muted"}`}>
-                      {statusSummary || "—"}
+                    <span className={`fleet-agent-cell-right fleet-cell-secondary${hasWork ? "" : " fleet-cell-muted"}`}>
+                      {workSummary}
                     </span>
                   </Link>
                 );
@@ -475,26 +374,6 @@ export default function ProjectsPage() {
       )}
     </main>
   );
-}
-
-function sortProjects(projects: FleetProject[], sort: SortMode, stats: Map<string, ProjectStats>): FleetProject[] {
-  const list = [...projects];
-  if (sort === "agents") {
-    list.sort((a, b) => (stats.get(b.id)?.agents ?? 0) - (stats.get(a.id)?.agents ?? 0));
-  } else if (sort === "cost") {
-    list.sort((a, b) => (stats.get(b.id)?.cost ?? 0) - (stats.get(a.id)?.cost ?? 0));
-  } else if (sort === "last_active") {
-    list.sort((a, b) => {
-      const la = stats.get(a.id)?.lastActive;
-      const lb = stats.get(b.id)?.lastActive;
-      const ta = la ? new Date(la).getTime() : 0;
-      const tb = lb ? new Date(lb).getTime() : 0;
-      return tb - ta;
-    });
-  } else {
-    list.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
-  }
-  return list;
 }
 
 /**

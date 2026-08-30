@@ -2,7 +2,7 @@
 
 /**
  * The workspace Agents page's LIST layout — one row per agent, in collapsible
- * sections when a grouping is on (status / project / hardware placement) and
+ * sections when a grouping is on (status / hardware placement) and
  * as a plain run of rows when it is not. A PARALLEL build to
  * TasksGroupedList.tsx, not a shared/generalized version of it — see
  * agent-view-options.ts's file header for why. Nothing here imports from
@@ -29,13 +29,16 @@
  * one channel twice across one row is noise.
  *
  * GROUPING BY. "status" reuses the exact same four buckets the Board draws
- * (agentStatusGroup — see agent-view-options.ts); "project" is the reason
- * this feature is worth having on a CROSS-project page (each agent already
- * carries its own project_id, and the per-project Agents tab has no
- * equivalent need for it); "placement" splits by the same Cloud/VPS/Device
- * category the flat table's own Placement column already computes per row.
- * groupAgents() in agent-view-options.ts owns which sections exist and in
- * what order.
+ * (agentStatusGroup — see agent-view-options.ts); "placement" splits by the
+ * same Cloud/VPS/Device category the flat table's own Placement column
+ * already computes per row. groupAgents() in agent-view-options.ts owns
+ * which sections exist and in what order.
+ *
+ * "project" GROUPING WAS REMOVED, 2026-08-30 (founder hard rule: "an agent
+ * is completely independent of any project"). It bucketed by `project_id`,
+ * a nullable, never-backfilled column that never meant ownership — see
+ * groupAgents' own removal note in agent-view-options.ts for the full
+ * history. This component no longer takes a `projectById` prop at all.
  *
  * ZERO-COUNT SECTIONS ARE NEVER SHOWN. Unlike TasksGroupedList's "All" tab
  * (which deliberately keeps every status section, even empty, so a reader
@@ -70,10 +73,9 @@ import {
 import { agentCardReach, type AgentCardTaskInput } from "./agent-card-face";
 import { resolveHardwarePlacement, type FleetGateway } from "./gateway-box-picker";
 import { AgentSigil, StatusDot } from "./fleet-indicators";
-import { ProjectIcon } from "./fleet-project-identity";
 import { CHANNEL_LABELS, channelIconSrc } from "./fleet-icons";
 import { timeAgo, type AgentStatusTone } from "./fleet-presentation";
-import type { FleetAgent, FleetProject } from "./fleet-data";
+import type { FleetAgent } from "./fleet-data";
 
 const STATUS_GROUP_TONE: Record<AgentStatusGroup, AgentStatusTone> = {
   working: "working",
@@ -129,7 +131,6 @@ export function AgentsGroupedList({
   gateways,
   costByAgent,
   tasksByAgent,
-  projectById,
   grouping,
   display,
   onSelect,
@@ -146,7 +147,6 @@ export function AgentsGroupedList({
    *  and the card grid instead of a fourth opinion on the same fact). Also
    *  what agentCardReach reads for each row's second line. */
   tasksByAgent: Map<string, AgentCardTaskInput[]>;
-  projectById?: Map<string, FleetProject>;
   /** Every value, "none" included — see the file header for why that case is
    *  this component's job rather than a third rendering's. */
   grouping: AgentGrouping;
@@ -176,8 +176,8 @@ export function AgentsGroupedList({
   );
 
   const sections = useMemo(
-    () => groupAgents(agents, grouping, { gateways, projectById: projectById || new Map(), tasksByAgent }),
-    [agents, grouping, gateways, projectById, tasksByAgent],
+    () => groupAgents(agents, grouping, { gateways, tasksByAgent }),
+    [agents, grouping, gateways, tasksByAgent],
   );
 
   const rowStyle = useMemo(
@@ -209,7 +209,7 @@ export function AgentsGroupedList({
                   onClick={() => toggleCollapsed(section.key)}
                 >
                   <ChevronRight size={13} strokeWidth={2.25} className="fleet-agent-glist-chevron" />
-                  <SectionGlyph section={section} projectById={projectById} />
+                  <SectionGlyph section={section} />
                   <span className="fleet-agent-glist-header-title">{section.label}</span>
                   <span className="fleet-agent-glist-header-count">{section.count}</span>
                 </button>
@@ -240,21 +240,16 @@ export function AgentsGroupedList({
 }
 
 /** A heading is never just text: status brings the same dot the board column
- *  draws, project brings its own icon/tint (ProjectIcon — the same mark the
- *  sidebar and project pages already use for that project, so a "General"
- *  section here reads as the same project everywhere else in the app).
- *  Placement's own three words (Cloud/VPS/Device) are already the exact
- *  short label the flat table's own chip shows — a placeholder glyph would
- *  only repeat them, the same reasoning TasksGroupedList's SectionGlyph
- *  applies to its own catch-all buckets (Unassigned / No label). The
- *  "Ungrouped" project bucket (an agent with no project_id) gets the same
- *  treatment for the same reason. */
-function SectionGlyph({ section, projectById }: { section: AgentGroup; projectById?: Map<string, FleetProject> }) {
+ *  draws. Placement's own three words (Cloud/VPS/Device) are already the
+ *  exact short label the flat table's own chip shows — a placeholder glyph
+ *  would only repeat them, the same reasoning TasksGroupedList's
+ *  SectionGlyph applies to its own catch-all buckets (Unassigned / No
+ *  label). "project" grouping (and the icon/tint glyph it drew here,
+ *  ProjectIcon) was REMOVED 2026-08-30 — an agent is completely
+ *  independent of any project, so there is no project glyph left to draw
+ *  on this surface. */
+function SectionGlyph({ section }: { section: AgentGroup }) {
   if (section.statusGroup) return <StatusDot tone={STATUS_GROUP_TONE[section.statusGroup]} size={9} />;
-  if (section.projectId) {
-    const proj = projectById?.get(section.projectId);
-    return <ProjectIcon icon={proj?.icon} tint={proj?.tint} size={16} glyphSize={10} />;
-  }
   return null;
 }
 

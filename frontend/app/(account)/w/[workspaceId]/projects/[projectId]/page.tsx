@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "r
 import Link from "next/link";
 import { useParams, usePathname, useRouter } from "next/navigation";
 
-import { Bot, Calendar, Zap } from "lucide-react";
+import { Calendar, Zap } from "lucide-react";
 
 import {
   useFleetAgents,
@@ -32,13 +32,12 @@ import { MemberAvatarStack } from "@/lib/workspace/fleet/MemberAvatarStack";
 import { ProjectMemberAdd } from "@/lib/workspace/fleet/ProjectMemberAdd";
 import { ProjectPeople } from "@/lib/workspace/fleet/ProjectPeople";
 import { ProjectSettings } from "@/lib/workspace/fleet/ProjectSettings";
-import { useBreadcrumbLabel, useBreadcrumbIcon, useBreadcrumbBadge, HeaderAction } from "@/lib/workspace/fleet/Breadcrumbs";
-import { breadcrumbCount, deriveStatus, formatDate, formatNumber } from "@/lib/workspace/fleet/fleet-presentation";
+import { useBreadcrumbLabel, useBreadcrumbIcon, HeaderAction } from "@/lib/workspace/fleet/Breadcrumbs";
+import { deriveStatus, formatDate, formatNumber } from "@/lib/workspace/fleet/fleet-presentation";
 import { AgentSigil, StatusDot } from "@/lib/workspace/fleet/fleet-indicators";
 import { ProjectIcon } from "@/lib/workspace/fleet/fleet-project-identity";
 import { UsageStat, bucketSeries, type UsageBucket } from "@/lib/workspace/fleet/fleet-sparkline";
 import { planAgentCountShape } from "@/lib/workspace/fleet/agent-count-shape";
-import { shouldRedirectToSoloAgent } from "@/lib/workspace/fleet/agent-solo-redirect";
 import { createButtonClass } from "@/lib/workspace/fleet/create-accent";
 import { FleetToolbar } from "@/lib/workspace/fleet/FleetToolbar";
 import { TaskViewOptions } from "@/lib/workspace/fleet/TaskViewOptions";
@@ -49,7 +48,7 @@ import {
   writeTaskViewOptions,
   type TaskViewOptions as TaskViewOptionsState,
 } from "@/lib/workspace/fleet/task-view-options";
-import { FleetRightPanel, PanelSection, PanelRow, PanelRowsSkeleton } from "@/lib/workspace/fleet/FleetRightPanel";
+import { FleetRightPanel, PanelSection, PanelRow } from "@/lib/workspace/fleet/FleetRightPanel";
 import { quickCreateAgentChatPath } from "@/lib/workspace/fleet/agent-quick-create";
 import { AgentCreateCard } from "@/lib/workspace/fleet/AgentCreateCard";
 import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
@@ -237,7 +236,7 @@ export default function ProjectDetailPage() {
   }
   function handleAgentCreated(result: { agentId: string; projectId: string }) {
     setAgentCardOpen(false);
-    router.push(quickCreateAgentChatPath({ workspaceId, projectId: result.projectId, agentId: result.agentId }));
+    router.push(quickCreateAgentChatPath({ workspaceId, agentId: result.agentId }));
   }
   // Agents | Tasks | Documents — a real ROUTE per view (`${projectBase}/agents`,
   // `${projectBase}/tasks`, `${projectBase}/documents`), not component state.
@@ -426,23 +425,17 @@ export default function ProjectDetailPage() {
     return () => { cancelled = true; };
   }, [workspaceId]);
 
+  // `inProject` — agents grouped by project_id — is kept ONLY for the
+  // now-unreachable `view === "agents"` content below (the route that
+  // selected it, projects/[projectId]/agents/page.tsx, was deleted
+  // 2026-08-30: an agent is completely independent of any project) and for
+  // TaskComposer/DocumentComposer's assignee pool (a separate, NOT-yet-
+  // decided question — see this file's own header note). The breadcrumb
+  // badge, the Properties drawer's "Agents" count, and its "Cost by agent"
+  // section that used to read from it are gone: each rendered unconditionally
+  // (never gated by `view`), so each was a LIVE per-project ownership claim,
+  // not dead code riding along with the rest.
   const inProject = agents.filter((a) => (a.project_id || "").trim() === projectId);
-  // U3-E: the count lives on the breadcrumb line itself ("General · 3
-  // agents"), not a second toolbar row — the project name appears exactly
-  // once, in the crumb this badge attaches to.
-  useBreadcrumbBadge(
-    projectId,
-    useMemo(
-      () => <span className="fleet-breadcrumb-count">· {breadcrumbCount(inProject.length, "agent", "agents", project?.name || "")}</span>,
-      [inProject.length, project?.name],
-    ),
-  );
-  const costByAgent = useMemo(
-    () => inProject
-      .map((a) => ({ id: a.agent_id, label: a.label || "Unnamed agent", cost: cost.get(a.agent_id) || 0 }))
-      .sort((a, b) => b.cost - a.cost),
-    [inProject, cost],
-  );
 
   // Where an agent's own page lives — the WORKSPACE's own routed agent page,
   // never the project-scoped `${projectBase}/agents/{id}/chat` twin. An
@@ -452,29 +445,13 @@ export default function ProjectDetailPage() {
   // /people and /conversations already get.
   const agentHref = (agentId: string) =>
     `${base}/agents/${encodeURIComponent(agentId)}/chat`;
-
-  // MAN-317, composed via agent-count-shape.ts's rule — never a second one.
-  // "none": the empty state below, unchanged. "solo": a list of one is worse
-  // than no list, so this view redirects straight into that one agent
-  // instead of showing anything here. "fleet": this pane lists them.
-  const agentCountMode = useMemo(() => planAgentCountShape(inProject.length), [inProject.length]);
-  const soloAgent = agentCountMode === "solo" ? inProject[0] : null;
-  // MAN-374 — shares agent-solo-redirect.ts's rule with the workspace-level
-  // twin of this exact redirect (agents/page.tsx), rather than re-typing the
-  // condition a second time: that IS the bug this file used to carry. The
-  // full trace (AgentCreateCard.create() awaits createAgentQuickly(), which
-  // awaits a synchronous force-refetch of the shared agents cache this
-  // page's own list is built from, flipping the count to "solo" while the
-  // wizard is still on step 2) lives in agent-solo-redirect.ts's own header.
-  const redirectToSolo = shouldRedirectToSoloAgent({
-    loading,
-    hasSoloTarget: view === "agents" && Boolean(soloAgent),
-    cardOpen: agentCardOpen,
-  });
-  useEffect(() => {
-    if (redirectToSolo && soloAgent) router.replace(agentHref(soloAgent.agent_id));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [redirectToSolo, soloAgent?.agent_id]);
+  // Read only by the (now-unreachable) `view === "agents"` content below —
+  // MAN-374's own solo-redirect EFFECT is gone: it fired only when
+  // `view === "agents"`, a state nothing can reach any more, so the effect
+  // itself was 100% dead the moment that route was deleted, not merely
+  // gated behind dead JSX. The workspace-level twin of this redirect
+  // (agents/page.tsx's soloHref) is unaffected and still real.
+  const soloAgent = planAgentCountShape(inProject.length) === "solo" ? inProject[0] : null;
 
   // MAN-64/MAN-70: assignee is agent-or-human -- dispatch to whichever of
   // assignFleetTask/assignFleetTaskToUser matches the picker's selection.
@@ -568,10 +545,18 @@ export default function ProjectDetailPage() {
           shared <h1> above the Agents/Tasks/Documents tabs). The breadcrumb's
           current crumb IS the page's <h1> now, on all three tabs (see
           Breadcrumbs.tsx) — it already carries the project's own icon
-          (useBreadcrumbIcon above) and its "· N agents" count
-          (useBreadcrumbBadge above), context a plain title never had. This
+          (useBreadcrumbIcon above), context a plain title never had. This
           block is gone, not replaced with a styled div: the heading role
-          lives one layer up, it isn't lost. */}
+          lives one layer up, it isn't lost.
+
+          UPDATE, 2026-08-30: the crumb used to ALSO carry a "· N agents"
+          badge (useBreadcrumbBadge), derived by grouping agents on
+          project_id. Removed outright, not replaced with a work-summary
+          equivalent — an agent is completely independent of any project
+          (founder hard rule), and this page already shows its own real
+          work (the Tasks/Documents tabs a reader is already looking at),
+          so a second summary of the same thing in the crumb would be
+          redundant chrome, not a fact worth restoring. */}
 
       {/* U3-H: top row is breadcrumb + primary action only; the
           view-control cluster is its own row below, under the topbar's
@@ -1019,38 +1004,18 @@ export default function ProjectDetailPage() {
               values={bucketSeries(costBuckets, "total_tokens")}
             />
             <PanelRow label="LLM calls" value={formatNumber(rollup?.events ?? 0)} icon={<Zap size={15} strokeWidth={1.75} />} />
-            <PanelRow label="Agents" value={inProject.length} icon={<Bot size={15} strokeWidth={1.75} />} />
             <PanelRow label="Created" value={project?.created_at ? formatDate(project.created_at) : "—"} icon={<Calendar size={15} strokeWidth={1.75} />} tone={project?.created_at ? "default" : "muted"} />
           </PanelSection>
 
-          <PanelSection title="Cost by agent">
-            {loading && agents.length === 0 ? (
-              // The rows here are one-per-agent, so this section's depth isn't
-              // known until the agents fetch lands. Reserve it instead of
-              // showing "No agents yet." — that line is both untrue mid-fetch
-              // and shorter than the rows it gets replaced by, so the drawer
-              // grew under the reader as the list arrived.
-              <PanelRowsSkeleton rows={3} />
-            ) : costByAgent.length === 0 ? (
-              <div className="fleet-panel-empty">No agents yet.</div>
-            ) : (
-              costByAgent.map((a) => (
-                <PanelRow
-                  key={a.id}
-                  label={a.label}
-                  // A neutral bullet, not the per-agent identity hue this used
-                  // to render (TINTS[tintKeyForIndex(i)]) — this is a plain
-                  // list of PanelRows, each already labelled by name, not a
-                  // chart with a legend to key against. Unlike the Usage page
-                  // (billing/page.tsx), there's no colored line here for the
-                  // dot to match, so the hue was pure decoration.
-                  icon={<span className="fleet-tint-pip" />}
-                  value={a.cost > 0 ? money(a.cost) : "—"}
-                  tone={a.cost > 0 ? "default" : "muted"}
-                />
-              ))
-            )}
-          </PanelSection>
+          {/* "Agents" (PanelRow, above) and "Cost by agent" (a whole
+              PanelSection) are REMOVED, 2026-08-30 — both derived from
+              `inProject`/`costByAgent`, agents grouped by project_id, the
+              exact ownership claim the founder's hard rule forbids: "an
+              agent is completely independent of any project." "Cost this
+              month"/"Tokens"/"LLM calls" above are NOT touched — they come
+              from a genuinely project-scoped backend rollup
+              (/fleet/usage?scope=project), never a client-side agent
+              grouping, so they carry none of the same lie. */}
 
         </FleetRightPanel>
       </div>

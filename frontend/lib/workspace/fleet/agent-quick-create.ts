@@ -74,13 +74,19 @@
  *                 the workspace's own is_default project. The identical
  *                 resolution the wizard already used — this module only
  *                 removes the screen that made a person confirm it, never
- *                 the logic that picks it. Project reassignment after
- *                 creation is deliberately NOT built: CLAUDE.md's "an
- *                 agent belongs to its project and works only there" law
- *                 makes that a non-feature by design, the same posture
- *                 documents took for "move to another project" (flagged,
- *                 not shipped, for the identical reason — a project is a
- *                 collaboration boundary, not a filing cabinet).
+ *                 the logic that picks it. `project_id` is silently seeded
+ *                 into the create request because it is still a required
+ *                 backend field today (fleet_tools.py) — CORRECTED
+ *                 2026-08-30: this used to claim a fabricated "an agent
+ *                 belongs to its project and works only there" CLAUDE.md
+ *                 law as the reason a reassignment UI was never built. No
+ *                 such law exists; the real one is the opposite —
+ *                 "an agent belongs to the WORKSPACE, never a project" —
+ *                 and the founder has now hardened it further: "an agent
+ *                 is completely independent of any project." Reassignment
+ *                 is simply unbuilt, not disallowed by any rule; the
+ *                 create-time field is plumbing for a still-required
+ *                 column, never a claim about where the agent "lives".
  *   capability  -- SUPERSEDED 2026-08-28. It was "standard", hardcoded, for
  *                 every agent ever created here. It is now whatever the JOB
  *                 picked on step 1 says (agent-create-job.ts) — "standard"
@@ -207,26 +213,25 @@ export function buildQuickCreateAgentPayload(
   return payload;
 }
 
-/** Where to land after creation — straight into the new agent's Chat, the
- *  same path FleetCreateAgentWizard's own old finish() used (kept
- *  byte-for-byte so no deep-link shape regresses), including its identical
- *  guard: an unresolvable project segment would otherwise swallow the
- *  agent id in the URL (a blank [projectId] makes "agents" itself get
- *  consumed as that segment, stranding the real agent id — a 404 via the
- *  global not-found page), so an empty project routes to the flat agents
- *  list instead of a link already known to be broken. */
+/** Where to land after creation — straight into the new agent's Chat, at
+ *  its one real, workspace-level address (/w/{ws}/agents/{id}/chat — same
+ *  route inbox/page.tsx's agentHrefFor and every other post-2026-08-30
+ *  agent link use). CORRECTED 2026-08-30: this used to build a
+ *  project-scoped link (.../projects/{projectId}/agents/{id}/chat), with a
+ *  fallback for when the project segment couldn't be resolved. That
+ *  fallback was itself the tell — an agent belongs to the WORKSPACE, never
+ *  a project (CLAUDE.md, hardened by the founder the same day: "an agent
+ *  is completely independent of any project"), so there is no second,
+ *  degraded case to fall back FROM. No `projectId` parameter here at all
+ *  now; the caller no longer needs to resolve one just to navigate. */
 export function quickCreateAgentChatPath(opts: {
   workspaceId: string;
-  projectId: string;
   agentId: string;
 }): string {
   const base = `/w/${encodeURIComponent(opts.workspaceId)}`;
-  const projSeg = (opts.projectId || "").trim();
   const agentSeg = (opts.agentId || "").trim();
   if (!agentSeg) return `${base}/agents`;
-  return projSeg
-    ? `${base}/projects/${encodeURIComponent(projSeg)}/agents/${encodeURIComponent(agentSeg)}/chat`
-    : `${base}/agents`;
+  return `${base}/agents/${encodeURIComponent(agentSeg)}/chat`;
 }
 
 /** The ONE network call agent creation needs — POST .../fleet/agents,

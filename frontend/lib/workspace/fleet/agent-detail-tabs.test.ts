@@ -53,21 +53,16 @@ function assert(condition: boolean, label: string): void {
 }
 
 const detailSource = readFileSync(new URL("./FleetAgentDetail.tsx", import.meta.url), "utf8");
+// ONE route now, not two: the project-scoped twin
+// (projects/[projectId]/agents/[agentId]/[tab]/page.tsx) was deleted
+// 2026-08-30 — an agent is completely independent of any project, so it
+// has exactly one real address. next.config.ts's LEGACY_REDIRECTS covers
+// old bookmarks into the deleted route.
 const ROUTE_FILES: { label: string; source: string }[] = [
   {
     label: "workspace-scoped route",
     source: readFileSync(
       new URL("../../../app/(account)/w/[workspaceId]/agents/[agentId]/[tab]/page.tsx", import.meta.url),
-      "utf8",
-    ),
-  },
-  {
-    label: "project-scoped route",
-    source: readFileSync(
-      new URL(
-        "../../../app/(account)/w/[workspaceId]/projects/[projectId]/agents/[agentId]/[tab]/page.tsx",
-        import.meta.url,
-      ),
       "utf8",
     ),
   },

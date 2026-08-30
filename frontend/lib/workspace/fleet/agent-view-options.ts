@@ -89,7 +89,7 @@ import {
   hardwarePlacementIsBrainBound,
   type FleetGateway,
 } from "./gateway-box-picker";
-import type { FleetAgent, FleetProject } from "./fleet-data";
+import type { FleetAgent } from "./fleet-data";
 import { timeAgo, type AgentStatusTone } from "./fleet-presentation";
 import { formatUsd } from "../../ui/money";
 
@@ -108,7 +108,13 @@ export const AGENT_LAYOUT_OPTIONS: { value: AgentLayout; label: string }[] = [
   { value: "board", label: "Board" },
 ];
 
-export type AgentGrouping = "none" | "status" | "project" | "placement";
+// "project" was REMOVED 2026-08-30 (founder hard rule: "an agent is
+// completely independent of any project... that's the hard rule!"). An
+// agent's project_id is a nullable, never-backfilled column that never
+// meant ownership; grouping by it taught the opposite lesson on the one
+// surface built to show every agent across the whole workspace. See
+// groupAgents' own removal note below for the full history.
+export type AgentGrouping = "none" | "status" | "placement";
 
 /** Three keys, and "status"/"group" are deliberately absent: they are what
  *  AgentGrouping already does, and offering the same reshaping two ways in one
@@ -148,7 +154,6 @@ export type AgentViewOptions = {
 export const AGENT_GROUPING_OPTIONS: { value: AgentGrouping; label: string }[] = [
   { value: "none", label: "No grouping" },
   { value: "status", label: "Status" },
-  { value: "project", label: "Project" },
   { value: "placement", label: "Hardware placement" },
 ];
 
@@ -425,10 +430,16 @@ export function agentPlacementCategory(agent: FleetAgent, gateways: FleetGateway
 
 /**
  * One section of a grouped list (or, when built from the fixed
- * AGENT_STATUS_GROUPS order, one board column). `empty` marks the catch-all
- * bucket (an agent with no project) — drawn quieter and always last, same
- * convention groupTasks() in task-view-options.ts uses for Unassigned/No
- * label.
+ * AGENT_STATUS_GROUPS order, one board column).
+ *
+ * "project" grouping — and the `projectId`/`empty` fields that existed
+ * only to support it — was REMOVED 2026-08-30 (founder hard rule: "an
+ * agent is completely independent of any project... that's the hard
+ * rule!"). It bucketed agents by `project_id`, a nullable, never-backfilled
+ * column that never meant ownership, and taught exactly the opposite
+ * lesson on the one surface built to show every agent across the whole
+ * workspace. `projectById` is gone from this function's options for the
+ * same reason — nothing left here reads a project map.
  */
 export type AgentGroup = {
   key: string;
@@ -436,9 +447,7 @@ export type AgentGroup = {
   agents: FleetAgent[];
   count: number;
   statusGroup?: AgentStatusGroup;
-  projectId?: string;
   placementCategory?: AgentPlacementCategory;
-  empty?: boolean;
   /** The single synthetic bucket grouping "none" produces. It is not a section
    *  anybody chose — it holds every agent, so its heading would name the one
    *  thing already on screen and its collapse control's only effect would be to
@@ -453,11 +462,9 @@ export function groupAgents(
   grouping: AgentGrouping,
   {
     gateways = [],
-    projectById = new Map<string, FleetProject>(),
     tasksByAgent = new Map<string, { status?: string | null }[]>(),
   }: {
     gateways?: FleetGateway[];
-    projectById?: Map<string, FleetProject>;
     /** Per-agent tasks (agent-card-face.ts's groupTasksByAgent output) — only
      *  read for grouping "status", to fold an in-progress task into the same
      *  "Working" bucket agentDisplayStatus/agentStatusGroup above now use. */
@@ -482,52 +489,23 @@ export function groupAgents(
     }));
   }
 
-  if (grouping === "placement") {
-    const buckets = new Map<AgentPlacementCategory, FleetAgent[]>();
-    for (const agent of agents) {
-      const cat = agentPlacementCategory(agent, gateways);
-      if (!buckets.has(cat)) buckets.set(cat, []);
-      buckets.get(cat)!.push(agent);
-    }
-    return (["cloud", "vps", "device"] as AgentPlacementCategory[])
-      .filter((c) => (buckets.get(c) || []).length > 0)
-      .map((c) => ({
-        key: c,
-        label: AGENT_PLACEMENT_LABELS[c],
-        placementCategory: c,
-        agents: buckets.get(c) || [],
-        count: (buckets.get(c) || []).length,
-      }));
-  }
-
-  // grouping === "project" — genuinely valuable here specifically because
-  // this page is cross-project (each agent carries its own project_id); the
-  // per-project Agents tab has no equivalent need for this grouping.
-  const buckets = new Map<string, AgentGroup>();
+  // grouping === "placement" — the only value left once "none"/"status" have
+  // each returned above (AgentGrouping is a 3-member union).
+  const buckets = new Map<AgentPlacementCategory, FleetAgent[]>();
   for (const agent of agents) {
-    const key = agent.project_id || "__none__";
-    if (!buckets.has(key)) {
-      const proj = agent.project_id ? projectById.get(agent.project_id) : undefined;
-      buckets.set(key, {
-        key,
-        // "Ungrouped" matches the exact word AgentsList.tsx's own
-        // group-by-project sort mode already uses for the same bucket — one
-        // word for "no project" across both surfaces.
-        label: proj?.name || "Ungrouped",
-        projectId: agent.project_id || undefined,
-        agents: [],
-        count: 0,
-        empty: !agent.project_id,
-      });
-    }
-    const group = buckets.get(key)!;
-    group.agents.push(agent);
-    group.count += 1;
+    const cat = agentPlacementCategory(agent, gateways);
+    if (!buckets.has(cat)) buckets.set(cat, []);
+    buckets.get(cat)!.push(agent);
   }
-  return [...buckets.values()].sort((a, b) => {
-    if (Boolean(a.empty) !== Boolean(b.empty)) return a.empty ? 1 : -1;
-    return a.label.localeCompare(b.label);
-  });
+  return (["cloud", "vps", "device"] as AgentPlacementCategory[])
+    .filter((c) => (buckets.get(c) || []).length > 0)
+    .map((c) => ({
+      key: c,
+      label: AGENT_PLACEMENT_LABELS[c],
+      placementCategory: c,
+      agents: buckets.get(c) || [],
+      count: (buckets.get(c) || []).length,
+    }));
 }
 
 // ── Ordering ────────────────────────────────────────────────────────────────

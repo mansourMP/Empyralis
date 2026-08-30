@@ -121,11 +121,16 @@ assert(
   "the <AgentDetailHeader> call site is wired to the computed phase",
 );
 
-// ── Both routed pages actually supply agentsLoading/agentsError ──────────
+// ── The routed page actually supplies agentsLoading/agentsError ──────────
+// One route now, not two: the project-scoped twin
+// (projects/[projectId]/agents/[agentId]/[tab]/page.tsx) was deleted
+// 2026-08-30 -- an agent is completely independent of any project, so it
+// has exactly one real address, not one per surface it could be reached
+// from. next.config.ts's LEGACY_REDIRECTS covers old bookmarks into the
+// deleted route; this file has nothing left to read there.
 
 for (const rel of [
   "../../../app/(account)/w/[workspaceId]/agents/[agentId]/[tab]/page.tsx",
-  "../../../app/(account)/w/[workspaceId]/projects/[projectId]/agents/[agentId]/[tab]/page.tsx",
 ]) {
   const pageSource = readFileSync(new URL(rel, import.meta.url), "utf8");
   assert(pageSource.length > 500, `CANARY: ${rel} was actually read`);

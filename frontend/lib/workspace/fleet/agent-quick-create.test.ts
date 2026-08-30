@@ -98,23 +98,24 @@ const payloadB = buildQuickCreateAgentPayload("proj_456");
 assert(payloadB.project_id === "proj_456" && payload.project_id === "proj_123", "independent calls never share state");
 
 // ── quickCreateAgentChatPath ─────────────────────────────────────────────
+// CORRECTED 2026-08-30: this used to build a project-scoped link
+// (.../projects/{projectId}/agents/{id}/chat) with a fallback for when the
+// project couldn't be resolved. An agent is completely independent of any
+// project (founder hard rule) — its one real address never carries a
+// project segment, so there is no `projectId` parameter and no fallback
+// case left to test.
 
 assert(
-  quickCreateAgentChatPath({ workspaceId: "ws_1", projectId: "proj_1", agentId: "agent_1" }) ===
-    "/w/ws_1/projects/proj_1/agents/agent_1/chat",
-  "a resolved project lands straight in that agent's Chat",
+  quickCreateAgentChatPath({ workspaceId: "ws_1", agentId: "agent_1" }) === "/w/ws_1/agents/agent_1/chat",
+  "lands straight in that agent's Chat, at its one real workspace-level address",
 );
 assert(
-  quickCreateAgentChatPath({ workspaceId: "ws_1", projectId: "", agentId: "agent_1" }) === "/w/ws_1/agents",
-  "an unresolvable project falls back to the flat agents list, never a broken /projects/agents/{id} link",
+  quickCreateAgentChatPath({ workspaceId: "ws_1", agentId: "" }) === "/w/ws_1/agents",
+  "no agent id at all falls back to the flat agents list rather than building a link to nothing",
 );
 assert(
-  quickCreateAgentChatPath({ workspaceId: "ws_1", projectId: "proj_1", agentId: "" }) === "/w/ws_1/agents",
-  "no agent id at all also falls back rather than building a link to nothing",
-);
-assert(
-  quickCreateAgentChatPath({ workspaceId: "a b", projectId: "p/1", agentId: "x y" }) ===
-    `/w/${encodeURIComponent("a b")}/projects/${encodeURIComponent("p/1")}/agents/${encodeURIComponent("x y")}/chat`,
+  quickCreateAgentChatPath({ workspaceId: "a b", agentId: "x y" }) ===
+    `/w/${encodeURIComponent("a b")}/agents/${encodeURIComponent("x y")}/chat`,
   "every path segment is individually URI-encoded",
 );
 
