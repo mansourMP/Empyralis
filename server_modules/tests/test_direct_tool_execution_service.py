@@ -223,6 +223,36 @@ class DirectToolExecutionServiceTests(unittest.TestCase):
         )
         self.assertIsNone(metadata["linked_record"])
 
+    def test_document_result_missing_project_id_carries_no_linked_record(self) -> None:
+        # A malformed/legacy result (id present, project_id absent) must not
+        # produce a link WorkTab.tsx's own fleetRecordHref cannot resolve --
+        # both halves of the identity are required or there is no record at
+        # all. Caught independently of the authoring agent: removing this
+        # guard in direct_tool_execution_service.py left the pre-existing
+        # test suite fully green, because nothing exercised this branch.
+        metadata = service.build_direct_tool_trace_metadata(
+            "document",
+            "write",
+            {"title": "Q3 Ledger"},
+            result_text=json.dumps({
+                "ok": True,
+                "document": {"id": "doc_abc123", "title": "Q3 Ledger"},
+            }),
+        )
+        self.assertIsNone(metadata["linked_record"])
+
+    def test_task_result_missing_id_carries_no_linked_record(self) -> None:
+        metadata = service.build_direct_tool_trace_metadata(
+            "project_task",
+            "update",
+            {"task_id": "task_1", "status": "in_review"},
+            result_text=json.dumps({
+                "ok": True,
+                "task": {"title": "Reconcile August", "status": "in_review", "project_id": "proj_1"},
+            }),
+        )
+        self.assertIsNone(metadata["linked_record"])
+
     def test_execute_single_direct_tool_call_handles_memory_tools(self) -> None:
         callbacks = _callbacks()
 
