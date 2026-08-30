@@ -541,7 +541,24 @@ h6.fleet-doc-heading { font-size: 14px; }
    one alone fixes exactly half the cases. */
 .fleet-doc-diff-line {
   white-space: pre;
-  display: inline-block;
+  /* `block` + `width: max-content`, NOT `inline-block`.
+     2026-08-27 (badadf38) made this `inline-block` so a long line's
+     red/green background ran the full length instead of stopping at the
+     visible fold -- a real phone bug, correctly identified. But an
+     inline-level box inside this `<pre>` inherits `white-space: pre`, and
+     `pre` SUPPRESSES line breaking between inline boxes: every diff line
+     then laid out on one horizontal row, so a whole revision read as a
+     single scrolling line. Reported 2026-08-30: "before it was wide
+     because each line would be each line, right now the entire thing is
+     just one line."
+     `block` restores one line per line unconditionally -- it cannot be
+     defeated by the parent's white-space. `width: max-content` shrink-wraps
+     to the content the way `inline-block` did, so a LONG line's background
+     still runs its full length; `min-width: 100%` keeps a SHORT line
+     spanning the full visible width so the stripe still reads as a row.
+     Both halves of the phone fix survive; the stacking comes back. */
+  display: block;
+  width: max-content;
   min-width: 100%;
   color: var(--text-secondary);
 }
