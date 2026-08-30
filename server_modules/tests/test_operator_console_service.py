@@ -179,7 +179,15 @@ class AccountDetailTests(unittest.IsolatedAsyncioTestCase):
             "created_at": "2026-01-01T00:00:00+00:00",
             "workspace_status": "active",
             "workspace_type": "personal",
-            "owner": {"user_id": "u_1", "email": "a@acme.test", "display_name": "Ada"},
+            # A JSON STRING, not a dict -- asyncpg hands back an undecoded
+            # jsonb column exactly this way with no custom type codec
+            # registered (see get_account_detail's own comment on the
+            # `owner` field). Every other jsonb field below is built the
+            # same way for the same reason: a dict/list fixture here would
+            # never exercise the _decode_json_object/_decode_json_array call
+            # that has to run against the real wire shape, which is exactly
+            # how this module's `owner` field shipped broken once already.
+            "owner": json.dumps({"user_id": "u_1", "email": "a@acme.test", "display_name": "Ada"}),
             "members": [],
             "agents": [],
             "projects": [],
@@ -199,6 +207,11 @@ class AccountDetailTests(unittest.IsolatedAsyncioTestCase):
         assert mock_fetch.await_args.args[2] == "ws_1"
         assert detail["name"] == "Acme"
         assert detail["runs_by_outcome"] == {"completed": 4, "failed": 1}
+        # The regression this fixture change exists to catch: `owner` must
+        # decode into a real object, not pass through as the raw JSON string
+        # the row carries it as.
+        assert detail["owner"] == {"user_id": "u_1", "email": "a@acme.test", "display_name": "Ada"}
+        assert isinstance(detail["owner"], dict)
 
     async def test_workspace_not_found_returns_none_not_an_empty_account(self) -> None:
         with _patched_fetchrow(self._row(workspace_found=False, name=None, tenant_id=None)):
