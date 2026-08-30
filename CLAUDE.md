@@ -62,7 +62,7 @@ When you learn something durable, add ONE line. A paragraph is archaeology.
 
 ## Founder decisions — do not silently reverse
 
-- **An agent belongs to the WORKSPACE, never to a project.** Do not re-nest agents under projects and do not add an Agents tab to a project.
+- **An agent is INDEPENDENT of every project — the hard rule** (founder, restated 2026-08-30: *"they are completely independent. Things agents are doesn't belong to a project."*). No Agents tab on a project, no project-scoped agent route, no grouping agents by project, no per-project agent count. The relationship runs the other way and only one way: an agent is GRANTED reach into projects via `context_project_ids`. `agents.project_id` is nullable, never backfilled, and is not ownership — treating it as ownership is the drift this rule keeps catching.
 - **Context is GRANTED per agent, never inherited**, in `workspace_agent_installs.metadata["context_project_ids"]`. Four states: key ABSENT = legacy (pre-grant behaviour), `[]` = granted nothing, `[ids]` = those only, unreadable = no reach at all (never falls back to legacy). Read many, write one. The model cannot widen its own grant — the only writer is the owner-gated `PUT .../context-projects`.
 - **Hardware attaches to its owner, never to the project.** Sharing a machine is an explicit per-machine opt-in, default off; an agent with no opted-in hardware runs cloud-side, which is a clean degradation and never an error.
 - **Conversations are private. Work is shared.** Non-owners never see personal or self-chat threads.
