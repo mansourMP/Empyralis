@@ -119,7 +119,13 @@ type Thread = {
 };
 
 // ── agent_trace_service canonical shapes (routes_agent_traces.py) ──────────
-type TraceEvent = {
+// Exported (along with buildActivityRows/toolIconFor/fleetRecordHref/
+// fleetRecordLabel/ActivityRow below) so work-tab-activity.test.ts can
+// prove the row-building function itself against real trace-event
+// fixtures, rather than a re-typed copy of it (CLAUDE.md: "a fixture
+// protects a shape, not a path" — the shape has to come from the real
+// producer, and the function under test has to be the real one).
+export type TraceEvent = {
   id: string;
   trace_id?: string | null;
   seq: number;
@@ -271,8 +277,39 @@ function extractPreviewText(obj: unknown): string {
   return "";
 }
 
-function toolIconFor(toolName: string): { icon: LucideIcon; label: string } {
+// document__*/project_task__* action → label, the task↔document loop's own
+// half of "one narrated event": before this, both tool names fell through
+// to the generic `Used ${toolName}` case below — an unclickable, literal
+// tool-name row identical in voice to a plumbing error. These match the
+// SAME action_id vocabulary skills_service.py's connector_id ==
+// "document"/"project_task" blocks dispatch on.
+const DOCUMENT_TOOL_LABELS: Record<string, string> = {
+  write: "Wrote a document",
+  edit: "Edited a document",
+  read: "Read a document",
+  list: "Listed documents",
+};
+const TASK_TOOL_LABELS: Record<string, string> = {
+  create: "Created a task",
+  update: "Updated a task",
+  get: "Looked up a task",
+  list: "Listed tasks",
+  comment: "Commented on a task",
+  assign: "Assigned a task",
+  set_parent: "Re-parented a task",
+  add_label: "Labeled a task",
+  remove_label: "Unlabeled a task",
+  list_labels: "Listed labels",
+};
+
+export function toolIconFor(toolName: string): { icon: LucideIcon; label: string } {
   const n = (toolName || "").toLowerCase();
+  if (n.startsWith("document__")) {
+    return { icon: FileText, label: DOCUMENT_TOOL_LABELS[n.replace("document__", "")] || "Used a document tool" };
+  }
+  if (n.startsWith("project_task__")) {
+    return { icon: ListChecks, label: TASK_TOOL_LABELS[n.replace("project_task__", "")] || "Used a task tool" };
+  }
   if (n.startsWith("browser__")) return { icon: Globe, label: `Browser: ${n.replace("browser__", "") || "action"}` };
   if (n.includes("search") || n.includes("web")) return { icon: Search, label: "Searched the web" };
   if (n.includes("memory")) return { icon: Database, label: "Read memory" };
@@ -288,7 +325,7 @@ function toolIconFor(toolName: string): { icon: LucideIcon; label: string } {
 
 // ── Activity row model ──────────────────────────────────────────────────
 type RowTone = "accent" | "success" | "danger" | "warning" | "muted";
-type ActivityRow = {
+export type ActivityRow = {
   id: string;
   ts: string | null;
   text: string;
@@ -305,7 +342,41 @@ type ActivityRow = {
    *  never reached a screen. Deliberately the coarse bucket only, never a
    *  hostname or VPS id (a disclosure decision, not this pass's call). */
   location?: string;
+  /** The document/task a tool.result's `linked_record` named — set ONLY
+   *  when a real in-app route resolves (see fleetRecordHref); a resolvable
+   *  `linked_record` with no working href still gets a linkLabel so the
+   *  row states what it touched, but renders as plain text instead of a
+   *  link to nowhere (CLAUDE.md: "a link that would 404 must not render
+   *  as a link"). */
+  linkHref?: string;
+  linkLabel?: string;
 };
+
+// The one in-app route builder for a linked_record — deliberately the SAME
+// relative shape server_modules/deep_link_service.py's TASK_PATH_TEMPLATE/
+// DOCUMENT_PATH_TEMPLATE and the inbox page's own taskHrefFor already build
+// (`/w/{workspaceId}/projects/{projectId}/{tasks|documents}/{id}`), so this
+// is not a third URL shape for the same two routes. Returns null (never a
+// best-effort guess) whenever any one of workspaceId/project_id/id is
+// missing — the caller renders plain text rather than a dead link.
+export function fleetRecordHref(workspaceId: string, record: unknown): string | null {
+  if (!record || typeof record !== "object") return null;
+  const r = record as Record<string, unknown>;
+  const kind = String(r.kind || "").trim();
+  const id = String(r.id || "").trim();
+  const projectId = String(r.project_id || "").trim();
+  if (!workspaceId || !id || !projectId) return null;
+  const base = `/w/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(projectId)}`;
+  if (kind === "document") return `${base}/documents/${encodeURIComponent(id)}`;
+  if (kind === "task") return `${base}/tasks/${encodeURIComponent(id)}`;
+  return null;
+}
+
+export function fleetRecordLabel(record: unknown): string {
+  if (!record || typeof record !== "object") return "";
+  const title = String((record as Record<string, unknown>).title || "").trim();
+  return title;
+}
 
 // Human labels for direct_tool_execution_service._execution_environment_
 // for_direct_tool's coarse buckets (hardware_runtime_target_resolver.
@@ -387,7 +458,7 @@ function latestPlanTasks(events: TraceEvent[]): PlanTask[] | null {
  *  in place) rather than two, since that's how the approved design reads
  *  ("Searched the web · `query`" is one line, not a start row + a result
  *  row). Order-preserving (input is already seq-ascending). */
-function buildActivityRows(events: TraceEvent[]): ActivityRow[] {
+export function buildActivityRows(events: TraceEvent[], workspaceId: string = ""): ActivityRow[] {
   const rows: ActivityRow[] = [];
   const indexByKey = new Map<string, number>();
 
@@ -419,16 +490,41 @@ function buildActivityRows(events: TraceEvent[]): ActivityRow[] {
       }
       const status = String(data.status || "").toLowerCase();
       const failed = status === "failed" || status === "error";
+      // linked_record (direct_tool_execution_service.build_direct_tool_
+      // trace_metadata's document/project_task branch): the record the
+      // call actually touched. Never trusted on a failed result even if
+      // the wire somehow carried one — the backend already gates this the
+      // same way, but display and persistence are guarded separately
+      // (CLAUDE.md). When present, it states what the summary text would
+      // otherwise repeat ('Wrote "Q3 Ledger"' vs. the row's own "Wrote a
+      // document → Q3 Ledger"), so the generic summary is skipped rather
+      // than shown twice.
+      const linkedRecord = !failed && data.linked_record && typeof data.linked_record === "object" ? data.linked_record : null;
+      const linkLabel = linkedRecord ? fleetRecordLabel(linkedRecord) : "";
+      const linkHref = linkLabel ? fleetRecordHref(workspaceId, linkedRecord) : null;
+      const summaryDetail = linkLabel ? undefined : (data.summary ? String(data.summary).slice(0, 160) : undefined);
       if (idx !== undefined) {
         rows[idx] = {
           ...rows[idx],
           tone: failed ? "danger" : rows[idx].tone,
-          detail: (data.summary && String(data.summary).slice(0, 160)) || rows[idx].detail,
+          detail: summaryDetail || rows[idx].detail,
           location: rows[idx].location || executionEnvironmentLabel(data.execution_environment),
+          linkLabel: linkLabel || rows[idx].linkLabel,
+          linkHref: linkHref || rows[idx].linkHref,
         };
       } else {
         const { icon, label } = toolIconFor(String(data.tool_name || ""));
-        rows.push({ id: e.id, ts: e.ts || null, tone: failed ? "danger" : "accent", icon, text: label, detail: data.summary ? String(data.summary).slice(0, 160) : undefined, location: executionEnvironmentLabel(data.execution_environment) });
+        rows.push({
+          id: e.id,
+          ts: e.ts || null,
+          tone: failed ? "danger" : "accent",
+          icon,
+          text: label,
+          detail: summaryDetail,
+          location: executionEnvironmentLabel(data.execution_environment),
+          linkLabel: linkLabel || undefined,
+          linkHref: linkHref || undefined,
+        });
       }
       continue;
     }
@@ -708,6 +804,18 @@ function ActivityRowView({ row, delaySeconds }: { row: ActivityRow; delaySeconds
       </span>
       <span className="fleet-work-activity-text">
         {row.text}
+        {row.linkLabel && (
+          <>
+            {" → "}
+            {row.linkHref ? (
+              <a className="fleet-link" href={row.linkHref}>
+                {row.linkLabel}
+              </a>
+            ) : (
+              row.linkLabel
+            )}
+          </>
+        )}
         {row.detail && <span className="fleet-work-activity-detail"> · `{row.detail}`</span>}
         {row.location && <span className="fleet-work-activity-location"> · {row.location}</span>}
       </span>
@@ -913,7 +1021,7 @@ export function WorkTab({
   const assistantTurn = traceRef && selectedThread?.turns ? selectedThread.turns[traceRef.assistantIndex] : undefined;
   const receivedTurn = traceRef && selectedThread?.turns ? findPrecedingCustomerTurn(selectedThread.turns, traceRef.assistantIndex) : undefined;
 
-  const middleRows = useMemo(() => buildActivityRows(effectiveEvents), [effectiveEvents]);
+  const middleRows = useMemo(() => buildActivityRows(effectiveEvents, workspaceId), [effectiveEvents, workspaceId]);
   // Latest plan.updated snapshot for the selected conversation's trace — see
   // latestPlanTasks. Recomputes as effectiveEvents grows (live SSE while the
   // trace is still running, or the fetched batch once it's finished), which

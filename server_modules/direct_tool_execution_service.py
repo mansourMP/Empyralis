@@ -4,7 +4,7 @@ import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from server_modules import security_audit_service
 from server_modules import deployed_agent_virtual_runtime_service
@@ -685,6 +685,83 @@ def _hardware_result_summary(
     return fallback
 
 
+# document__*/project_task__* verbs, one word per action_id, the same voice
+# as the tool descriptions the model reads (skills_service.py's
+# connector_id == "document"/"project_task" blocks) and as every other
+# result_summary this module writes ("Captured screenshot...", "Delegation
+# finished"). Deliberately narrow: an action_id with no entry here (list,
+# list_labels, add_label, remove_label -- none of which returns a single
+# document/task in its own result) falls through to the generic truncated-
+# JSON summary every OTHER connector already gets, rather than a summary
+# that lies about what the call actually returned.
+_DOCUMENT_RESULT_VERBS: Dict[str, str] = {"write": "Wrote", "edit": "Edited", "read": "Read"}
+_TASK_RESULT_VERBS: Dict[str, str] = {
+    "create": "Created",
+    "get": "Looked up",
+    "comment": "Commented on",
+    "assign": "Assigned",
+    "set_parent": "Re-parented",
+}
+
+
+def _document_result_summary(action_id: str, title: str) -> str:
+    verb = _DOCUMENT_RESULT_VERBS.get(action_id)
+    if not verb:
+        return ""
+    return f'{verb} "{title}"' if title else f"{verb} a document."
+
+
+def _task_result_summary(action_id: str, title: str, status: str) -> str:
+    label = f'"{title}"' if title else "a task"
+    if action_id == "update":
+        return f"Updated {label} → {status}" if status else f"Updated {label}"
+    verb = _TASK_RESULT_VERBS.get(action_id)
+    if not verb:
+        return ""
+    return f"{verb} {label}"
+
+
+def _linked_record_from_result(
+    normalized_connector: str, normalized_action: str, result_payload: Dict[str, Any]
+) -> Tuple[Optional[Dict[str, Any]], str]:
+    """`(linked_record, result_summary)` for a document/project_task tool
+    call whose result carries a single real record -- never a blob built
+    from the model's own arguments (a tool call can ask for any id; only
+    the RESULT proves what actually got read/written), and never a link
+    missing either half of its identity (a project_id-less or id-less
+    record cannot resolve to a real in-app route -- see WorkTab.tsx's own
+    "no dead controls" guard on this same field).
+    """
+    if normalized_connector == "document":
+        document = result_payload.get("document")
+        if not isinstance(document, dict):
+            return None, ""
+        doc_id = str(document.get("id") or "").strip()
+        doc_project_id = str(document.get("project_id") or "").strip()
+        doc_title = str(document.get("title") or "").strip()
+        if not doc_id or not doc_project_id:
+            return None, ""
+        return (
+            {"kind": "document", "id": doc_id, "project_id": doc_project_id, "title": doc_title or "Untitled document"},
+            _document_result_summary(normalized_action, doc_title),
+        )
+    if normalized_connector == "project_task":
+        task = result_payload.get("task")
+        if not isinstance(task, dict):
+            return None, ""
+        task_id = str(task.get("id") or "").strip()
+        task_project_id = str(task.get("project_id") or "").strip()
+        task_title = str(task.get("title") or "").strip()
+        if not task_id or not task_project_id:
+            return None, ""
+        record = {"kind": "task", "id": task_id, "project_id": task_project_id, "title": task_title or "Untitled task"}
+        display_id = str(task.get("display_id") or "").strip()
+        if display_id:
+            record["display_id"] = display_id
+        return record, _task_result_summary(normalized_action, task_title, str(task.get("status") or "").strip())
+    return None, ""
+
+
 def build_direct_tool_trace_metadata(
     connector_id: str,
     action_id: str,
@@ -699,6 +776,7 @@ def build_direct_tool_trace_metadata(
     search_results: List[Dict[str, str]] = []
     browser_action: Optional[Dict[str, Any]] = None
     browser_screenshot: Optional[Dict[str, Any]] = None
+    linked_record: Optional[Dict[str, Any]] = None
     result_summary = _compact_trace_text(result_text or payload.get("query") or payload.get("url"))
     result_payload: Dict[str, Any] = {}
 
@@ -764,6 +842,19 @@ def build_direct_tool_trace_metadata(
                     "height": 0,
                 }
 
+    if normalized_connector in ("document", "project_task"):
+        # Only the RESULT proves what actually got read/written -- this
+        # runs on both the tool.started call (result_text="", so
+        # result_payload is {} and linked_record stays None -- there is
+        # nothing to link to yet) and the tool.result call, exactly like
+        # the "hardware" branch above.
+        result_payload = _parse_result_json_object(result_text)
+        linked_record, linked_summary = _linked_record_from_result(
+            normalized_connector, normalized_action, result_payload
+        )
+        if linked_summary:
+            result_summary = _compact_trace_text(linked_summary)
+
     return {
         "capability_id": (
             str(payload.get("capability_id") or payload.get("action") or "").strip()
@@ -774,6 +865,7 @@ def build_direct_tool_trace_metadata(
         "search_results": search_results,
         "browser_action": browser_action,
         "browser_screenshot": browser_screenshot,
+        "linked_record": linked_record,
         "result_summary": result_summary,
         "execution_environment": _execution_environment_for_direct_tool(
             normalized_connector,
