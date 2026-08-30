@@ -249,6 +249,7 @@ from server_modules.routes_deployed_agents import router as deployed_agents_rout
 from server_modules.routes_gateway import router as gateway_router
 from server_modules.routes_health import router as health_router
 from server_modules.routes_marketplace import router as marketplace_router
+from server_modules.routes_operator_console import router as operator_console_router
 from server_modules.routes_personal_channels import router as personal_channels_router
 from server_modules.routes_pilot import router as pilot_router
 from server_modules.routes_platform_analytics import router as platform_analytics_router
@@ -381,11 +382,13 @@ app.include_router(agents_router)
 app.include_router(runs_router)
 app.include_router(auth_router)
 app.include_router(health_router)
+app.include_router(operator_console_router)
 app.include_router(connectors_router)
 app.include_router(builder_router)
 app.include_router(agents_router, prefix="/api")
 app.include_router(runs_router, prefix="/api")
 app.include_router(health_router, prefix="/api")
+app.include_router(operator_console_router, prefix="/api")
 app.include_router(connectors_router, prefix="/api")
 app.include_router(connections_router, prefix="/api")
 app.include_router(gateway_router, prefix="/api")
