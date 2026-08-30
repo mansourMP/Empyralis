@@ -275,13 +275,21 @@ assert(
   !/projectAgentsSpaceIsActive\s*\(/.test(projectPageSource),
   "ProjectDetailPage no longer hides its tab strip for a rail space that cannot exist",
 );
-// And the pane that space used to serve is not a dead end: at 2+ agents the
-// project's own /agents route lists them in the CONTENT area (the same
-// .fleet-conversation-row markup the workspace list pane renders), instead
-// of prompting "pick an agent" beside a rail that no longer offers one.
+// UPDATE, 2026-08-30: the pane this comment used to describe (a content-area
+// list of the project's own agents, at 2+ agents, reusing the workspace
+// list pane's `.fleet-conversation-row` markup) is itself deleted now, not
+// merely unreachable — the project-scoped `/agents` route it served is gone
+// outright (next.config.ts's LEGACY_REDIRECTS sends that URL to the agent's
+// real, workspace-level address before this page's `view` can ever resolve
+// to "agents"), per the founder's hard rule: an agent is independent of
+// every project, full stop, not merely "not on the rail". Removing the
+// route without removing the page's own fallback render would have left a
+// dead JSX block asserting the opposite of the rule it sat under, which is
+// exactly the drift this test exists to catch — so the assertion below is
+// INVERTED from what it used to pin, same convention as the block above.
 assert(
-  /fleet-conversation-row/.test(projectPageSource),
-  "the project's /agents route lists its agents in the content area rather than prompting a pick with nothing to pick from",
+  !/fleet-conversation-row/.test(projectPageSource),
+  "the project detail page no longer renders a content-area agent list — the /agents route it served is deleted, not just unlinked",
 );
 
 // ── The workspace-level /agents picker is NOT on the rail (2026-08-20) ────

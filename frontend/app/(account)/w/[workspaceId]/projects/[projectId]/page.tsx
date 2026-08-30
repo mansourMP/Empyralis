@@ -33,13 +33,10 @@ import { ProjectMemberAdd } from "@/lib/workspace/fleet/ProjectMemberAdd";
 import { ProjectPeople } from "@/lib/workspace/fleet/ProjectPeople";
 import { ProjectSettings } from "@/lib/workspace/fleet/ProjectSettings";
 import { useBreadcrumbLabel, useBreadcrumbIcon, HeaderAction } from "@/lib/workspace/fleet/Breadcrumbs";
-import { deriveStatus, formatDate, formatNumber } from "@/lib/workspace/fleet/fleet-presentation";
-import { AgentSigil, StatusDot } from "@/lib/workspace/fleet/fleet-indicators";
+import { formatDate, formatNumber } from "@/lib/workspace/fleet/fleet-presentation";
 import { ProjectIcon } from "@/lib/workspace/fleet/fleet-project-identity";
 import { UsageStat, bucketSeries, type UsageBucket } from "@/lib/workspace/fleet/fleet-sparkline";
-import { planAgentCountShape } from "@/lib/workspace/fleet/agent-count-shape";
 import { createButtonClass } from "@/lib/workspace/fleet/create-accent";
-import { FleetToolbar } from "@/lib/workspace/fleet/FleetToolbar";
 import { TaskViewOptions } from "@/lib/workspace/fleet/TaskViewOptions";
 import {
   DEFAULT_TASK_VIEW_OPTIONS,
@@ -49,9 +46,6 @@ import {
   type TaskViewOptions as TaskViewOptionsState,
 } from "@/lib/workspace/fleet/task-view-options";
 import { FleetRightPanel, PanelSection, PanelRow } from "@/lib/workspace/fleet/FleetRightPanel";
-import { quickCreateAgentChatPath } from "@/lib/workspace/fleet/agent-quick-create";
-import { AgentCreateCard } from "@/lib/workspace/fleet/AgentCreateCard";
-import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
 import { FleetBoardSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import { PROJECT_TAB_LABEL, PROJECT_TAB_VIEWS } from "@/lib/workspace/fleet/project-views";
 import { ListChecks, FileText } from "lucide-react";
@@ -167,12 +161,15 @@ function DocumentsListSkeleton() {
 // machinery) is gone from this view, and so is its successor — the primary
 // rail's project-agents space, deleted 2026-08-21 because an agent belongs
 // to the WORKSPACE and not to a project (founder, 2026-08-20; see
-// primary-rail-space.ts's header). This route is unlinked legacy now: the
-// project tab bar is Tasks · Documents (project-views.ts) and nothing in
-// the product points here. It stays live for bookmarks, and the
-// `view === "agents"` branch below still renders honestly — an empty state
-// (0 agents), a quiet redirect (1 agent), or a plain list of this project's
-// agents linking out to where each one actually lives (2+).
+// primary-rail-space.ts's header). The project-scoped `/agents` route this
+// page used to render for (`${projectBase}/agents`) is deleted outright now
+// (founder's hard rule, 2026-08-30: an agent is completely independent of
+// any project) — next.config.ts's LEGACY_REDIRECTS sends that URL straight
+// to the agent's real, workspace-level address before this component ever
+// mounts with that pathname, so `view` below can no longer resolve to
+// "agents" at all. This file used to carry an honest fallback render for
+// that state anyway (an empty state, a quiet solo redirect, or a plain
+// list); that render is gone with the route it served.
 
 export default function ProjectDetailPage() {
   const params = useParams();
@@ -184,7 +181,7 @@ export default function ProjectDetailPage() {
   const projectId = String(params?.projectId || "");
   const base = `/w/${encodeURIComponent(workspaceId)}`;
 
-  const { agents, loading, error: agentsError, refresh } = useFleetAgents(workspaceId);
+  const { agents, error: agentsError } = useFleetAgents(workspaceId);
   // MAN-64/MAN-70: the pool of valid HUMAN assignees -- the same list
   // MemberAvatarStack renders for this page's own roster stack, passed down
   // as a prop rather than fetched a second time there (GET
@@ -218,26 +215,9 @@ export default function ProjectDetailPage() {
 
   const projectBase = `${base}/projects/${encodeURIComponent(projectId)}`;
 
-  const [agentCardOpen, setAgentCardOpen] = useState(false);
   // Properties drawer — closed by default, an overlay over the sheet.
   const [panelOpen, setPanelOpen] = useState(false);
 
-  // AgentCreateCard (2026-08-20) — see agent-quick-create.ts's own
-  // "CORRECTION, 2026-08-20" header for why this opens a card rather than
-  // creating on the click itself, and AgentCreateCard.tsx's own header for
-  // the SECOND correction the same day: the card asks only for a name and
-  // an optional system prompt now — project is no longer a UI decision at
-  // all ("project and agents are completely independent"). Passing
-  // `currentProjectId` here only silently seeds the still-required backend
-  // field via resolveQuickCreateProjectId, exactly as before; nothing about
-  // it is shown or asked.
-  function openCreateCard() {
-    setAgentCardOpen(true);
-  }
-  function handleAgentCreated(result: { agentId: string; projectId: string }) {
-    setAgentCardOpen(false);
-    router.push(quickCreateAgentChatPath({ workspaceId, agentId: result.agentId }));
-  }
   // Agents | Tasks | Documents — a real ROUTE per view (`${projectBase}/agents`,
   // `${projectBase}/tasks`, `${projectBase}/documents`), not component state.
   //
@@ -267,20 +247,18 @@ export default function ProjectDetailPage() {
   // in CLAUDE.md — no redirect, no dead bookmarks), which is why `view`
   // still knows "people": a directly-typed URL still renders it. See
   // project-views.ts for the tab set itself.
-  const view: "agents" | "tasks" | "documents" | "people" =
-    pathname === `${projectBase}/agents`
-      ? "agents"
-      : pathname === `${projectBase}/documents`
-        ? "documents"
-        : pathname === `${projectBase}/people`
-          ? "people"
-          : "tasks";
+  const view: "tasks" | "documents" | "people" =
+    pathname === `${projectBase}/documents`
+      ? "documents"
+      : pathname === `${projectBase}/people`
+        ? "people"
+        : "tasks";
   // router.replace, not .push — same choice the agent detail page's own
   // sub-tabs already made (AgentDetailPage's onTabChange, one directory up).
   // Collapses Agents→Tasks→Documents clicks onto one history entry, so the
   // browser's own back button steps out of the project in one press instead
   // of walking back through every sub-tab click first.
-  const viewHref = (v: "agents" | "tasks" | "documents" | "people") => `${projectBase}/${v}`;
+  const viewHref = (v: "tasks" | "documents" | "people") => `${projectBase}/${v}`;
   // TWO shapes of the same tasks, plus the options that reshape them.
   //
   // This used to be a three-way switch — Board | Grouped | List — and that
@@ -425,33 +403,21 @@ export default function ProjectDetailPage() {
     return () => { cancelled = true; };
   }, [workspaceId]);
 
-  // `inProject` — agents grouped by project_id — is kept ONLY for the
-  // now-unreachable `view === "agents"` content below (the route that
-  // selected it, projects/[projectId]/agents/page.tsx, was deleted
-  // 2026-08-30: an agent is completely independent of any project) and for
-  // TaskComposer/DocumentComposer's assignee pool (a separate, NOT-yet-
-  // decided question — see this file's own header note). The breadcrumb
-  // badge, the Properties drawer's "Agents" count, and its "Cost by agent"
-  // section that used to read from it are gone: each rendered unconditionally
-  // (never gated by `view`), so each was a LIVE per-project ownership claim,
-  // not dead code riding along with the rest.
+  // `inProject` — agents grouped by project_id — is kept for two LIVE
+  // consumers: ProjectSettings's delete-confirmation below (`contents.agents`
+  // → "N agents move to General", an honest disclosure of a real backend
+  // side effect — project_id is still a required column on agent rows) and
+  // TasksBoard/TasksGroupedList/TasksList/TaskComposer's assignee pool (a
+  // separate, NOT-yet-decided question: whether that pool should stay
+  // project-filtered or widen to all workspace agents — the founder has
+  // been asked and explicitly deferred it). The `view === "agents"` content
+  // that used to read it too — an empty state, a solo redirect, a plain
+  // list, all gone with the route they served (see this file's own header)
+  // — is deleted outright, not merely unreachable, and so are the
+  // breadcrumb badge and the Properties drawer's "Agents"/"Cost by agent"
+  // rollups, both LIVE per-project ownership claims removed earlier
+  // (2026-08-30, see git history) rather than dead code riding along.
   const inProject = agents.filter((a) => (a.project_id || "").trim() === projectId);
-
-  // Where an agent's own page lives — the WORKSPACE's own routed agent page,
-  // never the project-scoped `${projectBase}/agents/{id}/chat` twin. An
-  // agent belongs to the workspace (founder, 2026-08-20), so that is where
-  // links point; the project-scoped route stays live for old bookmarks and
-  // is simply not linked from anywhere any more, the same treatment
-  // /people and /conversations already get.
-  const agentHref = (agentId: string) =>
-    `${base}/agents/${encodeURIComponent(agentId)}/chat`;
-  // Read only by the (now-unreachable) `view === "agents"` content below —
-  // MAN-374's own solo-redirect EFFECT is gone: it fired only when
-  // `view === "agents"`, a state nothing can reach any more, so the effect
-  // itself was 100% dead the moment that route was deleted, not merely
-  // gated behind dead JSX. The workspace-level twin of this redirect
-  // (agents/page.tsx's soloHref) is unaffected and still real.
-  const soloAgent = planAgentCountShape(inProject.length) === "solo" ? inProject[0] : null;
 
   // MAN-64/MAN-70: assignee is agent-or-human -- dispatch to whichever of
   // assignFleetTask/assignFleetTaskToUser matches the picker's selection.
@@ -560,10 +526,10 @@ export default function ProjectDetailPage() {
 
       {/* U3-H: top row is breadcrumb + primary action only; the
           view-control cluster is its own row below, under the topbar's
-          existing divider. FleetToolbar always renders here (even with 0
-          agents) so the Properties toggle stays reachable; filters/sort
-          still hide themselves when there's nothing to filter/sort (each is
-          independently optional). */}
+          existing divider. FleetToolbar (the Properties-panel toggle) used
+          to render here for the Agents view; that view and its route are
+          deleted (2026-08-30 — an agent is independent of every project),
+          and FleetToolbar is gone with it. */}
       {/* FILLED, 2026-08-01, EXCEPT WHEN THE LIST IS EMPTY (2026-08-12). This
           used to be the quiet hairline unconditionally, on the theory that
           the centre empty-state button ("Create your first agent") was the
@@ -585,21 +551,12 @@ export default function ProjectDetailPage() {
           time (no dead controls); it only earns the fill once the list holds
           something and this is genuinely the button used every day. */}
       <HeaderAction>
-        {view === "agents" ? (
-          // create-accent.ts decides which of the three create controls
-          // owns the view's one accent fill — including the case these
-          // hand-inlined ternaries were blind to: a composer open in front
-          // of this button, both filled at once. All three views answer to
-          // one rule now; Tasks and Documents carried the identical bug the
-          // Agents fix left behind by name.
-          <button
-            type="button"
-            className={createButtonClass("header", { listIsEmpty: inProject.length === 0, composerOpen: agentCardOpen })}
-            onClick={openCreateCard}
-          >
-            <span className="fleet-btn-plus">+</span> New agent
-          </button>
-        ) : view === "tasks" ? (
+        {/* create-accent.ts decides which of the two create controls owns
+            the view's one accent fill — including the case a hand-inlined
+            ternary would be blind to: a composer open in front of this
+            button, both filled at once. Both views answer to one rule
+            here. */}
+        {view === "tasks" ? (
           <button
             type="button"
             className={createButtonClass("header", { listIsEmpty: tasks.length === 0, composerOpen: composer !== null })}
@@ -608,12 +565,11 @@ export default function ProjectDetailPage() {
             <span className="fleet-btn-plus">+</span> New task
           </button>
         ) : view === "documents" && canWriteProject ? (
-          // Write-gated, unlike the Agents/Tasks buttons beside it — a
-          // viewer here would open a dialog whose own Create call the
-          // server rejects outright (fleet_create_document's `member`
-          // floor). No dead controls (CLAUDE.md): the button simply isn't
-          // in the DOM for a reader who can't use it, `null` (still
-          // resolving) included.
+          // Write-gated, unlike the Tasks button beside it — a viewer here
+          // would open a dialog whose own Create call the server rejects
+          // outright (fleet_create_document's `member` floor). No dead
+          // controls (CLAUDE.md): the button simply isn't in the DOM for a
+          // reader who can't use it, `null` (still resolving) included.
           <button
             type="button"
             className={createButtonClass("header", { listIsEmpty: documents.length === 0, composerOpen: documentComposerOpen })}
@@ -628,11 +584,12 @@ export default function ProjectDetailPage() {
           topbar is where the earlier mobile header-overlap bug came from, and
           this row is already proven reachable at 375px. */}
       <div className="fleet-content-toolbar">
-        {/* ORDER IS THE FOUNDER'S OWN SKETCH: Tasks · Documents · Agents.
+        {/* ORDER IS THE FOUNDER'S OWN SKETCH: Tasks · Documents.
             Tasks leads because it is both the default landing view (the
             bare `${projectBase}` URL falls through to it) and the surface
             a project is opened to act on daily. It used to read Agents ·
-            Tasks · Documents, which put the default view second.
+            Tasks · Documents, which put the default view second — Agents
+            is gone now (an agent is independent of every project).
 
             REAL LINKS, not buttons (CLAUDE.md: "primary navigation is real
             links, so cmd-click and middle-click work"). These were
@@ -643,7 +600,7 @@ export default function ProjectDetailPage() {
             Documents collapses to one entry, so browser-back steps out of
             the project rather than walking every tab click) while
             ⌘/middle-click get native browser semantics for free. */}
-        {/* Exactly Tasks · Documents · Agents — the set lives in
+        {/* Exactly Tasks · Documents — the set lives in
             project-views.ts, whose header records why People is not here
             (the avatar stack + "+" in this same row ARE the people
             surface; its route stays live, unlinked).
@@ -771,18 +728,6 @@ export default function ProjectDetailPage() {
               </button>
             </div>
           </div>
-        ) : null}
-        {/* Filters/sort are gone — a short scan-and-pick list of one
-            project's agents has nothing for a status/channel dropdown to
-            narrow. The panel toggle stays: it's the only entry point to
-            this project's cost/properties drawer (below), unrelated to how
-            agents are browsed. */}
-        {view === "agents" ? (
-          <FleetToolbar
-            panelOpen={panelOpen}
-            onTogglePanel={() => setPanelOpen((v) => !v)}
-            usageWorkspaceId={workspaceId}
-          />
         ) : null}
       </div>
 
@@ -937,55 +882,7 @@ export default function ProjectDetailPage() {
               loading={membersLoading || projectMembersLoading}
               error={membersError || projectMembersError}
             />
-          ) : loading && inProject.length === 0 ? (
-            <div className="fleet-project-agents-placeholder" aria-busy="true">Loading…</div>
-          ) : agentsError && inProject.length === 0 ? (
-            <FleetSurfaceError title="Couldn’t load agents" message={agentsError} onRetry={refresh} />
-          ) : inProject.length === 0 ? (
-            <FirstAgentEmpty
-              title="No agents in this project"
-              desc="Create one — it’ll be assigned here."
-              onCreate={openCreateCard}
-              createCardOpen={agentCardOpen}
-            />
-          ) : soloAgent ? (
-            // The redirect effect above is already firing — this is the one
-            // paint before it commits, same quiet-state convention the
-            // workspace-level Agents page uses for its own solo redirect.
-            <div className="fleet-page-state-body">Opening {soloAgent.label || "your agent"}…</div>
-          ) : (
-            // 2+ agents. This pane used to say "Pick an agent to watch it
-            // work." and rely on the primary rail having morphed into a
-            // project-agents pick-list beside it. That space is deleted
-            // (2026-08-21), so a prompt with nothing to pick from would be a
-            // dead end — the list lives here instead, in the content area,
-            // reusing the same `.fleet-conversation-row` markup the
-            // workspace-level list pane already renders rather than a second
-            // set of styles. Rows link to the WORKSPACE agent page, which is
-            // where an agent actually lives now.
-            <nav className="fleet-agents-conversation-list-rows" aria-label="Agents in this project">
-              {inProject.map((agent) => {
-                const status = deriveStatus(
-                  agent.hardware_status || "unknown",
-                  Boolean(agent.stopped?.active),
-                  Boolean(agent.current_run_id),
-                );
-                return (
-                  <Link key={agent.agent_id} href={agentHref(agent.agent_id)} className="fleet-conversation-row">
-                    <span className="fleet-conversation-row-avatar">
-                      <AgentSigil seed={agent.agent_id} size={32} />
-                      <StatusDot tone={status.tone} size={9} />
-                    </span>
-                    <span className="fleet-conversation-row-text">
-                      <span className="fleet-conversation-row-line1">
-                        <span className="fleet-conversation-row-name">{agent.label || "Unnamed agent"}</span>
-                      </span>
-                    </span>
-                  </Link>
-                );
-              })}
-            </nav>
-          )}
+          ) : null}
         </div>
 
         <FleetRightPanel open={panelOpen} onClose={() => setPanelOpen(false)}>
@@ -1042,16 +939,6 @@ export default function ProjectDetailPage() {
           projectName={project?.name}
           onClose={() => setDocumentComposerOpen(false)}
           onCreated={() => { setDocumentComposerOpen(false); refreshDocuments(); }}
-        />
-      )}
-
-      {agentCardOpen && (
-        <AgentCreateCard
-          workspaceId={workspaceId}
-          currentProjectId={projectId}
-          projects={projects}
-          onClose={() => setAgentCardOpen(false)}
-          onCreated={handleAgentCreated}
         />
       )}
     </main>
