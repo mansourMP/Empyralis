@@ -1,0 +1,73 @@
+# Empyralis operator console (Next.js production server) -- a SECOND,
+# independent Node process from empyralis-frontend.service, on its own port.
+# Modeled directly on deploy/empyralis-frontend.service's shape (same
+# User=empyralis, same `npm run start` ExecStart, same Restart policy) --
+# see that file's own header for the reasoning behind each choice this unit
+# copies. Differences from that file, and why:
+#
+#   - WorkingDirectory/PORT point at this app's own checkout and port
+#     (3100, not 3000) -- it is a completely separate application per the
+#     founder's explicit instruction, not a second route tree inside the
+#     customer frontend. The production box has ~1GB RAM free; this is a
+#     second small Next process, not a duplicate of the customer app's own
+#     (no lucide-react/motion, no fleet-theme.css, no chat/board/agent-
+#     detail routes -- see ops/next.config.ts and ops/package.json).
+#   - EMPYRALIS_API_URL is the SAME backend both processes talk to
+#     (127.0.0.1:8001) -- this app reads server_modules/routes_operator_
+#     console.py through its own ops/lib/server/operator-proxy.ts, which
+#     forwards the browser's session cookie server-side exactly the way
+#     frontend/lib/server/control-plane-proxy.ts already does.
+#
+# BEFORE this unit's app can actually show data to a signed-in operator,
+# TWO things need to be true on the box (outside this file's control):
+#
+#   1. The backend's `FRONTEND_ORIGINS` env var (deploy/empyralis-backend
+#      .service or /root/pm2-env.sh -- see CLAUDE.md: "production never
+#      loads .env") must include https://ops.empyralis.ai, or CORS-adjacent
+#      backend checks that key off it may reject requests server_modules/
+#      auth.py doesn't already treat as same-origin. server-to-server calls
+#      from this app's own Next process are not subject to browser CORS, but
+#      any check that reads FRONTEND_ORIGINS directly still needs the entry.
+#   2. The backend's `EMPYRALIS_AUTH_COOKIE_DOMAIN` (server_modules/auth.py
+#      _cookie_domain()) must be the shared PARENT domain (e.g.
+#      `.empyralis.ai`), not left unset/scoped to empyralis.ai alone -- a
+#      cookie set for one subdomain is never sent to a sibling subdomain by
+#      the browser. This is the actual mechanism behind "reuse the
+#      platform's existing session": the SAME empyralis_access_token /
+#      empyralis_refresh_token / empyralis_csrf_token cookies the customer
+#      app's login already issues have to reach ops.empyralis.ai too. If
+#      this is not already how the box is configured, an operator visiting
+#      ops.empyralis.ai for the first time will need to sign in there
+#      separately (server_modules/routes_auth.py's own /login already works
+#      standalone) -- the console still works, sessions just don't carry
+#      over automatically until this is set.
+#
+# Install: copy to /etc/systemd/system/empyralis-ops.service,
+# `systemctl daemon-reload`, `systemctl enable --now empyralis-ops`.
+# Deploy the app itself the same way frontend/ is deployed -- `npm install`
+# then `npm run build` in ops/, from a checkout at the WorkingDirectory path
+# below (a detached/nohup'd build, per docs/DEPLOY-RUNBOOK.md's own note
+# that a dropped SSH session kills an attached frontend build).
+
+[Unit]
+Description=Empyralis Operator Console (Next.js)
+After=network.target empyralis-backend.service
+Wants=empyralis-backend.service
+
+[Service]
+Type=simple
+User=empyralis
+Group=empyralis
+WorkingDirectory=/opt/empyralis-app/ops
+ExecStart=/usr/bin/npm run start
+Restart=on-failure
+RestartSec=5
+Environment=NODE_ENV=production
+Environment=PORT=3100
+Environment=EMPYRALIS_API_URL=http://127.0.0.1:8001
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=empyralis-ops
+
+[Install]
+WantedBy=multi-user.target

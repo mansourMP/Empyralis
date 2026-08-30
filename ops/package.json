@@ -1,0 +1,26 @@
+{
+  "name": "empyralis-ops-console",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Empyralis internal operator console (ops.empyralis.ai) — a separate app from the customer frontend. Reads server_modules/routes_operator_console.py. See README-less deploy/ops/ for install notes.",
+  "scripts": {
+    "dev": "next dev -H 127.0.0.1 -p 3100",
+    "build": "next build",
+    "start": "next start -p ${PORT:-3100}",
+    "typecheck": "tsc --noEmit",
+    "test:unit": "tsx lib/view-state.test.ts && tsx lib/format.test.ts && tsx lib/money.test.ts && tsx lib/overview.test.ts && tsx lib/accounts.test.ts && tsx lib/account-detail.test.ts && tsx lib/funnel.test.ts && tsx lib/retention.test.ts && tsx lib/failures.test.ts && tsx lib/spend.test.ts",
+    "verify": "npm run typecheck && npm run test:unit"
+  },
+  "dependencies": {
+    "next": "^16.2.6",
+    "react": "19.2.3",
+    "react-dom": "19.2.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.57",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.3"
+  }
+}
