@@ -23,6 +23,7 @@ import { FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import {
   inboxNeedsYouCount,
   planInboxNeedsYou,
+  resolveInboxNeedsYouViewState,
   type InboxNeedsYouGroups,
   type InboxNeedsYouItem,
 } from "@/lib/workspace/fleet/inbox-needs-you";
@@ -175,9 +176,19 @@ export default function InboxPage() {
 
   const allResolved = !notifLoading && !tasksLoading && !runsLoading;
   const anyError = Boolean(notifError || tasksError || runsError);
-  const genuinelyEmpty = allResolved && !anyError && needsYouTotal === 0;
   const totallyFailed = allResolved && needsYouTotal === 0 && anyError;
   const stillLoadingNeedsYou = !allResolved && needsYouTotal === 0 && !anyError;
+  // The one place this decision gets made — see resolveInboxNeedsYouViewState's
+  // own doc comment for the bug it replaces (real "needs you" content losing
+  // to the "create your first agent" nudge in any workspace with zero agents,
+  // which is the ORDINARY state for a customer who has only started tracking
+  // tasks, not a rare edge case).
+  const needsYouView = resolveInboxNeedsYouViewState({
+    stillLoading: stillLoadingNeedsYou,
+    totallyFailed,
+    freshWorkspace,
+    needsYouTotal,
+  });
 
   // ── Activity tab's own state (the old page's, unchanged) ───────────────
   const { events, loading: activityLoading, error: activityError } = useWorkspaceActivity(workspaceId, 50);
@@ -250,7 +261,7 @@ export default function InboxPage() {
 
       {view === "needs-you" ? (
         <main className="fleet-content">
-          {stillLoadingNeedsYou ? (
+          {needsYouView === "loading" ? (
             <div className="fleet-activity" aria-busy="true" aria-label="Loading inbox">
               {Array.from({ length: 4 }).map((_, i) => (
                 <div key={i} className="fleet-activity-item">
@@ -261,19 +272,19 @@ export default function InboxPage() {
                 </div>
               ))}
             </div>
-          ) : totallyFailed ? (
+          ) : needsYouView === "error" ? (
             <FleetSurfaceError
               title="Couldn’t load your inbox"
               message={notifError || tasksError || runsError}
             />
-          ) : freshWorkspace ? (
+          ) : needsYouView === "onboarding" ? (
             <CreateFirstAgentEmpty
               workspaceId={workspaceId}
               onCreated={refreshAgents}
               title="Your inbox is empty"
               desc="This is where mentions, assignments, and anything your agents need you for shows up. Create your first agent to get started."
             />
-          ) : genuinelyEmpty ? (
+          ) : needsYouView === "caught-up" ? (
             <div className="fleet-work-empty">
               <InboxIcon size={26} strokeWidth={1.5} />
               <div className="fleet-work-empty-title">You’re all caught up</div>
