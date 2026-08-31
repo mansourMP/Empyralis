@@ -19,6 +19,7 @@ import {
   isMyStuckTask,
   notificationTitle,
   planInboxNeedsYou,
+  resolveInboxNeedsYouViewState,
   type InboxBlockedRunShape,
   type InboxNotificationShape,
   type InboxTaskShape,
@@ -322,6 +323,41 @@ assert(legacy.runs[0].detail !== null, "the summary still reaches the row withou
 
   assert(g.tasks.length === 1 && g.tasks[0].title === "Ship the picker", "a task row titles the thing");
   assert(g.tasks[0].detail === "Blocked", "a task row puts the reason in the subtitle");
+}
+
+// ── resolveInboxNeedsYouViewState — real content outranks "no agents yet" ──
+// Reproduces a bug found live: a fresh workspace (zero agents — the
+// ordinary state for a customer who has only started tracking tasks, not
+// an edge case) with a task assigned to the owner and stuck in
+// `awaiting_input` rendered "Create your first agent" instead of that
+// task, because the OLD page.tsx ternary checked `freshWorkspace` before
+// `genuinelyEmpty`. These assertions are the ones that would have caught
+// it: the moment `needsYouTotal` is nonzero, freshWorkspace must never win.
+{
+  assert(
+    resolveInboxNeedsYouViewState({ stillLoading: true, totallyFailed: false, freshWorkspace: true, needsYouTotal: 0 }) === "loading",
+    "still resolving every source -> loading, regardless of freshWorkspace",
+  );
+  assert(
+    resolveInboxNeedsYouViewState({ stillLoading: false, totallyFailed: true, freshWorkspace: true, needsYouTotal: 0 }) === "error",
+    "every source failed -> error, regardless of freshWorkspace",
+  );
+  assert(
+    resolveInboxNeedsYouViewState({ stillLoading: false, totallyFailed: false, freshWorkspace: true, needsYouTotal: 3 }) === "content",
+    "THE bug: a fresh (zero-agent) workspace with real needs-you content must show that content, not the onboarding nudge",
+  );
+  assert(
+    resolveInboxNeedsYouViewState({ stillLoading: false, totallyFailed: false, freshWorkspace: false, needsYouTotal: 2 }) === "content",
+    "an established workspace with content shows that content",
+  );
+  assert(
+    resolveInboxNeedsYouViewState({ stillLoading: false, totallyFailed: false, freshWorkspace: true, needsYouTotal: 0 }) === "onboarding",
+    "fresh AND genuinely empty -> the onboarding nudge is still correct here",
+  );
+  assert(
+    resolveInboxNeedsYouViewState({ stillLoading: false, totallyFailed: false, freshWorkspace: false, needsYouTotal: 0 }) === "caught-up",
+    "not fresh, nothing needs you -> caught up, never the onboarding nudge",
+  );
 }
 
 if (failed > 0) {

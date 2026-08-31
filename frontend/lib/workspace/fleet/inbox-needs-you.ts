@@ -279,3 +279,39 @@ export function countUnseenBlockedRuns(
     return t > since;
   }).length;
 }
+
+/** Which of the "Needs you" tab's five renders to show — pure decision, no
+ *  JSX, same idiom as agent-chat-view-state.ts's resolveAgentChatViewState
+ *  (same house law it exists to enforce: "'empty' and 'I could not load
+ *  this' are different facts and must never share one screen" — here
+ *  widened to a THIRD fact this page also has to keep separate: "there is
+ *  real content, but you have not created an agent yet" is not "empty").
+ *
+ * Bug this replaces, found live testing task creation end to end: a brand
+ * new workspace with a task assigned to the owner and stuck in
+ * `awaiting_input` — textbook "needs you" content — rendered the
+ * "Create your first agent" onboarding nudge instead, because page.tsx's
+ * ternary checked `freshWorkspace` (zero agents) BEFORE `genuinelyEmpty`
+ * (zero needs-you items). Zero agents is the ordinary state for a customer
+ * who has only just started tracking tasks — the founder's own pitch is
+ * "track your issues," agents are not it — so this was not a rare edge
+ * case, it was the FIRST thing a new customer would hit the moment a task
+ * of their own got stuck. The onboarding nudge is still correct when the
+ * workspace is BOTH fresh and truly empty; it must never outrank real
+ * content that already exists. */
+export type InboxNeedsYouViewState = "loading" | "error" | "onboarding" | "caught-up" | "content";
+
+export function resolveInboxNeedsYouViewState(params: {
+  stillLoading: boolean;
+  totallyFailed: boolean;
+  freshWorkspace: boolean;
+  needsYouTotal: number;
+}): InboxNeedsYouViewState {
+  const { stillLoading, totallyFailed, freshWorkspace, needsYouTotal } = params;
+  if (stillLoading) return "loading";
+  if (totallyFailed) return "error";
+  // Real content always wins, regardless of how many agents exist — the
+  // one line this function exists to enforce.
+  if (needsYouTotal > 0) return "content";
+  return freshWorkspace ? "onboarding" : "caught-up";
+}
