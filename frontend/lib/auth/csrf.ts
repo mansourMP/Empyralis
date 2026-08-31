@@ -131,3 +131,35 @@ export function generateBrowserCsrfToken(): string {
   }
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
+
+// ── csrf_mismatch retry classification ──────────────────────────────────
+//
+// Shared by every browser-side transport that retries a 401 by rebuilding
+// its CSRF header from the live cookie (fleet-authorized-fetch.ts,
+// workspace-services.tsx's WorkspaceTransportAdapter): a rotation this
+// request had nothing to do with can land between the moment the caller
+// reads the cookie to build its X-CSRF-Token header and the moment the
+// request actually reaches the backend -- e.g. proxy.ts's middleware
+// refreshing the access token on a concurrent qualifying GET
+// (issue_csrf_token() rotates unconditionally on every refresh). That
+// request never 401s itself, so a 401-triggered retry never runs for it;
+// the backend instead reports a clean 403 with `code: 'csrf_mismatch'`
+// (csrf-failure.ts's csrfFailureResponseBody) on the very first attempt.
+// One shared classifier here means both transports retry on exactly the
+// same signal instead of silently drifting -- and only on this specific
+// code: `csrf_cookie_missing` and `csrf_header_missing` mean something a
+// live-cookie rebuild cannot fix (no session, or a caller that never opted
+// into CSRF protection) and must keep failing as-is.
+export async function responseIsCsrfMismatch(response: Response): Promise<boolean> {
+  try {
+    // Clone before reading -- the caller still owns `response` on every
+    // path that isn't this exact retry, and a body can only be consumed
+    // once.
+    const payload: unknown = await response.clone().json();
+    return Boolean(payload)
+      && typeof payload === 'object'
+      && (payload as { code?: unknown }).code === 'csrf_mismatch';
+  } catch {
+    return false;
+  }
+}

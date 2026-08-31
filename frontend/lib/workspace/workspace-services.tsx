@@ -9,7 +9,7 @@ import {
   useSyncExternalStore,
 } from 'react';
 
-import { buildCookieAuthHeaders } from '@/lib/auth/csrf';
+import { browserCsrfProtectedMethod, buildCookieAuthHeaders, responseIsCsrfMismatch } from '@/lib/auth/csrf';
 import { refresh as refreshBrowserAuthSession } from '@/lib/auth/auth-client';
 import type { WorkspaceBootstrapPayload } from '@/lib/workspace/workspace-bootstrap';
 import {
@@ -422,7 +422,10 @@ class WorkspacePersistenceNamespace {
   }
 }
 
-class WorkspaceTransportAdapter {
+// Exported (only) so workspace-transport-csrf-retry.test.ts can construct
+// this class directly and drive request()'s retry loop without a full
+// React render / DOM -- see that file's own header comment for why.
+export class WorkspaceTransportAdapter {
   private readonly inFlightControllers = new Map<string, AbortController>();
   private authRedirectInFlight = false;
 
@@ -560,6 +563,7 @@ class WorkspaceTransportAdapter {
     const retryOnStatuses = new Set(policy.retryOnStatuses ?? Array.from(WorkspaceTransportAdapter.RETRYABLE_STATUSES));
     const refreshSessionOn401 = policy.refreshSessionOn401 ?? true;
     let refreshed = false;
+    let csrfMismatchRetried = false;
     let attempt = 0;
 
     while (true) {
@@ -571,6 +575,30 @@ class WorkspaceTransportAdapter {
             continue;
           }
           this.redirectToLogin();
+        }
+
+        // See lib/auth/csrf.ts's responseIsCsrfMismatch for why this can
+        // fire on the very FIRST attempt with no 401 involved: a rotation
+        // this request had nothing to do with (proxy.ts's middleware
+        // refreshing on a concurrent qualifying GET) can land between this
+        // request's header build and its arrival at the backend.
+        // performRequest already rebuilds the X-CSRF-Token header from the
+        // live cookie on every call (buildCookieAuthHeaders above), so
+        // simply looping back here is enough -- unlike
+        // fleet-authorized-fetch.ts's one-shot fetch(), no separate
+        // header-patching retry helper is needed. Gated on the CSRF-
+        // protected method the same way buildCookieAuthHeaders itself gates
+        // attaching the header (a GET/HEAD/OPTIONS could never have carried
+        // one to mismatch), and exactly one retry: a second mismatch is the
+        // honest final answer, not looped further.
+        if (
+          response.status === 403
+          && !csrfMismatchRetried
+          && browserCsrfProtectedMethod(method)
+          && (await responseIsCsrfMismatch(response))
+        ) {
+          csrfMismatchRetried = true;
+          continue;
         }
 
         if (attempt < retryCount && retryOnStatuses.has(response.status)) {
