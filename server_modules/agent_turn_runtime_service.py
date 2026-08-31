@@ -4521,138 +4521,201 @@ async def _run_sage_action_loop_v3(
         return list(generation_event_sink.wrap_generation_with_sink(_gen))
 
     _trace_started_monotonic = _time_module.monotonic()
-    stream_events = await asyncio.to_thread(_collect_stream_events)
-    collected = _collect_sage_operator_loop_v3_events(stream_events)
-    final_payload = collected["final_payload"]
 
-    async def _finish_sdk_engine_trace(outcome: str) -> None:
-        """Close the trace this loop opened — SDK-engine turns ONLY.
+    async def _finish_open_trace(outcome: str) -> None:
+        """Close this loop's trace on a path that never reaches a normal
+        finisher — an exception or a cancellation.
 
-        The legacy branch's own callee already finishes the SAME
-        trace_context (direct_chat_generation_service's `_finish_trace` call
-        sites, which resolve a more precise outcome than this can), so
-        finishing it here too would overwrite their verdict with a coarser
-        one. The SDK branch — the production default — has no finisher at
-        all, which is why every trace in a live database has
-        `finished_at = NULL`.
+        WHY THIS EXISTS. Everything below runs after `start_trace` has already
+        written the `agent_traces` row, and the only finishers were at the two
+        normal exits. Anything that raised in between — a provider error out of
+        `asyncio.to_thread(_collect_stream_events)` on the SDK engine, which is
+        the production default, or a client disconnect cancelling the turn —
+        left `finished_at = NULL` forever. That is not cosmetic:
 
-        That is not cosmetic. WorkTab.tsx reads `!trace.finished_at` as
-        "still running": it shows a "Working" pill on a turn that ended
-        minutes ago and holds an SSE poll open against the database
-        indefinitely. `trace.completed` is also what makes the stream
-        generator return (`_terminal_trace_event`), so an unfinished trace
-        is a connection that never closes.
+        * `prune_finished_agent_traces` gates on `finished_at IS NOT NULL` by
+          design, so an abandoned trace is never reaped and accumulates.
+        * WorkTab reads `!trace.finished_at` as "still running", so a turn that
+          died minutes ago keeps showing a "Working" pill.
+        * `trace.completed` is what makes the SSE generator return, so an
+          unfinished trace is also a connection that never closes.
+
+        ENGINE-AGNOSTIC, unlike `_finish_sdk_engine_trace` below. On the legacy
+        branch the callee normally resolves a more precise outcome itself, but
+        when the raise happens it may not have got that far. Calling this is
+        safe either way because `finish_agent_trace` is first-writer-wins: if
+        the callee already closed the row, this is a no-op and its verdict
+        stands.
         """
-        if trace_context is None or _selected_engine != claude_agent_sdk_bridge.ENGINE_ID:
+        if trace_context is None:
             return
         duration_ms = int(max(0.0, _time_module.monotonic() - _trace_started_monotonic) * 1000)
+        # asyncio.shield so the write still gets its chance when the reason we
+        # are here is that this task is being cancelled — without it the very
+        # first await would re-raise CancelledError and the row would stay
+        # open, which is the case this handler exists for. Failures are
+        # swallowed: the original exception is re-raised by the caller and must
+        # not be masked by a bookkeeping error.
         try:
-            await agent_trace_service.emit_trace_completed(trace_context, duration_ms, None)
-        except Exception:
+            await asyncio.shield(
+                agent_trace_service.emit_trace_completed(trace_context, duration_ms, None)
+            )
+        except BaseException:
             pass
         try:
-            await agent_trace_service.finish_trace(
-                trace_context, outcome=outcome, final_message_id=None
+            await asyncio.shield(
+                agent_trace_service.finish_trace(
+                    trace_context, outcome=outcome, final_message_id=None
+                )
             )
-        except Exception:
+        except BaseException:
             pass
 
-    if _selected_engine == claude_agent_sdk_bridge.ENGINE_ID:
-        # Write back whatever session id this turn ended on (resumed or
-        # freshly minted — claude_agent_sdk_bridge always includes one; see
-        # translate_sdk_message's ResultMessage branch) so the NEXT turn on
-        # this conversation can resume it. next_turn_fingerprint mirrors
-        # what thread_service.record_user_turn/record_assistant_turn are
-        # about to append below (this turn's own user+assistant pair) —
-        # see _sdk_engine_session_lookup's docstring for why an exact-count
-        # match is required before a future turn trusts this session id.
-        _sdk_new_session_id = str(final_payload.get("session_id") or "").strip()
-        if _sdk_new_session_id:
-            await _sdk_engine_session_persist(
-                thread_id=conversation_thread_id,
-                tenant_id=tenant_id,
-                workspace_id=workspace_id,
-                session_id=_sdk_new_session_id,
-                next_turn_fingerprint=_sdk_prior_message_fingerprint + 2,
-            )
-    # Accumulate streaming reply text from all result events (same pattern as web chat path)
-    accumulated_reply = ""
-    for event in stream_events:
-        if isinstance(event, dict):
-            et = event.get("type")
-            r = str(event.get("reply") or "").strip()
-            pl = event.get("payload") if isinstance(event.get("payload"), dict) else None
-            r2 = str(pl.get("reply") or "").strip() if pl else ""
-            if et == "result" or et == "final":
-                candidate = r or r2
-                if candidate and (not accumulated_reply or len(candidate) > len(accumulated_reply)):
-                    accumulated_reply = candidate
-    reply = _coerce_text(final_payload.get("reply"))
-    # Fallback: if final reply is empty but we accumulated text, use accumulated
-    if not reply and accumulated_reply:
-        reply = accumulated_reply
-    # If the action loop ran tools but produced no text reply at all,
-    # return None so handle_sage_chat falls back to text-only generation.
-    has_any_tool_activity = bool(
-        collected.get("tool_calls") or collected.get("blocked_tools") or collected.get("approvals_required")
-    )
-    if not reply and not has_any_tool_activity:
-        # Nothing to say and nothing done — the caller regenerates on a
-        # different path that never sees this trace, so close it here rather
-        # than leaving a trace that reads as "still running" forever.
-        #
-        # PARTIAL, not failed, and that is deliberate: the turn did not go
-        # wrong here, it continued somewhere this trace cannot see. Calling
-        # it failed would report a failure that did not happen — the same
-        # law that makes an errored turn stop calling itself partial.
-        await _finish_sdk_engine_trace(agent_trace_service.TRACE_OUTCOME_PARTIAL)
-        return None
-    # 2026-07-09 first-run integrity fix, corrected 2026-08-14 (twice: first
-    # to stop guessing "disabled tools" for a provider/execution failure,
-    # then again the same day to remove the "disabled tools" diagnosis
-    # entirely — there is no more per-agent Tools checklist for it to name).
-    # A turn that ends with nothing substantive to say (empty, or the bare
-    # catch-all) while blocked_tools is non-empty must say SOMETHING honest.
-    # Only fires on the true silence/generic case (not on a specific,
-    # already-honest error from classify_error) so it never overrides a
-    # more precise message with a vaguer one.
-    if (not reply or reply.strip() == GENERIC_ERROR.channel_text) and collected.get("blocked_tools"):
-        reply = SAGE_TURN_NO_REPLY_UNKNOWN.channel_text
-    # An errored turn is FAILED, not partial — "partial" claims work
-    # happened, and this branch is reached precisely when the turn carries
-    # an error. The no-error branch is unchanged.
-    await _finish_sdk_engine_trace(
-        agent_trace_service.TRACE_OUTCOME_FAILED
-        if _coerce_text(final_payload.get("error"))
-        else agent_trace_service.TRACE_OUTCOME_SUCCESS
-    )
-    return {
-        "message": reply,
-        "error": _coerce_text(final_payload.get("error")) or None,
-        "tool_calls": collected["tool_calls"],
-        "blocked_tools": collected["blocked_tools"],
-        "approvals_required": collected["approvals_required"],
-        "action_execution_mode": collected["action_execution_mode"],
-        "available_tools": tools,
-        "route_decision": route_decision,
-        "action_loop_version": _SAGE_OPERATOR_LOOP_VERSION,
-        "loop_budget": collected["loop_budget"],
-        "raw_final_payload": final_payload,
-        "trace_events": collected["trace_events"],
-        "tool_progress_messages": collected.get("tool_progress_messages", []),
-        "media": list(session_ctx.get("pending_outbound_media") or []),
-        # The `agent_traces.id` of the trace THIS loop opened above and emitted
-        # every tool/plan/browser event into — i.e. the row the Work tab renders.
-        # Deliberately NOT named `trace_id`: in this module `trace_id` is a
-        # per-call correlation uuid (see handle_sage_chat's own
-        # `trace_id = str(uuid.uuid4())`) that is not, and has never been, a row
-        # in agent_traces. Two different ids, so two different names — writing
-        # the correlation uuid into agent_turns.metadata.trace_id would point the
-        # Work tab at a trace that does not exist, which is worse than the empty
-        # value it had. Empty when start_trace failed (it never raises), which is
-        # the honest "this turn produced no trace" value.
-        "agent_trace_id": str(getattr(trace_context, "trace_id", "") or "").strip(),
-    }
+    try:
+        stream_events = await asyncio.to_thread(_collect_stream_events)
+        collected = _collect_sage_operator_loop_v3_events(stream_events)
+        final_payload = collected["final_payload"]
+
+        async def _finish_sdk_engine_trace(outcome: str) -> None:
+            """Close the trace this loop opened — SDK-engine turns ONLY.
+
+            The legacy branch's own callee already finishes the SAME
+            trace_context (direct_chat_generation_service's `_finish_trace` call
+            sites, which resolve a more precise outcome than this can), so
+            finishing it here too would overwrite their verdict with a coarser
+            one. The SDK branch — the production default — has no finisher at
+            all, which is why every trace in a live database has
+            `finished_at = NULL`.
+
+            That is not cosmetic. WorkTab.tsx reads `!trace.finished_at` as
+            "still running": it shows a "Working" pill on a turn that ended
+            minutes ago and holds an SSE poll open against the database
+            indefinitely. `trace.completed` is also what makes the stream
+            generator return (`_terminal_trace_event`), so an unfinished trace
+            is a connection that never closes.
+            """
+            if trace_context is None or _selected_engine != claude_agent_sdk_bridge.ENGINE_ID:
+                return
+            duration_ms = int(max(0.0, _time_module.monotonic() - _trace_started_monotonic) * 1000)
+            try:
+                await agent_trace_service.emit_trace_completed(trace_context, duration_ms, None)
+            except Exception:
+                pass
+            try:
+                await agent_trace_service.finish_trace(
+                    trace_context, outcome=outcome, final_message_id=None
+                )
+            except Exception:
+                pass
+
+        if _selected_engine == claude_agent_sdk_bridge.ENGINE_ID:
+            # Write back whatever session id this turn ended on (resumed or
+            # freshly minted — claude_agent_sdk_bridge always includes one; see
+            # translate_sdk_message's ResultMessage branch) so the NEXT turn on
+            # this conversation can resume it. next_turn_fingerprint mirrors
+            # what thread_service.record_user_turn/record_assistant_turn are
+            # about to append below (this turn's own user+assistant pair) —
+            # see _sdk_engine_session_lookup's docstring for why an exact-count
+            # match is required before a future turn trusts this session id.
+            _sdk_new_session_id = str(final_payload.get("session_id") or "").strip()
+            if _sdk_new_session_id:
+                await _sdk_engine_session_persist(
+                    thread_id=conversation_thread_id,
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    session_id=_sdk_new_session_id,
+                    next_turn_fingerprint=_sdk_prior_message_fingerprint + 2,
+                )
+        # Accumulate streaming reply text from all result events (same pattern as web chat path)
+        accumulated_reply = ""
+        for event in stream_events:
+            if isinstance(event, dict):
+                et = event.get("type")
+                r = str(event.get("reply") or "").strip()
+                pl = event.get("payload") if isinstance(event.get("payload"), dict) else None
+                r2 = str(pl.get("reply") or "").strip() if pl else ""
+                if et == "result" or et == "final":
+                    candidate = r or r2
+                    if candidate and (not accumulated_reply or len(candidate) > len(accumulated_reply)):
+                        accumulated_reply = candidate
+        reply = _coerce_text(final_payload.get("reply"))
+        # Fallback: if final reply is empty but we accumulated text, use accumulated
+        if not reply and accumulated_reply:
+            reply = accumulated_reply
+        # If the action loop ran tools but produced no text reply at all,
+        # return None so handle_sage_chat falls back to text-only generation.
+        has_any_tool_activity = bool(
+            collected.get("tool_calls") or collected.get("blocked_tools") or collected.get("approvals_required")
+        )
+        if not reply and not has_any_tool_activity:
+            # Nothing to say and nothing done — the caller regenerates on a
+            # different path that never sees this trace, so close it here rather
+            # than leaving a trace that reads as "still running" forever.
+            #
+            # PARTIAL, not failed, and that is deliberate: the turn did not go
+            # wrong here, it continued somewhere this trace cannot see. Calling
+            # it failed would report a failure that did not happen — the same
+            # law that makes an errored turn stop calling itself partial.
+            await _finish_sdk_engine_trace(agent_trace_service.TRACE_OUTCOME_PARTIAL)
+            return None
+        # 2026-07-09 first-run integrity fix, corrected 2026-08-14 (twice: first
+        # to stop guessing "disabled tools" for a provider/execution failure,
+        # then again the same day to remove the "disabled tools" diagnosis
+        # entirely — there is no more per-agent Tools checklist for it to name).
+        # A turn that ends with nothing substantive to say (empty, or the bare
+        # catch-all) while blocked_tools is non-empty must say SOMETHING honest.
+        # Only fires on the true silence/generic case (not on a specific,
+        # already-honest error from classify_error) so it never overrides a
+        # more precise message with a vaguer one.
+        if (not reply or reply.strip() == GENERIC_ERROR.channel_text) and collected.get("blocked_tools"):
+            reply = SAGE_TURN_NO_REPLY_UNKNOWN.channel_text
+        # An errored turn is FAILED, not partial — "partial" claims work
+        # happened, and this branch is reached precisely when the turn carries
+        # an error. The no-error branch is unchanged.
+        await _finish_sdk_engine_trace(
+            agent_trace_service.TRACE_OUTCOME_FAILED
+            if _coerce_text(final_payload.get("error"))
+            else agent_trace_service.TRACE_OUTCOME_SUCCESS
+        )
+        return {
+            "message": reply,
+            "error": _coerce_text(final_payload.get("error")) or None,
+            "tool_calls": collected["tool_calls"],
+            "blocked_tools": collected["blocked_tools"],
+            "approvals_required": collected["approvals_required"],
+            "action_execution_mode": collected["action_execution_mode"],
+            "available_tools": tools,
+            "route_decision": route_decision,
+            "action_loop_version": _SAGE_OPERATOR_LOOP_VERSION,
+            "loop_budget": collected["loop_budget"],
+            "raw_final_payload": final_payload,
+            "trace_events": collected["trace_events"],
+            "tool_progress_messages": collected.get("tool_progress_messages", []),
+            "media": list(session_ctx.get("pending_outbound_media") or []),
+            # The `agent_traces.id` of the trace THIS loop opened above and emitted
+            # every tool/plan/browser event into — i.e. the row the Work tab renders.
+            # Deliberately NOT named `trace_id`: in this module `trace_id` is a
+            # per-call correlation uuid (see handle_sage_chat's own
+            # `trace_id = str(uuid.uuid4())`) that is not, and has never been, a row
+            # in agent_traces. Two different ids, so two different names — writing
+            # the correlation uuid into agent_turns.metadata.trace_id would point the
+            # Work tab at a trace that does not exist, which is worse than the empty
+            # value it had. Empty when start_trace failed (it never raises), which is
+            # the honest "this turn produced no trace" value.
+            "agent_trace_id": str(getattr(trace_context, "trace_id", "") or "").strip(),
+        }
+    except asyncio.CancelledError:
+        # PARTIAL, not failed. A cancelled turn is "it stopped", not "it broke"
+        # — work may well have happened before the client went away, and
+        # calling that a failure would report a failure that did not occur.
+        await _finish_open_trace(agent_trace_service.TRACE_OUTCOME_PARTIAL)
+        raise
+    except BaseException:
+        # FAILED: the turn produced no result because something broke. The
+        # exception is re-raised unchanged — this handler only closes the row,
+        # it never swallows or reinterprets the error.
+        await _finish_open_trace(agent_trace_service.TRACE_OUTCOME_FAILED)
+        raise
 
 
 # _run_sage_action_loop_v2 (and its _run_sage_action_loop_v1 alias) were
