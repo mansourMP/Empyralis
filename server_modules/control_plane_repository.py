@@ -11940,6 +11940,16 @@ async def finish_agent_trace(
     async with _scoped_connection(tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id) as connection:
         if connection is None:
             return None
+        # FIRST FINISHER WINS -- `AND finished_at IS NULL` is load-bearing.
+        # Without it a second call silently overwrote the first outcome, so a
+        # coarse late verdict ("failed" from a crash handler) could replace the
+        # precise one a callee had already resolved ("success"). A trace has
+        # exactly one true outcome; whoever reaches it first observed it.
+        # This guard is what makes it safe for a caller to add a belt-and-
+        # braces finisher on an exception path without having to know whether
+        # some callee deeper down already closed the row -- the safety lives
+        # here, on the one statement every finisher goes through, rather than
+        # as a rule each of them has to remember.
         row = await connection.fetchrow(
             """
             UPDATE agent_traces
@@ -11949,6 +11959,7 @@ async def finish_agent_trace(
             WHERE id = $1
               AND tenant_id = $2
               AND workspace_id = $3
+              AND finished_at IS NULL
             RETURNING *
             """,
             resolved_trace_id,
@@ -11958,6 +11969,35 @@ async def finish_agent_trace(
             str(final_message_id or "").strip() or None,
             resolved_finished_at,
         )
+        if row is None:
+            # Nothing was updated, and TWO DIFFERENT FACTS share that silence:
+            # the row may already be finished (a second finisher lost the race
+            # -- correct and expected), or there may be no such row at all
+            # (wrong id, wrong scope, never started). Returning None for both
+            # would make them indistinguishable to every caller, so read the
+            # row back and let the return value say which happened: a row means
+            # "already finished, here is the verdict that stands", None still
+            # means exactly what it means today -- no such trace.
+            row = await connection.fetchrow(
+                """
+                SELECT *
+                FROM agent_traces
+                WHERE id = $1
+                  AND tenant_id = $2
+                  AND workspace_id = $3
+                """,
+                resolved_trace_id,
+                resolved_tenant_id,
+                resolved_workspace_id,
+            )
+            if row is not None:
+                LOGGER.debug(
+                    "finish_agent_trace no-op: trace %s was already finished as %s; "
+                    "the later %s verdict was discarded",
+                    resolved_trace_id,
+                    (row.get("outcome") if hasattr(row, "get") else None),
+                    resolved_outcome,
+                )
     return _row_to_agent_trace(row)
 
 
