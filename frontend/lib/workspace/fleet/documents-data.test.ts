@@ -13,7 +13,7 @@
  * Run: npx tsx lib/workspace/fleet/documents-data.test.ts
  */
 
-import { documentExportFilename, duplicateDocumentTitle } from "./documents-data";
+import { documentExportFilename, duplicateDocumentTitle, isGenuineDocumentNotFound } from "./documents-data";
 
 let passed = 0;
 let failed = 0;
@@ -89,6 +89,45 @@ assert(
 assert(
   documentExportFilename("Plain title", "plain-title.md").endsWith(".md"),
   "the extension is always .md, regardless of input",
+);
+
+// ── isGenuineDocumentNotFound ────────────────────────────────────────────
+// The fact the document detail page's whole "not found" vs "couldn't load"
+// split rests on. Reproduced live (2026-08-31, this e2e stack): a session
+// that had gone stale mid-test made a real GET 401, and before this fix the
+// document page rendered the exact same "This document isn't in this
+// project any more. It may have been deleted…" copy it shows for an actual
+// deletion -- a customer's own just-written document, reported as possibly
+// gone, when the read had simply failed.
+function withHttpStatus(message: string, httpStatus?: number): Error {
+  const error = new Error(message);
+  if (httpStatus !== undefined) (error as Error & { httpStatus?: number }).httpStatus = httpStatus;
+  return error;
+}
+
+assert(
+  isGenuineDocumentNotFound(withHttpStatus("Document not found.", 200)) === true,
+  "HTTP 200 + the backend's own 'no' is a genuine not-found",
+);
+assert(
+  isGenuineDocumentNotFound(withHttpStatus("Authentication required.", 401)) === false,
+  "a 401 (expired/invalid session) is a failed read, never a 'deleted' answer",
+);
+assert(
+  isGenuineDocumentNotFound(withHttpStatus("Forbidden.", 403)) === false,
+  "a 403 (access denied) is a failed read too, not evidence of deletion",
+);
+assert(
+  isGenuineDocumentNotFound(withHttpStatus("Internal error.", 500)) === false,
+  "a 5xx upstream failure must not be reported as 'this document is gone'",
+);
+assert(
+  isGenuineDocumentNotFound(withHttpStatus("Failed to fetch")) === false,
+  "a network-level throw (fetch() itself failing) carries no httpStatus at all -- also not a not-found",
+);
+assert(
+  isGenuineDocumentNotFound("not an Error instance") === false,
+  "a non-Error thrown value is never treated as a genuine not-found",
 );
 
 // --- Summary ---

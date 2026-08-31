@@ -153,6 +153,64 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+class ComputeDocumentDiffLineStructureTests(unittest.TestCase):
+    """`_compute_document_diff` in isolation, asserting actual LINE
+    structure (split on "\n" and check the exact set of lines) rather than
+    substring containment. The existing diff tests above use assertIn,
+    which cannot tell a correctly newline-separated diff from one where
+    every line ran together into a single blob -- exactly the shape of bug
+    that shipped here: `difflib.unified_diff(..., lineterm="")` suppresses
+    the trailing newline on ITS OWN "---"/"+++"/"@@" lines while the
+    content lines (from `splitlines(keepends=True)`) keep theirs, so
+    `"".join(...)` glued the header lines onto the first content line --
+    "--- before+++ after@@ -0,0 +1,2 @@+first line" on one row instead of
+    four. DocumentHistory.tsx's own `diff.split("\n")` (one <div> per
+    element) is exactly what turns a missing "\n" here into a visibly
+    mangled row in the browser -- this is the same "a diff line is a line
+    again" surface e2baf9bb fixed on the CSS side; this is the data side.
+    A regression here renders correctly (CSS is unaffected) but garbles
+    what a customer actually reads as their document's history."""
+
+    def test_first_revision_diff_has_one_line_per_row_not_one_blob(self):
+        diff = documents._compute_document_diff(
+            previous_title=None, previous_body=None,
+            title="Runbook", body="Base line one.\nBase line two.",
+        )
+        lines = diff.split("\n")
+        self.assertIn("--- before", lines, f"header line ran into something else: {lines!r}")
+        self.assertIn("+++ after", lines, f"header line ran into something else: {lines!r}")
+        self.assertIn("+Base line one.", lines, f"content line ran into the header: {lines!r}")
+        self.assertIn("+Base line two.", lines, f"content line ran into a neighbour: {lines!r}")
+        # The specific failure mode this regresses to: everything before the
+        # first real content line collapsed onto one row.
+        self.assertNotIn(
+            "--- before+++ after", "".join(lines[:1]),
+            "the '---'/'+++' header lines ran together (lineterm dropped their newline)",
+        )
+
+    def test_editing_the_last_line_of_a_no_trailing_newline_body_stays_two_lines(self):
+        """The ordinary case: a document typed in a plain textarea almost
+        never ends with a trailing newline, and editing its LAST line is a
+        completely routine edit (fixing a typo in the final sentence). The
+        removed and added lines must not glue into one row just because the
+        source string they came from had no trailing "\\n" of its own."""
+        diff = documents._compute_document_diff(
+            previous_title="Runbook", previous_body="Line one.\nLine two.\nLine three original.",
+            title="Runbook", body="Line one.\nLine two.\nLine three edited.",
+        )
+        lines = diff.split("\n")
+        self.assertIn("-Line three original.", lines, f"removed line glued to its neighbour: {lines!r}")
+        self.assertIn("+Line three edited.", lines, f"added line glued to its neighbour: {lines!r}")
+
+    def test_diff_still_reports_no_change_as_none(self):
+        # Padding-for-diff must never turn an identical title+body into a
+        # phantom change.
+        self.assertIsNone(documents._compute_document_diff(
+            previous_title="Runbook", previous_body="same text",
+            title="Runbook", body="same text",
+        ))
+
+
 class CreateDocumentRevisionTests(unittest.TestCase):
     def test_create_records_revision_one_as_an_all_added_diff(self):
         """No 'before' state to diff against -- the revision still carries a

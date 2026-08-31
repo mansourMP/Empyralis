@@ -192,7 +192,17 @@ async function documentsRequest(
         );
       }
     }
-    throw new Error(apiErrorMessage(data, `HTTP ${res.status}`));
+    const failure = new Error(apiErrorMessage(data, `HTTP ${res.status}`));
+    // Additive only — every existing caller reads `.message` (via
+    // `e instanceof Error ? e.message : ...`) and never looks at this, so
+    // attaching it changes nothing for them. It exists for fetchFleetDocument
+    // below, which DOES need to tell "the backend ran fine and said no" (200,
+    // `ok:false` — project_documents_repository genuinely found nothing)
+    // apart from "the request itself failed" (401/403/5xx, or no response at
+    // all) -- see that function's own comment for why collapsing the two is
+    // its own bug.
+    (failure as Error & { httpStatus?: number }).httpStatus = res.status;
+    throw failure;
   }
   return data;
 }
@@ -279,11 +289,48 @@ export function useFleetWorkspaceDocuments(workspaceId: string) {
   return { documents, loading, error, refresh };
 }
 
+/** A document READ that could not be completed — a network blip, an
+ *  auth/session hiccup (401/403), or a server error (5xx). None of these
+ *  mean the document doesn't exist; they mean this attempt to find out
+ *  failed. Distinct from the plain `Error` fetchFleetDocument still throws
+ *  when project_documents_repository genuinely has no row for this id
+ *  (the backend's own 200 + `ok:false` "Document not found." — a real
+ *  answer, not a failed question) — collapsing the two used to render the
+ *  identical "This document isn't in this project any more. It may have
+ *  been deleted…" empty state for BOTH, which is a real lie on the
+ *  session-hiccup path: nothing was deleted, the read just didn't land.
+ *  CLAUDE.md: "'empty' and 'I could not load this' are different facts." */
+export class DocumentUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DocumentUnavailableError";
+  }
+}
+
+/** Pure, and tested as such (documents-data.test.ts) without a network mock
+ *  — the one fact this whole distinction rests on. `httpStatus === 200` is
+ *  documentsRequest's signal for "the backend itself answered, in the
+ *  clear (never a raised exception), and the answer was no": the ONLY case
+ *  that is honestly a not-found. A network-level throw (fetch() itself
+ *  failing, no response at all — `httpStatus` absent) or any raised
+ *  HTTPException status (401 expired session, 403 access, 404/5xx upstream)
+ *  is a failed READ, not an answer, and must not be reported as one. */
+export function isGenuineDocumentNotFound(error: unknown): boolean {
+  return error instanceof Error && (error as Error & { httpStatus?: number }).httpStatus === 200;
+}
+
 /** One document, WITH its body — the read a detail page needs, never served
  *  by the list route (see the file header). */
 export async function fetchFleetDocument(workspaceId: string, documentId: string): Promise<FleetDocument> {
-  const data = await documentsRequest(workspaceId, "GET", `/${encodeURIComponent(documentId)}`);
-  return normalizeDocument(data.document);
+  try {
+    const data = await documentsRequest(workspaceId, "GET", `/${encodeURIComponent(documentId)}`);
+    return normalizeDocument(data.document);
+  } catch (e) {
+    if (isGenuineDocumentNotFound(e)) throw e;
+    throw new DocumentUnavailableError(
+      e instanceof Error ? e.message : "Could not load this document.",
+    );
+  }
 }
 
 export async function createFleetDocument(
