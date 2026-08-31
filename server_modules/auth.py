@@ -261,6 +261,47 @@ def issue_csrf_token() -> str:
     return secrets.token_urlsafe(32)
 
 
+_AUTH_COOKIE_HTTPONLY: Dict[str, bool] = {
+    AUTH_ACCESS_COOKIE_NAME: True,
+    AUTH_REFRESH_COOKIE_NAME: True,
+    AUTH_CSRF_COOKIE_NAME: False,
+}
+
+
+def _delete_host_only_cookie_twins(response: Response, *, secure: bool, samesite: str) -> None:
+    """Delete the host-only (no ``Domain`` attribute) identity of each auth
+    cookie, alongside whatever domain-scoped set/delete the caller also
+    issues.
+
+    Insurance against a stray host-only twin: RFC 6265 keys a cookie by
+    ``(name, domain, path)``, so a cookie set with ``Domain=<x>`` and one set
+    with no ``Domain`` attribute at all are two independent entries that
+    coexist rather than overwrite each other, and a domain-scoped
+    set/delete cannot touch the host-only one. This repo shipped exactly
+    that stray twin once already (see git history: "remove the fallback
+    CSRF cookie that was creating a permanent duplicate") -- a Next-side
+    fallback wrote a host-only ``empyralis_csrf_token`` while the backend's
+    real cookie carried ``Domain=.empyralis.ai``, and an affected browser
+    could not self-heal by signing out or back in, because
+    ``clear_auth_cookies`` only ever deleted the domain-scoped identity.
+
+    Deleting a cookie that was never set is a harmless no-op, so callers run
+    this unconditionally whenever a domain IS configured. When no domain is
+    configured at all, every cookie this app sets is already host-only, so
+    there is no split identity to repair and callers skip this to avoid a
+    byte-identical repeat of the delete/set they already issue.
+    """
+    for cookie_name, httponly in _AUTH_COOKIE_HTTPONLY.items():
+        response.delete_cookie(
+            key=cookie_name,
+            path=AUTH_COOKIE_PATH,
+            domain=None,
+            secure=secure,
+            samesite=samesite,
+            httponly=httponly,
+        )
+
+
 def auth_cookie_access_token(request: Request) -> Optional[str]:
     token = str(request.cookies.get(AUTH_ACCESS_COOKIE_NAME) or "").strip()
     return token or None
@@ -305,6 +346,19 @@ def set_auth_cookies(
     domain = _cookie_domain()
     samesite = _cookie_samesite()
 
+    if domain is not None:
+        # Repair a browser already carrying a stray host-only twin as soon as
+        # it signs in again -- the path that actually matters, since an
+        # affected person may be stuck on a screen with no reachable logout
+        # control (see _delete_host_only_cookie_twins). Runs before the
+        # set_cookie calls below purely for readability of the raw
+        # Set-Cookie sequence: a host-only delete and a domain-scoped set are
+        # different (name, domain) identities, so ordering cannot make one
+        # clobber the other -- verified empirically in a real browser that
+        # exactly one of each cookie survives, and it is the domain-scoped
+        # one.
+        _delete_host_only_cookie_twins(response, secure=secure, samesite=samesite)
+
     response.set_cookie(
         key=AUTH_ACCESS_COOKIE_NAME,
         value=access_token,
@@ -347,11 +401,6 @@ def clear_auth_cookies(response: Response, *, request: Request) -> None:
     # readable by JS. Starlette's delete_cookie() defaults httponly to False,
     # so this must be passed explicitly or the deletion Set-Cookie header for
     # the auth cookies is inconsistent with the cookie that was actually set.
-    httponly_by_cookie = {
-        AUTH_ACCESS_COOKIE_NAME: True,
-        AUTH_REFRESH_COOKIE_NAME: True,
-        AUTH_CSRF_COOKIE_NAME: False,
-    }
     for cookie_name in (AUTH_ACCESS_COOKIE_NAME, AUTH_REFRESH_COOKIE_NAME, AUTH_CSRF_COOKIE_NAME):
         response.delete_cookie(
             key=cookie_name,
@@ -359,8 +408,13 @@ def clear_auth_cookies(response: Response, *, request: Request) -> None:
             domain=domain,
             secure=secure,
             samesite=samesite,
-            httponly=httponly_by_cookie[cookie_name],
+            httponly=_AUTH_COOKIE_HTTPONLY[cookie_name],
         )
+    if domain is not None:
+        # Insurance: also delete the host-only identity of each cookie so a
+        # browser carrying a stray host-only twin self-heals on logout too,
+        # not only on the next sign-in (see _delete_host_only_cookie_twins).
+        _delete_host_only_cookie_twins(response, secure=secure, samesite=samesite)
 
 
 def _access_token_is_live(token: str) -> bool:

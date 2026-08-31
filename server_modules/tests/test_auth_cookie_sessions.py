@@ -560,3 +560,173 @@ async def test_state_changing_auth_routes_require_csrf_for_browser_session(
 
     assert response.status_code == 403
     assert response.json()["detail"] == "CSRF validation failed."
+
+
+def _login_request(scheme: str = "https") -> Request:
+    return Request(
+        {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": scheme,
+            "path": "/auth/login",
+            "raw_path": b"/auth/login",
+            "query_string": b"",
+            "headers": [],
+            "client": ("127.0.0.1", 12345),
+            "server": ("testserver", 80),
+        }
+    )
+
+
+def test_set_auth_cookies_deletes_host_only_twin_before_domain_scoped_set_when_domain_configured(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Insurance fix: a browser that already picked up a stray host-only
+    twin of one of these cookies (e.g. from the since-removed Next-side
+    fallback CSRF cookie -- see git history, "remove the fallback CSRF
+    cookie that was creating a permanent duplicate") must self-heal on the
+    very next sign-in, since an affected person may be stuck on a screen
+    with no reachable logout control. set_auth_cookies must therefore also
+    delete the host-only (no Domain attribute) identity of each cookie
+    BEFORE setting the real, domain-scoped one -- and the two must never
+    collide, because they are different (name, domain) identities per RFC
+    6265.
+    """
+    now_ts = 1_700_000_000
+    monkeypatch.setenv("EMPYRALIS_AUTH_COOKIE_DOMAIN", ".empyralis.ai")
+    monkeypatch.setattr(auth.time, "time", lambda: float(now_ts))
+    monkeypatch.setattr(
+        auth,
+        "_decode_token_payload",
+        lambda token: {"exp": now_ts + auth.AUTH_ACCESS_COOKIE_MAX_AGE_SECONDS},
+    )
+
+    response = Response()
+    payload = {
+        "token": "header.payload.signature",
+        "session_recovery": {
+            "refresh_token": "refresh-token-1",
+            "refresh_expires_at": now_ts + auth.AUTH_REFRESH_COOKIE_MAX_AGE_SECONDS,
+        },
+    }
+    auth.set_auth_cookies(response, payload, request=_login_request(), channel="web")
+    cookie_headers = response.headers.getlist("set-cookie")
+
+    for name in ("empyralis_access_token", "empyralis_refresh_token", "empyralis_csrf_token"):
+        matching = [h for h in cookie_headers if h.startswith(f"{name}=")]
+        assert len(matching) == 2, (
+            f"expected exactly 2 Set-Cookie headers for {name} (host-only delete "
+            f"+ domain-scoped set), got {len(matching)}: {matching}"
+        )
+        delete_header, set_header = matching
+        # Order is load-bearing: the host-only delete must come first so it
+        # cannot be read as clobbering the domain-scoped cookie set after it.
+        assert "Domain=" not in delete_header
+        assert "Max-Age=0" in delete_header
+        assert "Domain=.empyralis.ai" in set_header
+        assert "Max-Age=0" not in set_header
+
+
+def test_set_auth_cookies_skips_host_only_twin_delete_when_no_domain_configured(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """When EMPYRALIS_AUTH_COOKIE_DOMAIN is unset (local/dev), every cookie
+    this app sets is already host-only -- there is no split identity to
+    repair, so set_auth_cookies must not double the Set-Cookie headers.
+    """
+    now_ts = 1_700_000_000
+    monkeypatch.delenv("EMPYRALIS_AUTH_COOKIE_DOMAIN", raising=False)
+    monkeypatch.setattr(auth.time, "time", lambda: float(now_ts))
+    monkeypatch.setattr(
+        auth,
+        "_decode_token_payload",
+        lambda token: {"exp": now_ts + auth.AUTH_ACCESS_COOKIE_MAX_AGE_SECONDS},
+    )
+
+    response = Response()
+    payload = {"token": "header.payload.signature"}
+    auth.set_auth_cookies(response, payload, request=_login_request(), channel="web")
+    cookie_headers = response.headers.getlist("set-cookie")
+
+    for name in ("empyralis_access_token", "empyralis_csrf_token"):
+        matching = [h for h in cookie_headers if h.startswith(f"{name}=")]
+        assert len(matching) == 1, f"expected exactly 1 Set-Cookie header for {name}, got {matching}"
+
+
+def test_clear_auth_cookies_also_deletes_host_only_twin_when_domain_configured(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Same insurance on logout: clear_auth_cookies must delete BOTH the
+    domain-scoped identity (the one it always cleared) and the host-only
+    identity (the stray twin a domain-scoped delete can never touch), so an
+    affected browser self-heals on logout too.
+    """
+    monkeypatch.setenv("EMPYRALIS_AUTH_COOKIE_DOMAIN", ".empyralis.ai")
+    response = Response()
+    auth.clear_auth_cookies(response, request=_login_request())
+    cookie_headers = response.headers.getlist("set-cookie")
+
+    for name in ("empyralis_access_token", "empyralis_refresh_token", "empyralis_csrf_token"):
+        matching = [h for h in cookie_headers if h.startswith(f"{name}=")]
+        assert len(matching) == 2, (
+            f"expected exactly 2 Set-Cookie delete headers for {name} (domain-scoped "
+            f"+ host-only), got {len(matching)}: {matching}"
+        )
+        assert all("Max-Age=0" in h for h in matching)
+        domain_scoped = [h for h in matching if "Domain=.empyralis.ai" in h]
+        host_only = [h for h in matching if "Domain=" not in h]
+        assert len(domain_scoped) == 1
+        assert len(host_only) == 1
+
+
+def test_clear_auth_cookies_skips_host_only_twin_delete_when_no_domain_configured(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("EMPYRALIS_AUTH_COOKIE_DOMAIN", raising=False)
+    response = Response()
+    auth.clear_auth_cookies(response, request=_login_request())
+    cookie_headers = response.headers.getlist("set-cookie")
+
+    for name in ("empyralis_access_token", "empyralis_refresh_token", "empyralis_csrf_token"):
+        matching = [h for h in cookie_headers if h.startswith(f"{name}=")]
+        assert len(matching) == 1, f"expected exactly 1 Set-Cookie header for {name}, got {matching}"
+
+
+@pytest.mark.anyio
+async def test_logout_route_clears_host_only_twin_when_domain_configured(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Route-level proof (not just the unit-level set_auth_cookies/
+    clear_auth_cookies tests above): a real /auth/logout call, with
+    EMPYRALIS_AUTH_COOKIE_DOMAIN configured the way production runs, must
+    emit both the domain-scoped and host-only delete for every auth cookie.
+    """
+    monkeypatch.setenv("EMPYRALIS_AUTH_COOKIE_DOMAIN", ".empyralis.ai")
+    app = _build_app()
+    app.dependency_overrides[routes_auth.get_current_user] = lambda: {
+        "auth_type": "bearer",
+        "user_id": "user-1",
+        "session_id": "session-1",
+    }
+    monkeypatch.setattr(
+        routes_auth,
+        "logout_authenticated_session",
+        lambda current_user: {"ok": True, "session_id": "session-1"},
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        _seed_browser_cookies(client)
+        response = await client.post(
+            "/auth/logout",
+            headers={"x-csrf-token": "csrf-cookie"},
+        )
+
+    assert response.status_code == 200
+    set_cookie_headers = response.headers.get_list("set-cookie")
+    for name in ("empyralis_access_token", "empyralis_refresh_token", "empyralis_csrf_token"):
+        matching = [h for h in set_cookie_headers if h.startswith(f"{name}=")]
+        assert len(matching) == 2, f"expected 2 delete headers for {name}, got {matching}"
+        assert any("Domain=.empyralis.ai" in h for h in matching)
+        assert any("Domain=" not in h for h in matching)
