@@ -1,5 +1,10 @@
 import { NextResponse, type NextRequest } from 'next/server';
 
+import {
+  AUTH_CSRF_COOKIE_NAME,
+  generateBrowserCsrfToken,
+  needsFallbackCsrfCookie,
+} from '@/lib/auth/csrf';
 import { AUTH_REQUEST_TIMEOUT_MS } from '@/lib/auth/auth-timeouts';
 import { controlPlaneBaseUrl } from '@/lib/server/control-plane-base-url';
 import { CSP_NONCE_REQUEST_HEADER } from '@/lib/security/content-security-policy';
@@ -197,6 +202,7 @@ window.location.href = ${JSON.stringify(redirectUrl)};
 
     // Forward Set-Cookie headers from the backend as real browser cookies
     // (server-side set, so HttpOnly is preserved — unlike document.cookie).
+    const parsedCookieNames: string[] = [];
     for (const raw of upstreamCookies) {
       const parts = raw.split(';').map(s => s.trim());
       const [nvPair] = parts;
@@ -205,6 +211,7 @@ window.location.href = ${JSON.stringify(redirectUrl)};
       const name = nvPair.slice(0, eqIdx).trim();
       const value = nvPair.slice(eqIdx + 1);
       if (!name || !value) continue;
+      parsedCookieNames.push(name);
 
       const options: {
         httpOnly?: boolean;
@@ -228,6 +235,32 @@ window.location.href = ${JSON.stringify(redirectUrl)};
         else if (lower.startsWith('domain=')) options.domain = attr.split('=')[1];
       }
       response.cookies.set(name, value, options);
+    }
+
+    // Same safety net forwardControlPlaneRequest already applies to every
+    // other auth route (control-plane-proxy.ts's shouldEnsureBrowserCsrfCookie):
+    // a session that arrives with an access/refresh cookie but no CSRF
+    // cookie must never be left permanently unable to make its first
+    // same-site mutation (the /onboarding auto-submit PATCH right after this
+    // redirect is exactly that request). This route re-forwards cookies by
+    // hand instead of going through that shared proxy -- it has to return an
+    // HTML page, not a JSON passthrough, per the CSP-nonce comment above --
+    // so it did not inherit the fallback. Google's callback is also the one
+    // auth entry point whose Set-Cookie headers cross an extra hop this repo
+    // cannot fully reproduce outside production (a real cross-site redirect
+    // through accounts.google.com, then Cloudflare/nginx back to the
+    // browser -- CLAUDE.md notes Cloudflare's presence there is itself
+    // undocumented in the nginx config); minting a fresh CSRF cookie here
+    // when it is missing closes the gap regardless of which hop dropped it,
+    // without weakening the CSRF check itself (validate_csrf's comparison is
+    // untouched -- this only guarantees a cookie exists to compare against).
+    if (needsFallbackCsrfCookie(parsedCookieNames)) {
+      response.cookies.set(AUTH_CSRF_COOKIE_NAME, generateBrowserCsrfToken(), {
+        httpOnly: false,
+        secure: request.nextUrl.protocol === 'https:',
+        sameSite: 'lax',
+        path: '/',
+      });
     }
 
     return response;
