@@ -234,6 +234,73 @@ for (const connect_method of CONNECT_METHODS) {
 }
 assert(cases > 0, "the remediationFor matrix actually ran at least one case");
 
+// --- remediationFor + observedErrorCode (MAN-329): the PER-ROW half of the
+//     2026-08-13 audit's #2/#2b fix. That audit taught the BANNER above the
+//     grid (openclawObservedErrorBanner, tested below) to tell
+//     "gateway_capability_missing" (the box answered fine; this build's
+//     gateway has simply never had the channel transport installed, or
+//     predates the capability entirely) apart from every other unreachable-
+//     read reason — but every ROW on the grid, and the one sentence inside
+//     each row's own detail panel, kept sharing the generic "This computer
+//     could not be reached" copy regardless of which of the two facts
+//     actually happened. A customer could see the correct banner ("Channels
+//     aren't set up on this computer yet.") directly above a grid of cards
+//     each insisting, for the identical failure, that their computer was
+//     unreachable. Proven across the same connect_method/requires_plugin
+//     matrix as the block above, with `reachable: false` throughout — the
+//     only branch this parameter can affect. -------------------------------
+
+for (const connect_method of CONNECT_METHODS) {
+  for (const requires_plugin of [true, false]) {
+    const e = entry({ connect_method, requires_plugin });
+    const caseLabel = `connect_method=${connect_method} requires_plugin=${requires_plugin}`;
+
+    const capabilityMissing = remediationFor(e, undefined, false, true, "gateway_capability_missing");
+    assert(
+      capabilityMissing.kind === "unknown",
+      `remediationFor(${caseLabel}, gateway_capability_missing).kind must be "unknown" — got ${JSON.stringify(capabilityMissing.kind)}`,
+    );
+    assert(
+      capabilityMissing.detail === OPENCLAW_CAPABILITY_MISSING_BANNER_TEXT,
+      `remediationFor(${caseLabel}, gateway_capability_missing).detail must be the SAME sentence the banner uses, so the grid and the panel it opens can never disagree — got ${JSON.stringify(capabilityMissing.detail)}`,
+    );
+    assert(
+      !/could not be reached/i.test(capabilityMissing.detail),
+      `remediationFor(${caseLabel}, gateway_capability_missing).detail must not claim the computer is unreachable — it answered fine, got ${JSON.stringify(capabilityMissing.detail)}`,
+    );
+    assertNoOpenClaw(capabilityMissing.detail, `remediationFor(${caseLabel}, gateway_capability_missing).detail`);
+
+    for (const [code, label] of [
+      ["gateway_offline", "gateway_offline"],
+      [null, "no code at all (older response shape, or an unclassified failure)"],
+      ["some_future_token_this_module_has_not_seen", "an unrecognized future token"],
+    ] as const) {
+      const generic = remediationFor(e, undefined, false, true, code);
+      assert(
+        generic.kind === "unknown",
+        `remediationFor(${caseLabel}, ${label}).kind must be "unknown" — got ${JSON.stringify(generic.kind)}`,
+      );
+      assert(
+        /could not be reached/i.test(generic.detail),
+        `remediationFor(${caseLabel}, ${label}).detail must keep the "could not be reached" sentence — got ${JSON.stringify(generic.detail)}`,
+      );
+      assert(
+        generic.detail !== capabilityMissing.detail,
+        `remediationFor(${caseLabel}, ${label}) must not share copy with gateway_capability_missing — that collapse is the bug this block exists to catch`,
+      );
+    }
+
+    // The 5th argument is optional so every pre-existing caller — this
+    // file's own earlier matrix included — keeps behaving exactly as before
+    // this parameter existed. Omitting it must match passing null.
+    const omitted = remediationFor(e, undefined, false, true);
+    assert(
+      omitted.detail === remediationFor(e, undefined, false, true, null).detail,
+      `remediationFor(${caseLabel}) with observedErrorCode omitted must match passing null explicitly`,
+    );
+  }
+}
+
 // --- `hasGateway: false`: the third fact `remediationFor` used to collapse
 //     into "unknown", THE BUG THIS FILE SHIPS WITH. Before this fix, a
 //     transported channel with no gateway bound at all was simply absent
