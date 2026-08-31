@@ -14,6 +14,7 @@ import {
   needsFallbackCsrfCookie,
 } from '@/lib/auth/csrf';
 import { controlPlaneBaseUrl } from '@/lib/server/control-plane-base-url';
+import { classifyCsrfFailure, csrfFailureResponseBody, logCsrfFailure } from '@/lib/server/csrf-failure';
 
 type ForwardControlPlaneRequestInit = RequestInit & {
   timeoutMs?: number;
@@ -108,8 +109,11 @@ function validateBrowserCsrf(request: NextRequest, bypassCsrf?: boolean): NextRe
   }
   const csrfCookie = request.cookies.get(AUTH_CSRF_COOKIE_NAME)?.value?.trim() || '';
   const csrfHeader = request.headers.get(AUTH_CSRF_HEADER_NAME)?.trim() || '';
-  if (!csrfCookie || !csrfHeader || csrfCookie !== csrfHeader) {
-    return new NextResponse(JSON.stringify({ detail: 'CSRF validation failed.' }), {
+  const failureCode = classifyCsrfFailure(csrfCookie, csrfHeader);
+  if (failureCode) {
+    const cookieNames = request.cookies.getAll().map((cookie) => cookie.name);
+    logCsrfFailure(failureCode, { path: request.nextUrl.pathname, method: request.method, cookieNames });
+    return new NextResponse(JSON.stringify(csrfFailureResponseBody(failureCode)), {
       status: 403,
       headers: { 'content-type': 'application/json' },
     });
