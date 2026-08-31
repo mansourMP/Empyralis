@@ -83,8 +83,14 @@ function ContinuePageContent() {
       return;
     }
     const storageKey = `${UPGRADE_CLICK_SESSION_KEY_PREFIX}${channelAttribution}`;
-    if (window.sessionStorage.getItem(storageKey) === '1') {
-      return;
+    try {
+      if (window.sessionStorage.getItem(storageKey) === '1') {
+        return;
+      }
+    } catch {
+      // Storage blocked — fall through and let the upgrade-click POST fire;
+      // the backend's own `duplicate` response is the second line of
+      // defense against double-counting a click.
     }
     let cancelled = false;
     void (async () => {

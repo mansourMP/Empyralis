@@ -47,9 +47,13 @@ export function WorkstationSplitWorkbench({
     if (!effectiveResizableSidebar || !sidebarResizeStorageKey) {
       return;
     }
-    const storedValue = Number(window.localStorage.getItem(sidebarResizeStorageKey));
-    if (Number.isFinite(storedValue) && storedValue > 0) {
-      setSidebarWidth(clampSidebarWidth(storedValue));
+    try {
+      const storedValue = Number(window.localStorage.getItem(sidebarResizeStorageKey));
+      if (Number.isFinite(storedValue) && storedValue > 0) {
+        setSidebarWidth(clampSidebarWidth(storedValue));
+      }
+    } catch {
+      /* localStorage unavailable — keep the default width */
     }
   }, [clampSidebarWidth, effectiveResizableSidebar, sidebarResizeStorageKey]);
 
@@ -64,7 +68,11 @@ export function WorkstationSplitWorkbench({
     if (!effectiveResizableSidebar || !sidebarResizeStorageKey) {
       return;
     }
-    window.localStorage.setItem(sidebarResizeStorageKey, String(clampSidebarWidth(nextWidth)));
+    try {
+      window.localStorage.setItem(sidebarResizeStorageKey, String(clampSidebarWidth(nextWidth)));
+    } catch {
+      /* localStorage unavailable — the resize still works for this session */
+    }
   }, [clampSidebarWidth, effectiveResizableSidebar, sidebarResizeStorageKey]);
 
   const updateSidebarWidth = useCallback((nextWidth: number, persist = false) => {
