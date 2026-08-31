@@ -7521,10 +7521,23 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
 .fleet-door-consequence--risk { color: var(--warning-text); }
 .fleet-door-consequence--safe { color: var(--online-text); }
 
-/* A one-door channel opens straight into its setup and so has no door face to
-   carry the line — it rides above the form instead. */
-.fleet-door-consequence--standalone {
+/* MAN-150: a one-door channel opens straight into its setup and so has no
+   picker card to carry its body/consequence — DoorContextNote
+   (FleetAgentDetail.tsx) renders both here instead, above the form/QR/button
+   the customer opened straight into. One short line of what this connects,
+   the consequence (if any) directly under it — never a paragraph. */
+.fleet-door-context {
   margin: 0 0 var(--space-3);
+}
+.fleet-door-context-body {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  line-height: 1.5;
+  max-width: 62ch;
+}
+.fleet-door-context .fleet-door-consequence {
+  margin-top: var(--space-2);
 }
 
 /* The door already chosen, kept visible while its setup runs, so the

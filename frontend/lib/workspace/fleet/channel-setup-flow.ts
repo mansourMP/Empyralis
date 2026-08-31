@@ -166,7 +166,38 @@ export type ChannelSetupFlow = {
    *  here rather than recomputed in the component so the screen and the shape
    *  cannot disagree. */
   connect: ChannelConnectMethod | null;
+  /** Whether THIS screen should carry the chosen door's own "what this is"
+   *  text (its `body`, and its `consequence` at whatever tone) above the
+   *  control. See `showsDoorContext` — carried on the flow, rather than
+   *  recomputed per call site, for the same reason `connect` is: the screen
+   *  and the decision of what rides on top of it cannot disagree. */
+  showDoorContext: boolean;
 };
+
+/** Whether this screen should carry the chosen door's own "what this is"
+ *  text — its `body`, and its `consequence` at whatever tone — above the
+ *  control the screen renders.
+ *
+ *  MAN-150: pressing a single-door channel (WhatsApp, and — since
+ *  full_account was deleted — Telegram too) skipped straight from the card
+ *  to a connect form, an install button, or a QR code, with no idea what was
+ *  about to happen. The door's own `body`/`consequence` text already exists
+ *  for exactly this — CLAUDE.md: "a door states its consequence on its face"
+ *  — but it was authored onto the PICKER card, so a channel with only one
+ *  real door (most of them, by design: an intermediate screen offering one
+ *  option is a dead click) never rendered it anywhere. Picker mode has no
+ *  such gap: every door's body and consequence sit on its own card, read the
+ *  instant before it is picked. So this is true ONLY in direct mode
+ *  (`!picker`), and only on the three screens where a connecting action is
+ *  actually about to be taken — `connect` / `install` / `enable`. The other
+ *  screens either already carry their own single sentence (`elsewhere`,
+ *  `needs_hardware`, `unknown`) or need none (`connected`, `settings`,
+ *  `pick_door` itself) — stacking the door's body on top of those would be
+ *  the wall-of-text failure mode in the other direction, never the "no
+ *  context at all" one this exists to fix. */
+export function showsDoorContext(picker: boolean, screen: ChannelSetupScreenKind): boolean {
+  return !picker && (screen === "connect" || screen === "install" || screen === "enable");
+}
 
 export type ChannelSetupFlowInput = {
   /** From planDoors — the ONE rule that decides whether a choice is shown. */
@@ -187,8 +218,18 @@ export type ChannelSetupFlowInput = {
 export function planChannelSetupFlow(input: ChannelSetupFlowInput): ChannelSetupFlow {
   const picker = input.doorPlan.mode === "picker";
 
+  // Every return below goes through this one place, so `showDoorContext`
+  // (see `showsDoorContext`) can never be decided differently from the
+  // screen it rides on — the exact bug class the rest of this function
+  // already guards against for `back` and `connect`.
+  const flow = (
+    screen: ChannelSetupScreenKind,
+    back: "doors" | "connected" | null,
+    connect: ChannelConnectMethod | null,
+  ): ChannelSetupFlow => ({ screen, back, connect, showDoorContext: showsDoorContext(picker, screen) });
+
   if (picker && !input.doorChosen) {
-    return { screen: "pick_door", back: null, connect: null };
+    return flow("pick_door", null, null);
   }
 
   // Past the door choice, "back" means the choice — and only when there WAS
@@ -197,32 +238,30 @@ export function planChannelSetupFlow(input: ChannelSetupFlowInput): ChannelSetup
   const back: "doors" | null = picker ? "doors" : null;
 
   if (!input.remediation) {
-    return { screen: "unknown", back, connect: null };
+    return flow("unknown", back, null);
   }
 
   switch (input.remediation.kind) {
     case "needs_hardware":
-      return { screen: "needs_hardware", back, connect: null };
+      return flow("needs_hardware", back, null);
     case "install":
-      return { screen: "install", back, connect: null };
+      return flow("install", back, null);
     case "credential":
-      return { screen: "connect", back, connect: input.connectMethod ?? "paste" };
+      return flow("connect", back, input.connectMethod ?? "paste");
     case "link":
-      return { screen: "connect", back, connect: input.connectMethod ?? "scan" };
+      return flow("connect", back, input.connectMethod ?? "scan");
     case "enable":
-      return { screen: "enable", back, connect: null };
+      return flow("enable", back, null);
     case "elsewhere":
-      return { screen: "elsewhere", back, connect: null };
+      return flow("elsewhere", back, null);
     case "ready":
       // RULE 2 LIVES HERE, AND NOWHERE ELSE. `editingSettings` is only ever
       // honoured from `ready`; every other branch above ignores it entirely,
       // so no caller can reach the policy forms on a channel with no working
       // identity to apply them to.
-      return input.editingSettings
-        ? { screen: "settings", back: "connected", connect: null }
-        : { screen: "connected", back, connect: null };
+      return input.editingSettings ? flow("settings", "connected", null) : flow("connected", back, null);
     default:
-      return { screen: "unknown", back, connect: null };
+      return flow("unknown", back, null);
   }
 }
 

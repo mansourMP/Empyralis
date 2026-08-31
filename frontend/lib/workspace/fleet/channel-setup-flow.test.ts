@@ -26,6 +26,8 @@ import {
   planChannelSetupFlow,
   setupInstructionsFor,
   setupQuestionFor,
+  showsDoorContext,
+  type ChannelSetupScreenKind,
   type ChannelSetupWizard,
 } from "./channel-setup-flow";
 
@@ -190,6 +192,88 @@ assert(
   }).screen === "elsewhere",
   "an unreachable box degrades to the no-control screen rather than offering one that cannot work",
 );
+
+// ── MAN-150: the door's own "what this is" text rides on the SCREEN, not on
+//    whether a picker happened to run. A single-door channel (WhatsApp today,
+//    Telegram since full_account was deleted) skips the picker entirely, so
+//    before this rule existed its `body`/`consequence` never reached the
+//    customer at all — the connect form (or the QR) appeared with zero
+//    context. Driven off the real `planChannelSetupFlow`, not a hand-rolled
+//    boolean, so the screen and the decision of what rides on top of it can
+//    never disagree. ------------------------------------------------------
+
+const ALL_SCREENS: ChannelSetupScreenKind[] = [
+  "pick_door",
+  "needs_hardware",
+  "unknown",
+  "install",
+  "connect",
+  "enable",
+  "elsewhere",
+  "connected",
+  "settings",
+];
+const CONNECTING_SCREENS: ChannelSetupScreenKind[] = ["connect", "install", "enable"];
+
+for (const screen of ALL_SCREENS) {
+  assert(
+    showsDoorContext(false, screen) === CONNECTING_SCREENS.includes(screen),
+    `direct mode, screen ${screen}: door context shows exactly on connect/install/enable`,
+  );
+  assert(
+    showsDoorContext(true, screen) === false,
+    `picker mode, screen ${screen}: never — the door's own card already carried this before the pick`,
+  );
+}
+
+// The actual regression: a single real door (WhatsApp's shape — one
+// "pairing"/QR door, no picker) reaching the connect screen must carry its
+// context. Before this fix, `screen === "connect"` was true here and
+// `showDoorContext` did not exist at all — a caller rendering the QR form had
+// nothing telling it whether to show the door's body.
+assert(
+  planChannelSetupFlow({
+    doorPlan: ONE_DOOR,
+    doorChosen: true,
+    remediation: { kind: "link", label: "Show code", detail: "", qrKnown: true },
+    connectMethod: "scan",
+    editingSettings: false,
+  }).showDoorContext === true,
+  "MAN-150: a single-door channel's QR/connect screen carries the door's own context — this is the whole fix",
+);
+
+// Two-door channels (Zalo today, once a third Telegram door lands) already
+// showed the body/consequence on the picker card the instant before the
+// pick — showing it again on the connect screen right after would be the
+// wall-of-text failure mode in the other direction.
+assert(
+  planChannelSetupFlow({
+    doorPlan: TWO_DOORS,
+    doorChosen: true,
+    remediation: { kind: "credential", label: "Add credential", detail: "" },
+    connectMethod: "paste",
+    editingSettings: false,
+  }).showDoorContext === false,
+  "a picker-mode channel already showed the door's context before the pick — not repeated on connect",
+);
+
+// Every non-connecting screen stays silent regardless of door count — the
+// wall-of-text failure mode in the other direction, since these screens
+// already carry their own single sentence (or need none).
+for (const remediation of REMEDIATIONS) {
+  if (CONNECTING_SCREENS.includes(EXPECTED[remediation.kind] as ChannelSetupScreenKind)) continue;
+  const flow = planChannelSetupFlow({
+    doorPlan: ONE_DOOR,
+    doorChosen: true,
+    remediation,
+    connectMethod: remediation.kind === "link" ? "scan" : "paste",
+    editingSettings: false,
+  });
+  assert(
+    flow.showDoorContext === false,
+    `${remediation.kind} (screen ${flow.screen}): not a connecting screen, so no door context — it already has its own sentence or needs none`,
+  );
+}
 
 // ── THE INSTRUCTIONS ARE THEIRS. Read the checked-in manifest the backend
 //    serves and assert the derivation produced usable, customer-safe text —

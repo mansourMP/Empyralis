@@ -2155,7 +2155,7 @@ import {
   connectMethodFor,
   openclawObservedErrorBanner,
 } from "./openclaw-channel-copy";
-import { planChannelSetupFlow, setupQuestionFor } from "./channel-setup-flow";
+import { planChannelSetupFlow, setupQuestionFor, showsDoorContext } from "./channel-setup-flow";
 import {
   CHANNEL_GRID_PLATFORMS,
   channelDoorChoiceNote,
@@ -2286,6 +2286,30 @@ function ChosenDoorBar({
         <button type="button" className="fleet-btn fleet-door-chosen-change" onClick={onChange}>
           <ArrowLeft size={13} strokeWidth={2} aria-hidden /> Change
         </button>
+      ) : null}
+    </div>
+  );
+}
+
+/** The chosen door's own "what this is" text, rendered above the control it
+ *  opens straight into — a direct-mode channel's only door has no picker
+ *  card to carry this (see `showsDoorContext` in channel-setup-flow.ts), so
+ *  it rides here instead. Shared by the first-party panel below and the
+ *  transported/OpenClaw panel in ChannelsTab — one rendering, driven by the
+ *  same `ChannelDoor` shape either produces, so WhatsApp, Telegram, Signal
+ *  and every future channel read exactly the same way with no per-channel
+ *  branch here. */
+function DoorContextNote({ door }: { door: ChannelDoor }) {
+  return (
+    <div className="fleet-door-context">
+      <p className="fleet-door-context-body">{door.body}</p>
+      {door.consequence ? (
+        <span className={`fleet-door-consequence fleet-door-consequence--${door.consequence.tone}`}>
+          {door.consequence.tone === "risk"
+            ? <AlertTriangle size={11} strokeWidth={2} aria-hidden />
+            : <Check size={11} strokeWidth={2} aria-hidden />}
+          {door.consequence.text}
+        </span>
       ) : null}
     </div>
   );
@@ -3265,6 +3289,13 @@ export function ChannelsTab({
 
               {openclawDetail && openclawFlow.screen !== "pick_door" ? (
                 <>
+                  {/* MAN-150: what this connects and what happens next, BEFORE
+                      the control that does it — a direct-mode channel (one
+                      real door, most of them) has no picker card to carry
+                      this, so it rides here instead. See showsDoorContext. */}
+                  {openclawActiveDoor && openclawFlow.showDoorContext ? (
+                    <DoorContextNote door={openclawActiveDoor} />
+                  ) : null}
                   {/* STEP 2 — CONNECT. Instructions in the transport's own
                       words (generated: see channel-setup-flow.ts), then ONE
                       form. Never a credential field beside two allowlists and
@@ -3514,14 +3545,15 @@ export function ChannelsTab({
                 />
               ) : null}
 
-              {/* A one-door channel has no face to carry its consequence, so
-                   the fact rides above the form it opened straight into. Only
-                   a real risk earns the line — never a reassurance nobody
-                   asked for. */}
-              {activeDoor && doorPlan.mode === "direct" && activeDoorAvailable && activeDoor.consequence?.tone === "risk" ? (
-                <p className="fleet-door-consequence fleet-door-consequence--risk fleet-door-consequence--standalone">
-                  <AlertTriangle size={12} strokeWidth={2} aria-hidden /> {activeDoor.consequence.text}
-                </p>
+              {/* MAN-150: a one-door channel has no picker card to carry its
+                   body/consequence (an intermediate screen offering one
+                   option is a dead click), so what it connects and what
+                   happens next rides above the form it opened straight into
+                   instead — the exact same `showsDoorContext` rule the
+                   transported panel uses, so a first-party channel and a
+                   transported one read the same way. */}
+              {activeDoor && activeDoorAvailable && showsDoorContext(doorPlan.mode === "picker", "connect") ? (
+                <DoorContextNote door={activeDoor} />
               ) : null}
 
               {/* The door cannot be walked through on this agent as it stands.
