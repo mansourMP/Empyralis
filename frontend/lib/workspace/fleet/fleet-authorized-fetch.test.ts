@@ -26,6 +26,20 @@
  * This proves the retry now re-reads the CSRF cookie AFTER the refresh
  * resolves, so its header matches whatever the browser will actually send.
  *
+ * A 401-then-refresh isn't the only way this pair can disagree, though:
+ * production kept 403ing on the SAME onboarding PATCH even after the fix
+ * above, with the CSRF cookie present (journalctl: `csrf_mismatch` on the
+ * first attempt, no 401 anywhere in the log). proxy.ts's own middleware
+ * refreshes the access token on a concurrent qualifying GET (the
+ * `/onboarding` navigation itself) and rotates the CSRF cookie exactly the
+ * same way — a rotation this PATCH had nothing to do with, landing between
+ * its header build and its arrival at the backend. The tests below prove
+ * fleetAuthorizedFetch now retries exactly once on a bare 403 whose body
+ * carries `code: 'csrf_mismatch'`, rebuilding the header from the live
+ * cookie first — and that it never does so for a genuinely different CSRF
+ * failure, a request that never opted into CSRF protection, or a second
+ * consecutive mismatch.
+ *
  * Run: npx tsx lib/workspace/fleet/fleet-authorized-fetch.test.ts
  */
 
@@ -162,6 +176,115 @@ async function main() {
       const response = await fleetAuthorizedFetch("/api/workspaces", { method: "GET" });
       assert.equal(response.status, 200);
       assert.equal(fetchCount, 1, "no 401 means no refresh and no retry");
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  await test("a first-try 403 csrf_mismatch retries once with the live cookie, and never touches refresh", async () => {
+    setCookie("empyralis_csrf_token", "token-old");
+    const originalFetch = global.fetch;
+    const calls: { headers: Headers }[] = [];
+    let fetchCount = 0;
+    global.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCount += 1;
+      calls.push({ headers: new Headers(init?.headers) });
+      if (fetchCount === 1) {
+        // Simulate proxy.ts's middleware rotating the cookie on a
+        // CONCURRENT request — this PATCH's header was already built from
+        // "token-old" before this happened, so the backend sees the two
+        // disagree on the very first try. No 401 here at all.
+        setCookie("empyralis_csrf_token", "token-new");
+        return new Response(JSON.stringify({ detail: "CSRF validation failed.", code: "csrf_mismatch" }), {
+          status: 403,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    try {
+      const response = await fleetAuthorizedFetch("/api/workspaces/ws_1", {
+        method: "PATCH",
+        headers: { [AUTH_CSRF_HEADER_NAME]: "token-old", accept: "application/json" },
+        body: JSON.stringify({ setupCompleted: true }),
+      });
+
+      assert.equal(response.status, 200, "the retry must succeed once the header is rebuilt from the live cookie");
+      assert.equal(fetchCount, 2, "expected: first attempt (403 csrf_mismatch), retry — no refresh() call in between");
+      assert.equal(
+        calls[1].headers.get(AUTH_CSRF_HEADER_NAME),
+        "token-new",
+        "the retry's X-CSRF-Token header must match the cookie as it stands now, not the stale value from the first attempt",
+      );
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  await test("a bare 403 that is NOT csrf_mismatch is never retried, and its body stays readable", async () => {
+    const originalFetch = global.fetch;
+    let fetchCount = 0;
+    global.fetch = async () => {
+      fetchCount += 1;
+      return new Response(JSON.stringify({ detail: "CSRF validation failed.", code: "csrf_header_missing" }), {
+        status: 403,
+        headers: { "content-type": "application/json" },
+      });
+    };
+    try {
+      const response = await fleetAuthorizedFetch("/api/workspaces/ws_1", {
+        method: "PATCH",
+        headers: { [AUTH_CSRF_HEADER_NAME]: "token-old" },
+      });
+      assert.equal(response.status, 403);
+      assert.equal(fetchCount, 1, "csrf_header_missing means something a live-cookie rebuild cannot fix — must not retry");
+      const body = await response.json();
+      assert.equal(body.code, "csrf_header_missing", "the returned response body must still be readable by the caller");
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  await test("a 403 csrf_mismatch is never retried when the caller never opted into CSRF protection", async () => {
+    const originalFetch = global.fetch;
+    let fetchCount = 0;
+    global.fetch = async () => {
+      fetchCount += 1;
+      return new Response(JSON.stringify({ detail: "CSRF validation failed.", code: "csrf_mismatch" }), {
+        status: 403,
+        headers: { "content-type": "application/json" },
+      });
+    };
+    try {
+      const response = await fleetAuthorizedFetch("/api/workspaces", { method: "GET" });
+      assert.equal(response.status, 403);
+      assert.equal(fetchCount, 1, "must never invent a CSRF retry for a request that never carried the header");
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  await test("exactly one retry: a second consecutive csrf_mismatch is surfaced honestly, not looped", async () => {
+    setCookie("empyralis_csrf_token", "token-old");
+    const originalFetch = global.fetch;
+    let fetchCount = 0;
+    global.fetch = async () => {
+      fetchCount += 1;
+      // Every attempt mismatches — a genuinely broken session, not a
+      // one-off race.
+      setCookie("empyralis_csrf_token", `token-${fetchCount}`);
+      return new Response(JSON.stringify({ detail: "CSRF validation failed.", code: "csrf_mismatch" }), {
+        status: 403,
+        headers: { "content-type": "application/json" },
+      });
+    };
+    try {
+      const response = await fleetAuthorizedFetch("/api/workspaces/ws_1", {
+        method: "PATCH",
+        headers: { [AUTH_CSRF_HEADER_NAME]: "token-old" },
+      });
+      assert.equal(response.status, 403, "a second mismatch must be surfaced honestly, not silently retried again");
+      assert.equal(fetchCount, 2, "exactly one retry — no loop");
     } finally {
       global.fetch = originalFetch;
     }

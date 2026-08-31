@@ -1,7 +1,7 @@
 "use client";
 
 import { refresh as refreshBrowserAuthSession } from "@/lib/auth/auth-client";
-import { AUTH_CSRF_HEADER_NAME, readCsrfTokenFromCookie } from "@/lib/auth/csrf";
+import { AUTH_CSRF_HEADER_NAME, readCsrfTokenFromCookie, responseIsCsrfMismatch } from "@/lib/auth/csrf";
 
 /**
  * fetch() that survives an access-token expiry mid-flow instead of just
@@ -57,16 +57,40 @@ function withFreshCsrfHeader(init: RequestInit | undefined): RequestInit | undef
   return { ...init, headers };
 }
 
+function hasCsrfHeader(init: RequestInit | undefined): boolean {
+  if (!init?.headers) {
+    return false;
+  }
+  return new Headers(init.headers).has(AUTH_CSRF_HEADER_NAME);
+}
+
 export async function fleetAuthorizedFetch(
   input: RequestInfo | URL,
   init?: RequestInit,
 ): Promise<Response> {
   const first = await fetch(input, init);
-  if (first.status !== 401) return first;
-  try {
-    await refreshBrowserAuthSession();
-  } catch {
-    return first;
+
+  if (first.status === 401) {
+    try {
+      await refreshBrowserAuthSession();
+    } catch {
+      return first;
+    }
+    return fetch(input, withFreshCsrfHeader(init));
   }
-  return fetch(input, withFreshCsrfHeader(init));
+
+  // Only a caller that opted into CSRF protection in the first place can
+  // have hit `csrf_mismatch` -- never invent the header here, and never
+  // retry a bare 403 that isn't this exact, known-recoverable code (see
+  // responseIsCsrfMismatch's own comment for why: proxy.ts's middleware can
+  // rotate the CSRF cookie on a concurrent GET, landing this request in
+  // permanent disagreement with the cookie jar on its very first try, no
+  // 401 involved). Exactly one retry: whatever the second attempt returns
+  // (success, or the same mismatch again) is the honest final answer, not
+  // looped further.
+  if (first.status === 403 && hasCsrfHeader(init) && (await responseIsCsrfMismatch(first))) {
+    return fetch(input, withFreshCsrfHeader(init));
+  }
+
+  return first;
 }
