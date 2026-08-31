@@ -23,13 +23,19 @@
  *      whatever the caller passes in rather than re-filtering on `is_read`,
  *      so a future "show read too" view isn't silently dropped here.
  *
- *   2. The caller's OWN tasks stuck in `blocked` / `awaiting_input` — the
- *      exact status pair that sat unseen for 17 days. Deliberately narrower
- *      than my-work.ts's `myWorkBucket("mine")`: every open task assigned to
- *      you is "yours", but only a STUCK one needs you to actually DO
- *      something about it right now — `in_progress`/`todo`/`backlog` don't
- *      belong on a "needs you" surface any more than a routine chat
- *      completion does.
+ *   2. The caller's OWN tasks — theirs directly, or theirs via an agent they
+ *      handed it to (my-work.ts's `myWorkBucket`, reused here rather than
+ *      re-derived) — stuck in `blocked` / `awaiting_input`. The exact status
+ *      pair that sat unseen for 17 days. An agent-assigned task can NEVER
+ *      carry `assignee_user_id` (project_tasks_service's assign_task/
+ *      assign_task_to_user NULL out the other column on write — mutually
+ *      exclusive by construction), so a rule that only checked the human
+ *      assignee column silently excluded every task an agent was actually
+ *      working — which is most of them. Still deliberately narrower than
+ *      `myWorkBucket` alone: every open task that's "mine" is a candidate,
+ *      but only a STUCK one needs me to actually DO something right now —
+ *      `in_progress`/`todo`/`backlog` don't belong on a "needs you" surface
+ *      any more than a routine chat completion does.
  *
  *   3. Blocked/failed agent runs — activity_ledger_service.py's own
  *      `blocked_action` event class (run_failed, machine_revoked,
@@ -50,11 +56,18 @@
  * comment from ten minutes ago vs. a task idle for two weeks).
  */
 
+import { myWorkBucket } from "./my-work";
+
 export type InboxTaskShape = {
   id: string;
   title?: string | null;
   status?: string | null;
   assignee_user_id?: string | null;
+  /** The two fields myWorkBucket needs to recognize agent-owned work as
+   *  mine. Both already ride every /fleet/tasks row (project_tasks_
+   *  service._row_to_task) — added here, not invented. */
+  assignee_agent_id?: string | null;
+  created_by?: string | null;
   project_id?: string | null;
   updated_at?: string | null;
   created_at?: string | null;
@@ -65,15 +78,22 @@ export type InboxTaskShape = {
 export const INBOX_STUCK_STATUSES = ["blocked", "awaiting_input"] as const;
 export type InboxStuckStatus = (typeof INBOX_STUCK_STATUSES)[number];
 
-/** Assigned to this person AND currently stuck. Both conditions matter:
- *  dropping the assignee check would surface a teammate's stuck task under
- *  my name (my-work.ts's own over-inclusion risk, one level down); dropping
- *  the status check would turn this into "everything I own", which is
- *  My work's job, not Inbox's. */
+/** "Mine" (either bucket) AND currently stuck. Ownership is delegated
+ *  entirely to my-work.ts's `myWorkBucket` — the one place that rule lives —
+ *  rather than re-checking `assignee_user_id` here, which is the bug this
+ *  replaces: every task an agent is actually working has
+ *  `assignee_user_id = NULL` by construction (assign_task NULLs it out),
+ *  so a rule that only looked at that column returned false for all of
+ *  them and Inbox could never show a stuck agent-owned task.
+ *
+ *  Both properties the old rule got right still hold, now enforced by
+ *  myWorkBucket instead of duplicated here: a teammate's stuck task never
+ *  surfaces under my name (myWorkBucket's "agent" bucket requires
+ *  `created_by === me`, not just an agent assignee), and the status check
+ *  below still keeps this narrower than "everything I own" — that's My
+ *  work's job, not Inbox's. */
 export function isMyStuckTask(task: InboxTaskShape, userId: string | null): boolean {
-  const me = String(userId || "").trim();
-  if (!me) return false;
-  if (String(task.assignee_user_id || "").trim() !== me) return false;
+  if (myWorkBucket(task, userId) === null) return false;
   return (INBOX_STUCK_STATUSES as readonly string[]).includes(String(task.status || "").trim());
 }
 

@@ -72,6 +72,40 @@ assert(
 assert(isMyStuckTask(task({ assignee_user_id: ME, status: "blocked" }), null) === false, "no viewer, nothing is theirs");
 assert(isMyStuckTask(task({ assignee_user_id: ME, status: "blocked" }), "") === false, "blank viewer id, same as no viewer");
 
+// Agent-owned work: assign_task/assign_task_to_user NULL out the other
+// assignee column on write, so an agent-assigned task NEVER carries
+// assignee_user_id — the exact reason the old assignee_user_id-only check
+// could never match a single one of these. Reused from my-work.ts's
+// myWorkBucket rather than re-derived here.
+assert(
+  isMyStuckTask(
+    task({ assignee_user_id: null, assignee_agent_id: "agent_1", created_by: ME, status: "blocked" }),
+    ME,
+  ) === true,
+  "an agent-owned blocked task I created needs me — this is the bug: it used to always read false",
+);
+assert(
+  isMyStuckTask(
+    task({ assignee_user_id: null, assignee_agent_id: "agent_1", created_by: ME, status: "awaiting_input" }),
+    ME,
+  ) === true,
+  "an agent-owned awaiting_input task I created needs me",
+);
+assert(
+  isMyStuckTask(
+    task({ assignee_user_id: null, assignee_agent_id: "agent_1", created_by: OTHER, status: "blocked" }),
+    ME,
+  ) === false,
+  "an agent-owned blocked task a TEAMMATE created must NOT appear under my name — myWorkBucket's own over-inclusion guard",
+);
+assert(
+  isMyStuckTask(
+    task({ assignee_user_id: null, assignee_agent_id: "agent_1", created_by: ME, status: "in_progress" }),
+    ME,
+  ) === false,
+  "an agent-owned task that is merely in_progress is not stuck — the status gate still applies to the agent bucket too",
+);
+
 // ── notificationTitle ────────────────────────────────────────────────────
 assert(
   notificationTitle({ id: "n1", source_event_type: "task_mention" } as InboxNotificationShape) === "Mentioned you",
