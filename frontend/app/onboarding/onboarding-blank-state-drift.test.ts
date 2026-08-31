@@ -83,7 +83,7 @@ assert(
 );
 assert(
   /<ShellRecoveryActions/.test(degradedBranchBody),
-  "the degraded-session branch offers a real recovery action (ShellRecoveryActions — Reload / Sign in again), not just a message with no way out",
+  "the degraded-session branch offers a real recovery action (ShellRecoveryActions — Reload / Sign out and start over), not just a message with no way out",
 );
 
 // ── State 2: the auto-submit PATCH failed — the error is actually shown,
@@ -102,9 +102,32 @@ assert(
   /onClick=\{[\s\S]*?handleSubmit\(/.test(errorBranchBody),
   "the failed-submit branch offers a real retry that calls handleSubmit again — this PATCH is idempotent and safe to retry, so silence here would be a second, avoidable trap",
 );
+// A plain href="/login" here used to be the recovery option offered "in
+// case the real cause was session-shaped rather than a one-off request
+// failure" -- but that link cannot actually help a session-shaped failure:
+// POST /api/auth/login is CSRF-gated, and a browser stuck with a duplicate
+// empyralis_csrf_token (domain-scoped + stray host-only twin, RFC 6265)
+// 403s on it exactly like every other mutating request while the old
+// access-token cookie is still live (see ShellRecoveryActions.tsx's own
+// header comment). The fix reuses that file's useSignOutAndStartOver()
+// hook here instead of a second, independently-broken implementation --
+// signing out is the one guaranteed-to-succeed escape hatch, not a plain
+// link to a page that would 403 the same way.
 assert(
-  /href="\/login"/.test(errorBranchBody),
-  "the failed-submit branch also offers Sign in again, in case the real cause was session-shaped rather than a one-off request failure",
+  /useSignOutAndStartOver/.test(source),
+  "must reuse ShellRecoveryActions.tsx's useSignOutAndStartOver() hook — not a " +
+    "second, hand-rolled sign-out/logout implementation",
+);
+assert(
+  /onClick=\{signOutAndStartOver\}/.test(errorBranchBody),
+  "the failed-submit branch also offers a real sign-out action, in case the real " +
+    "cause was session-shaped rather than a one-off request failure — a plain " +
+    "href=\"/login\" cannot help there (see this file's own comment)",
+);
+assert(
+  !/href="\/login"/.test(errorBranchBody),
+  "no plain href=\"/login\" link remains in the failed-submit branch — it cannot " +
+    "help a session-shaped failure and must not come back in any form",
 );
 
 // ── State 3: nothing has failed yet (either about to auto-submit, or the

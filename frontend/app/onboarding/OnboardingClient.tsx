@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
-import { ShellRecoveryActions } from '@/app/(account)/ShellRecoveryActions';
+import { ShellRecoveryActions, useSignOutAndStartOver } from '@/app/(account)/ShellRecoveryActions';
 import {
   loadAccountShellBootstrap,
   updateWorkspace,
@@ -68,6 +68,7 @@ export function OnboardingClient({
   const { state, actions } = useAccountShell();
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const { isSigningOut, signOutAndStartOver } = useSignOutAndStartOver();
   // Guards the auto-submit effect below so it fires at most once per mount.
   // handleSubmit's own success path calls actions.replaceSession(), which
   // changes state.workspaceMemberships (and therefore the memoized
@@ -210,16 +211,28 @@ export function OnboardingClient({
             <button
               type="button"
               className="app-page-message__button"
-              disabled={submitting}
+              disabled={submitting || isSigningOut}
               onClick={() => {
                 void handleSubmit(autoSubmitValuesForMembership(membership));
               }}
             >
               {submitting ? 'Retrying…' : 'Retry'}
             </button>
-            <a className="app-page-message__button app-page-message__button--secondary" href="/login">
-              Sign in again
-            </a>
+            {/* Was a plain link to the login route. That link cannot help a
+                session stuck 403ing on every mutating request (the
+                host-only CSRF cookie twin -- see ShellRecoveryActions.tsx's
+                own comment): POST /api/auth/login is CSRF-gated too while
+                the old access-token cookie is still live. Reuses the SAME
+                sign-out action ShellRecoveryActions.tsx uses elsewhere, not
+                a second implementation. */}
+            <button
+              type="button"
+              className="app-page-message__button app-page-message__button--secondary"
+              disabled={submitting || isSigningOut}
+              onClick={signOutAndStartOver}
+            >
+              {isSigningOut ? 'Signing out...' : 'Sign out and start over'}
+            </button>
           </div>
         </div>
       </main>
