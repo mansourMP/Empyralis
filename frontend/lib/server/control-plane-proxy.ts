@@ -8,8 +8,10 @@ import {
   AUTH_CSRF_HEADER_NAME,
   AUTH_REFRESH_COOKIE_NAME,
   browserCsrfProtectedMethod,
+  generateBrowserCsrfToken,
   isAccessTokenLive,
   isRefreshTokenStructurallyValid,
+  needsFallbackCsrfCookie,
 } from '@/lib/auth/csrf';
 import { controlPlaneBaseUrl } from '@/lib/server/control-plane-base-url';
 
@@ -123,36 +125,29 @@ function splitCombinedSetCookieHeader(value: string): string[] {
   return source.split(/,(?=[^;,]+=)/g).map((item) => item.trim()).filter(Boolean);
 }
 
-function setCookieHeadersContain(headers: Headers, cookieName: string): boolean {
-  const prefix = `${cookieName}=`;
-  const responseHeaders = headers as Headers & {
-    getSetCookie?: () => string[];
-  };
-  const setCookieValues =
-    typeof responseHeaders.getSetCookie === 'function'
-      ? responseHeaders.getSetCookie()
-      : splitCombinedSetCookieHeader(headers.get('set-cookie') || '');
-  return setCookieValues.some((cookie) => cookie.trim().startsWith(prefix));
-}
+// needsFallbackCsrfCookie / generateBrowserCsrfToken live in lib/auth/csrf.ts
+// (imported above), not here -- frontend/app/api/auth/google/callback/
+// route.ts needs the identical rule and generator (it forwards cookies by
+// hand instead of through forwardControlPlaneRequest below, so it cannot
+// reach this file's own logic; see that route's own comment) but importing
+// THIS file directly fails outside Next's bundler (`import 'server-only'`
+// above is not an installed package). csrf.ts has neither problem: no
+// server-only guard, no Request/Response types, safe for a route handler, a
+// browser bundle, and a plain `tsx` unit test to all import identically.
 
 function shouldEnsureBrowserCsrfCookie(upstreamPath: string, responseHeaders: Headers): boolean {
   if (!upstreamPath.startsWith(BROWSER_AUTH_UPSTREAM_PREFIX)) {
     return false;
   }
-  const hasAuthCookie =
-    setCookieHeadersContain(responseHeaders, AUTH_ACCESS_COOKIE_NAME)
-    || setCookieHeadersContain(responseHeaders, AUTH_REFRESH_COOKIE_NAME);
-  if (!hasAuthCookie) {
-    return false;
-  }
-  return !setCookieHeadersContain(responseHeaders, AUTH_CSRF_COOKIE_NAME);
-}
-
-function generateBrowserCsrfToken(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  const responseHeadersWithGetter = responseHeaders as Headers & {
+    getSetCookie?: () => string[];
+  };
+  const setCookieValues =
+    typeof responseHeadersWithGetter.getSetCookie === 'function'
+      ? responseHeadersWithGetter.getSetCookie()
+      : splitCombinedSetCookieHeader(responseHeaders.get('set-cookie') || '');
+  const cookieNames = setCookieValues.map((cookie) => cookie.trim().split('=', 1)[0]);
+  return needsFallbackCsrfCookie(cookieNames);
 }
 
 function copyForwardableRequestHeaders(

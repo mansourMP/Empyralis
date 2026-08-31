@@ -1,9 +1,10 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
+import { ShellRecoveryActions } from '@/app/(account)/ShellRecoveryActions';
 import {
   loadAccountShellBootstrap,
   updateWorkspace,
@@ -39,6 +40,23 @@ function initialValuesForMembership(
   });
 }
 
+// Auto-submit defaults for the single-user platform — skip the setup form.
+// The label is a DISPLAY value and can be a fallback ("Untitled workspace",
+// and before workspace_naming landed, the workspace's own id). Persisting it
+// would turn a placeholder into the stored name -- which is plausibly how a
+// workspace whose stored name IS its own id came to exist. Send nothing and
+// let the server keep what it minted.
+function autoSubmitValuesForMembership(
+  membership: WorkspaceMembershipRecord,
+): CreateWorkspaceInput {
+  return createDefaultWorkspaceSetupValues(membership.workspace.id, {
+    name: '',
+    workspaceType: 'personal',
+    preferredShellProfileId: 'personal_shell',
+    defaultRoute: membership.defaultRoute || `/w/${encodeURIComponent(membership.workspace.id)}`,
+  });
+}
+
 export function OnboardingClient({
   targetWorkspaceId,
   requestedWorkspaceId,
@@ -50,6 +68,14 @@ export function OnboardingClient({
   const { state, actions } = useAccountShell();
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  // Guards the auto-submit effect below so it fires at most once per mount.
+  // handleSubmit's own success path calls actions.replaceSession(), which
+  // changes state.workspaceMemberships (and therefore the memoized
+  // `membership` object the effect depends on) WHILE this component may
+  // still be mounted awaiting the router.replace() navigation -- without
+  // this guard that reference change would re-run the effect and fire a
+  // second PATCH before the redirect lands.
+  const autoSubmitAttempted = useRef(false);
 
   const membership = useMemo(
     () =>
@@ -95,8 +121,50 @@ export function OnboardingClient({
     }
   }
 
+  // Auto-submit with defaults for single-user platform — skip the setup
+  // form. Hooks must run unconditionally on every render (React's Rules of
+  // Hooks): the previous version of this component called useEffect AFTER
+  // two early `return`s above it, which rendered a different NUMBER of
+  // hooks depending on state.status/membership -- a latent "Rendered fewer
+  // hooks than expected" crash the moment either flipped between renders.
+  // The gating now lives inside the effect instead.
+  useEffect(() => {
+    if (state.status !== 'authenticated' || !membership || autoSubmitAttempted.current) {
+      return;
+    }
+    autoSubmitAttempted.current = true;
+    void handleSubmit(autoSubmitValuesForMembership(membership));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.status, membership]);
+
+  // "Still loading", "your session ended", and "we could not load your
+  // workspace" are different facts (CLAUDE.md's outcome-honesty law) and
+  // must not collapse into one bare `return null`, which used to render a
+  // pure white screen with no chrome, no message, and no way out. There is
+  // no genuine async gap here -- state.status resolves synchronously from
+  // the server-rendered session -- so the one real way to land here is the
+  // root layout's OWN independent account-shell fetch (loadAccountShellSessionSafely,
+  // seeding AccountShellProvider) degrading even though this page's own
+  // server-side session check already succeeded (see OnboardingPage, which
+  // redirects to /login on a genuinely absent session before this component
+  // ever mounts). That is a "could not load", not a "signed out" -- render
+  // the same recoverable idiom app/(account)/layout.tsx already uses for
+  // exactly this fact.
   if (state.status !== 'authenticated') {
-    return null;
+    return (
+      <main className="app-page-message">
+        <div className="app-page-message__content">
+          <h1 className="app-page-message__title">Onboarding is temporarily unavailable</h1>
+          <p className="app-page-message__body">
+            Empyralis could not load your account shell here. This can happen during a deploy or service warm-up.
+          </p>
+          <p className="app-page-message__meta">
+            Reload this page and try again once the workspace shell is back.
+          </p>
+          <ShellRecoveryActions label="Onboarding recovery actions" />
+        </div>
+      </main>
+    );
   }
 
   if (!membership) {
@@ -127,20 +195,47 @@ export function OnboardingClient({
     );
   }
 
-  // Auto-submit with defaults for single-user platform — skip the setup form.
-  useEffect(() => {
-    handleSubmit(createDefaultWorkspaceSetupValues(membership.workspace.id, {
-      // The label is a DISPLAY value and can be a fallback ("Untitled
-      // workspace", and before workspace_naming landed, the workspace's own
-      // id). Persisting it would turn a placeholder into the stored name --
-      // which is plausibly how a workspace whose stored name IS its own id
-      // came to exist. Send nothing and let the server keep what it minted.
-      name: '',
-      workspaceType: 'personal',
-      preferredShellProfileId: 'personal_shell',
-      defaultRoute: membership.defaultRoute || `/w/${encodeURIComponent(membership.workspace.id)}`,
-    }));
-  }, []);
+  // The auto-submit PATCH failed (this is the production trap: a CSRF 403,
+  // a network blip, anything) -- say so and offer a real way out, instead of
+  // silently rendering nothing forever. Safe to retry: the PATCH is
+  // idempotent (it sets the same defaults) and nothing was lost either way.
+  if (errorMessage) {
+    return (
+      <main className="app-page-message">
+        <div className="app-page-message__content">
+          <h1 className="app-page-message__title">Workspace setup couldn&rsquo;t finish</h1>
+          <p className="app-page-message__body">{errorMessage}</p>
+          <p className="app-page-message__meta">This is safe to retry — nothing was lost.</p>
+          <div className="app-page-message__actions" aria-label="Onboarding recovery actions">
+            <button
+              type="button"
+              className="app-page-message__button"
+              disabled={submitting}
+              onClick={() => {
+                void handleSubmit(autoSubmitValuesForMembership(membership));
+              }}
+            >
+              {submitting ? 'Retrying…' : 'Retry'}
+            </button>
+            <a className="app-page-message__button app-page-message__button--secondary" href="/login">
+              Sign in again
+            </a>
+          </div>
+        </div>
+      </main>
+    );
+  }
 
-  return null;
+  // In flight (either the auto-submit effect hasn't fired yet on this very
+  // first paint, or its PATCH is still pending) -- an honest "working on it"
+  // rather than a blank screen. This never spins forever: it always resolves
+  // to either the errorMessage branch above or a navigation away on success.
+  return (
+    <main className="app-page-message">
+      <div className="app-page-message__content">
+        <h1 className="app-page-message__title">Setting up your workspace</h1>
+        <p className="app-page-message__body">This only takes a moment.</p>
+      </div>
+    </main>
+  );
 }

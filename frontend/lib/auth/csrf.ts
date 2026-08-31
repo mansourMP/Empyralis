@@ -81,3 +81,53 @@ export function isRefreshTokenStructurallyValid(token: string | undefined | null
   if (dotIndex <= 0) return false;
   return Boolean(rest.slice(0, dotIndex).trim() && rest.slice(dotIndex + 1).trim());
 }
+
+// ── CSRF-cookie fallback safety net ─────────────────────────────────────
+//
+// Pure, isomorphic (no `server-only`, no DOM/Request/Response types) on
+// purpose: both frontend/lib/server/control-plane-proxy.ts's
+// forwardControlPlaneRequest AND frontend/app/api/auth/google/callback/
+// route.ts need the identical rule -- a session that arrives with an
+// access/refresh cookie but no CSRF cookie must never be left permanently
+// unable to make its first same-site mutation (readCsrfTokenFromCookie
+// above finds nothing, buildCookieAuthHeaders sends no x-csrf-token, and
+// the backend's validate_csrf / the proxy's own validateBrowserCsrf both
+// 403 forever). Google's callback route forwards cookies by hand instead of
+// through the shared proxy (it must return an HTML page, not a JSON
+// passthrough — see that route's own CSP-nonce comment) and is also the one
+// auth entry point whose Set-Cookie headers cross an extra hop this repo
+// cannot fully reproduce outside production (a real cross-site redirect
+// through accounts.google.com, then Cloudflare/nginx back to the browser —
+// CLAUDE.md notes Cloudflare's presence there is itself undocumented in the
+// nginx config). Living here, plain and dependency-free, means both call
+// sites share one rule instead of silently drifting, and it can be unit
+// tested directly (importing control-plane-proxy.ts itself fails outside
+// Next's bundler: it starts with `import 'server-only'`, which is not an
+// installed package and only resolves via Next's own webpack alias).
+
+/** True exactly when an auth cookie (access or refresh) is present among
+ * `cookieNames` without a CSRF cookie alongside it. */
+export function needsFallbackCsrfCookie(cookieNames: Iterable<string>): boolean {
+  let hasAuthCookie = false;
+  let hasCsrfCookie = false;
+  for (const name of cookieNames) {
+    if (name === AUTH_ACCESS_COOKIE_NAME || name === AUTH_REFRESH_COOKIE_NAME) {
+      hasAuthCookie = true;
+    }
+    if (name === AUTH_CSRF_COOKIE_NAME) {
+      hasCsrfCookie = true;
+    }
+  }
+  return hasAuthCookie && !hasCsrfCookie;
+}
+
+/** Generates a fresh, non-secret-derived CSRF token for the fallback cookie
+ * above. Not a security boundary in itself (the real protection is that the
+ * value must round-trip: cookie === x-csrf-token header) — just needs to be
+ * unpredictable enough that a cross-site request can't guess it. */
+export function generateBrowserCsrfToken(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
