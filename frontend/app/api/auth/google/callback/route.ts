@@ -160,10 +160,7 @@ export async function GET(request: NextRequest) {
     // a 200 HTML page. Set cookies server-side on the response (preserving
     // HttpOnly) so the browser receives the auth tokens correctly. The JS-only
     // approach dropped HttpOnly cookies (access/refresh tokens), breaking login.
-    const upstreamCookies = upstream.headers.getSetCookie
-      ? upstream.headers.getSetCookie()
-      : splitCombinedSetCookieHeader(upstream.headers.get('set-cookie') || '');
-
+    //
     // NONCE IS REQUIRED HERE, and its absence took Google sign-in down.
     //
     // The strict CSP (sec/content-security-policy, 2026-08-13) ships
@@ -197,38 +194,24 @@ window.location.href = ${JSON.stringify(redirectUrl)};
 
     // Forward Set-Cookie headers from the backend as real browser cookies
     // (server-side set, so HttpOnly is preserved — unlike document.cookie).
-    for (const raw of upstreamCookies) {
-      const parts = raw.split(';').map(s => s.trim());
-      const [nvPair] = parts;
-      const eqIdx = nvPair.indexOf('=');
-      if (eqIdx <= 0) continue;
-      const name = nvPair.slice(0, eqIdx).trim();
-      const value = nvPair.slice(eqIdx + 1);
-      if (!name || !value) continue;
-
-      const options: {
-        httpOnly?: boolean;
-        secure?: boolean;
-        sameSite?: 'strict' | 'lax' | 'none';
-        maxAge?: number;
-        path?: string;
-        domain?: string;
-      } = {};
-      for (const attr of parts.slice(1)) {
-        const lower = attr.toLowerCase();
-        if (lower === 'httponly') options.httpOnly = true;
-        else if (lower === 'secure') options.secure = true;
-        else if (lower.startsWith('samesite=')) {
-          const v = attr.split('=')[1]?.toLowerCase();
-          if (v === 'strict' || v === 'lax' || v === 'none') options.sameSite = v;
-        } else if (lower.startsWith('max-age=')) {
-          const n = parseInt(attr.split('=')[1], 10);
-          if (Number.isFinite(n)) options.maxAge = n;
-        } else if (lower.startsWith('path=')) options.path = attr.split('=')[1];
-        else if (lower.startsWith('domain=')) options.domain = attr.split('=')[1];
-      }
-      response.cookies.set(name, value, options);
-    }
+    //
+    // Forward the RAW upstream Set-Cookie headers verbatim via
+    // appendUpstreamCookies — never hand-parse-and-`response.cookies.set()`
+    // again. `NextResponse.cookies.set(name, value, options)` (the old
+    // approach here) keys by cookie NAME ALONE and REPLACES, so two upstream
+    // Set-Cookie headers for the same name collapse into one. That is exactly
+    // what auth.py's set_auth_cookies() self-heal emits for a browser
+    // carrying a stray host-only `empyralis_csrf_token` twin: a host-only
+    // DELETE (Max-Age=0, no Domain) followed by the real domain-scoped SET.
+    // Hand-parsing silently dropped the DELETE, so a Google sign-in could
+    // never clear that twin -- `duplicateCsrfCookieCount` stayed at 2 and
+    // every CSRF-protected request kept 403ing regardless of how many times
+    // the user signed in. `response.headers.append('set-cookie', raw)`
+    // preserves multiplicity AND every attribute untouched, with no parser
+    // to get subtly wrong -- the same pattern forwardControlPlaneRequest
+    // (control-plane-proxy.ts) already uses for the email/password path,
+    // which never had this bug.
+    appendUpstreamCookies(response, upstream.headers);
 
     // No "mint a fallback CSRF cookie if one looks missing" here on purpose
     // (removed 2026-09-01 -- see control-plane-proxy.ts's own comment at its
