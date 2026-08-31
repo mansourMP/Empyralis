@@ -226,21 +226,33 @@ class WorkspacePersistenceNamespace {
     return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
   }
 
+  // `typeof window.localStorage` only proves the object exists — in Safari
+  // with "Block All Cookies", certain ITP states, and some private-browsing
+  // configurations, every actual access (get/set/remove/key/length) throws
+  // SecurityError even though canUseStorage() returned true. Every method
+  // below that touches window.localStorage wraps the touch in its own
+  // try/catch so that throw can never escape this namespace and crash
+  // whatever workspace feature owns it — this persistence layer is a cache,
+  // never a requirement.
+
   private readIndex(): string[] {
     if (!this.canUseStorage()) {
       return [];
     }
 
-    const rawValue = window.localStorage.getItem(this.indexKey);
-    if (!rawValue) {
-      return [];
-    }
-
     try {
+      const rawValue = window.localStorage.getItem(this.indexKey);
+      if (!rawValue) {
+        return [];
+      }
       const parsed = JSON.parse(rawValue);
       return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === 'string') : [];
     } catch {
-      window.localStorage.removeItem(this.indexKey);
+      try {
+        window.localStorage.removeItem(this.indexKey);
+      } catch {
+        /* storage refused the cleanup too — nothing left to do */
+      }
       return [];
     }
   }
@@ -250,7 +262,11 @@ class WorkspacePersistenceNamespace {
       return;
     }
 
-    window.localStorage.setItem(this.indexKey, JSON.stringify(Array.from(new Set(entries))));
+    try {
+      window.localStorage.setItem(this.indexKey, JSON.stringify(Array.from(new Set(entries))));
+    } catch {
+      /* storage unavailable or full — the index just won't persist */
+    }
   }
 
   private storageKeyToLogicalKey(storageKey: string): string | null {
@@ -266,7 +282,11 @@ class WorkspacePersistenceNamespace {
       return;
     }
 
-    window.localStorage.removeItem(storageKey);
+    try {
+      window.localStorage.removeItem(storageKey);
+    } catch {
+      /* storage refused the removal — nothing left to do */
+    }
     this.writeIndex(this.readIndex().filter((entry) => entry !== storageKey));
   }
 
@@ -283,18 +303,26 @@ class WorkspacePersistenceNamespace {
       return;
     }
 
-    const keys: string[] = [];
-    for (let index = 0; index < window.localStorage.length; index += 1) {
-      const key = window.localStorage.key(index);
-      if (key) {
-        keys.push(key);
+    // Runs from the constructor, on every namespace this app boots — a
+    // throw here (storage present but access-blocked) must never escape,
+    // or every caller of `new WorkspacePersistenceNamespace(...)` inherits
+    // a boot-time crash.
+    try {
+      const keys: string[] = [];
+      for (let index = 0; index < window.localStorage.length; index += 1) {
+        const key = window.localStorage.key(index);
+        if (key) {
+          keys.push(key);
+        }
       }
-    }
 
-    for (const key of keys) {
-      if (this.legacyPrefixes.some((prefix) => key.startsWith(prefix))) {
-        window.localStorage.removeItem(key);
+      for (const key of keys) {
+        if (this.legacyPrefixes.some((prefix) => key.startsWith(prefix))) {
+          window.localStorage.removeItem(key);
+        }
       }
+    } catch {
+      /* storage unavailable — nothing to purge */
     }
   }
 
@@ -322,15 +350,18 @@ class WorkspacePersistenceNamespace {
     }
 
     const storageKey = this.keyFor(key);
-    const rawValue = window.localStorage.getItem(storageKey);
-    if (!rawValue) {
-      return null;
-    }
-
     try {
+      const rawValue = window.localStorage.getItem(storageKey);
+      if (!rawValue) {
+        return null;
+      }
       return JSON.parse(rawValue) as T;
     } catch {
-      window.localStorage.removeItem(storageKey);
+      try {
+        window.localStorage.removeItem(storageKey);
+      } catch {
+        /* storage refused the cleanup too — nothing left to do */
+      }
       return null;
     }
   }
@@ -346,7 +377,12 @@ class WorkspacePersistenceNamespace {
     }
 
     const storageKey = this.keyFor(key);
-    window.localStorage.setItem(storageKey, JSON.stringify(value));
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify(value));
+    } catch {
+      /* storage unavailable or full — this write just won't persist */
+      return;
+    }
     this.writeIndex([...this.readIndex(), storageKey]);
   }
 
@@ -363,10 +399,14 @@ class WorkspacePersistenceNamespace {
       return;
     }
 
-    for (const storageKey of this.readIndex()) {
-      window.localStorage.removeItem(storageKey);
+    try {
+      for (const storageKey of this.readIndex()) {
+        window.localStorage.removeItem(storageKey);
+      }
+      window.localStorage.removeItem(this.indexKey);
+    } catch {
+      /* storage refused the removal — nothing left to do */
     }
-    window.localStorage.removeItem(this.indexKey);
   }
 
   snapshot() {

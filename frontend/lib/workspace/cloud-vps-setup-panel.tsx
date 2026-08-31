@@ -388,7 +388,13 @@ function saveStoredConnections(workspaceId: string, connections: Partial<Record<
   if (typeof window === 'undefined') {
     return;
   }
-  window.localStorage.setItem(connectionStorageKey(workspaceId), JSON.stringify(connections));
+  try {
+    window.localStorage.setItem(connectionStorageKey(workspaceId), JSON.stringify(connections));
+  } catch {
+    // Storage blocked or full — this browser-local cache is a fallback for
+    // the backend-authoritative connection list (see the comment below);
+    // losing a write here just means one fewer offline fallback source.
+  }
 }
 
 type VpsConnectionsPayload = {
