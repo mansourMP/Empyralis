@@ -28,6 +28,7 @@ import {
   fetchFleetDocument,
   patchFleetDocument,
   deleteFleetDocument,
+  DocumentUnavailableError,
   type FleetDocument,
 } from "@/lib/workspace/fleet/documents-data";
 import { DocumentDetailView } from "@/lib/workspace/fleet/DocumentDetailView";
@@ -65,20 +66,36 @@ export default function DocumentDetailPage() {
   const [document, setDocument] = useState<FleetDocument | null>(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  // Set only for a READ that failed to complete (session hiccup, network
+  // blip, upstream 5xx) — never for a genuine "this document doesn't
+  // exist" answer, which is what `notFound` alone means. The two used to
+  // share one boolean, so a plain 401 (proven to happen within a minute of
+  // a fresh login here — the access-token refresh path has its own open
+  // issue) rendered the exact same "This document isn't in this project
+  // any more. It may have been deleted…" copy as an actual delete would —
+  // a customer staring at their own just-written document being told it
+  // might be gone, when the only thing that failed was the READ. CLAUDE.md:
+  // "'empty' and 'I could not load this' are different facts."
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!workspaceId || !documentId) return;
     setLoading(true);
     setNotFound(false);
+    setLoadError(null);
     try {
       const doc = await fetchFleetDocument(workspaceId, documentId);
       setDocument(doc);
-    } catch {
-      // A vanished document (deleted elsewhere, or a plain bad id) gets its
-      // own state below rather than a silent bounce — see tasks/[taskId]'s
-      // identical reasoning.
+    } catch (e) {
       setDocument(null);
-      setNotFound(true);
+      if (e instanceof DocumentUnavailableError) {
+        setLoadError(e.message || "Couldn't load this document.");
+      } else {
+        // A vanished document (deleted elsewhere, or a plain bad id) gets
+        // its own state below rather than a silent bounce — see
+        // tasks/[taskId]'s identical reasoning.
+        setNotFound(true);
+      }
     } finally {
       setLoading(false);
     }
@@ -133,6 +150,22 @@ export default function DocumentDetailPage() {
     return (
       <main className="fleet-content fleet-content--chat">
         <FleetDocumentSkeleton />
+      </main>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <main className="fleet-content">
+        <div className="fleet-empty">
+          <div className="fleet-empty-title">Couldn&rsquo;t load this document</div>
+          <div className="fleet-empty-desc">{loadError}</div>
+          <div className="fleet-empty-actions">
+            <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => void load()}>
+              Try again
+            </button>
+          </div>
+        </div>
       </main>
     );
   }

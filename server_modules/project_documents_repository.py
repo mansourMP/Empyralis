@@ -412,13 +412,43 @@ def _compute_document_diff(
     if resolved_previous_title != title:
         parts.append(f"- title: {resolved_previous_title}\n+ title: {title}")
     if resolved_previous_body != body:
+        # `splitlines(keepends=True)` gives every LINE its own trailing "\n"
+        # -- EXCEPT the last one, which keeps whatever the source string
+        # actually ended with. A typed document body almost never ends with
+        # a trailing newline (nobody presses Enter before clicking away), so
+        # the "before" or "after" list handed to unified_diff below routinely
+        # has a final element with no "\n" on it.
+        #
+        # unified_diff's own three header lines ("--- before" / "+++ after"
+        # / "@@ ... @@") get NO trailing newline unless `lineterm` (default
+        # "\n") is left alone -- this used to pass `lineterm=""`, which is
+        # only correct when paired with `"\n".join(...)` on the way back
+        # out. Paired with `"".join(...)` (below) instead, the header lines
+        # ran straight into the first content line with nothing between
+        # them: "--- before+++ after@@ -0,0 +1,2 @@+first line". Not passing
+        # `lineterm` restores the "\n" every OTHER line already carries.
+        #
+        # That alone still leaves the missing-newline-on-the-last-source-
+        # line case above: editing the last line of an ordinary (no final
+        # newline) document glues its "-"/"+" pair together the same way --
+        # "-old last line+new last line" -- because THAT line's terminator
+        # was never there to begin with, `lineterm` or not. Padding a
+        # trailing "\n" onto each side (only when it is non-empty and
+        # missing one) before diffing normalizes that away without adding a
+        # phantom line: it changes what the LAST existing line ends with,
+        # never how many lines there are, so hunk counts are unaffected.
+        diffable_previous_body = (
+            resolved_previous_body + "\n"
+            if resolved_previous_body and not resolved_previous_body.endswith("\n")
+            else resolved_previous_body
+        )
+        diffable_body = body + "\n" if body and not body.endswith("\n") else body
         body_diff = "".join(
             difflib.unified_diff(
-                resolved_previous_body.splitlines(keepends=True),
-                body.splitlines(keepends=True),
+                diffable_previous_body.splitlines(keepends=True),
+                diffable_body.splitlines(keepends=True),
                 fromfile="before",
                 tofile="after",
-                lineterm="",
             )
         )
         if body_diff:
