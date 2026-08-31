@@ -1,6 +1,7 @@
 "use client";
 
 import { refresh as refreshBrowserAuthSession } from "@/lib/auth/auth-client";
+import { AUTH_CSRF_HEADER_NAME, readCsrfTokenFromCookie } from "@/lib/auth/csrf";
 
 /**
  * fetch() that survives an access-token expiry mid-flow instead of just
@@ -22,6 +23,40 @@ import { refresh as refreshBrowserAuthSession } from "@/lib/auth/auth-client";
  * takes it from there (an honest "HTTP 401"/message via
  * `@/lib/ui/api-error`'s getErrorMessage, not a silent stall).
  */
+function withFreshCsrfHeader(init: RequestInit | undefined): RequestInit | undefined {
+  if (!init?.headers) {
+    return init;
+  }
+  const headers = new Headers(init.headers);
+  // Only touch it if the caller already opted this request into CSRF
+  // protection (buildCookieAuthHeaders sets this for every mutating
+  // method) — never invent the header for a caller that deliberately left
+  // it off (e.g. a GET).
+  if (!headers.has(AUTH_CSRF_HEADER_NAME)) {
+    return init;
+  }
+  // A successful refresh ALWAYS rotates the CSRF cookie server-side —
+  // set_auth_cookies()/issue_csrf_token() in auth.py mints a brand new
+  // random token on every single call, unconditionally, whether or not the
+  // old one was still valid. The header above was built once, before the
+  // refresh, from the cookie as it stood then; the retry's Cookie header is
+  // attached fresh by the browser from whatever is in the jar right now —
+  // the just-rotated value. Reusing the stale header verbatim guaranteed a
+  // csrf_mismatch on EVERY 401-then-refresh retry of a mutating request,
+  // not just a rare race: this is what actually produced the "403 CSRF
+  // validation failed" a brand-new Google signup hit on the onboarding
+  // PATCH, immediately after its first attempt 401'd while the just-created
+  // session was still propagating (see awaitBrowserAuthReady's own comment
+  // on that being expected right after signup).
+  const freshToken = readCsrfTokenFromCookie();
+  if (freshToken) {
+    headers.set(AUTH_CSRF_HEADER_NAME, freshToken);
+  } else {
+    headers.delete(AUTH_CSRF_HEADER_NAME);
+  }
+  return { ...init, headers };
+}
+
 export async function fleetAuthorizedFetch(
   input: RequestInfo | URL,
   init?: RequestInit,
@@ -33,5 +68,5 @@ export async function fleetAuthorizedFetch(
   } catch {
     return first;
   }
-  return fetch(input, init);
+  return fetch(input, withFreshCsrfHeader(init));
 }
