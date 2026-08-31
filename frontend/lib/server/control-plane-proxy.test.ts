@@ -173,6 +173,48 @@ async function main() {
     }
   });
 
+  await test(
+    "DUPLICATE csrf cookie (host-only + domain-scoped) -> a stable mismatch the client can't see, duplicateCsrfCookieCount: 2",
+    async () => {
+      const originalError = console.error;
+      const logs: unknown[][] = [];
+      console.error = (...args: unknown[]) => logs.push(args);
+      try {
+        // Simulates two coexisting `empyralis_csrf_token` cookies under
+        // different Domain/Path scopes (RFC 6265: same name + same domain +
+        // same path always overwrite; any difference in domain or path
+        // creates a SECOND cookie -- e.g. a Next-side fallback setter's
+        // host-only cookie alongside the backend's real Domain-scoped one).
+        // The browser's own readCsrfTokenFromCookie (lib/auth/csrf.ts)
+        // returns the FIRST match when building the X-CSRF-Token header --
+        // reproduced here with a header that matches the FIRST cookie in
+        // the raw string, not the last.
+        const request = patchRequest(
+          `${AUTH_ACCESS_COOKIE_NAME}=${access}; ${AUTH_CSRF_COOKIE_NAME}=first-value; ${AUTH_CSRF_COOKIE_NAME}=second-value`,
+          "first-value",
+        );
+        const response = await forwardControlPlaneRequest(request, "/api/v1/workspaces/ws_123");
+        const { status, code } = await readCode(response);
+        assert.equal(status, 403);
+        assert.equal(
+          code,
+          "csrf_mismatch",
+          "NextRequest's cookie jar keeps the LAST duplicate, so a header matching the FIRST reads as a mismatch",
+        );
+        assert.equal(logs.length, 1, "expected exactly one console.error call");
+        const [, context] = logs[0] as [string, Record<string, unknown>];
+        assert.equal(context.duplicateCsrfCookieCount, 2, "the log must surface that TWO cookies shared this name");
+        const serialized = JSON.stringify(logs[0]);
+        assert.ok(
+          !serialized.includes("first-value") && !serialized.includes("second-value"),
+          "raw cookie values must never be logged, even in the duplicate case",
+        );
+      } finally {
+        console.error = originalError;
+      }
+    },
+  );
+
   await test("cookie and header MATCH -> not a CSRF failure at all (falls through to the upstream call)", async () => {
     const originalFetch = global.fetch;
     let fetchCalled = false;
