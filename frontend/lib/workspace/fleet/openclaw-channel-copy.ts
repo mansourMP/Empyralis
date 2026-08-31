@@ -349,6 +349,22 @@ export function remediationFor(
   // and must not share the "unknown" copy. See the module-level Remediation
   // comment: this is the "needs_hardware" state that copy used to lie about.
   hasGateway: boolean,
+  // The STRUCTURED reason the read failed, when it did — the same code
+  // openclawObservedErrorBanner already branches on, never a text match
+  // (CLAUDE.md: "match on stable codes, never on prose"). MAN-329: before
+  // this parameter existed, every unreachable-read produced the SAME
+  // sentence ("This computer could not be reached...") no matter WHY the
+  // read failed — even though the banner above the grid already knew to
+  // tell "gateway_capability_missing" (the box answered fine; this build's
+  // gateway has never had the channel transport installed, or predates the
+  // capability entirely — "reconnect" cannot fix that) apart from an
+  // actually offline/stale/unhealthy box. That left every card on the grid,
+  // and the one-sentence detail inside each card's own panel, telling the
+  // customer their computer was unreachable while the banner directly above
+  // it, for the identical failure, correctly said the computer was fine.
+  // Optional so every pre-existing caller (this file's own test matrix
+  // included) keeps behaving exactly as before when it has no code to pass.
+  observedErrorCode?: string | null,
 ): Remediation {
   if (!hasGateway) {
     return {
@@ -360,6 +376,13 @@ export function remediationFor(
     };
   }
   if (!reachable || !observed) {
+    if (observedErrorCode === "gateway_capability_missing") {
+      // The box answered fine — this is not a reachability problem. Reuses
+      // the banner's own constant rather than a second hand-written
+      // sentence, so the grid and the panel it opens can never disagree
+      // about the same failure.
+      return { kind: "unknown", detail: OPENCLAW_CAPABILITY_MISSING_BANNER_TEXT };
+    }
     return {
       kind: "unknown",
       detail: "This computer could not be reached, so its channel state is unknown.",

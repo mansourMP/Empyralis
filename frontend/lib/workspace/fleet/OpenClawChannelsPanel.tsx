@@ -456,6 +456,13 @@ export function useOpenClawChannelSetup(gatewayId: string | null, agentId: strin
   const alreadyAvailable = data?.already_available_channels ?? [];
   const observedList = data?.observed?.channels ?? [];
   const reachable = Boolean(data?.observed) && !data?.observed_error;
+  // The STRUCTURED reason the read failed, passed straight into every row's
+  // own remediation below — same code the top banner (openclawObservedErrorBanner)
+  // already branches on. MAN-329: without this, every row shared the generic
+  // "could not be reached" sentence regardless of which of the two facts
+  // actually happened, contradicting the banner above the grid for the exact
+  // same failure.
+  const observedErrorCode = data?.observed_error_code ?? null;
   const observedById = useMemo(
     () => new Map(observedList.map((entry) => [entry.channel_id, entry])),
     [observedList],
@@ -469,9 +476,13 @@ export function useOpenClawChannelSetup(gatewayId: string | null, agentId: strin
         // computer at all" fact. With no gateway bound, every row reads
         // `needs_hardware` regardless of what a PREVIOUS gateway's observed
         // data might still be sitting in `data` from a stale response.
-        return { entry, observed, remediation: remediationFor(entry, observed, reachable, Boolean(gatewayId)) };
+        return {
+          entry,
+          observed,
+          remediation: remediationFor(entry, observed, reachable, Boolean(gatewayId), observedErrorCode),
+        };
       }),
-    [catalog, observedById, reachable, gatewayId],
+    [catalog, observedById, reachable, gatewayId, observedErrorCode],
   );
 
   const repairable = rows
@@ -482,7 +493,7 @@ export function useOpenClawChannelSetup(gatewayId: string | null, agentId: strin
     loading,
     error,
     observedError: data?.observed_error ?? null,
-    observedErrorCode: data?.observed_error_code ?? null,
+    observedErrorCode,
     busy,
     rows,
     alreadyAvailable,
