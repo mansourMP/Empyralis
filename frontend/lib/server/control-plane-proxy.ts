@@ -8,13 +8,16 @@ import {
   AUTH_CSRF_HEADER_NAME,
   AUTH_REFRESH_COOKIE_NAME,
   browserCsrfProtectedMethod,
-  generateBrowserCsrfToken,
   isAccessTokenLive,
   isRefreshTokenStructurallyValid,
-  needsFallbackCsrfCookie,
 } from '@/lib/auth/csrf';
 import { controlPlaneBaseUrl } from '@/lib/server/control-plane-base-url';
-import { classifyCsrfFailure, csrfFailureResponseBody, logCsrfFailure } from '@/lib/server/csrf-failure';
+import {
+  classifyCsrfFailure,
+  countRawCookieOccurrences,
+  csrfFailureResponseBody,
+  logCsrfFailure,
+} from '@/lib/server/csrf-failure';
 
 type ForwardControlPlaneRequestInit = RequestInit & {
   timeoutMs?: number;
@@ -50,8 +53,6 @@ const HOP_BY_HOP_RESPONSE_HEADERS = new Set([
   'transfer-encoding',
   'upgrade',
 ]);
-
-const BROWSER_AUTH_UPSTREAM_PREFIX = '/api/v1/auth/';
 
 function upstreamUnavailableResponse(error: unknown): NextResponse {
   const reason = error instanceof Error ? error.message : 'upstream_unavailable';
@@ -107,12 +108,28 @@ function validateBrowserCsrf(request: NextRequest, bypassCsrf?: boolean): NextRe
   if (!hasBrowserSessionCookie(request)) {
     return null;
   }
-  const csrfCookie = request.cookies.get(AUTH_CSRF_COOKIE_NAME)?.value?.trim() || '';
-  const csrfHeader = request.headers.get(AUTH_CSRF_HEADER_NAME)?.trim() || '';
+  // Raw (untrimmed) values are kept separately from the trimmed values fed
+  // to classifyCsrfFailure() below -- the comparison itself must stay
+  // exactly as it was (trimmed, unweakened); the raw values exist only so a
+  // failure log can fingerprint what actually arrived, whitespace and all.
+  const csrfCookieRaw = request.cookies.get(AUTH_CSRF_COOKIE_NAME)?.value ?? '';
+  const csrfHeaderRaw = request.headers.get(AUTH_CSRF_HEADER_NAME) ?? '';
+  const csrfCookie = csrfCookieRaw.trim();
+  const csrfHeader = csrfHeaderRaw.trim();
   const failureCode = classifyCsrfFailure(csrfCookie, csrfHeader);
   if (failureCode) {
     const cookieNames = request.cookies.getAll().map((cookie) => cookie.name);
-    logCsrfFailure(failureCode, { path: request.nextUrl.pathname, method: request.method, cookieNames });
+    logCsrfFailure(failureCode, {
+      path: request.nextUrl.pathname,
+      method: request.method,
+      cookieNames,
+      csrfCookieValue: csrfCookieRaw,
+      csrfHeaderValue: csrfHeaderRaw,
+      duplicateCsrfCookieCount: countRawCookieOccurrences(
+        request.headers.get('cookie') || '',
+        AUTH_CSRF_COOKIE_NAME,
+      ),
+    });
     return new NextResponse(JSON.stringify(csrfFailureResponseBody(failureCode)), {
       status: 403,
       headers: { 'content-type': 'application/json' },
@@ -127,31 +144,6 @@ function splitCombinedSetCookieHeader(value: string): string[] {
     return [];
   }
   return source.split(/,(?=[^;,]+=)/g).map((item) => item.trim()).filter(Boolean);
-}
-
-// needsFallbackCsrfCookie / generateBrowserCsrfToken live in lib/auth/csrf.ts
-// (imported above), not here -- frontend/app/api/auth/google/callback/
-// route.ts needs the identical rule and generator (it forwards cookies by
-// hand instead of through forwardControlPlaneRequest below, so it cannot
-// reach this file's own logic; see that route's own comment) but importing
-// THIS file directly fails outside Next's bundler (`import 'server-only'`
-// above is not an installed package). csrf.ts has neither problem: no
-// server-only guard, no Request/Response types, safe for a route handler, a
-// browser bundle, and a plain `tsx` unit test to all import identically.
-
-function shouldEnsureBrowserCsrfCookie(upstreamPath: string, responseHeaders: Headers): boolean {
-  if (!upstreamPath.startsWith(BROWSER_AUTH_UPSTREAM_PREFIX)) {
-    return false;
-  }
-  const responseHeadersWithGetter = responseHeaders as Headers & {
-    getSetCookie?: () => string[];
-  };
-  const setCookieValues =
-    typeof responseHeadersWithGetter.getSetCookie === 'function'
-      ? responseHeadersWithGetter.getSetCookie()
-      : splitCombinedSetCookieHeader(responseHeaders.get('set-cookie') || '');
-  const cookieNames = setCookieValues.map((cookie) => cookie.trim().split('=', 1)[0]);
-  return needsFallbackCsrfCookie(cookieNames);
 }
 
 function copyForwardableRequestHeaders(
@@ -288,18 +280,23 @@ export async function forwardControlPlaneRequest(
         ? null
         : await response.arrayBuffer();
 
+    // No "mint a CSRF cookie if the upstream response looks like it's
+    // missing one" fallback here on purpose (removed 2026-09-01, see git
+    // history for the incident). The backend already sets one
+    // unconditionally on every auth response (auth.py's set_auth_cookies ->
+    // issue_csrf_token()); a second, independently-minted cookie under this
+    // Next.js origin is host-only (no Domain attribute) while production's
+    // real cookie carries Domain=EMPYRALIS_AUTH_COOKIE_DOMAIN -- two
+    // different (name, domain, path) identities that COEXIST rather than
+    // overwrite (RFC 6265). The browser's own CSRF-header builder
+    // (readCsrfTokenFromCookie) and this proxy's cookie reader then land on
+    // opposite ends of that duplicate pair, producing a stable csrf_mismatch
+    // no retry converges. If the real cookie is ever genuinely missing, fix
+    // the transport that dropped it -- don't mint a second one.
     const nextResponse = new NextResponse(responseBody, {
       status: response.status,
       headers: responseHeaders,
     });
-    if (shouldEnsureBrowserCsrfCookie(upstreamPath, responseHeaders)) {
-      nextResponse.cookies.set(AUTH_CSRF_COOKIE_NAME, generateBrowserCsrfToken(), {
-        httpOnly: false,
-        secure: request.nextUrl.protocol === 'https:',
-        sameSite: 'lax',
-        path: '/',
-      });
-    }
     return nextResponse;
   } catch (error) {
     if (controller && error instanceof Error && error.name === 'AbortError') {
