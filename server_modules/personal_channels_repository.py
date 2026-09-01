@@ -870,6 +870,70 @@ def list_owner_linked_channel_identities_for_workspace(
     return linked
 
 
+def list_owner_linked_channel_identities_for_agent(
+    workspace_id: str,
+    agent_id: str,
+    *,
+    db_path: Optional[Path | str] = None,
+) -> Dict[str, str]:
+    """Per-AGENT twin of list_owner_linked_channel_identities_for_workspace
+    above — {channel_key: linked_id}, scoped to one agent's own rows only.
+
+    agent_turn_runtime_service._resolve_channel_sender_class needs this one,
+    not the workspace-wide version: two agents in the same workspace can be
+    linked to two DIFFERENT owners on the very same channel_key (agent A
+    handed to person 1, agent B handed to person 2 later), and the
+    workspace-wide function's own docstring is explicit that "the LAST-
+    updated row per channel_key wins" across every agent/gateway that has
+    written one — which silently handed agent A's tool authority to person
+    2 the moment agent B linked. See _resolve_channel_sender_class's own
+    docstring for the full incident this closes.
+
+    agent_id is REQUIRED and has no default that widens scope: an empty/
+    unresolved agent_id returns {} rather than falling back to the
+    workspace-wide set — a sender with no resolved agent to check against
+    must fail CLOSED to "audience", never inherit whichever agent last
+    wrote a row. This also means a legacy/ambiguous row written under
+    LEGACY_UNSCOPED_AGENT_ID (agent_id == "") is never read back out as a
+    specific agent's owner link, which matches that sentinel's own
+    contract (see its module-level comment): unclaimed/ambiguous data
+    belongs to no agent in particular.
+    """
+    normalized_workspace_id = str(workspace_id or "").strip()
+    normalized_agent_id = str(agent_id or "").strip()
+    if not normalized_workspace_id or not normalized_agent_id:
+        return {}
+    linked: Dict[str, str] = {}
+    with _DB_LOCK:
+        connection = _connect(db_path)
+        try:
+            for table, id_column in (
+                ("personal_channel_whatsapp_states", "linked_jid"),
+                ("personal_channel_telegram_states", "linked_user_id"),
+                ("personal_channel_local_bridge_states", "linked_identity"),
+            ):
+                rows = connection.execute(
+                    f"""
+                    SELECT channel_key, {id_column} AS linked_id, updated_at
+                    FROM {table}
+                    WHERE workspace_id = ? AND agent_id = ? AND {id_column} IS NOT NULL AND {id_column} != ''
+                    ORDER BY updated_at ASC
+                    """,
+                    (normalized_workspace_id, normalized_agent_id),
+                ).fetchall()
+                for row in rows:
+                    channel_key = str(row["channel_key"] or "").strip()
+                    linked_id = str(row["linked_id"] or "").strip()
+                    if channel_key and linked_id:
+                        # ORDER BY updated_at ASC + plain dict assignment:
+                        # the last (most recent) row for a given channel_key
+                        # naturally wins, no separate max() pass needed.
+                        linked[channel_key] = linked_id
+        finally:
+            connection.close()
+    return linked
+
+
 def claim_channel_owner_identity_if_unclaimed(
     *,
     gateway_id: str,
