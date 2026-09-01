@@ -9377,6 +9377,13 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   flex-shrink: 0;
 }
 
+/* Copy link's trailing grid cell — same 32px track .fleet-project-row's own
+   copy button sits in, just centred since this column carries nothing else. */
+.fleet-task-cell-copy {
+  display: flex;
+  justify-content: center;
+}
+
 @media (max-width: 768px) {
   .fleet-tasks-list {
     --fleet-list-padding-x: 0px;
@@ -9394,6 +9401,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   .fleet-task-cell-title,
   .fleet-task-cell-assignee,
   .fleet-task-cell-status,
+  .fleet-task-cell-copy,
   .fleet-task-row .fleet-agent-cell-right {
     display: none;
   }
@@ -9621,6 +9629,9 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   flex-direction: column;
   gap: 11px;
   flex-shrink: 0;
+  /* Anchors .fleet-board-card-copy's absolute position to this card, not
+     the column or the page. */
+  position: relative;
   padding: 18px;
   background: var(--bg-card);
   border: 1px solid var(--border);
@@ -9635,6 +9646,16 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
      nothing decorative; the global prefers-reduced-motion block further up
      this file already flattens it to ~0 for anyone who asked. */
   transition: background-color var(--dur-1) var(--ease-out), border-color var(--dur-1) var(--ease-out);
+}
+/* Copy link — top-right corner of the card, the one spot nothing else on a
+   dense 292px card ever draws into. Always visible rather than hover-only:
+   nothing else on this board reveals its controls on hover, and a control
+   that only appears once you've already found it by accident is not
+   discoverable. */
+.fleet-board-card-copy {
+  position: absolute;
+  top: 10px;
+  right: 10px;
 }
 .fleet-board-card:hover { background: var(--bg-card-hover); border-color: var(--border-strong); }
 /* Which card the open detail drawer is showing — the same "selected, not
@@ -9662,6 +9683,9 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   color: var(--text-muted);
   font-size: var(--text-2xs);
   line-height: 1.3;
+  /* Clears .fleet-board-card-copy's absolute top-right corner — same
+     reserve .fleet-board-card-title below carries. */
+  padding-right: 28px;
 }
 .fleet-board-card-parent svg { flex-shrink: 0; }
 .fleet-board-card-parent-title {
@@ -9684,6 +9708,9 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  /* Clears .fleet-board-card-copy's absolute top-right corner on the first
+     line, so a short single-line title never runs under the button. */
+  padding-right: 28px;
 }
 
 /* One row: status ring · priority · id · sub-tasks … date · assignee. Every
@@ -11135,7 +11162,7 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
    screen. */
 .fleet-glist-row {
   display: grid;
-  grid-template-columns: 16px 56px 16px minmax(0, 1fr) 54px 58px 20px;
+  grid-template-columns: 16px 56px 16px minmax(0, 1fr) 54px 58px 20px 20px;
   gap: 10px;
   align-items: center;
   min-height: 34px;
@@ -11194,18 +11221,36 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
 /* Empty slot, not an em dash — a column of "—" where the avatars aren't is
    noise, and "unassigned" reads fine from the absence of one. */
 .fleet-glist-cell-unassigned { display: inline-block; }
+/* Copy link's trailing 20px track — shrunk down from .fleet-icon-btn's
+   default 28px box, this grid's rows are 34px tall and every other cell in
+   it is 16-20px. */
+.fleet-glist-cell-copy {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+}
+.fleet-glist-cell-copy .fleet-icon-btn {
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+}
 
 /* Mobile is out of scope for this pass (desktop-first, 1440x900), but the
    seven-track grid would be unreadable at 375px and a one-rule guard is
    cheaper than a broken narrow window: drop the two date columns and the id,
-   keeping glyph · status · title · assignee. */
+   keeping glyph · status · title · assignee. Copy link drops too — gridTracks()
+   already omits its track on mobile (see TasksGroupedList.tsx), this just
+   keeps the cell itself from rendering as an untracked grid item. */
 @media (max-width: 768px) {
   .fleet-glist-row {
     grid-template-columns: 16px 16px minmax(0, 1fr) 20px;
   }
   .fleet-glist-cell-id,
   .fleet-glist-cell-due,
-  .fleet-glist-cell-updated { display: none; }
+  .fleet-glist-cell-updated,
+  .fleet-glist-cell-copy { display: none; }
 }
 
 /* ── Ask AI console: history + memory ─────────────────────────────────────
@@ -11543,7 +11588,7 @@ h2.fleet-assistant-console-title {
    track lists the original rules carry, so a row rendered without the custom
    properties (any other caller) is unchanged. */
 .fleet-glist-row {
-  grid-template-columns: var(--fleet-glist-grid, 16px 56px 16px minmax(0, 1fr) 54px 58px 20px);
+  grid-template-columns: var(--fleet-glist-grid, 16px 56px 16px minmax(0, 1fr) 54px 58px 20px 20px);
 }
 @media (max-width: 768px) {
   .fleet-glist-row {

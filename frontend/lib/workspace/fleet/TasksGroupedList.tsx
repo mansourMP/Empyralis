@@ -61,6 +61,7 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { ChevronRight, Plus } from "lucide-react";
 
+import { CopyLinkButton } from "@/lib/ui/CopyLinkButton";
 import { dueLabel } from "./TasksList";
 import { timeAgo } from "./fleet-presentation";
 import { AgentSigil } from "./fleet-indicators";
@@ -150,6 +151,13 @@ function gridTracks(display: TaskDisplayState, mobile: boolean): string {
     !mobile && display.due ? "54px" : null,
     !mobile && display.updated ? "58px" : null,
     display.assignee ? "20px" : null,
+    // Copy link — always on (not a display-property toggle, same "permanent
+    // page control, not a data column" reasoning as TasksList's own trailing
+    // track) and desktop-only, matching every other track this file already
+    // drops at 768px (mobile is out of scope for this pass — see the file
+    // header). .fleet-glist-cell-copy is display:none under that same media
+    // query, so the track and the cell agree.
+    !mobile ? "20px" : null,
   ]
     .filter(Boolean)
     .join(" ");
@@ -570,6 +578,14 @@ function GroupedRow({
         // aren't is noise, and "unassigned" reads fine from the absence.
         <span className="fleet-glist-cell-assignee fleet-glist-cell-unassigned" title="Unassigned" aria-hidden />
       )}
+
+      {/* Copy link — same CopyLinkButton every row/detail surface in this
+          codebase shares, in the trailing 20px track gridTracks() always
+          reserves for it on desktop. Its own click handler stops this row's
+          <a> from also navigating, same as the status <select> above. */}
+      <span className="fleet-glist-cell-copy">
+        <CopyLinkButton path={href} label={task.title || "this task"} iconSize={13} />
+      </span>
     </a>
   );
 }

@@ -1030,6 +1030,143 @@ async def get_task(
     return _row_to_task(row)
 
 
+class _TaskDeleteRaced(Exception):
+    """Internal: the DELETE matched no row, so the whole unit of work is
+    rolled back and delete_task returns None. Never escapes this module."""
+
+
+def _task_delete_affected_row_count(command_tag: Any) -> int:
+    """asyncpg's execute() returns a command tag like 'DELETE 1'. Parse the
+    count, defaulting to 0 rather than guessing when the shape is
+    unexpected -- same tiny helper projects_repository.delete_project keeps
+    for the identical purpose, duplicated rather than imported so this
+    module's delete stays self-contained the way the rest of it already is."""
+    parts = str(command_tag or "").strip().split()
+    if not parts:
+        return 0
+    try:
+        return int(parts[-1])
+    except ValueError:
+        return 0
+
+
+async def delete_task(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    task_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Permanently delete ONE task. Irreversible -- there is no archive/
+    restore for a task the way projects_repository.set_project_archived
+    gives projects; this is the only removal path there is, which is the
+    gap this function exists to close (there was previously no way to
+    delete a standalone task at all -- it could only die via its project's
+    own CASCADE in projects_repository.delete_project).
+
+    Returns a summary of what happened, or None when the task doesn't
+    resolve in this workspace -- same "claiming a deletion that did not
+    happen is the dishonesty this whole path exists to avoid" posture as
+    projects_repository.delete_project, whose count-then-delete-in-one-
+    transaction shape this mirrors exactly.
+
+    WHAT DIES WITH THE TASK:
+      * Its comments -- `metadata.comments` lives ON this row (add_task_
+        comment's own docstring: "Deliberately NOT a new task_comments
+        table"), so deleting the row deletes them; there is no separate
+        table to cascade.
+      * project_task_labels rows naming this task -- ON DELETE CASCADE
+        (migrations/add_task_labels.sql). Only the ATTACHMENT dies; the
+        label itself (workspace_labels) is a shared workspace vocabulary
+        entry and is untouched, exactly as deleting a task never deletes
+        the project it lived in.
+      * task_notifications rows naming this task_id -- ON DELETE CASCADE
+        (migrations/add_task_notifications.sql). An internal per-user
+        inbox record, not user-authored content; not worth naming in a
+        user-facing confirmation, but real DB state that goes with it.
+
+    WHAT IS DELIBERATELY SPARED -- SUB-TASKS ARE PROMOTED, NOT DELETED:
+      `project_tasks.parent_task_id` -> this row is ON DELETE SET NULL
+      (migrations/add_task_parent.sql), the same "a deleted parent PROMOTES
+      its children, it never destroys them" rule that file states for
+      exactly this reason: a sub-task is real work someone wrote down,
+      often with its own assignee, its own comment history and its own
+      persisted plan, and one click on the parent must not silently take
+      an unbounded amount of that with it. Deleting a task that has
+      children leaves every one of them behind as an ordinary top-level
+      task. Deleting a task that IS a sub-task only ever removes that one
+      row -- its parent and any of the parent's OTHER children are
+      untouched.
+    """
+    pool = await control_plane_repository.ensure_control_plane_schema()
+    if pool is None:
+        return None
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    resolved_task_id = str(task_id or "").strip()
+
+    target = await get_task(
+        tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id, task_id=resolved_task_id,
+    )
+    if target is None:
+        return None
+
+    # ONE transaction for the count + the delete, on one connection -- the
+    # count must be read from rows the cascade/set-null has not touched
+    # yet, and the delete must not partially apply. Identical shape to
+    # projects_repository.delete_project's own _run/_XxxDeleteRaced pair.
+    async def _run(connection: Any) -> Dict[str, Any]:
+        await control_plane_repository.apply_connection_scope(
+            connection, tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id,
+        )
+
+        counts_row = await connection.fetchrow(
+            """
+            SELECT
+              (SELECT COUNT(*) FROM project_tasks
+                 WHERE tenant_id = $1 AND workspace_id = $2 AND parent_task_id = $3) AS subtasks,
+              (SELECT COUNT(*) FROM project_task_labels
+                 WHERE tenant_id = $1 AND workspace_id = $2 AND task_id = $3) AS labels,
+              (SELECT jsonb_array_length(COALESCE(metadata->'comments', '[]'::jsonb))
+                 FROM project_tasks
+                 WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3) AS comments
+            """,
+            resolved_tenant_id,
+            resolved_workspace_id,
+            resolved_task_id,
+        )
+        counts = dict(counts_row) if counts_row else {}
+
+        deleted = await connection.execute(
+            "DELETE FROM project_tasks WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3",
+            resolved_tenant_id,
+            resolved_workspace_id,
+            resolved_task_id,
+        )
+        if _task_delete_affected_row_count(deleted) < 1:
+            # Raced with a concurrent delete of the same task between the
+            # get_task existence check above and this DELETE.
+            raise _TaskDeleteRaced()
+
+        return {"counts": counts}
+
+    try:
+        async with pool.acquire() as connection:
+            async with connection.transaction():
+                outcome = await _run(connection)
+    except _TaskDeleteRaced:
+        return None
+
+    counts = outcome["counts"]
+    return {
+        "id": resolved_task_id,
+        "title": target.get("title") or "",
+        "project_id": target.get("project_id"),
+        "subtasks_promoted": int(counts.get("subtasks") or 0),
+        "comments_deleted": int(counts.get("comments") or 0),
+        "labels_detached": int(counts.get("labels") or 0),
+    }
+
+
 async def list_tasks(
     *,
     tenant_id: str,

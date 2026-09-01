@@ -96,6 +96,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
+import { createPortal } from "react-dom";
 import {
   ArrowUp,
   Calendar,
@@ -112,6 +113,7 @@ import {
   Pencil,
   Plus,
   SignalHigh,
+  Trash2,
   User,
   UserPlus,
   X,
@@ -136,8 +138,10 @@ import {
   assigneeOptionValue,
   commentFleetTask,
   createFleetTask,
+  deleteFleetTask,
   FLEET_TASK_STATUSES,
   parseAssigneeOptionValue,
+  refreshFleetTasks,
   useFleetTasks,
   type FleetAgent,
   type FleetTask,
@@ -151,6 +155,7 @@ import {
   sortTasks,
   type TaskViewOptions as TaskViewOptionsState,
 } from "./task-view-options";
+import { describeTaskDeleteEffects } from "./task-delete-summary";
 import { MarkdownLiteText } from "../markdown-lite";
 import { useCopyLinkState } from "@/lib/ui/copy-link";
 import "./task-detail.css";
@@ -684,6 +689,41 @@ export function TaskDetailView({
   // rebuilt path — same reasoning DocumentDetailView's Copy link uses:
   // it's guaranteed to match exactly what's on screen.
   const { state: copyLinkState, copy: copyLink } = useCopyLinkState(() => window.location.href);
+
+  // ── Delete (founder-requested; there was previously no way to remove a
+  // standalone task at all). Owned entirely by this component, same as the
+  // comment composer and label editor just below — it writes directly
+  // through deleteFleetTask rather than round-tripping through a prop the
+  // route page would have to thread through, because there is nothing for
+  // the page to optimistically overlay: a deleted task has nowhere to
+  // render, so the only follow-up is navigating away, which this component
+  // already does for Escape (see the effect above) and already has
+  // `router`/`projectHref` in scope for.
+  const [confirmDeleteTask, setConfirmDeleteTask] = useState(false);
+  const [deletingTask, setDeletingTask] = useState(false);
+  const [deleteTaskError, setDeleteTaskError] = useState<string | null>(null);
+
+  const commitDeleteTask = useCallback(async () => {
+    if (!workspaceId) return;
+    setDeletingTask(true);
+    setDeleteTaskError(null);
+    try {
+      await deleteFleetTask(workspaceId, task.id);
+    } catch (e) {
+      setDeleteTaskError(e instanceof Error ? e.message : "Could not delete this task.");
+      setDeletingTask(false);
+      return;
+    }
+    // The delete already happened — refreshFleetTasks (fire-and-forget,
+    // same contract as refreshFleetProjects) just catches up every other
+    // view of this project's tasks (the board, the grouped list) before we
+    // navigate away from a page whose own subject no longer exists.
+    refreshFleetTasks(workspaceId);
+    setConfirmDeleteTask(false);
+    setDeletingTask(false);
+    router.push(projectHref);
+  }, [workspaceId, task.id, router, projectHref]);
+
   const siblingIndex = useMemo(
     () => orderedSiblings.findIndex((t) => t.id === task.id),
     [orderedSiblings, task.id],
@@ -988,8 +1028,41 @@ export function TaskDetailView({
                     <LinkIcon size={14} strokeWidth={1.75} />
                   )}
                 </button>
+                {/* Delete — writes through fleet_delete_task, gated
+                    member-and-above server-side exactly like every other
+                    mutation on this page (status, assign, comments); this
+                    component renders it unconditionally rather than trying
+                    to duplicate that role check client-side, the same
+                    posture the status/assignee/comment controls above
+                    already take. Never accent-filled — CLAUDE.md: a
+                    destructive action is never the one primary filled
+                    button. */}
+                {workspaceId ? (
+                  <button
+                    type="button"
+                    className="fleet-task-detail-icon-btn"
+                    aria-label="Delete task"
+                    title="Delete task"
+                    onClick={() => { setDeleteTaskError(null); setConfirmDeleteTask(true); }}
+                  >
+                    <Trash2 size={14} strokeWidth={1.75} />
+                  </button>
+                ) : null}
               </div>
             </div>
+
+            {confirmDeleteTask ? (
+              <DeleteTaskDialog
+                taskTitle={task.title || "Untitled task"}
+                subtaskCount={task.subtask_count || 0}
+                commentCount={readComments(task).length}
+                labelCount={(task.labels || []).length}
+                busy={deletingTask}
+                error={deleteTaskError}
+                onCancel={() => { if (!deletingTask) setConfirmDeleteTask(false); }}
+                onConfirm={() => void commitDeleteTask()}
+              />
+            ) : null}
 
             {parentTask ? (
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1866,5 +1939,100 @@ function CommentAuthorLine({ author }: { author: ResolvedCommentAuthor }) {
       )}
       <span>{author.label}</span>
     </span>
+  );
+}
+
+/** Destructive confirmation, NOT an approval gate — CLAUDE.md rules out
+ *  approve/deny states for agent actions; a human confirming their own
+ *  irreversible click is a different thing entirely and is fine.
+ *
+ *  Same portal + .fleet-small-dialog + Cancel/.fleet-btn--danger shape as
+ *  ProjectSettings.tsx's DeleteProjectDialog and AgentsList.tsx's
+ *  DeleteAgentDialog, so every destructive confirmation in this product
+ *  reads identically. States exactly what happens to each of the three
+ *  things a task can carry, because none of it is a guess:
+ *    - comments: task.metadata.comments lives ON the row, so they ARE
+ *      deleted with it (project_tasks_service.delete_task's own docstring).
+ *    - sub-tasks: parent_task_id -> this row is ON DELETE SET NULL
+ *      (migrations/add_task_parent.sql) — they are explicitly named as NOT
+ *      deleted, only promoted to top-level tasks, the one fact a founder-
+ *      requested delete must never get wrong.
+ *    - labels: only the ATTACHMENT (project_task_labels) is removed; the
+ *      label itself is a shared workspace vocabulary entry and survives,
+ *      stated so nobody reads "labels removed" as "labels destroyed". */
+function DeleteTaskDialog({
+  taskTitle,
+  subtaskCount,
+  commentCount,
+  labelCount,
+  busy,
+  error,
+  onCancel,
+  onConfirm,
+}: {
+  taskTitle: string;
+  subtaskCount: number;
+  commentCount: number;
+  labelCount: number;
+  busy: boolean;
+  error: string | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  useEffect(() => {
+    const onKeyDown = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) onCancel();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [busy, onCancel]);
+
+  if (typeof document === "undefined") return null;
+
+  const effects = describeTaskDeleteEffects({ subtaskCount, commentCount, labelCount });
+
+  return createPortal(
+    <div
+      role="presentation"
+      onClick={() => { if (!busy) onCancel(); }}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0, 0, 0, 0.5)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 1000,
+      }}
+    >
+      <div
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="fleet-delete-task-title"
+        className="fleet-small-dialog"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="fleet-small-dialog-header">
+          <span id="fleet-delete-task-title" className="fleet-title">Delete task</span>
+        </div>
+        <div className="fleet-small-dialog-body">
+          <p style={{ margin: 0, fontSize: 13, color: "var(--text-primary)", lineHeight: 1.5 }}>
+            Delete <strong>{taskTitle}</strong>?{effects} This can&apos;t be undone.
+          </p>
+          {error && (
+            <p style={{ margin: 0, fontSize: 12, color: "var(--offline-text)" }}>{error}</p>
+          )}
+        </div>
+        <div className="fleet-small-dialog-footer">
+          <button type="button" className="fleet-btn" onClick={onCancel} disabled={busy}>
+            Cancel
+          </button>
+          <button type="button" className="fleet-btn fleet-btn--danger" onClick={onConfirm} disabled={busy}>
+            {busy ? "Deleting…" : "Delete task"}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }

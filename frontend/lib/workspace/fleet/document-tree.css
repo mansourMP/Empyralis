@@ -109,6 +109,16 @@
   color: var(--text-secondary);
 }
 
+/* Copy link — shrunk from .fleet-icon-btn's default 28px box so a file row
+   (30px min-height, same as every other row in this tree) doesn't grow to
+   fit it. */
+.fleet-doc-tree-copy {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+}
+
 /* ── Cross-project view (/w/{id}/context) ────────────────────────────────
    Airy between groups: one project's tree is a unit, and the gap is what
    says so. No boxes, no cards — a bordered card per project would draw
