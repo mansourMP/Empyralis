@@ -1039,8 +1039,32 @@ def _current_dashboard_user(
 
 
 def _accessible_workspace_ids(current_user: Dict[str, Any]) -> List[str]:
-    ids = [str(w or "").strip() for w in (current_user.get("workspace_ids") or [])]
-    return [w for w in ids if w]
+    """The workspaces this person may consent for, resolved LIVE.
+
+    ``current_user["workspace_ids"]`` is a snapshot taken from the session
+    TOKEN at sign-in -- a hint, never the source of truth. A workspace
+    change (left, removed, deleted) after that token was minted leaves the
+    claim carrying a stale id forever, since nothing re-signs a live
+    session on membership change. Reading it directly here once meant a
+    fully consistent account -- one user, one workspace, one membership row
+    -- got told "not a member of any workspace" and 403'd, because the
+    token happened to predate the membership and still named a workspace
+    that no longer existed (MAN, 2026-09-01).
+
+    ``auth.workspace_access_map`` is the SAME live-membership resolution
+    every other surface gates on (``enforce_workspace_access`` ->
+    ``allowed_workspace_ids`` -> this). It is seeded from
+    ``current_user["workspace_access"]`` when ``auth.get_current_user``
+    already computed it for this request (the normal case: that computation
+    merges the token's claim with a live ``_list_workspace_memberships``
+    query and drops any workspace_id that no longer resolves to a real
+    row) and otherwise recomputes the same merge on demand. Never a second,
+    parallel interpretation of "which workspaces may this person consent
+    for" -- reusing the app's own gate is the fix.
+    """
+    from server_modules import auth
+
+    return list(auth.workspace_access_map(current_user).keys())
 
 
 async def _named_accessible_workspaces(current_user: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -1416,10 +1440,22 @@ class EmpyralisOAuthProvider(
             login_url = f"{_frontend_origin()}/login?{urlencode({'next': next_path})}"
             return RedirectResponse(login_url, status_code=302)
 
+        # _named_accessible_workspaces resolves membership LIVE (never from
+        # the session token's own workspace_ids claim -- see
+        # _accessible_workspace_ids), so an empty result here is a genuine,
+        # just-checked fact: this account holds no workspace right now. It is
+        # never "the token is stale" -- that case is resolved correctly
+        # above it, not reported as this. Two different facts, one signal
+        # each: this page must not become the "please log in again" screen
+        # in disguise, so it also says what to do next instead of dead-ending.
         workspaces = await _named_accessible_workspaces(current_user)
         if not workspaces:
             return HTMLResponse(
-                _render_message_page("No workspace", "Your Empyralis account is not a member of any workspace yet."),
+                _render_message_page(
+                    "No workspace",
+                    "Your Empyralis account is not a member of any workspace yet.",
+                    status_hint="Create or join a workspace in Empyralis, then reconnect this Connector.",
+                ),
                 status_code=403,
             )
 

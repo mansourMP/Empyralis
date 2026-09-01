@@ -165,6 +165,17 @@ def _mint_real_session_token(user_id: str, workspace_ids: list[str]) -> str:
 def _login(test_client, user_id: str = "u-connector-1", workspace_ids=("ws-connector-1",)) -> None:
     from server_modules import auth
 
+    # /mcp/consent resolves accessible workspaces LIVE (auth.workspace_access_map),
+    # never from the raw token claim alone -- so a workspace the token claims
+    # must genuinely exist, the way a real signup would leave a row behind, or
+    # it is (correctly) treated as orphaned and dropped. This binds each claimed
+    # workspace to a tenant without needing a full auth.register_user() -- the
+    # minimal seed for "this workspace is not orphaned". The isolated-DELETED-
+    # workspace case (belongs to a real workspace that no longer exists) is
+    # covered separately in test_mcp_oauth_provider.py.
+    for workspace_id in workspace_ids:
+        auth.ensure_workspace_tenant_binding(workspace_id, f"tenant-{workspace_id}")
+
     test_client.cookies.set(auth.AUTH_ACCESS_COOKIE_NAME, _mint_real_session_token(user_id, list(workspace_ids)))
     # The dashboard's own CSRF cookie IS present, exactly as it is in a real
     # browser. What a browser cannot do is echo it back in a custom HEADER on
@@ -409,6 +420,113 @@ def test_allow_refuses_a_workspace_the_session_does_not_hold(assembled, pool):
             tc, page.text, decision="allow", overrides={"workspace_id": "ws-somebody-elses"},
         )
     assert response.status_code == 403
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# The 403 in production, 2026-09-01 -- a fully consistent account (one user,
+# one workspace, one owner membership) was told "no workspace" and 403'd,
+# because the session TOKEN was minted before that membership and still
+# named a workspace that no longer existed. The consent screen believed the
+# token over the database. server_modules/mcp_oauth_provider.py:1042.
+# ═════════════════════════════════════════════════════════════════════════
+
+
+def test_a_token_naming_a_deleted_workspace_still_serves_the_real_membership(assembled, pool, monkeypatch):
+    """Reproduction: mint a session whose token claims a workspace id that
+    was never bound to a tenant (the observable shape of "deleted" --
+    tenant_id_for_workspace raises exactly as it would for a real delete),
+    while the account genuinely, currently belongs to a DIFFERENT workspace.
+
+    Before the fix, _accessible_workspace_ids read the token's claim
+    directly: the stale id came back as the (sole) accessible workspace, its
+    name lookup failed the same way a deleted workspace's would, and -- once
+    _named_accessible_workspaces stopped dropping unreadable names (that
+    degrade-to-a-word behavior is intentional) -- the live, real membership
+    was never consulted at all, or a fully consistent account got a 403 with
+    an empty list depending on which stale id won. Either way: wrong. The
+    fix must serve the REAL workspace, not the phantom one, without the
+    caller needing to log out and back in.
+    """
+    from starlette.testclient import TestClient
+    from server_modules import auth
+
+    app, provider = assembled
+    client_info = _register_client(provider)
+    ticket = _ticket(client_info)
+
+    # upsert_workspace_membership requires a real user row; give it the
+    # minimal one, rather than a full auth.register_user() (which bootstraps
+    # its OWN workspace under an id this test cannot pin, making "the one
+    # real workspace this account holds" ambiguous to assert on).
+    stale_user = {"id": "u-stale-token", "email": "u-stale-token@example.test", "name": "Stale Token User"}
+    monkeypatch.setattr(auth, "_find_user_by_id", lambda uid: stale_user if uid == "u-stale-token" else None)
+
+    with TestClient(app) as tc:
+        # The account's CURRENT, live, real workspace -- created and bound
+        # after the token below was (hypothetically) minted.
+        auth.ensure_workspace_tenant_binding("ws-real-current", "tenant-real-current")
+        # The account's REAL, live membership -- looked up fresh on every
+        # request, unaffected by what the token happened to claim.
+        auth.upsert_workspace_membership("u-stale-token", "ws-real-current", "owner")
+        # The token still names a workspace that was never bound to any
+        # tenant at all -- i.e. it does not exist, the same as a deleted one.
+        tc.cookies.set(
+            auth.AUTH_ACCESS_COOKIE_NAME,
+            _mint_real_session_token("u-stale-token", ["ws-deleted-long-ago"]),
+        )
+        tc.cookies.set(auth.AUTH_CSRF_COOKIE_NAME, "dashboard-csrf-cookie-value")
+
+        page = tc.get(f"{oauth.CONSENT_PATH}?ticket={ticket}", follow_redirects=False)
+        assert page.status_code == 200, (
+            f"a fully consistent account (real membership exists) was refused "
+            f"because its SESSION TOKEN named a workspace that no longer "
+            f"exists: {page.status_code} {page.text[:300]!r}"
+        )
+        assert "ws-deleted-long-ago" not in page.text, "the deleted workspace must not be offered at all"
+
+        response, submitted = _submit_rendered_consent_form(tc, page.text, decision="allow")
+        assert submitted.get("workspace_id") == "ws-real-current", (
+            f"the consent form did not offer the account's real workspace: {submitted}"
+        )
+    assert response.status_code == 302, f"Allow did not mint a code: {response.status_code} {response.text[:300]!r}"
+    assert "code=" in response.headers["location"]
+
+
+def test_a_user_in_no_workspace_at_all_gets_an_honest_message_not_a_dead_end(assembled, pool):
+    """The negative this incident's fix must not create: someone who
+    GENUINELY belongs to nothing must still be refused -- but told what to
+    do next, not left on a bare, unexplained 403. "You belong to no
+    workspace" and "your session is out of date" are different facts; this
+    is only ever the first, now that resolution is live."""
+    from starlette.testclient import TestClient
+    from server_modules import auth
+
+    app, provider = assembled
+    client_info = _register_client(provider)
+    ticket = _ticket(client_info)
+
+    with TestClient(app) as tc:
+        # No ensure_workspace_tenant_binding, no upsert_workspace_membership
+        # -- this account has never belonged to anything, live or claimed.
+        tc.cookies.set(
+            auth.AUTH_ACCESS_COOKIE_NAME,
+            _mint_real_session_token("u-truly-workspaceless", ["ws-never-existed"]),
+        )
+        tc.cookies.set(auth.AUTH_CSRF_COOKIE_NAME, "dashboard-csrf-cookie-value")
+
+        response = tc.get(f"{oauth.CONSENT_PATH}?ticket={ticket}", follow_redirects=False)
+
+    assert response.status_code == 403
+    assert "not a member of any workspace" in response.text
+    # It must say what to do next -- not just refuse.
+    assert "workspace" in response.text.lower() and (
+        "create" in response.text.lower() or "join" in response.text.lower()
+    ), f"the empty-workspace page does not say what to do next: {response.text[:400]!r}"
+    # And it must not misreport this as a session/login problem -- that is a
+    # different fact, resolved by the redirect-to-login branch above it, not
+    # by this one.
+    assert "session" not in response.text.lower()
+    assert "log in" not in response.text.lower() and "login" not in response.text.lower()
 
 
 def test_deny_from_a_plain_form_post_reaches_the_client(assembled, pool):
