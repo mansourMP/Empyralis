@@ -25,6 +25,7 @@ import {
   Plug,
   Radio,
   RefreshCw,
+  Repeat,
   Settings,
   Smartphone,
   Sparkles,
@@ -57,6 +58,9 @@ import {
   previewFleetAgentSchedule,
   createFleetAgentSchedule,
   deleteFleetAgentSchedule,
+  useFleetAgentRecurringSchedule,
+  createFleetAgentRecurringSchedule,
+  cancelFleetAgentRecurringSchedule,
   friendlyChannelOwnershipError,
   useFleetProjects,
   useFleetWorkspaceTasks,
@@ -65,7 +69,18 @@ import {
   type FleetChannel,
   type FleetCapability,
   type FleetScheduleItem,
+  type FleetRecurringScheduleItem,
 } from "./fleet-data";
+import {
+  buildRecurringCron,
+  describeCronPlain,
+  describeRecurringSchedule,
+  parseRecurringCron,
+  WEEKDAY_NAMES,
+  DEFAULT_PLAIN_SCHEDULE,
+  type PlainRecurringSchedule,
+  type RecurringFrequency,
+} from "./recurring-schedule-plain";
 import { groupTasksByAgent } from "./agent-card-face";
 import { agentDisplayStatus } from "./agent-view-options";
 import { timeAgo, formatDateTime, formatNumber, usagePayerLabel, type AgentStatusTone, type UsageMatrixRow } from "./fleet-presentation";
@@ -1784,7 +1799,10 @@ function GeneralTab({
         <AgentTitle workspaceId={workspaceId} agentId={agentId} label={agent.label || ""} onRenamed={onRenamed} />
       )}
       {!isMaster && agent && (
-        <ScheduleSection workspaceId={workspaceId} agentId={agentId} />
+        <>
+          <ScheduleSection workspaceId={workspaceId} agentId={agentId} />
+          <RecurringScheduleSection workspaceId={workspaceId} agentId={agentId} />
+        </>
       )}
     </div>
   );
@@ -2132,6 +2150,228 @@ function ScheduleSection({ workspaceId, agentId }: { workspaceId: string; agentI
               </button>
             </div>
           ))}
+        </div>
+      )}
+      {!creating && error && <p className="fleet-channel-expand-error" style={{ marginTop: 8 }}>{error}</p>}
+    </div>
+  );
+}
+
+// ── Recurring schedule — "every week," not a single wake-up ────────────────
+// ScheduleSection's twin, same tab, same visual grammar (one open form at a
+// time, one accent-filled Confirm inside it, everything else neutral — see
+// create-accent.ts's rule; this section isn't a list/composer surface that
+// module governs, so it earns the same property the plain way ScheduleSection
+// already does: the trigger button disappears while the form is open, so
+// there is only ever one filled button on screen).
+//
+// No PATCH route exists for a recurring schedule (bounded_scheduler_service
+// only has create/list/cancel) — "Edit" is a cancel-then-create pair the UI
+// performs as one action, never a fabricated update call.
+
+const TIME_FIELD_OPTIONS: Array<{ value: RecurringFrequency; label: string }> = [
+  { value: "daily", label: "Every day" },
+  { value: "weekdays", label: "Every weekday (Mon–Fri)" },
+  { value: "weekly", label: "Every week" },
+];
+
+function timeInputValue(hour: number, minute: number): string {
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+}
+
+function RecurringScheduleSection({ workspaceId, agentId }: { workspaceId: string; agentId: string }) {
+  const { schedules, loading, refresh } = useFleetAgentRecurringSchedule(workspaceId, agentId);
+  const [creating, setCreating] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [plain, setPlain] = useState<PlainRecurringSchedule>(DEFAULT_PLAIN_SCHEDULE);
+  const [instruction, setInstruction] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [cancellingId, setCancellingId] = useState<string | null>(null);
+
+  function resetForm() {
+    setCreating(false);
+    setEditingId(null);
+    setPlain(DEFAULT_PLAIN_SCHEDULE);
+    setInstruction("");
+    setError(null);
+  }
+
+  function startCreate() {
+    setPlain(DEFAULT_PLAIN_SCHEDULE);
+    setInstruction("");
+    setEditingId(null);
+    setError(null);
+    setCreating(true);
+  }
+
+  function startEdit(item: FleetRecurringScheduleItem) {
+    const parsed = parseRecurringCron(item.cron_expression);
+    if (!parsed) return; // Edit is only rendered when this succeeds — see below.
+    setPlain(parsed);
+    setInstruction(item.instruction);
+    setEditingId(item.id);
+    setError(null);
+    setCreating(true);
+  }
+
+  async function handleConfirm() {
+    setBusy(true);
+    setError(null);
+    const cron = buildRecurringCron(plain);
+    const wasEditing = editingId;
+    if (wasEditing) {
+      const cancelResult = await cancelFleetAgentRecurringSchedule(workspaceId, agentId, wasEditing);
+      if (!cancelResult.ok) {
+        setBusy(false);
+        setError(cancelResult.error || "Could not update this schedule.");
+        return;
+      }
+    }
+    const result = await createFleetAgentRecurringSchedule(workspaceId, agentId, cron, instruction.trim());
+    setBusy(false);
+    if (result.ok) {
+      resetForm();
+      await refresh();
+    } else if (wasEditing) {
+      // The old schedule is already gone (cancel above succeeded) — say so
+      // honestly rather than a generic failure that implies nothing changed.
+      setError(`Cancelled the old schedule, but couldn't save the new one: ${result.error || "unknown error"}. Set it up again.`);
+      await refresh();
+    } else {
+      setError(result.error || "Could not create this schedule.");
+    }
+  }
+
+  async function handleCancel(id: string) {
+    setCancellingId(id);
+    setError(null);
+    const result = await cancelFleetAgentRecurringSchedule(workspaceId, agentId, id);
+    setCancellingId(null);
+    if (result.ok) await refresh();
+    else setError(result.error || "Could not cancel this schedule.");
+  }
+
+  return (
+    <div style={{ marginTop: 20 }}>
+      <div className="fleet-detail-section-title" style={{ marginTop: 0, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span>Recurring</span>
+        {!creating && (
+          <button type="button" className="fleet-btn" onClick={startCreate}>
+            <Repeat size={14} strokeWidth={1.75} /> New recurring schedule
+          </button>
+        )}
+      </div>
+
+      {creating && (
+        <div className="fleet-card" style={{ padding: "var(--space-3)", marginBottom: 12 }}>
+          <div className="fleet-wizard-label" style={{ marginTop: 0 }}>How often</div>
+          <select
+            className="fleet-wizard-input"
+            value={plain.frequency}
+            onChange={(e) => setPlain({ ...plain, frequency: e.target.value as RecurringFrequency })}
+          >
+            {TIME_FIELD_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+
+          {plain.frequency === "weekly" && (
+            <>
+              <div className="fleet-wizard-label">Which day</div>
+              <select
+                className="fleet-wizard-input"
+                value={plain.weekday}
+                onChange={(e) => setPlain({ ...plain, weekday: Number(e.target.value) })}
+              >
+                {WEEKDAY_NAMES.map((name, idx) => (
+                  <option key={name} value={idx}>{name}</option>
+                ))}
+              </select>
+            </>
+          )}
+
+          <div className="fleet-wizard-label">What time</div>
+          <input
+            type="time"
+            className="fleet-wizard-input"
+            value={timeInputValue(plain.hour, plain.minute)}
+            onChange={(e) => {
+              const [h, m] = e.target.value.split(":").map(Number);
+              if (Number.isFinite(h) && Number.isFinite(m)) setPlain({ ...plain, hour: h, minute: m });
+            }}
+          />
+          <p className="fleet-subtitle" style={{ marginTop: 4 }}>→ {describeRecurringSchedule(plain)}</p>
+
+          <div className="fleet-wizard-label">What should it do</div>
+          <textarea
+            className="fleet-wizard-input"
+            placeholder="Check in on things and tell me if anything needs my attention."
+            value={instruction}
+            onChange={(e) => setInstruction(e.target.value)}
+            rows={2}
+            style={{ height: "auto", padding: "8px 12px", resize: "vertical" }}
+          />
+          {error && <p className="fleet-channel-expand-error" style={{ marginTop: 4 }}>{error}</p>}
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            <button type="button" className="fleet-btn" disabled={busy} onClick={resetForm}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="fleet-btn fleet-btn--accent"
+              disabled={busy || !instruction.trim()}
+              onClick={handleConfirm}
+            >
+              {busy ? "Saving…" : editingId ? "Save changes" : "Confirm"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {loading ? (
+        <FleetToggleRowsSkeleton rows={2} trailing="button" label="Loading recurring schedules" />
+      ) : schedules.length === 0 ? (
+        <p className="fleet-subtitle" style={{ marginTop: 0 }}>
+          No recurring schedules yet.
+        </p>
+      ) : (
+        <div className="fleet-config" style={{ padding: 0 }}>
+          {schedules.map((item) => {
+            const editable = parseRecurringCron(item.cron_expression) !== null;
+            return (
+              <div key={item.id} className="fleet-toggle-row">
+                <div style={{ minWidth: 0 }}>
+                  <div className="fleet-toggle-row-label">{item.instruction || item.summary || "Recurring check-in"}</div>
+                  <div className="fleet-toggle-row-desc">
+                    {describeCronPlain(item.cron_expression)} · Next {formatDueAt(item.next_fire_at)}
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                  {editable && (
+                    <button
+                      type="button"
+                      className="fleet-btn"
+                      disabled={cancellingId === item.id}
+                      onClick={() => startEdit(item)}
+                      title="Edit this recurring schedule"
+                    >
+                      <Pencil size={14} strokeWidth={1.75} /> Edit
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="fleet-btn"
+                    disabled={cancellingId === item.id}
+                    onClick={() => handleCancel(item.id)}
+                    title="Cancel this recurring schedule"
+                  >
+                    <Trash2 size={14} strokeWidth={1.75} /> {cancellingId === item.id ? "Cancelling…" : "Cancel"}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
       {!creating && error && <p className="fleet-channel-expand-error" style={{ marginTop: 8 }}>{error}</p>}

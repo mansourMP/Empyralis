@@ -409,6 +409,170 @@ class FleetScheduleControlTests(unittest.TestCase):
         self.assertFalse(result["ok"])
 
 
+class FleetRecurringScheduleControlTests(unittest.TestCase):
+    """Owner-facing recurring-schedule surface: fleet_list_agent_recurring_
+    schedules, fleet_create_agent_recurring_schedule, fleet_cancel_agent_
+    recurring_schedule -- FleetScheduleControlTests' twin, above, for "every
+    week" instead of a one-off wake-up.
+
+    fleet_list_agent_recurring_schedules shipped with NO test that actually
+    CALLED it end to end: every prior reference to `recurring_schedule_view`
+    in this module (list_recurring_tasks, the agent-callable twin above)
+    imports it locally, but this owner-facing function's own `from
+    server_modules.bounded_scheduler_service import list_recurring_schedules`
+    line never imported `recurring_schedule_view` at all -- so every real
+    call raised `NameError: name 'recurring_schedule_view' is not defined`,
+    caught only by FleetAgentDetail.tsx's new Recurring section actually
+    listing a schedule it had just created in a real browser (MAN's
+    recurring-schedule UI work). The route's own `except Exception` caught
+    it and returned {"ok": False, "schedules": []}, which read identically
+    to "no recurring schedules yet" -- exactly CLAUDE.md's "empty" vs
+    "couldn't load this" trap. This test calls the real function with a
+    real row shape, not a mock of the broken name, so it fails loud if the
+    import regresses."""
+
+    def _bundle(self):
+        return {"id": "agent-x", "install_metadata": {}}
+
+    def _row(self, **overrides):
+        row = {
+            "id": "recur-1",
+            "agent_id": "agent-x",
+            "cron_expression": "0 9 * * 1",
+            "status": "active",
+            "requested_by": "agent-x",
+            "summary": "Check on dad and text me a summary.",
+            "payload": {"instruction": "Check on dad and text me a summary."},
+            "metadata": {},
+            "next_fire_at": "2026-09-07T09:00:00+00:00",
+            "last_fired_at": None,
+            "occurrence_count": 0,
+            "max_occurrences": None,
+            "expires_at": "2026-11-30T09:00:00+00:00",
+            "created_at": "2026-09-01T00:00:00+00:00",
+        }
+        row.update(overrides)
+        return row
+
+    def test_list_recurring_schedules_actually_returns_shaped_rows(self):
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.bounded_scheduler_service.list_recurring_schedules",
+                new=AsyncMock(return_value=[self._row()]),
+            ) as list_mock,
+        ):
+            result = _run(fleet_tools.fleet_list_agent_recurring_schedules(workspace_id="ws-1", agent_id="agent-x"))
+        # The regression this guards: result["ok"] was False (NameError
+        # swallowed by the route's except Exception) with schedules=[],
+        # indistinguishable from a genuinely empty list.
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertEqual(list_mock.call_args.kwargs["agent_id"], "agent-x")
+        schedules = result["schedules"]
+        self.assertEqual(len(schedules), 1)
+        self.assertEqual(schedules[0]["id"], "recur-1")
+        self.assertEqual(schedules[0]["cron_expression"], "0 9 * * 1")
+        self.assertEqual(schedules[0]["instruction"], "Check on dad and text me a summary.")
+        self.assertEqual(schedules[0]["status"], "active")
+
+    def test_list_recurring_schedules_rejects_unknown_agent(self):
+        with patch(
+            "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+            new=AsyncMock(return_value=None),
+        ):
+            result = _run(fleet_tools.fleet_list_agent_recurring_schedules(workspace_id="ws-1", agent_id="ghost"))
+        self.assertFalse(result["ok"])
+
+    def test_create_recurring_schedule_always_forces_owner_tier(self):
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.bounded_scheduler_service.create_recurring_schedule",
+                new=AsyncMock(return_value=self._row()),
+            ) as create_mock,
+            patch.object(fleet_tools, "_ledger_fleet_action", new=AsyncMock()),
+        ):
+            result = _run(fleet_tools.fleet_create_agent_recurring_schedule(
+                actor_id="user-1", workspace_id="ws-1", agent_id="agent-x",
+                cron="0 9 * * 1", instruction="check the inbox",
+            ))
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertEqual(create_mock.call_args.kwargs["authority_tier"], "owner")
+        self.assertEqual(create_mock.call_args.kwargs["cron_expression"], "0 9 * * 1")
+
+    def test_create_recurring_schedule_rejects_unknown_agent(self):
+        with patch(
+            "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+            new=AsyncMock(return_value=None),
+        ):
+            result = _run(fleet_tools.fleet_create_agent_recurring_schedule(
+                actor_id="user-1", workspace_id="ws-1", agent_id="ghost",
+                cron="0 9 * * 1", instruction="check the inbox",
+            ))
+        self.assertFalse(result["ok"])
+
+    def test_cancel_recurring_schedule_transitions_status_and_ledgers(self):
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.control_plane_repository.get_agent_recurring_schedule",
+                new=AsyncMock(return_value=self._row()),
+            ),
+            patch(
+                "server_modules.control_plane_repository.update_agent_recurring_schedule",
+                new=AsyncMock(return_value=self._row(status="cancelled")),
+            ) as update_mock,
+            patch.object(fleet_tools, "_ledger_fleet_action", new=AsyncMock()) as ledger_mock,
+        ):
+            result = _run(fleet_tools.fleet_cancel_agent_recurring_schedule(
+                actor_id="user-1", workspace_id="ws-1", agent_id="agent-x", schedule_id="recur-1",
+            ))
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertEqual(update_mock.call_args.kwargs["status"], "cancelled")
+        ledger_mock.assert_awaited_once()
+
+    def test_cancel_recurring_schedule_rejects_wrong_agent(self):
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.control_plane_repository.get_agent_recurring_schedule",
+                new=AsyncMock(return_value=self._row(agent_id="agent-OTHER")),
+            ),
+        ):
+            result = _run(fleet_tools.fleet_cancel_agent_recurring_schedule(
+                actor_id="user-1", workspace_id="ws-1", agent_id="agent-x", schedule_id="recur-1",
+            ))
+        self.assertFalse(result["ok"])
+
+    def test_cancel_recurring_schedule_rejects_already_terminal(self):
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.control_plane_repository.get_agent_recurring_schedule",
+                new=AsyncMock(return_value=self._row(status="cancelled")),
+            ),
+        ):
+            result = _run(fleet_tools.fleet_cancel_agent_recurring_schedule(
+                actor_id="user-1", workspace_id="ws-1", agent_id="agent-x", schedule_id="recur-1",
+            ))
+        self.assertFalse(result["ok"])
+
+
 class ResolveHardwareStatusCloudHonestyTests(unittest.TestCase):
     """fleet_tools._resolve_hardware_status — no-fake-state fix.
 

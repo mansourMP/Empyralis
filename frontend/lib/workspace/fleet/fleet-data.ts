@@ -965,6 +965,93 @@ export async function deleteFleetAgentSchedule(
   }
 }
 
+// ── Recurring schedule — "do this every week," not a single wake-up ────────
+// The owner-only twin of Schedule (Part U2) just above: same REST shape
+// (list/create/cancel), same owner-gated routes, different underlying
+// primitive (bounded_scheduler_service.create_recurring_schedule, which
+// persists its own generator row instead of a single due_at). There is no
+// PATCH route — bounded_scheduler_service has no update_recurring_schedule
+// at all, only create/list/cancel — so "editing" a schedule in the UI is a
+// cancel-then-create pair, never a fabricated PATCH call.
+
+export type FleetRecurringScheduleItem = {
+  id: string;
+  cron_expression: string;
+  instruction: string;
+  summary: string;
+  status: string;
+  next_fire_at: string;
+  last_fired_at: string | null;
+  occurrence_count: number;
+  max_occurrences: number | null;
+  expires_at: string | null;
+};
+
+export function useFleetAgentRecurringSchedule(workspaceId: string, agentId: string | null) {
+  const [schedules, setSchedules] = useState<FleetRecurringScheduleItem[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const refresh = useCallback(async () => {
+    if (!agentId) { setSchedules([]); return; }
+    setLoading(true);
+    try {
+      const res = await fleetAuthorizedFetch(
+        `/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}/recurring-schedule`,
+        { credentials: "include" }
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setSchedules(data.schedules || []);
+    } catch { setSchedules([]); }
+    finally { setLoading(false); }
+  }, [workspaceId, agentId]);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  return { schedules, loading, refresh };
+}
+
+export async function createFleetAgentRecurringSchedule(
+  workspaceId: string, agentId: string, cron: string, instruction: string
+): Promise<FleetScheduleMutationResult & { next_fire_at?: string }> {
+  try {
+    const res = await fleetAuthorizedFetch(
+      `/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}/recurring-schedule`,
+      {
+        method: "POST",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+        body: JSON.stringify({ cron, instruction }),
+      }
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data?.ok === false) return { ok: false, error: getErrorMessage(data, `HTTP ${res.status}`) };
+    return { ok: true, next_fire_at: data.next_fire_at };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Request failed" };
+  }
+}
+
+export async function cancelFleetAgentRecurringSchedule(
+  workspaceId: string, agentId: string, scheduleId: string
+): Promise<FleetScheduleMutationResult> {
+  try {
+    const res = await fleetAuthorizedFetch(
+      `/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}/recurring-schedule/${encodeURIComponent(scheduleId)}`,
+      {
+        method: "DELETE",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("DELETE"),
+      }
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data?.ok === false) return { ok: false, error: getErrorMessage(data, `HTTP ${res.status}`) };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Request failed" };
+  }
+}
+
 export type WorkspaceActivityEvent = {
   id: string | null;
   title: string | null;

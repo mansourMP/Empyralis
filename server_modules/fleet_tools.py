@@ -3449,7 +3449,7 @@ async def fleet_list_agent_recurring_schedules(
 ) -> Dict[str, Any]:
     """Owner-facing list of this agent's active recurring schedules."""
     from server_modules import agent_registry_repository as repo
-    from server_modules.bounded_scheduler_service import list_recurring_schedules
+    from server_modules.bounded_scheduler_service import list_recurring_schedules, recurring_schedule_view
 
     if not str(agent_id or "").strip():
         return {"ok": False, "error": "agent_id is required"}
