@@ -5,7 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 import { BarList, type BarListRow } from "@/lib/components/BarList";
-import { EmptyState, ErrorState, ForbiddenState, LoadingState } from "@/lib/components/PageStates";
+import { EmptyState, ErrorState, ForbiddenState, LoadingState, SignedOutState } from "@/lib/components/PageStates";
 import { FAILURES_DEFAULT_DAYS, formatFailureEvent, formatFailureGroups, parseFailuresDays, type OperatorFailures } from "@/lib/failures";
 import { useOperatorResource } from "@/lib/use-operator-resource";
 import { planOperatorView } from "@/lib/view-state";
@@ -65,6 +65,7 @@ function FailuresPageInner() {
       </div>
 
       {view.kind === "loading" && <LoadingState rows={1} />}
+      {view.kind === "signedOut" && <SignedOutState />}
       {view.kind === "forbidden" && <ForbiddenState />}
       {view.kind === "error" && <ErrorState message={view.message} onRetry={refresh} />}
 

@@ -15,18 +15,28 @@
  * that is a page-level rendering choice (see accounts.ts's own handling),
  * never something decided here.
  *
- * `forbidden` is its own state (401/403), not folded into `error`: every
- * route in routes_operator_console.py calls `has_platform_fleet_operator_
- * access` before running a query, and require_api_key alone only proves
- * "is someone logged in" (CLAUDE.md). A signed-in non-operator needs to be
- * told THAT, not shown a generic "could not load" message that reads as a
- * bug in the console rather than a fact about who they are.
+ * `forbidden` is its own state, not folded into `error`: every route in
+ * routes_operator_console.py calls `has_platform_fleet_operator_access`
+ * before running a query, and require_api_key alone only proves "is someone
+ * logged in" (CLAUDE.md). A signed-in non-operator needs to be told THAT,
+ * not shown a generic "could not load" message that reads as a bug in the
+ * console rather than a fact about who they are.
+ *
+ * `signedOut` (401) is separate again, and for the same reason one step
+ * further on. 401 and 403 are DIFFERENT FACTS: 401 is "nobody is signed in
+ * here", 403 is "you are signed in and you are not an operator". Collapsing
+ * them told a signed-out operator that their account lacked entitlement --
+ * a false statement about their permissions, which sent the founder hunting
+ * for an access problem that did not exist (2026-09-02, on an account that
+ * IS in ORION_ADMIN_EMAILS). Only the 401 branch can offer a sign-in link,
+ * because only it is fixable by signing in.
  *
  * Run: npx tsx lib/view-state.test.ts
  */
 
 export type OperatorViewState<T> =
   | { kind: "loading" }
+  | { kind: "signedOut" }
   | { kind: "forbidden" }
   | { kind: "error"; message: string }
   | { kind: "ready"; data: T };
@@ -38,7 +48,8 @@ export function planOperatorView<T>(input: {
   data: T | null;
 }): OperatorViewState<T> {
   if (input.loading) return { kind: "loading" };
-  if (input.status === 401 || input.status === 403) return { kind: "forbidden" };
+  if (input.status === 401) return { kind: "signedOut" };
+  if (input.status === 403) return { kind: "forbidden" };
   if (input.error) return { kind: "error", message: input.error };
   if (input.data === null || input.data === undefined) {
     return { kind: "error", message: "The server did not return any data." };

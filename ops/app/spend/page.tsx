@@ -5,7 +5,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useMemo } from "react";
 
 import { BarList, type BarListRow } from "@/lib/components/BarList";
-import { EmptyState, ErrorState, ForbiddenState, LoadingState } from "@/lib/components/PageStates";
+import { EmptyState, ErrorState, ForbiddenState, LoadingState, SignedOutState } from "@/lib/components/PageStates";
 import { SparkBars } from "@/lib/components/SparkBars";
 import { formatUsd } from "@/lib/money";
 import {
@@ -76,6 +76,7 @@ function SpendPageInner() {
       </div>
 
       {view.kind === "loading" && <LoadingState rows={1} />}
+      {view.kind === "signedOut" && <SignedOutState />}
       {view.kind === "forbidden" && <ForbiddenState />}
       {view.kind === "error" && <ErrorState message={view.message} onRetry={refresh} />}
 

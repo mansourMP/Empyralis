@@ -1,7 +1,7 @@
 "use client";
 
 import { StatGrid } from "@/lib/components/StatGrid";
-import { ErrorState, ForbiddenState, LoadingState } from "@/lib/components/PageStates";
+import { ErrorState, ForbiddenState, LoadingState, SignedOutState } from "@/lib/components/PageStates";
 import { formatTimestamp } from "@/lib/format";
 import { agentComputerStatusBreakdown, overviewDetailStats, overviewSummaryStats, type OperatorOverview } from "@/lib/overview";
 import { useOperatorResource } from "@/lib/use-operator-resource";
@@ -26,6 +26,7 @@ export default function OverviewPage() {
       </div>
 
       {view.kind === "loading" && <LoadingState rows={2} />}
+      {view.kind === "signedOut" && <SignedOutState />}
       {view.kind === "forbidden" && <ForbiddenState />}
       {view.kind === "error" && <ErrorState message={view.message} onRetry={refresh} />}
 
