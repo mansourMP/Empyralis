@@ -602,13 +602,14 @@ async def fleet_delete_project(
 ) -> Dict[str, Any]:
     """Owner-only, irreversible: permanently delete a project, including
     the `is_default` one — every project is removable now (founder ruling,
-    2026-09-01). Its tasks, documents, goals and member grants go with it;
-    its agents and its project-scoped connector credentials end up with a
-    NULL project_id (the FK's own ON DELETE SET NULL) rather than being
-    rehomed anywhere — see projects_repository.delete_project's own
-    docstring for exactly what that means for each (correct/intended for
-    agents, a documented open gap for credentials) and for what is
-    deliberately left untouched.
+    2026-09-01). Its tasks, documents, goals and member grants go with it.
+    Its agents end up with a NULL project_id (the FK's own ON DELETE SET
+    NULL) rather than being rehomed anywhere — correct and intended, an
+    agent is independent of every project. Its project-scoped connector
+    credentials are DELETED outright, same transaction, unless a live
+    agent_connector_bindings row still uses one — see
+    projects_repository.delete_project's own docstring for exactly why and
+    for what is deliberately left untouched.
 
     ARCHIVING (PATCH .../projects/{id} with archived=true) is the reversible
     everyday action and stays what the UI offers first; this exists because
@@ -662,7 +663,8 @@ async def fleet_delete_project(
             summary=(
                 f"{_actor_label(current_user)} deleted this project — "
                 f"{removed.get('tasks_deleted', 0)} task(s), "
-                f"{removed.get('documents_deleted', 0)} document(s) removed; "
+                f"{removed.get('documents_deleted', 0)} document(s), "
+                f"{removed.get('credentials_deleted', 0)} connector credential(s) removed; "
                 f"{removed.get('agents_unassigned', 0)} agent(s) no longer "
                 f"belong to a project."
             ),

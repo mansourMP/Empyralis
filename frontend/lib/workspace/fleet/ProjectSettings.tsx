@@ -64,8 +64,12 @@ export function ProjectSettings({
   /** What this project currently holds, for the delete confirmation to name
    *  out loud. Each field is `null` while its own hook is still loading —
    *  the dialog then omits the tally rather than printing a confident "0"
-   *  it hasn't actually confirmed. */
-  contents?: { tasks: number | null; documents: number | null; agents: number | null };
+   *  it hasn't actually confirmed. `credentials` is specifically the count
+   *  that WILL be deleted (a project-scoped vault credential with no live
+   *  agent_connector_bindings subscriber) — never the project's total
+   *  connector count, which would overstate what this action actually
+   *  does (see page.tsx's `credentialsToDelete`). */
+  contents?: { tasks: number | null; documents: number | null; agents: number | null; credentials: number | null };
   /** Called after any successful save so the caller's project list
    *  refetches — this popover has no own poll, it only writes. */
   onChanged?: () => void;
@@ -332,8 +336,10 @@ export function ProjectSettings({
  *  Same portal + .fleet-small-dialog + Cancel/.fleet-btn--danger shape as
  *  AgentsList.tsx's DeleteAgentDialog, so the two destructive confirmations
  *  in this product read identically. It names what actually goes, because
- *  the delete is a cascade the reader cannot see: tasks, documents and
- *  goals die with the project, and the agents do NOT — they simply stop
+ *  the delete is a cascade the reader cannot see: tasks, documents,
+ *  connector credentials (the ones nothing else is still using — see
+ *  `contents.credentials`'s own doc comment on ProjectSettings) and goals
+ *  die with the project, and the agents do NOT — they simply stop
  *  belonging to any project (an agent is independent of every project,
  *  CLAUDE.md hard rule; projects_repository.delete_project no longer
  *  rehomes them anywhere — see its own docstring for why forcing a "home"
@@ -347,7 +353,7 @@ function DeleteProjectDialog({
   onConfirm,
 }: {
   projectName: string;
-  contents?: { tasks: number | null; documents: number | null; agents: number | null };
+  contents?: { tasks: number | null; documents: number | null; agents: number | null; credentials: number | null };
   busy: boolean;
   error: string | null;
   onCancel: () => void;
@@ -364,13 +370,30 @@ function DeleteProjectDialog({
   if (typeof document === "undefined") return null;
 
   const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+  const joinTally = (items: string[]): string => {
+    if (items.length <= 1) return items[0] || "";
+    if (items.length === 2) return `${items[0]} and ${items[1]}`;
+    return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
+  };
   // Only counts we've actually confirmed are shown — a hook still loading
   // reports null, and printing "0 tasks" for an unknown is the kind of
   // confident-but-wrong number a destructive dialog must never show.
-  const tally = [
+  // Credentials go a step further: it's included ONLY when it's a
+  // confirmed, positive count. Zero credentials is not "0 connector
+  // credentials are deleted with it" — that's a consequence that will not
+  // happen, and naming a non-event is exactly the dead copy CLAUDE.md
+  // rules out ("a caption admitting it does nothing is a design bug").
+  const credentialsToDelete = contents?.credentials ?? 0;
+  const tallyItems = [
     contents?.tasks != null ? plural(contents.tasks, "task", "tasks") : null,
     contents?.documents != null ? plural(contents.documents, "document", "documents") : null,
-  ].filter((s): s is string => Boolean(s)).join(" and ");
+    credentialsToDelete > 0 ? plural(credentialsToDelete, "connector credential", "connector credentials") : null,
+  ].filter((s): s is string => Boolean(s));
+  const tally = joinTally(tallyItems);
+  // "is"/"are" agreement: only a single item whose own count is exactly 1
+  // (e.g. "1 document") takes "is" — everything else, including a joined
+  // list of several 1-counts ("1 task and 1 document"), is plural.
+  const tallyVerb = tallyItems.length === 1 && /^1\s/.test(tallyItems[0]) ? "is" : "are";
   const agentsLosingProject = contents?.agents ?? 0;
 
   return createPortal(
@@ -400,7 +423,18 @@ function DeleteProjectDialog({
         <div className="fleet-small-dialog-body">
           <p style={{ margin: 0, fontSize: 13, color: "var(--text-primary)", lineHeight: 1.5 }}>
             Delete <strong>{projectName}</strong>?
-            {tally ? ` Its ${tally} are deleted with it.` : " Its tasks and documents are deleted with it."}
+            {tally ? ` Its ${tally} ${tallyVerb} deleted with it.` : " Its tasks and documents are deleted with it."}
+            {/* The row Empyralis stores is forgotten — the customer's own
+                connection at the provider (an OAuth grant, a bot token)
+                is untouched and stays live until they revoke it there.
+                Overstating this as a revocation is the exact dishonesty
+                CLAUDE.md's "never say more than you verified" rule is
+                written to catch — so this says "forgets," never
+                "revokes," and says so only when it is actually true
+                (credentialsToDelete > 0). */}
+            {credentialsToDelete > 0
+              ? " Empyralis forgets them; nothing is revoked at the provider, and you can reconnect any time."
+              : ""}
             {agentsLosingProject > 0
               ? ` ${plural(agentsLosingProject, "agent", "agents")} will no longer belong to a project.`
               : ""}
