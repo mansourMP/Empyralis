@@ -11,7 +11,7 @@
  *   the rail HIDES Inbox and Agents at zero agents          primary-rail-nav.ts
  *   the Projects page shows CreateFirstAgentEmpty ONLY
  *     when projects.length === 0                            projects/page.tsx
- *   ...but every workspace bootstraps a "General" project    routes_workspaces.py
+ *   ...but every workspace bootstrapped a "General" project  routes_fleet.py
  *   ─▶ the teaching state can NEVER fire, and the rail row that would
  *      reach the real one (at /w/{ws}/agents) is hidden
  * ```
@@ -20,14 +20,28 @@
  * only escape hatches were the command palette's "New agent" and typing the
  * URL, neither of which a first-time customer knows exists.
  *
+ * CORRECTED 2026-09-01 (founder ruling, workspace-first-run continued):
+ * that "General" auto-bootstrap is gone — `fleet_projects` (routes_fleet.py)
+ * no longer calls `ensure_default_project` on every list load, so a
+ * genuinely brand-new workspace now really does have `projectCount === 0`.
+ * The dead end above is CLOSED more directly than this module ever closed
+ * it: `projects.length === 0` now fires honestly, `projects/page.tsx`'s
+ * "full" CreateFirstAgentEmpty branch is reachable on its own, and the band
+ * below is what a person sees only after they've created at least one
+ * project (their own, or an inherited pre-ruling workspace's "General")
+ * and still has no agent. Kept, not deleted: every workspace that already
+ * had "General" before this ruling still has it (nothing here migrates or
+ * removes existing data), so the band stays load-bearing for them.
+ *
  * ── WHY A BAND AND NOT THE FULL EMPTY STATE ──────────────────────────────
  *
  * The obvious fix — key the existing centred empty state on the AGENT count
  * instead of the project count — renders "No projects yet" over a workspace
  * that demonstrably has one. That is the outcome-honesty law pointed at an
- * empty state: the General project is real, it is on the API response, and
- * telling somebody it does not exist to make room for a call to action is
- * the same class of lie as reporting failure on success.
+ * empty state: when there IS a real project (the person's own, or a legacy
+ * "General"), it is on the API response, and telling somebody it does not
+ * exist to make room for a call to action is the same class of lie as
+ * reporting failure on success.
  *
  * So the list still renders the truth, and the offer sits above it as a
  * first-run band carrying ONE control — the same "the single next thing

@@ -428,8 +428,18 @@ async def fleet_projects(
 
     try:
         tenant_id = await _resolve_tenant(resolved_workspace_id)
-        # Guarantee a default project exists so ungrouped agents have a home.
-        await projects.ensure_default_project(tenant_id=tenant_id, workspace_id=resolved_workspace_id)
+        # Founder ruling, 2026-09-01: a brand-new workspace starts with ZERO
+        # projects — the person chooses what to create, nobody hands them a
+        # "General" project they never asked for. This used to call
+        # ensure_default_project (create-if-absent) here, which meant the
+        # very first GET this page ever made silently wrote a project as a
+        # side effect of someone merely loading their own list — the same
+        # anti-pattern default_project_id_if_exists's own docstring already
+        # warns against ("a write nobody asked for"), just not applied here
+        # until now. ensure_default_project still exists and is still called
+        # from genuine on-demand actions (delete_project/set_project_archived
+        # rehoming an orphaned agent, and a project-less non-owner invite in
+        # routes_workspaces.py) — this was the one EAGER, read-path caller.
         rows = await projects.list_projects(
             tenant_id=tenant_id,
             workspace_id=resolved_workspace_id,

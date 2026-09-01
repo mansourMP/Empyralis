@@ -1,8 +1,21 @@
 """Phase 2: Projects repository.
 
-A Project is a client/company/purpose grouping of agents. The hierarchy is
-Workspace > Projects > Agents. Every agent install belongs to exactly one
-project; each workspace has a default ("General") project for ungrouped agents.
+A Project is a client/company/purpose grouping of work (an agent belongs to
+none — see CLAUDE.md's "an agent is independent of every project" hard rule).
+
+A brand-new workspace starts with ZERO projects (founder ruling, 2026-09-01:
+"I have to be the one who is going to choose what project I am going to
+create") — nothing seeds a "General" project at signup or at workspace
+creation any more. `ensure_default_project` (create-if-absent, below) still
+exists and is still called, but only from genuine on-demand actions that need
+a real fallback home: reassigning an orphaned agent/credential when
+`delete_project`/`set_project_archived` removes the project that held them,
+and a project-less non-owner workspace invite (routes_workspaces.py). None of
+those run at workspace creation, and none run merely because someone loaded
+their own project list — see `default_project_id_if_exists` below for the
+read-only counterpart that deliberately never creates one. A workspace that
+existed before this ruling keeps whatever "General" project it already has;
+nothing here migrates or deletes it.
 
 Follows the same direct-pool access pattern as agent_registry_repository:
 plain pool.fetch/execute with explicit tenant_id/workspace_id WHERE filters.
@@ -535,7 +548,15 @@ async def ensure_default_project(
     tenant_id: str,
     workspace_id: str,
 ) -> Dict[str, Any]:
-    """Get the workspace's default project, creating a 'General' one if absent."""
+    """Get the workspace's default project, creating a 'General' one if absent.
+
+    Create-if-absent, on purpose — but call this only from a genuine
+    on-demand action (an owner inviting a teammate, a project being
+    deleted/archived out from under agents that need somewhere to land).
+    Never from a read path: a project must not get created as the silent
+    side effect of someone merely loading their own list. See this module's
+    own header and `default_project_id_if_exists` (the read-only, never-
+    creates counterpart) for the fuller reasoning."""
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         raise control_plane_repository.runtime_db.DurableRuntimeConfigurationError(

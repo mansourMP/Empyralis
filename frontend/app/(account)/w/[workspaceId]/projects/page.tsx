@@ -266,9 +266,12 @@ export default function ProjectsPage() {
       <div className="fleet-content-with-panel">
         <div className="fleet-content-main">
           {/* THE FIRST AGENT IS REACHABLE FROM WHERE A NEW CUSTOMER LANDS.
-              Above the list, never instead of it — the "General" project this
-              workspace was bootstrapped with is real and stays on screen. The
-              band disappears the moment an agent exists, recomputed from the
+              Above the list, never instead of it — this only renders once
+              the workspace has a real project on screen (its own, or a
+              pre-2026-09-01 workspace's inherited "General"; a brand-new
+              workspace has none and shows the "full" CreateFirstAgentEmpty
+              state below instead — see workspace-first-run.ts). The band
+              disappears the moment an agent exists, recomputed from the
               live count with no flag to unset, exactly like every other
               count-shape consumer here. */}
           {firstAgentPrompt === "band" && (
