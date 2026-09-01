@@ -13,7 +13,7 @@
  * Run: npx tsx lib/workspace/fleet/agent-solo-redirect.test.ts
  */
 
-import { shouldRedirectToSoloAgent } from "./agent-solo-redirect";
+import { shouldRedirectToSoloAgent, suppressSoloRedirectFromSearch } from "./agent-solo-redirect";
 
 let passed = 0;
 let failed = 0;
@@ -47,6 +47,56 @@ assert(
 assert(
   shouldRedirectToSoloAgent({ loading: false, hasSoloTarget: true, cardOpen: true, suppressed: true }) === false,
   "still refuses when both guards are true at once",
+);
+
+// --- Bug A, 2026-09-01: the agent detail page's back control ---
+//
+// FleetAgentDetail's back control (`backHref`, [agentId]/[tab]/page.tsx)
+// points at `${base}/agents?list=1`. Before this fix, `?list=1` meant
+// nothing — the only query-derived suppression `agents/page.tsx` recognized
+// was `?new=1` — so landing back on `/agents` with exactly one agent
+// re-ran `shouldRedirectToSoloAgent` with `suppressed` false,
+// `router.replace` fired straight back into that same agent, and the
+// agents list (and "New agent" with it) was permanently unreachable for
+// any workspace holding exactly one agent — every new customer. Run this
+// file against the pre-fix `suppressSoloRedirectFromSearch` (only checking
+// `new`) and this assertion fails with real output, exactly the bug the
+// founder reported.
+assert(
+  suppressSoloRedirectFromSearch("?list=1") === true,
+  "the back-destination's ?list=1 suppresses the solo redirect",
+);
+// The mapping feeds straight into the same `suppressed` input as ?new=1 —
+// this is what stops the redirect firing for the exact scenario above:
+// cardOpen never opens (AgentCreateCard is not part of this flow at all).
+assert(
+  shouldRedirectToSoloAgent({
+    loading: false,
+    hasSoloTarget: true,
+    cardOpen: false,
+    suppressed: suppressSoloRedirectFromSearch("?list=1"),
+  }) === false,
+  "the back-destination (?list=1, cardOpen never opened) is not redirected away from the agents list",
+);
+// ?new=1 keeps working unchanged — the second suppression source doesn't
+// crowd out the first.
+assert(
+  suppressSoloRedirectFromSearch("?new=1") === true,
+  "?new=1 still suppresses (unchanged behaviour, now routed through the shared helper)",
+);
+// An ordinary /agents visit, and any unrelated query string, must NOT be
+// silently treated as a suppression — only these two explicit params do.
+assert(
+  suppressSoloRedirectFromSearch("") === false,
+  "no query string means no suppression",
+);
+assert(
+  suppressSoloRedirectFromSearch("?foo=1") === false,
+  "an unrelated query param is not mistaken for a suppression flag",
+);
+assert(
+  suppressSoloRedirectFromSearch("?list=0") === false,
+  "?list=0 (or anything other than the literal \"1\") does not suppress",
 );
 
 // --- The pre-existing guards, unweakened by adding cardOpen ---

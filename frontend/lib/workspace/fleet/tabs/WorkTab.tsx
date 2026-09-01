@@ -99,7 +99,10 @@ const TRACE_FETCH_CAP = 30;
 
 type TurnActor = { type?: string; id?: string; display_name?: string };
 
-type Turn = {
+// Exported (along with allAgentTraceRefs below) so work-tab-activity.test.ts
+// can prove the real per-turn trace-discovery function against real
+// /api/threads-shaped fixtures — bug B, 2026-09-01's root cause.
+export type Turn = {
   role?: string;
   content?: string;
   created_at?: string;
@@ -109,7 +112,7 @@ type Turn = {
   metadata?: Record<string, unknown>;
 };
 
-type Thread = {
+export type Thread = {
   id: string;
   title?: string;
   channel?: string;
@@ -735,6 +738,69 @@ function useThreadTraceMap(workspaceId: string, threads: Thread[], priorityThrea
   return map;
 }
 
+/** Every trace the SELECTED thread's turns reference (see
+ *  allAgentTraceRefs), fetched and cached by trace id — not capped, and
+ *  not collapsed to "just the latest" the way useThreadTraceMap is. The
+ *  detail pane renders the whole visible conversation, so an earlier
+ *  exchange's trace is exactly as real as the latest one; leaving it
+ *  unfetched is what made the second render silently drop it (bug B).
+ *  Shares the same "skip refetching a finished trace" cache discipline as
+ *  useThreadTraceMap, deliberately not the SAME cache instance — that one
+ *  is keyed for the cheap sidebar-preview cap (TRACE_FETCH_CAP), this one
+ *  exists to never cap the thread actually on screen. */
+function useSelectedThreadTraces(workspaceId: string, selectedThread: Thread | undefined) {
+  const [map, setMap] = useState<Record<string, TraceMapEntry | null>>({});
+  const cacheRef = useRef<Map<string, TraceMapEntry>>(new Map());
+
+  const traceIds = useMemo(
+    () => (selectedThread ? Array.from(new Set(allAgentTraceRefs(selectedThread).map((r) => r.traceId))) : []),
+    [selectedThread],
+  );
+  // Array identity changes every poll (a fresh /api/threads fetch always
+  // returns new objects) even when the underlying trace ids are the same —
+  // join into one string so the effect below only re-runs when the SET of
+  // ids actually changes, not on every unrelated poll tick.
+  const traceIdsKey = traceIds.join(",");
+
+  useEffect(() => {
+    if (traceIds.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      const results = await Promise.all(
+        traceIds.map(async (traceId) => {
+          const cached = cacheRef.current.get(traceId);
+          if (cached && cached.trace.finished_at) return [traceId, cached] as const;
+          try {
+            const r = await fleetAuthorizedFetch(
+              `/api/agent-traces/${encodeURIComponent(traceId)}?workspace_id=${encodeURIComponent(workspaceId)}`,
+              { credentials: "include" },
+            );
+            if (!r.ok) return [traceId, cached || null] as const;
+            const d = await r.json();
+            const entry: TraceMapEntry = { traceId, trace: d.trace || {}, events: Array.isArray(d.events) ? d.events : [] };
+            cacheRef.current.set(traceId, entry);
+            return [traceId, entry] as const;
+          } catch {
+            return [traceId, cached || null] as const;
+          }
+        }),
+      );
+      if (cancelled) return;
+      setMap((prev) => {
+        const next = { ...prev };
+        for (const [traceId, entry] of results) next[traceId] = entry;
+        return next;
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId, traceIdsKey]);
+
+  return map;
+}
+
 function latestTraceRef(t: Thread): { traceId: string; assistantIndex: number } | null {
   const turns = t.turns || [];
   for (let i = turns.length - 1; i >= 0; i--) {
@@ -746,11 +812,26 @@ function latestTraceRef(t: Thread): { traceId: string; assistantIndex: number } 
   return null;
 }
 
-function findPrecedingCustomerTurn(turns: Turn[], beforeIndex: number): Turn | undefined {
-  for (let i = beforeIndex - 1; i >= 0; i--) {
-    if (isCustomerRole(turns[i].role || "")) return turns[i];
+/** Every trace a turn in this thread points at, in turn order — NOT just
+ *  the latest. This file's own top comment says it plainly: a real
+ *  agent_turn() call opens its OWN agent_traces row, every time. A
+ *  multi-turn conversation is therefore multiple traces, one per exchange,
+ *  never one trace for the whole thing. `latestTraceRef` (above) is still
+ *  right for what it is used for now — the sidebar's per-thread preview
+ *  line and status dot, which only ever describe the CURRENT/latest
+ *  exchange — but the detail pane rendering the conversation itself needs
+ *  every one of these, or it silently drops every turn but the last one
+ *  (bug B, 2026-09-01 — founder: "it shows four messages... then it loads
+ *  again by itself and only shows two"). See useSelectedThreadTraces. */
+export function allAgentTraceRefs(t: Thread): { traceId: string; assistantIndex: number }[] {
+  const turns = t.turns || [];
+  const refs: { traceId: string; assistantIndex: number }[] = [];
+  for (let i = 0; i < turns.length; i++) {
+    if (!isAgentSide(turns[i].role || "")) continue;
+    const tid = String((turns[i].metadata as any)?.trace_id || "").trim();
+    if (tid) refs.push({ traceId: tid, assistantIndex: i });
   }
-  return undefined;
+  return refs;
 }
 
 type WorkStatus = "working" | "waiting" | "failed" | "done" | "unknown";
@@ -1015,98 +1096,146 @@ export function WorkTab({
   const stillRunning = !!selectedEntry?.trace && !selectedEntry.trace.finished_at;
   const live = useLiveTraceEvents(workspaceId, stillRunning ? selectedEntry!.traceId : null);
   const effectiveEvents = stillRunning ? live.events : selectedEntry?.events || [];
-  const hasResolvedTrace = !!selectedEntry?.trace;
-
-  const traceRef = selectedThread ? latestTraceRef(selectedThread) : null;
-  const assistantTurn = traceRef && selectedThread?.turns ? selectedThread.turns[traceRef.assistantIndex] : undefined;
-  const receivedTurn = traceRef && selectedThread?.turns ? findPrecedingCustomerTurn(selectedThread.turns, traceRef.assistantIndex) : undefined;
-
-  const middleRows = useMemo(() => buildActivityRows(effectiveEvents, workspaceId), [effectiveEvents, workspaceId]);
-  // Latest plan.updated snapshot for the selected conversation's trace — see
-  // latestPlanTasks. Recomputes as effectiveEvents grows (live SSE while the
-  // trace is still running, or the fetched batch once it's finished), which
-  // is what makes the Plan section update live as the agent creates tasks
-  // and flips them active → done. null (not []) when no plan.updated has
-  // ever been seen on this trace, so the section can render nothing rather
-  // than an empty "Plan · 0/0" box.
+  // Latest plan.updated snapshot for the selected conversation's CURRENT
+  // trace — see latestPlanTasks. Recomputes as effectiveEvents grows (live
+  // SSE while the trace is still running, or the fetched batch once it's
+  // finished), which is what makes the Plan section update live as the
+  // agent creates tasks and flips them active → done. null (not []) when
+  // no plan.updated has ever been seen on this trace, so the section can
+  // render nothing rather than an empty "Plan · 0/0" box. Deliberately
+  // tied to the LATEST trace only, unlike the work stream below — the
+  // plan is what the agent is doing RIGHT NOW, not a history to merge.
   const planTasks = useMemo(() => latestPlanTasks(effectiveEvents), [effectiveEvents]);
 
-  const activityRows: ActivityRow[] = useMemo(() => {
-    if (!selectedThread) return [];
+  // Every trace any turn of the SELECTED thread points at — see
+  // useSelectedThreadTraces/allAgentTraceRefs. Not the same map as
+  // `traceMap` above (that one is thread → latest trace only, capped,
+  // built for the sidebar preview line).
+  const selectedTraces = useSelectedThreadTraces(workspaceId, selectedThread);
 
-    // No trace ever resolved for this conversation (predates trace
-    // instrumentation, or the environment has no control-plane DB for
-    // agent_traces) — fall back to the real transcript rather than
-    // rendering an empty or fabricated timeline.
-    if (!hasResolvedTrace) {
-      const rows: ActivityRow[] = [];
-      for (const t of selectedThread.turns || []) {
-        if (isAgentSideLocal(t.role || "")) {
-          rows.push({
-            id: `t-${t.created_at || rows.length}-a`,
-            ts: t.created_at || null,
-            tone: "success",
-            icon: Send,
-            text: `Replied to ${selectedWho || "customer"}`,
-            detail: stripMarkdownPreview(t.content || "").slice(0, 140) || undefined,
-          });
-        } else if (isCustomerRole(t.role || "")) {
-          // Attribute this specific turn by ITS surface, not the thread's.
-          const fromConsole = turnIsConsole(t, selectedThread);
-          const iconUrl = fromConsole ? undefined : resolveChannelIconUrl(selectedThread.channel);
-          rows.push({
-            id: `t-${t.created_at || rows.length}-u`,
-            ts: t.created_at || null,
-            tone: "muted",
-            icon: iconUrl ? undefined : MessageSquare,
-            channelIconUrl: iconUrl,
-            text: fromConsole ? "You sent a message" : `Received message from ${(t.actor?.display_name || "").trim() || "customer"}`,
-            detail: stripMarkdownPreview(t.content || "").slice(0, 140) || undefined,
-          });
-        }
-      }
-      return rows;
+  // The work stream itself: every turn of the conversation, in order, one
+  // row minimum per turn ALWAYS — never fewer than the plain-transcript
+  // rendering this tab used to fall back to wholesale — enriched with that
+  // turn's own real trace step-by-step detail the moment ITS trace
+  // resolves. Bug B, 2026-09-01 (founder: "if I reload this page, it shows
+  // four messages... then it loads again by itself and only shows two"):
+  // the previous version resolved exactly ONE trace — the latest turn's,
+  // via latestTraceRef — and the instant it resolved, swapped the ENTIRE
+  // view over to a render built from JUST that trace, discarding every
+  // earlier turn outright. This file's own top comment already explained
+  // why: a real agent_turn() call opens its OWN agent_traces row every
+  // time, so a 2-turn conversation is two traces, never one — rendering
+  // "the trace" was always going to mean "the last exchange" no matter
+  // which one resolved first. Building the timeline per turn instead means
+  // row count can only grow as traces resolve in, never shrink — the
+  // flicker (a visible swap) and the data loss (turns disappearing) were
+  // the same defect, an all-or-nothing view replacement, and share this
+  // one fix. A turn whose own trace hasn't resolved yet (still fetching,
+  // or none exists — predates trace instrumentation, or no control-plane
+  // DB) still gets its plain "Replied to X" row from the real transcript,
+  // exactly what this tab has always honestly shown while trace detail is
+  // unavailable — never a fabricated "0 steps" for a turn nothing was
+  // fetched for yet.
+  const work = useMemo(() => {
+    const rows: ActivityRow[] = [];
+    let totalSteps = 0;
+    let totalTools = 0;
+    let anyTraceResolved = false;
+    let spanStartedAt: string | null = null;
+    let spanFinishedAt: string | null = null;
+    let spanStillOpen = false;
+
+    if (!selectedThread) {
+      return { rows, totalSteps, totalTools, anyTraceResolved, spanStartedAt, spanFinishedAt, spanStillOpen };
     }
 
-    const out: ActivityRow[] = [];
-    const channelIconUrl = selectedChannelIconUrl;
-    if (receivedTurn) {
-      out.push({
-        id: `recv-${receivedTurn.created_at || "x"}`,
-        ts: receivedTurn.created_at || null,
-        tone: "muted",
-        icon: channelIconUrl ? undefined : MessageSquare,
-        channelIconUrl,
-        text: selectedIsConsole ? "You sent a message" : `Received message from ${selectedWho || "customer"}`,
-        detail: stripMarkdownPreview(receivedTurn.content || "").slice(0, 140) || undefined,
+    const turns = selectedThread.turns || [];
+    const latestRef = latestTraceRef(selectedThread);
+
+    for (let i = 0; i < turns.length; i++) {
+      const t = turns[i];
+      const role = t.role || "";
+
+      if (isCustomerRole(role)) {
+        // Attribute this specific turn by ITS surface, not the thread's
+        // (one thread's history can carry messages from several channels).
+        const fromConsole = turnIsConsole(t, selectedThread);
+        const iconUrl = fromConsole ? undefined : resolveChannelIconUrl(selectedThread.channel);
+        rows.push({
+          id: `t-${t.created_at || i}-u`,
+          ts: t.created_at || null,
+          tone: "muted",
+          icon: iconUrl ? undefined : MessageSquare,
+          channelIconUrl: iconUrl,
+          text: fromConsole ? "You sent a message" : `Received message from ${(t.actor?.display_name || "").trim() || "customer"}`,
+          detail: stripMarkdownPreview(t.content || "").slice(0, 140) || undefined,
+        });
+        continue;
+      }
+      if (!isAgentSideLocal(role)) continue;
+
+      const traceId = String((t.metadata as any)?.trace_id || "").trim();
+      const isLatestTurn = !!latestRef && i === latestRef.assistantIndex;
+      const turnStillRunning = isLatestTurn && stillRunning;
+      const entry = traceId ? selectedTraces[traceId] : undefined;
+
+      if (!entry && !turnStillRunning) {
+        // This turn's own trace hasn't resolved (still fetching, has no
+        // trace_id at all, or the fetch failed) — the honest transcript
+        // row, same as every turn got before per-turn trace enrichment.
+        rows.push({
+          id: `t-${t.created_at || i}-a`,
+          ts: t.created_at || null,
+          tone: "success",
+          icon: Send,
+          text: `Replied to ${selectedWho || "customer"}`,
+          detail: stripMarkdownPreview(t.content || "").slice(0, 140) || undefined,
+        });
+        continue;
+      }
+
+      const turnEvents = turnStillRunning ? live.events : entry?.events || [];
+      const stepRows = buildActivityRows(turnEvents, workspaceId);
+      rows.push(...stepRows);
+      totalSteps += stepRows.length;
+      totalTools += stepRows.filter((r) => r.tone === "accent" || r.tone === "danger").length;
+      if (entry) {
+        anyTraceResolved = true;
+        const startedAt = entry.trace.started_at || null;
+        if (startedAt && (!spanStartedAt || startedAt < spanStartedAt)) spanStartedAt = startedAt;
+        const finishedAt = entry.trace.finished_at || null;
+        if (!turnStillRunning && finishedAt && (!spanFinishedAt || finishedAt > spanFinishedAt)) spanFinishedAt = finishedAt;
+      }
+
+      if (turnStillRunning) {
+        spanStillOpen = true;
+        rows.push({ id: "__thinking__", ts: null, tone: "muted", icon: Loader2, spin: true, text: "Thinking…" });
+        continue;
+      }
+
+      const repliedEvent = turnEvents.find((e) => (e.event_type || "").toLowerCase() === "assistant.message.completed");
+      const replyText = String(repliedEvent?.data?.text || t.content || "").trim();
+      rows.push({
+        id: `reply-${t.created_at || repliedEvent?.id || i}`,
+        ts: t.created_at || repliedEvent?.ts || null,
+        tone: "success",
+        icon: Send,
+        text: `Replied to ${selectedWho || "customer"}`,
+        detail: stripMarkdownPreview(replyText).slice(0, 140) || undefined,
       });
     }
 
-    out.push(...middleRows);
-
-    if (stillRunning) {
-      out.push({ id: "__thinking__", ts: null, tone: "muted", icon: Loader2, spin: true, text: "Thinking…" });
-    } else {
-      const repliedEvent = effectiveEvents.find((e) => (e.event_type || "").toLowerCase() === "assistant.message.completed");
-      const replyText = String(repliedEvent?.data?.text || assistantTurn?.content || "").trim();
-      if (replyText || assistantTurn) {
-        const totalMessages = selectedThread.turns?.length || 0;
-        out.push({
-          id: `reply-${assistantTurn?.created_at || repliedEvent?.id || "x"}`,
-          ts: assistantTurn?.created_at || repliedEvent?.ts || null,
-          tone: "success",
-          icon: Send,
-          text: `Replied to ${selectedWho || "customer"} · ${totalMessages} message${totalMessages === 1 ? "" : "s"}`,
-          detail: stripMarkdownPreview(replyText).slice(0, 140) || undefined,
-        });
-      }
+    if (!spanStillOpen && anyTraceResolved) {
       const status = classifyThreadStatus(selectedEntry);
       if (status === "done") {
-        out.push({ id: "__waiting__", ts: null, tone: "muted", pulseDot: true, text: `Waiting for ${selectedIsConsole ? "your" : selectedWho ? `${selectedWho}’s` : "their"} reply` });
+        rows.push({ id: "__waiting__", ts: null, tone: "muted", pulseDot: true, text: `Waiting for ${selectedIsConsole ? "your" : selectedWho ? `${selectedWho}’s` : "their"} reply` });
       }
     }
-    return out;
-  }, [selectedThread, hasResolvedTrace, receivedTurn, middleRows, stillRunning, effectiveEvents, assistantTurn, selectedWho, selectedIsConsole, selectedChannelIconUrl, selectedEntry, isAgentSideLocal]);
+
+    return { rows, totalSteps, totalTools, anyTraceResolved, spanStartedAt, spanFinishedAt, spanStillOpen };
+  }, [selectedThread, selectedTraces, stillRunning, live.events, selectedWho, selectedIsConsole, selectedEntry, workspaceId, isAgentSideLocal]);
+
+  const activityRows = work.rows;
 
   if (loading) {
     return (
@@ -1264,21 +1393,28 @@ export function WorkTab({
                       );
                     })()}
                   </div>
-                  {hasResolvedTrace && selectedEntry && (
+                  {work.anyTraceResolved && (
                     <div className="fleet-work-detail-metrics">
-                      {middleRows.length} step{middleRows.length === 1 ? "" : "s"} ·{" "}
-                      {middleRows.filter((r) => r.tone === "accent" || r.tone === "danger").length} tool
-                      {middleRows.filter((r) => r.tone === "accent" || r.tone === "danger").length === 1 ? "" : "s"} ·{" "}
+                      {/* Totals across every turn of the WHOLE conversation
+                          whose own trace has resolved so far, not just the
+                          latest exchange — see the `work` useMemo above.
+                          Summing rather than showing only the latest turn's
+                          count is what keeps this header honest once it
+                          covers more than one turn: it never claims fewer
+                          steps than ActivityTimeline is about to render
+                          below it. */}
+                      {work.totalSteps} step{work.totalSteps === 1 ? "" : "s"} ·{" "}
+                      {work.totalTools} tool{work.totalTools === 1 ? "" : "s"} ·{" "}
                       {formatDuration(
-                        (selectedEntry.trace.finished_at ? new Date(selectedEntry.trace.finished_at).getTime() : Date.now()) -
-                          new Date(selectedEntry.trace.started_at || Date.now()).getTime(),
+                        (work.spanStillOpen || !work.spanFinishedAt ? Date.now() : new Date(work.spanFinishedAt).getTime()) -
+                          (work.spanStartedAt ? new Date(work.spanStartedAt).getTime() : Date.now()),
                       )}
                     </div>
                   )}
                 </div>
                 {planTasks && planTasks.length > 0 && <PlanSection tasks={planTasks} />}
                 <div className="fleet-work-activity-label">Activity</div>
-                {!hasResolvedTrace && (
+                {!work.anyTraceResolved && (
                   <p className="fleet-work-activity-note">
                     Showing message history — detailed step tracking isn’t available for this conversation.
                   </p>
