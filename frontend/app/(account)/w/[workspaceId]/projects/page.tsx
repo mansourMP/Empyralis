@@ -5,7 +5,7 @@ import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fet
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { Bot, Loader2, X } from "lucide-react";
+import { Bot, FolderKanban, Loader2, X } from "lucide-react";
 
 import { useFleetAgents, useFleetProjects, useFleetWorkspace } from "@/lib/workspace/fleet/fleet-data";
 import { HeaderAction, useBreadcrumbBadge } from "@/lib/workspace/fleet/Breadcrumbs";
@@ -232,12 +232,13 @@ export default function ProjectsPage() {
           breadcrumb (U3-E's "one header bar" reading was wrong). */}
       {/* WHO OWNS THE VIEW'S ONE ACCENT FILL is create-accent.ts's answer, not
           a literal here. This used to be an unconditional `--accent-fill`,
-          which put it and CreateFirstAgentEmpty's own filled button on screen
+          which put it and the first-run offer's own filled button on screen
           together on every brand-new workspace — "two accent-filled buttons in
           one view is a bug", the same defect agents/page.tsx already fixed for
-          its own "New agent". `listIsEmpty` is the FIRST-RUN offer's presence,
-          not `projects.length === 0`: the band renders over a real list, and
-          while it is up it is the primary action. */}
+          its own "New agent". `listIsEmpty` is the FIRST-RUN offer's presence
+          — the zero-projects empty state below OR the CreateFirstAgentEmpty
+          band — not `projects.length === 0` on its own: the band renders over
+          a real list, and while it is up it is the primary action. */}
       <HeaderAction>
         <button
           type="button"
@@ -310,13 +311,40 @@ export default function ProjectsPage() {
             // is missing, the archive is simply empty.
             <div className="fleet-page-state-body">No archived projects.</div>
           ) : projects.length === 0 ? (
-            <CreateFirstAgentEmpty
-              workspaceId={workspaceId}
-              onCreated={refresh}
-              title="No projects yet"
-              desc="Projects keep your agents organized. Create your first agent and its project is set up for you."
-              siblingComposerOpen={dialogOpen}
-            />
+            // THE ZERO-PROJECTS LANDING SCREEN — the literal first screen a
+            // brand-new signup sees (/w/{id} redirects here, and a fresh
+            // workspace starts with no projects now that the "General"
+            // bootstrap is gone — see workspace-first-run.ts). This used to
+            // be CreateFirstAgentEmpty's "full" variant ("Create your first
+            // agent"), which put the one accent-filled control on this page
+            // on the one thing Empyralis is not selling (founder: launching
+            // on "track your issues and your documents", agents deliberately
+            // kept out of the pitch) — and its own copy had gone false too,
+            // describing a shared "General" project this ruling deleted.
+            // Agent creation stays reachable from the rail's own Agents
+            // entry; it just isn't this page's primary action any more.
+            <div className="fleet-empty">
+              <div className="fleet-empty-icon">
+                <FolderKanban size={20} strokeWidth={1.75} />
+              </div>
+              <div className="fleet-empty-title">No projects yet</div>
+              <div className="fleet-empty-desc">A project holds your team's tasks and documents.</div>
+              <div className="fleet-empty-actions">
+                {/* Opens the SAME NewProjectDialog the header's own "New
+                    project" does — one composer, two doors, so there is
+                    nothing here for a sibling composer to go blind to.
+                    `listIsEmpty: true` mirrors the header's own
+                    `firstAgentPrompt !== "none"` read of this exact branch,
+                    so create-accent.ts never sees two owners at once. */}
+                <button
+                  type="button"
+                  className={createButtonClass("empty_state", { listIsEmpty: true, composerOpen: dialogOpen })}
+                  onClick={() => setDialogOpen(true)}
+                >
+                  Create your first project
+                </button>
+              </div>
+            </div>
           ) : (
             <div className="fleet-projects-list">
               <div className="fleet-projects-list-header" aria-hidden>

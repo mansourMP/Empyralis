@@ -10,16 +10,25 @@ import { AgentCreateCard } from "./AgentCreateCard";
 import { createButtonClass } from "./create-accent";
 
 /**
- * The single first-run call to action, shared by every fresh-workspace empty
- * state (Agents, Projects, Inbox): "create your first agent". One action,
- * non-technical copy, no tour. `onCreate` opens AgentCreateCard (see
- * CreateFirstAgentEmpty below) — not a full wizard, one card with every
- * field pre-filled and visible before it commits (agent-quick-create.ts's
- * own "CORRECTION, 2026-08-20" header has the founder's own words on why
- * the earlier zero-click version was an over-correction). This component
- * itself stays dumb (a title/desc/button plus a callback) so a caller that
- * wants different creation behavior — none do today — still can without a
- * second copy of this markup.
+ * The single first-run call to action for AGENT creation: "create your
+ * first agent". One action, non-technical copy, no tour. `onCreate` opens
+ * AgentCreateCard (see CreateFirstAgentEmpty below) — not a full wizard, one
+ * card with every field pre-filled and visible before it commits
+ * (agent-quick-create.ts's own "CORRECTION, 2026-08-20" header has the
+ * founder's own words on why the earlier zero-click version was an
+ * over-correction). This component itself stays dumb (a title/desc/button
+ * plus a callback) so a caller that wants different creation behavior —
+ * none do today — still can without a second copy of this markup.
+ *
+ * Callers of the centred ("full") variant: the Agents page and Inbox, both
+ * genuinely about agents. The Projects page used to render this same "full"
+ * state on zero projects too — it does not any more (2026-09-01, founder:
+ * Empyralis launches on "track your issues and your documents", agents
+ * deliberately kept out of that pitch), so its own zero-projects empty state
+ * is now inline markup in projects/page.tsx offering a PROJECT instead.
+ * Projects still renders THIS module's "band" variant (FirstAgentBand,
+ * below) once it has a project and no agent — that offer is legitimately
+ * about agents, since a project already exists by then.
  */
 export function FirstAgentEmpty({
   title,
