@@ -281,6 +281,7 @@ export default function ProjectsPage() {
               onCreated={refresh}
               title="No agents in this workspace yet."
               desc=""
+              siblingComposerOpen={dialogOpen}
             />
           )}
           {loading && projects.length === 0 ? (
@@ -313,6 +314,7 @@ export default function ProjectsPage() {
               onCreated={refresh}
               title="No projects yet"
               desc="Projects keep your agents organized. Create your first agent and its project is set up for you."
+              siblingComposerOpen={dialogOpen}
             />
           ) : (
             <div className="fleet-projects-list">
