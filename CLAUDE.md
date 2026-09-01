@@ -3,7 +3,7 @@
 **This file loads into every agent's context on every turn. It stays under 200 lines.**
 Only three things earn a line: a rule someone would break if they didn't know it, a
 founder decision that would otherwise be silently reversed, or a trap that costs real
-time and is invisible in the code. Reasoning goes in git history. Findings go in Linear.
+time and is invisible in the code. Reasoning goes in git history. Findings go in the platform.
 A rule that has a drift test lives in the test and is named here in one line. Design,
 audit and gap documents are not kept — they go stale and get cited as present truth.
 When you learn something durable, add ONE line. A paragraph is archaeology.
@@ -16,7 +16,10 @@ When you learn something durable, add ONE line. A paragraph is archaeology.
 - Lead with the verdict — one line, then the detail.
 - Cofounder, not status report: find a real problem and fix it. Never report gaps and sit still. If the call is genuinely his, ask ONE question with your recommendation — never a menu.
 - Real markdown tables, never ASCII art. Code blocks are for code, paths and command output.
-- Linear is the system of record for issues, plans and status.
+- **Empyralis itself is the system of record for issues, documents and status. Never Linear.**
+  File and update through the `empyralis_*` MCP tools, project `project_3ab2705ec3c04b7b`
+  (key `EMP`) in workspace `ws_b31386aeff92`. Linear is being deleted (founder, 2026-09-01);
+  never write to it, and never read it as current truth.
 - Never weaken an assertion to go green, and never pin broken behaviour as intended.
 - Verify before reporting: read the diff, run the test, call the real function yourself.
 - Never add an AI co-author trailer to a commit.
