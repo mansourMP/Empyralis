@@ -817,12 +817,24 @@ def list_owner_linked_channel_identities_for_workspace(
     checks for the DM-policy gate that runs before every reply.
 
     agent_turn_runtime_service.py's owner/audience tool-authority
-    classification uses this — and ONLY this — as of the fix that added
-    this function; see that module's own comment on why
-    workspace.identity_links must never be consulted for the SAME
-    question again beside it. Two independent answers to "is this the
-    owner" is the shape that let one of them (identity_links, dead
-    because nothing has ever written it) silently win by default.
+    classification USED to read this directly and only this; the
+    2026-09-01 fix (407cc0cc) repointed it at the per-agent twin below,
+    list_owner_linked_channel_identities_for_agent, instead — two agents in
+    one workspace on the SAME channel_key can be linked to two DIFFERENT
+    owners, and this function's own "last-updated row wins" contract let
+    the second link silently reassign the first agent's owner too. This
+    function is still the right read for command_registry.
+    _channel_linked_owner_ids (the /config /mcp /plugins /debug /bash
+    owner gate, fixed the same way on 2026-09-02): it calls the per-agent
+    twin when its caller can name the acting agent, and falls back to
+    THIS workspace-wide function only when no agent id is available at
+    all (hosted Telegram's single-pairing-per-workspace model has no
+    specialist-agent concept to scope by) — never a stricter "fail closed"
+    substitute for it. Neither caller ever falls back to workspace.
+    identity_links for the SAME question; see that module's own comment on
+    why. Two independent answers to "is this the owner" is the shape that
+    let one of them (identity_links, dead because nothing has ever written
+    it) silently win by default.
 
     The three tables key their rows by (gateway_id, channel_key,
     agent_id), not workspace_id — but workspace_id is a stored column on

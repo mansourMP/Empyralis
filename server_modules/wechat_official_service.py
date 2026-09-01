@@ -870,6 +870,13 @@ async def handle_inbound_callback(
             cmd_reply = await dispatch_command(
                 command=mapped["text"], workspace_id=workspace_id, thread_id=_thread_id,
                 channel_origin=mapped["channel_origin"], sender_id=mapped["sender_jid"],
+                # agent_install_id is always the right scoping key here —
+                # one agent per WeChat/WeCom AppID/CorpID, same reasoning as
+                # _thread_id above. This branch is a structural no-op today
+                # (envelope_allows_owner_commands is always False for WeChat,
+                # see the comment above), but stays correct if WeChat ever
+                # gains a real owner-linkage mechanism.
+                agent_id=agent_install_id,
             )
             if cmd_reply is not None:
                 delivered = await transport.send_message(cmd_reply)

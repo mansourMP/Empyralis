@@ -136,7 +136,9 @@ def get_inline_shortcuts() -> list[str]:
     return result
 
 
-def _channel_linked_owner_ids(workspace_id: str, channel_origin: str) -> set[str]:
+def _channel_linked_owner_ids(
+    workspace_id: str, channel_origin: str, agent_id: str = "",
+) -> set[str]:
     """The sender ids that a real pairing/login event established as this
     workspace's OWNER on a channel — read from personal_channels_repository,
     which is the authoritative store, never workspace.identity_links.
@@ -172,6 +174,36 @@ def _channel_linked_owner_ids(workspace_id: str, channel_origin: str) -> set[str
     only reachable from callers that never supplied one, and a miss there
     fails closed exactly as before.
 
+    ``agent_id`` (2026-09-02 fix — the command-gate twin of 407cc0cc's
+    per-agent scoping for tool authority): when the dispatching call site
+    can name the agent whose turn this actually is (agent_turn_adapter.
+    execute_sage_turn's own "/" command block already resolves this as
+    _directive_agent_install_id — the resolved specialist's install id, set
+    for a BYO Telegram bot, a personal-gateway pairing, or a WeChat Official
+    Account turn), the lookup is scoped to list_owner_linked_channel_
+    identities_for_agent instead of the workspace-wide function below.
+    Without this, two agents in the SAME workspace sharing one channel_key
+    (a workspace's BYO Telegram bots all share channel_key
+    "telegram_agent_byo"; two personal-gateway pairings can share
+    "telegram_personal"/"whatsapp_personal") with two DIFFERENT linked
+    owners would cross-contaminate: the per-channel_key function's own
+    "last-updated row wins" contract means whichever agent linked most
+    recently would silently decide who may run /bash on BOTH agents.
+
+    agent_id empty (no change from pre-fix behavior): falls back to the
+    workspace-wide function, deliberately NOT a stricter "fail closed to no
+    owner" posture. Unlike 407cc0cc's tool-authority fix, there is no
+    workspace-wide "acting install id" guaranteed non-empty here — hosted
+    Telegram's single-pairing-per-workspace model (routes_sage_telegram_
+    hosted.py, sage_telegram_hosted_service.py) and the Discord-webhook DM
+    branch (connectors_actions.py) have no specialist-agent concept to name
+    at all, and failing every owner-gated command closed for them would
+    silently lock the real owner out of /config /mcp /plugins /debug /bash
+    on the single most common pairing shape in the product — the exact
+    "nothing anywhere says why" trap this function's own docstring already
+    warns about above. Callers that cannot name a real agent id keep today's
+    workspace-wide read, unchanged.
+
     Both sides go through _channel_prefixed_identity_tail — the SAME
     canonicalizer the DM gate and the sender-class resolver use — because
     this lane addresses one person two ways: the OpenClaw transport passes
@@ -181,17 +213,28 @@ def _channel_linked_owner_ids(workspace_id: str, channel_origin: str) -> set[str
     after the last colon" rule would let an attacker-supplied
     "anything:<owner id>" canonicalize onto the owner's own id.
     """
+    normalized_agent_id = str(agent_id or "").strip()
     try:
-        from server_modules.personal_channels_repository import (
-            list_owner_linked_channel_identities_for_workspace,
-        )
         from server_modules.personal_channels_service import (
             _channel_prefixed_identity_tail,
         )
 
-        linked_by_channel = list_owner_linked_channel_identities_for_workspace(
-            workspace_id
-        )
+        if normalized_agent_id:
+            from server_modules.personal_channels_repository import (
+                list_owner_linked_channel_identities_for_agent,
+            )
+
+            linked_by_channel = list_owner_linked_channel_identities_for_agent(
+                workspace_id, normalized_agent_id
+            )
+        else:
+            from server_modules.personal_channels_repository import (
+                list_owner_linked_channel_identities_for_workspace,
+            )
+
+            linked_by_channel = list_owner_linked_channel_identities_for_workspace(
+                workspace_id
+            )
     except Exception:
         return set()
 
@@ -215,7 +258,7 @@ def _channel_linked_owner_ids(workspace_id: str, channel_origin: str) -> set[str
 
 
 async def _is_sender_owner(
-    sender_id: str, workspace_id: str, channel_origin: str = "",
+    sender_id: str, workspace_id: str, channel_origin: str = "", agent_id: str = "",
 ) -> bool:
     """Check if *sender_id* is the workspace owner.
 
@@ -237,7 +280,11 @@ async def _is_sender_owner(
        CHANNEL sender, and the only one of the three that a Telegram/
        WhatsApp/Signal/iMessage/openclaw_* sender can ever satisfy. See
        _channel_linked_owner_ids above for why check 3 alone left every
-       channel owner locked out of their own owner-gated commands.
+       channel owner locked out of their own owner-gated commands, and for
+       what ``agent_id`` (2026-09-02) does to this check: scopes it to one
+       agent's own linked owner when the caller can name the agent, so a
+       second agent linked to a different person on the same channel_key
+       can never decide who may run /bash on this one.
     3. ``identity_links`` — kept, unchanged, as a disjunct. It is safe HERE
        in a way it was not safe as the sage runtime's SOLE source: this is
        an OR, so an empty store can only ever fail to grant, never wrongly
@@ -272,7 +319,7 @@ async def _is_sender_owner(
 
     clean_channel_origin = str(channel_origin or "").strip()
     channel_owner_ids = _channel_linked_owner_ids(
-        clean_workspace_id, clean_channel_origin
+        clean_workspace_id, clean_channel_origin, str(agent_id or "").strip(),
     )
     if channel_owner_ids:
         # The SENDER goes through the same canonicalizer the stored side
@@ -602,10 +649,21 @@ async def dispatch(
     # so the check must also live here or those channels get an ungated
     # shell/config/plugin command. Silently treat as unrecognized (None) —
     # do not reveal the command exists to an unauthorized sender.
+    #
+    # kwargs["agent_install_id"] (2026-09-02): the SAME kwarg name
+    # _handle_thinking/_handle_model already read out of **kwargs above for
+    # per-agent directive state — not a new key, just also consumed here now.
+    # agent_turn_adapter.execute_sage_turn's own "/" command block (the real
+    # live entry point for a BYO Telegram bot, a personal-gateway Telegram/
+    # WhatsApp pairing, and a WeChat Official Account turn) already threads
+    # this through as the resolved specialist's install id. See
+    # _channel_linked_owner_ids' own docstring for why an empty value here
+    # falls back to the workspace-wide read rather than failing closed.
     if cmd and cmd.access == "owner":
         sender_id = str(kwargs.get("sender_id") or kwargs.get("channel_sender_id") or "")
         if not await _is_sender_owner(
             sender_id, workspace_id, str(kwargs.get("channel_origin") or ""),
+            str(kwargs.get("agent_install_id") or ""),
         ):
             return None
 

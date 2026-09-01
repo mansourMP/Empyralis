@@ -325,12 +325,25 @@ async def dispatch_command(
     thread_id: str = "sage-main",
     channel_origin: str = "",
     sender_id: str | None = None,
+    agent_id: str = "",
 ) -> str | None:
     """Dispatch a /command and return the reply string.
 
     Delegates to the single :mod:`command_registry`.  Returns ``None`` when
     *command* is not a recognised slash command (caller should pass it through
     to handle_sage_chat() as a normal message).
+
+    agent_id (2026-09-02): the acting agent's install id, when the caller
+    genuinely has one — forwarded to command_registry.dispatch() as
+    `agent_install_id` (the same kwarg name agent_turn_adapter.execute_sage_
+    turn's own "/" command block already uses) so the /config /mcp /plugins
+    /debug /bash owner gate can scope its channel-linked-owner lookup to
+    THIS agent instead of the workspace-wide set — see command_registry.
+    _channel_linked_owner_ids' own docstring for the cross-agent
+    cross-contamination this closes, and for why an empty agent_id (most
+    callers of this function today — see each caller's own comment on
+    whether one is genuinely available) is not a stricter "fail closed"
+    posture, just today's unchanged workspace-wide read.
     """
     from server_modules.command_registry import dispatch as _dispatch
     from server_modules.command_registry import build_service_kwargs_for_text as _build_service_kwargs
@@ -352,6 +365,7 @@ async def dispatch_command(
         thread_id=thread_id,
         channel_origin=channel_origin,
         sender_id=sender_id,
+        agent_install_id=str(agent_id or ""),
         **_service_kwargs,
     )
     if result is None:
