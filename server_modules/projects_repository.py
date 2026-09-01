@@ -733,19 +733,31 @@ async def delete_project(
     "General" project as a side effect of deleting a DIFFERENT one — the
     exact anti-pattern `default_project_id_if_exists`'s docstring warns
     against, just reached from a write path instead of a read path. That
-    must not happen, so this no longer reassigns anything: the FK's own
-    `ON DELETE SET NULL` is left to run, and both columns land on NULL.
-    For agents that is the correct, intended outcome (see above). For
-    project-scoped `vault_credentials` it is a real, deliberately accepted
-    regression from the old behavior — a NULL project_id there is
-    unreachable from every surface that lists or revokes project-scoped
-    credentials (connectors_actions.list_project_connectors,
-    subscribe_agent_to_project_credential), so a secret attached to a
-    deleted project now has no UI path to see or revoke it. Documented
-    here as a known, UNFIXED gap (CLAUDE.md: a routed-around defect stays
-    named as broken, never quietly re-labeled as fine) — surfacing
-    project-less credentials somewhere is a separate, real piece of work,
-    not something this fix invents a workaround for.
+    must not happen, so this no longer reassigns anything.
+    `workspace_agent_installs.project_id` is left to the FK's own
+    `ON DELETE SET NULL` — correct, intended, an agent is INDEPENDENT of
+    every project (see above).
+
+    `vault_credentials.project_id` is handled differently, and NOT by the
+    FK: a NULL project_id there used to be a real, silent regression — no
+    surface anywhere lists or revokes a credential once its project_id is
+    NULL (connectors_actions.list_project_connectors,
+    subscribe_agent_to_project_credential both filter ON project_id), so a
+    secret attached to a deleted project became invisible and unrevokable,
+    not destroyed. Fixed by going the other way: a project-scoped
+    credential is deleted OUTRIGHT, in the same transaction, UNLESS an
+    ENABLED `agent_connector_bindings` row still points at it — that
+    binding is a LIVE dependency an agent uses at tool-call time
+    (secrets_broker._resolve_bound_connector_credential_id), completely
+    independent of the project's own lifecycle (connectors_actions.py's
+    module note on `subscribe_agent_to_project_credential` documents N
+    agents sharing ONE credential this way), and hard-deleting a row a
+    live agent still calls would be a worse bug than the invisible-orphan
+    one this replaces. A still-bound credential is left exactly as before:
+    the FK's `ON DELETE SET NULL` takes its project_id, the same accepted
+    gap as before this fix, just narrowed to rows something still actually
+    uses — a case for a real "orphaned credentials" surface some day, not
+    something this delete path can safely resolve on its own.
 
     What DIES with the project (all via the projects(id) FK's ON DELETE
     CASCADE — see control_plane_repository.CONTROL_PLANE_SCHEMA_SQL):
@@ -777,9 +789,9 @@ async def delete_project(
     if target is None:
         return None
 
-    # ONE transaction for the count + the delete, on one connection — the
-    # count must be read from rows the cascade has not touched yet, and the
-    # delete must not partially apply.
+    # ONE transaction for the count + the credential delete + the project
+    # delete, on one connection — the count must be read from rows the
+    # cascade has not touched yet, and none of it may partially apply.
     async def _run(connection: Any) -> Dict[str, Any]:
             await control_plane_repository.apply_connection_scope(
                 connection, tenant_id=tenant_id, workspace_id=workspace_id,
@@ -788,10 +800,14 @@ async def delete_project(
             # Count what the cascade/FK-null is about to take, BEFORE it
             # takes it — the caller (route → activity ledger → UI) can only
             # report honestly on numbers read while the rows still exist.
-            # agents/credentials are counted here too (not reassigned —
-            # see docstring): both columns are ON DELETE SET NULL, so the
-            # DELETE FROM projects below nulls them out on its own; this
-            # SELECT is only for the honest tally, not a precondition for it.
+            # agents are counted here too (not reassigned — see docstring):
+            # that column is ON DELETE SET NULL, so the DELETE FROM projects
+            # below nulls it out on its own; this SELECT is only for the
+            # honest tally, not a precondition for it. vault_credentials is
+            # NOT counted here — its own delete below (which decides,
+            # per-row, whether a credential is safe to remove) is the single
+            # source of truth for that count instead of two queries that
+            # could disagree.
             counts_row = await connection.fetchrow(
                 """
                 SELECT
@@ -804,15 +820,58 @@ async def delete_project(
                   (SELECT COUNT(*) FROM agent_goals
                      WHERE tenant_id = $1 AND workspace_id = $2 AND project_id = $3) AS goals,
                   (SELECT COUNT(*) FROM workspace_agent_installs
-                     WHERE tenant_id = $1 AND workspace_id = $2 AND project_id = $3) AS agents,
-                  (SELECT COUNT(*) FROM vault_credentials
-                     WHERE workspace_id = $2 AND project_id = $3) AS credentials
+                     WHERE tenant_id = $1 AND workspace_id = $2 AND project_id = $3) AS agents
                 """,
                 tenant_id,
                 workspace_id,
                 project_id,
             )
             counts = dict(counts_row) if counts_row else {}
+
+            # A project-scoped credential with no live subscriber is exactly
+            # the gap this fixes: forget it outright, same transaction, so
+            # it can never end up NULL-and-invisible again. A credential an
+            # ENABLED agent_connector_bindings row still points at is a LIVE
+            # dependency that has nothing to do with this project's own
+            # lifecycle — connectors_actions.py's module note on
+            # subscribe_agent_to_project_credential documents N agents
+            # sharing ONE credential this way, and the agent using it keeps
+            # running after its project is gone (independent-of-every-
+            # project hard rule) — so that row is EXCLUDED from the DELETE
+            # below and left exactly as before: the projects DELETE's own
+            # FK ON DELETE SET NULL takes its project_id, same accepted gap
+            # as today, just narrowed to rows something still actually
+            # uses. Deleting a still-bound credential out from under a live
+            # agent would be a worse bug than the invisible-orphan one this
+            # ships to fix.
+            #
+            # vault_credentials carries no tenant_id column (see the note
+            # on the same shape below); agent_connector_bindings does, and
+            # is filtered by it here to match its own RLS policy exactly.
+            deleted_credential_rows = await connection.fetch(
+                """
+                DELETE FROM vault_credentials
+                WHERE workspace_id = $1 AND project_id = $2
+                  AND id NOT IN (
+                    SELECT DISTINCT (binding->>'credential_id')
+                    FROM agent_connector_bindings
+                    WHERE tenant_id = $3 AND workspace_id = $1 AND enabled = TRUE
+                      AND binding->>'credential_id' IS NOT NULL
+                  )
+                RETURNING id
+                """,
+                workspace_id,
+                project_id,
+                tenant_id,
+            )
+            credentials_deleted = len(deleted_credential_rows or [])
+
+            still_bound_row = await connection.fetchrow(
+                "SELECT COUNT(*) AS n FROM vault_credentials WHERE workspace_id = $1 AND project_id = $2",
+                workspace_id,
+                project_id,
+            )
+            credentials_still_bound = int((still_bound_row or {}).get("n") or 0)
 
             deleted = await connection.execute(
                 "DELETE FROM projects WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3",
@@ -826,7 +885,11 @@ async def delete_project(
                 # written to avoid.
                 raise _ProjectDeleteRaced()
 
-            return {"counts": counts}
+            return {
+                "counts": counts,
+                "credentials_deleted": credentials_deleted,
+                "credentials_still_bound": credentials_still_bound,
+            }
 
     try:
         async with pool.acquire() as connection:
@@ -844,7 +907,15 @@ async def delete_project(
         "members_removed": int(counts.get("members") or 0),
         "goals_deleted": int(counts.get("goals") or 0),
         "agents_unassigned": int(counts.get("agents") or 0),
-        "credentials_unassigned": int(counts.get("credentials") or 0),
+        # Actually removed from the vault — never destroys a credential an
+        # enabled agent_connector_bindings row still points at (see above).
+        "credentials_deleted": int(outcome.get("credentials_deleted") or 0),
+        # Informational only, for the audit trail: credentials that stayed
+        # in the vault (project_id lands on NULL via the FK below) because
+        # a live subscriber is still using them. Not a consequence of THIS
+        # delete to announce in a confirmation — nothing happens to these
+        # rows.
+        "credentials_still_bound": int(outcome.get("credentials_still_bound") or 0),
     }
 
 

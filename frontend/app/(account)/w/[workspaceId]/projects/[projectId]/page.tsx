@@ -11,6 +11,7 @@ import { Calendar, Zap } from "lucide-react";
 import {
   useFleetAgents,
   useFleetProjects,
+  useFleetProjectConnectors,
   useFleetTasks,
   assignFleetTask,
   assignFleetTaskToUser,
@@ -329,6 +330,14 @@ export default function ProjectDetailPage() {
   // `view` const above). Only fetched with a real project_id: useFleetDocuments
   // itself no-ops without one, same guard useFleetTasks's own fetcher uses.
   const { documents, loading: documentsLoading, error: documentsError, refresh: refreshDocuments } = useFleetDocuments(workspaceId, projectId);
+  // Delete-confirmation only: how many of this project's connector
+  // credentials the delete will actually remove. A credential with a live
+  // subscriber (an enabled agent_connector_bindings row — the reuse-a-
+  // connector picker's own "Use acme-support@gmail.com" feature) is NOT
+  // one of them — deleting it would break that agent's next tool call, so
+  // projects_repository.delete_project leaves it alone; see its docstring.
+  const { projectConnectors, loading: projectConnectorsLoading } = useFleetProjectConnectors(workspaceId, projectId);
+  const credentialsToDelete = projectConnectors.filter((c) => c.subscribed_agent_ids.length === 0).length;
   const [documentComposerOpen, setDocumentComposerOpen] = useState(false);
   // Documents | Activity — this project's own change feed (the founder's
   // own ask, GitHub's per-repo "Commits" mapped onto this project — see
@@ -676,6 +685,7 @@ export default function ProjectDetailPage() {
             tasks: tasksLoading ? null : tasks.length,
             documents: documentsLoading ? null : documents.length,
             agents: inProject.length,
+            credentials: projectConnectorsLoading ? null : credentialsToDelete,
           }}
           onChanged={refreshProjects}
           // Archived or deleted, this route no longer resolves to anything

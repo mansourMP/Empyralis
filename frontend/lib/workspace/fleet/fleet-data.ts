@@ -462,6 +462,15 @@ export type DeletedProjectSummary = {
    *  agent is independent of every project (CLAUDE.md hard rule), so this
    *  is never a "moved to X" figure; there is no destination. */
   agents_unassigned?: number;
+  /** Project-scoped connector credentials actually removed from the vault
+   *  (routes_fleet.fleet_delete_project / projects_repository.
+   *  delete_project). Never a credential a live agent_connector_bindings
+   *  row still points at — see credentials_still_bound. */
+  credentials_deleted?: number;
+  /** Credentials that stayed in the vault (project_id lands on NULL,
+   *  same as an agent) because a live subscriber still uses them —
+   *  informational only, not a consequence of this delete to announce. */
+  credentials_still_bound?: number;
 };
 
 export async function deleteFleetProject(

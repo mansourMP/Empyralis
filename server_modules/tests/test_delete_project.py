@@ -34,9 +34,23 @@ safe rather than merely present:
    go by FK cascade. Agents and project-scoped vault credentials used to be
    REASSIGNED to a "default" project first, precisely to dodge the FK's own
    ON DELETE SET NULL — that reassignment is what could invent a project
-   nobody asked for, so it is gone. Both now land on NULL exactly as the FK
-   says, and the counts of each are read (like every other count here)
-   BEFORE the delete, so the caller can still report an honest tally.
+   nobody asked for, so it is gone. Agents land on NULL exactly as the FK
+   says, and the count is read (like every other count here) BEFORE the
+   delete, so the caller can still report an honest tally.
+
+4. CREDENTIALS ARE NOT LEFT TO THE FK. Landing a project-scoped
+   vault_credentials row on NULL project_id turned out to be its own real
+   regression (a separate fix from #3 above): nothing anywhere lists or
+   revokes a credential once its project_id is NULL, so it becomes
+   invisible and unrevokable rather than destroyed. Fixed by deleting it
+   OUTRIGHT in the same transaction — UNLESS an ENABLED
+   agent_connector_bindings row still points at it, which means a live
+   agent is actually using it right now (independent of this project's own
+   lifecycle — connectors_actions.py documents N agents sharing ONE
+   project-scoped credential this way). Hard-deleting a still-bound
+   credential would break that agent's next tool call, a worse bug than
+   the one this fixes — so those rows are deliberately left alone and land
+   on NULL via the FK exactly as before, and the honest count says so.
 """
 
 from __future__ import annotations
@@ -111,7 +125,8 @@ def _deleted_summary(**overrides) -> dict:
         "members_removed": 2,
         "goals_deleted": 0,
         "agents_unassigned": 2,
-        "credentials_unassigned": 1,
+        "credentials_deleted": 1,
+        "credentials_still_bound": 0,
     }
     base.update(overrides)
     return base
@@ -303,15 +318,35 @@ class _RecordingConnection:
     tests can assert on sequence — the count SELECT must run before the
     DELETE, or the tally it produces is a lie about rows already gone.
     Also records whether the whole unit of work committed or rolled back,
-    since "all or nothing" is the other safety property here."""
+    since "all or nothing" is the other safety property here.
+
+    Three query shapes are distinguished by statement prefix, matching the
+    three DIFFERENT asyncpg calls delete_project actually issues against
+    them: `fetchrow` for the tasks/documents/members/goals/agents tally AND
+    the still-bound-credentials count, `fetch` for the credentials DELETE
+    (it needs the RETURNING rows, not just a command tag), `execute` for
+    the final `DELETE FROM projects`. Anything else raises — delete_project
+    must never reassign (UPDATE) anything, the exact bug this file exists
+    to keep dead."""
 
     def __init__(self, owner: "_RecordingPool") -> None:
         self.owner = owner
 
     async def fetchrow(self, sql, *args):
-        self.owner.statements.append(_squash(sql))
+        squashed = _squash(sql)
+        self.owner.statements.append(squashed)
         self.owner.args.append(args)
+        if squashed.startswith("SELECT COUNT(*) AS n FROM vault_credentials"):
+            return {"n": self.owner.credentials_still_bound}
         return dict(self.owner.counts)
+
+    async def fetch(self, sql, *args):
+        squashed = _squash(sql)
+        self.owner.statements.append(squashed)
+        self.owner.args.append(args)
+        if squashed.startswith("DELETE FROM vault_credentials"):
+            return [{"id": cred_id} for cred_id in self.owner.credentials_deleted_ids]
+        raise AssertionError(f"unexpected fetch() statement: {squashed}")
 
     async def execute(self, sql, *args):
         squashed = _squash(sql)
@@ -339,11 +374,22 @@ class _RecordingTransaction:
 
 
 class _RecordingPool:
-    def __init__(self, counts: dict | None = None, delete_tag: str = "DELETE 1") -> None:
+    def __init__(
+        self,
+        counts: dict | None = None,
+        delete_tag: str = "DELETE 1",
+        credentials_deleted_ids: list[str] | None = None,
+        credentials_still_bound: int = 0,
+    ) -> None:
         self.statements: list[str] = []
         self.args: list[tuple] = []
-        self.counts = counts or {"tasks": 3, "documents": 1, "members": 2, "goals": 0, "agents": 2, "credentials": 1}
+        self.counts = counts or {"tasks": 3, "documents": 1, "members": 2, "goals": 0, "agents": 2}
         self.delete_tag = delete_tag
+        # Defaults to one deleted, orphaned credential and zero still-bound
+        # ones — matches _deleted_summary()'s own default so existing tests
+        # asserting against that summary don't have to know this detail.
+        self.credentials_deleted_ids = ["cred-1"] if credentials_deleted_ids is None else credentials_deleted_ids
+        self.credentials_still_bound = credentials_still_bound
         self.transactions_opened = 0
         self.committed = False
         self.rolled_back = False
@@ -437,14 +483,16 @@ async def test_repository_returns_none_for_a_project_in_another_workspace(monkey
 
 
 @pytest.mark.anyio
-async def test_agents_and_credentials_are_never_reassigned_and_land_on_null(monkeypatch) -> None:
-    """The old code reassigned workspace_agent_installs.project_id and
-    vault_credentials.project_id to a "default" project before the DELETE,
-    specifically to dodge the FK's own ON DELETE SET NULL. That reassignment
-    is gone (see module docstring) — _RecordingConnection.execute raises if
-    delete_project issues anything other than the DELETE itself, so this
-    proves no such statement is attempted; the FK is left to null both
-    columns out on its own when the row is deleted."""
+async def test_agents_are_never_reassigned_and_land_on_null(monkeypatch) -> None:
+    """The old code reassigned workspace_agent_installs.project_id to a
+    "default" project before the DELETE, specifically to dodge the FK's own
+    ON DELETE SET NULL. That reassignment is gone (see module docstring) —
+    _RecordingConnection.execute raises if delete_project issues anything
+    other than the DELETE itself, so this proves no such statement is
+    attempted; the FK is left to null the column out on its own when the
+    row is deleted. (vault_credentials is NOT this shape any more — see
+    the credentials-specific tests below; it is hard-deleted, not
+    reassigned OR left to the FK, unless a live agent still uses it.)"""
     recorder = _RecordingPool()
     _install_recording_pool(monkeypatch, recorder)
     monkeypatch.setattr(
@@ -462,16 +510,17 @@ async def test_agents_and_credentials_are_never_reassigned_and_land_on_null(monk
     # Reported for an honest tally, not because anything was moved — see
     # `_deleted_summary`'s doc comment on the field names.
     assert result["agents_unassigned"] == 2
-    assert result["credentials_unassigned"] == 1
 
 
 @pytest.mark.anyio
 async def test_counts_are_read_before_the_cascade_takes_the_rows(monkeypatch) -> None:
     """The tally the confirmation and the audit-ledger entry are built from
     can only be honest if it is read while the rows still exist — agents
-    and credentials included, same as tasks/documents/members/goals."""
+    included, same as tasks/documents/members/goals. (Credentials get their
+    own ordering test below: the DELETE FROM vault_credentials IS the
+    count, via RETURNING, so there's no separate SELECT to race.)"""
     recorder = _RecordingPool(
-        counts={"tasks": 7, "documents": 2, "members": 4, "goals": 1, "agents": 5, "credentials": 3}
+        counts={"tasks": 7, "documents": 2, "members": 4, "goals": 1, "agents": 5}
     )
     _install_recording_pool(monkeypatch, recorder)
     monkeypatch.setattr(
@@ -494,7 +543,6 @@ async def test_counts_are_read_before_the_cascade_takes_the_rows(monkeypatch) ->
     assert result["members_removed"] == 4
     assert result["goals_deleted"] == 1
     assert result["agents_unassigned"] == 5
-    assert result["credentials_unassigned"] == 3
 
 
 @pytest.mark.anyio
@@ -517,6 +565,129 @@ async def test_a_delete_that_removed_nothing_rolls_back_and_reports_nothing(monk
     assert result is None
     assert recorder.rolled_back is True
     assert recorder.committed is False
+
+
+# ── 4. Credentials: hard-deleted, unless a live agent still uses them ──────
+
+
+@pytest.mark.anyio
+async def test_orphaned_project_credentials_are_hard_deleted(monkeypatch) -> None:
+    """The actual fix: a project-scoped vault_credentials row that no live
+    agent_connector_bindings row points at is DELETED, same transaction —
+    never left to the FK's ON DELETE SET NULL, which is exactly how a
+    credential used to go invisible-and-unrevokable (module docstring,
+    part 4). The repository issues a real `DELETE FROM vault_credentials
+    ... RETURNING id`; this test's mock returns two ids for it, and the
+    result must report exactly that count as deleted."""
+    recorder = _RecordingPool(credentials_deleted_ids=["cred-1", "cred-2"], credentials_still_bound=0)
+    _install_recording_pool(monkeypatch, recorder)
+    monkeypatch.setattr(
+        projects_repository,
+        "get_project",
+        AsyncMock(return_value={"id": "proj-1", "name": "Demo takes", "is_default": False}),
+    )
+    _never_ensure_default_project(monkeypatch)
+
+    result = await projects_repository.delete_project(
+        tenant_id="tenant-1", workspace_id="ws-1", project_id="proj-1",
+    )
+
+    assert result is not None
+    assert result["credentials_deleted"] == 2
+    assert result["credentials_still_bound"] == 0
+    assert any(
+        s.startswith("DELETE FROM vault_credentials") and "NOT IN" in s
+        for s in recorder.statements
+    ), "delete_project must issue a real DELETE FROM vault_credentials, excluding still-bound rows"
+
+
+@pytest.mark.anyio
+async def test_a_credential_a_live_agent_still_uses_is_not_deleted(monkeypatch) -> None:
+    """THE case this fix has to get right: a project-scoped credential with
+    an ENABLED agent_connector_bindings row still pointing at it is a LIVE
+    dependency (secrets_broker._resolve_bound_connector_credential_id reads
+    it at tool-call time) — completely independent of this project's own
+    lifecycle, per the "N agents share ONE credential" reuse feature
+    (connectors_actions.py). Hard-deleting it would break that agent's next
+    tool call, a worse bug than the invisible-orphan one this fix targets.
+    The repository's own DELETE statement already excludes such rows via
+    its `NOT IN (SELECT ... FROM agent_connector_bindings WHERE enabled)`
+    clause — this test's mock simulates that exclusion actually holding (a
+    row that stays, reported separately) and asserts the result never
+    claims it as deleted."""
+    recorder = _RecordingPool(credentials_deleted_ids=[], credentials_still_bound=1)
+    _install_recording_pool(monkeypatch, recorder)
+    monkeypatch.setattr(
+        projects_repository,
+        "get_project",
+        AsyncMock(return_value={"id": "proj-1", "name": "Demo takes", "is_default": False}),
+    )
+    _never_ensure_default_project(monkeypatch)
+
+    result = await projects_repository.delete_project(
+        tenant_id="tenant-1", workspace_id="ws-1", project_id="proj-1",
+    )
+
+    assert result is not None
+    assert result["credentials_deleted"] == 0
+    assert result["credentials_still_bound"] == 1
+    # The still-bound row is never claimed as gone anywhere else in the
+    # summary either — no other field secretly absorbs it.
+    assert result["credentials_deleted"] != result["credentials_still_bound"] or result["credentials_deleted"] == 0
+
+
+@pytest.mark.anyio
+async def test_credential_delete_query_excludes_enabled_bindings_scoped_correctly(monkeypatch) -> None:
+    """Pins the actual WHERE shape, not just the outcome: the DELETE must
+    filter agent_connector_bindings on `enabled = TRUE` (a disabled/
+    unsubscribed binding is not a live dependency) and must scope both the
+    credential and the bindings lookup to THIS workspace_id/tenant_id — a
+    credential id colliding across tenants must never save a row that
+    should go, or delete one that shouldn't."""
+    recorder = _RecordingPool()
+    _install_recording_pool(monkeypatch, recorder)
+    monkeypatch.setattr(
+        projects_repository,
+        "get_project",
+        AsyncMock(return_value={"id": "proj-1", "name": "Demo takes", "is_default": False}),
+    )
+    _never_ensure_default_project(monkeypatch)
+
+    await projects_repository.delete_project(
+        tenant_id="tenant-1", workspace_id="ws-1", project_id="proj-1",
+    )
+
+    delete_stmt = next(s for s in recorder.statements if s.startswith("DELETE FROM vault_credentials"))
+    assert "enabled = TRUE" in delete_stmt
+    assert "agent_connector_bindings" in delete_stmt
+    delete_args = next(a for s, a in zip(recorder.statements, recorder.args) if s.startswith("DELETE FROM vault_credentials"))
+    assert delete_args == ("ws-1", "proj-1", "tenant-1")
+
+
+@pytest.mark.anyio
+async def test_credentials_are_deleted_before_the_project_row_in_the_same_transaction(monkeypatch) -> None:
+    """Ordering matters here too: the credential DELETE must run before the
+    project's own DELETE (whose FK ON DELETE SET NULL would otherwise race
+    it for the still-bound rows), and both must be inside the one
+    transaction `test_the_whole_removal_is_one_transaction` already pins."""
+    recorder = _RecordingPool()
+    _install_recording_pool(monkeypatch, recorder)
+    monkeypatch.setattr(
+        projects_repository,
+        "get_project",
+        AsyncMock(return_value={"id": "proj-1", "name": "Demo takes", "is_default": False}),
+    )
+    _never_ensure_default_project(monkeypatch)
+
+    await projects_repository.delete_project(
+        tenant_id="tenant-1", workspace_id="ws-1", project_id="proj-1",
+    )
+
+    credentials_at = next(i for i, s in enumerate(recorder.statements) if s.startswith("DELETE FROM vault_credentials"))
+    project_at = next(i for i, s in enumerate(recorder.statements) if s.startswith("DELETE FROM projects"))
+    assert credentials_at < project_at
+    assert recorder.transactions_opened == 1
+    assert recorder.committed is True
 
 
 @pytest.mark.anyio
