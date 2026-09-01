@@ -6,13 +6,20 @@ none — see CLAUDE.md's "an agent is independent of every project" hard rule).
 A brand-new workspace starts with ZERO projects (founder ruling, 2026-09-01:
 "I have to be the one who is going to choose what project I am going to
 create") — nothing seeds a "General" project at signup or at workspace
-creation any more. `ensure_default_project` (create-if-absent, below) still
-exists and is still called, but only from genuine on-demand actions that need
-a real fallback home: reassigning an orphaned agent/credential when
-`delete_project`/`set_project_archived` removes the project that held them,
-and a project-less non-owner workspace invite (routes_workspaces.py). None of
-those run at workspace creation, and none run merely because someone loaded
-their own project list — see `default_project_id_if_exists` below for the
+creation any more, and `is_default` is now a legacy marker with no removal
+consequence: an `is_default` project is archivable and deletable exactly
+like any other (same ruling — a locked-down "General" project the founder
+never asked for and could not remove was the bug this shipped to fix).
+`ensure_default_project` (create-if-absent, below) still exists, but its
+only caller left is a project-less non-owner workspace invite
+(routes_workspaces.py — an owner-initiated write, not a read path).
+`delete_project`/`set_project_archived` used to call it too, to reassign an
+orphaned agent/credential onto a "default" project before removing the one
+that held them — that call is what silently CREATED a fresh "General"
+project as a side effect of removing a different one, for any workspace
+with no project already marked `is_default`. Neither calls it any more; see
+`delete_project`'s own docstring for what happens to their agents/
+credentials instead. See `default_project_id_if_exists` below for the
 read-only counterpart that deliberately never creates one. A workspace that
 existed before this ruling keeps whatever "General" project it already has;
 nothing here migrates or deletes it.
@@ -550,13 +557,23 @@ async def ensure_default_project(
 ) -> Dict[str, Any]:
     """Get the workspace's default project, creating a 'General' one if absent.
 
-    Create-if-absent, on purpose — but call this only from a genuine
-    on-demand action (an owner inviting a teammate, a project being
-    deleted/archived out from under agents that need somewhere to land).
-    Never from a read path: a project must not get created as the silent
-    side effect of someone merely loading their own list. See this module's
-    own header and `default_project_id_if_exists` (the read-only, never-
-    creates counterpart) for the fuller reasoning."""
+    Create-if-absent, on purpose — but call this only from a genuine,
+    owner-initiated on-demand action, never from a read path: a project
+    must not get created as the silent side effect of someone merely
+    loading their own list. See this module's own header and
+    `default_project_id_if_exists` (the read-only, never-creates
+    counterpart) for the fuller reasoning.
+
+    As of 2026-09-01 the only caller left is routes_workspaces.py's
+    project-less invite path (an owner inviting a teammate with no project
+    named). `delete_project`/`set_project_archived` used to call this too,
+    to rehome a project's agents/credentials before removing it — that was
+    itself the bug: for a workspace with no project already marked
+    `is_default`, it silently created a fresh "General" project as a side
+    effect of deleting or archiving a DIFFERENT one. Both now leave
+    `is_default` projects removable like any other and let the FK's own
+    `ON DELETE SET NULL` land agents/credentials on NULL instead — see
+    `delete_project`'s own docstring."""
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         raise control_plane_repository.runtime_db.DurableRuntimeConfigurationError(
@@ -632,35 +649,32 @@ async def set_project_archived(
     project_id: str,
     archived: bool = True,
 ) -> Optional[Dict[str, Any]]:
-    """Archive/unarchive a project. The default project cannot be archived —
-    a workspace must always have a home for ungrouped agents."""
+    """Archive/unarchive a project — including the `is_default` one.
+
+    `is_default` used to block archiving here, back when the flag meant "the
+    workspace's guaranteed home for ungrouped agents" and losing that home
+    silently revoked an agent's project-scoped toolset. That reason is gone:
+    an agent is INDEPENDENT of every project (founder hard rule), and
+    `is_default` is now just a legacy marker with no removal consequence —
+    see `delete_project`'s own docstring for the fuller history.
+
+    This also no longer force-moves the project's agents anywhere. It used
+    to reassign them to `ensure_default_project()` (create-if-absent) before
+    flipping the flag, which — for a workspace with no OTHER project already
+    marked `is_default` — silently CREATED a fresh "General" project as a
+    side effect of archiving. Doing that from an archive call is worse than
+    from delete: this action is supposed to be reversible ("Hidden from your
+    lists. Restorable, nothing is lost." — ProjectSettings.tsx), and forcibly
+    relocating agents on the way in, with no matching move back on the way
+    out, was already quietly breaking that promise. Agents now simply keep
+    their `project_id` pointed at the archived project; un-archiving restores
+    them to view exactly as they were, nothing moved, nothing invented."""
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return None
     tenant_id = str(tenant_id or "").strip()
     workspace_id = str(workspace_id or "").strip()
     project_id = str(project_id or "").strip()
-    if archived:
-        target = await get_project(tenant_id=tenant_id, workspace_id=workspace_id, project_id=project_id)
-        if target is None:
-            return None
-        if target.get("is_default"):
-            raise ValueError("The default project cannot be archived.")
-        # Reassign this project's agents back to the default project.
-        default_project = await ensure_default_project(tenant_id=tenant_id, workspace_id=workspace_id)
-        await control_plane_repository.rls_execute(
-            pool,
-            """
-            UPDATE workspace_agent_installs
-            SET project_id = $4, updated_at = NOW()
-            WHERE tenant_id = $1 AND workspace_id = $2 AND project_id = $3
-            """,
-            tenant_id,
-            workspace_id,
-            project_id,
-            default_project["id"],
-            tenant_id=tenant_id, workspace_id=workspace_id,
-        )
     row = await control_plane_repository.rls_fetchrow(
         pool,
         """
@@ -690,14 +704,48 @@ async def delete_project(
     workspace_id: str,
     project_id: str,
 ) -> Optional[Dict[str, Any]]:
-    """Permanently delete a project and everything that IS the project.
-    Irreversible; `set_project_archived` above is the reversible everyday
-    action and stays what the UI reaches for first.
+    """Permanently delete a project and everything that IS the project —
+    including the `is_default` one. Irreversible; `set_project_archived`
+    above is the reversible everyday action and stays what the UI reaches
+    for first.
 
-    Returns a summary of what was removed (counts, plus how many agents were
-    rehomed), or None when the project doesn't resolve in this workspace.
-    Raises ValueError for the default project — a workspace must always keep
-    a home for ungrouped agents, exactly as `set_project_archived` refuses.
+    Returns a summary of what was removed (counts), or None when the
+    project doesn't resolve in this workspace.
+
+    `is_default` USED to block this (ValueError, "the default project
+    cannot be deleted") on the theory that a workspace must always keep a
+    home for ungrouped agents. Founder ruling, 2026-09-01: that theory is
+    dead. An agent is INDEPENDENT of every project — `project_id` is
+    nullable and is not ownership — so an agent whose project (default or
+    not) gets deleted simply ends up with `project_id = NULL`, which is
+    correct, not an emergency requiring a forced home. `is_default` is now
+    only a legacy marker (still read by `ensure_default_project`/
+    `default_project_id_if_exists` for the one thing that still legitimately
+    wants a "the workspace's default project" concept — an owner inviting a
+    teammate with no project named, in routes_workspaces.py); it carries no
+    consequence for deletion or archiving any more.
+
+    This used to also REASSIGN `workspace_agent_installs.project_id` and
+    `vault_credentials.project_id` to `ensure_default_project()` (create-
+    if-absent) before the delete, specifically to dodge the FK's own
+    `ON DELETE SET NULL`. For a workspace with no project already marked
+    `is_default`, that create-if-absent call silently CREATED a fresh
+    "General" project as a side effect of deleting a DIFFERENT one — the
+    exact anti-pattern `default_project_id_if_exists`'s docstring warns
+    against, just reached from a write path instead of a read path. That
+    must not happen, so this no longer reassigns anything: the FK's own
+    `ON DELETE SET NULL` is left to run, and both columns land on NULL.
+    For agents that is the correct, intended outcome (see above). For
+    project-scoped `vault_credentials` it is a real, deliberately accepted
+    regression from the old behavior — a NULL project_id there is
+    unreachable from every surface that lists or revokes project-scoped
+    credentials (connectors_actions.list_project_connectors,
+    subscribe_agent_to_project_credential), so a secret attached to a
+    deleted project now has no UI path to see or revoke it. Documented
+    here as a known, UNFIXED gap (CLAUDE.md: a routed-around defect stays
+    named as broken, never quietly re-labeled as fine) — surfacing
+    project-less credentials somewhere is a separate, real piece of work,
+    not something this fix invents a workaround for.
 
     What DIES with the project (all via the projects(id) FK's ON DELETE
     CASCADE — see control_plane_repository.CONTROL_PLANE_SCHEMA_SQL):
@@ -705,28 +753,6 @@ async def delete_project(
         project_documents
         project_memberships
         agent_goals
-
-    What MOVES HOME rather than being cut loose. Both columns are
-    ON DELETE SET NULL, and letting the FK do that is the sharp edge here,
-    which is why this reassigns them BEFORE the delete instead:
-
-      * workspace_agent_installs.project_id — a NULL here is not merely
-        untidy, it SILENTLY REVOKES the whole project-scoped toolset.
-        agent_turn_runtime_service._specialist_tool_allowed grants the
-        `project_task__*` / `document__*` / `goal__*` families on
-        `bool(toolset["project_id"])` alone (CLAUDE.md: "project membership
-        is the grant, not a connector binding"), so an agent whose project
-        row vanished would just stop being offered those tools, with no
-        error anywhere. Rehomed to the default project — the same thing
-        set_project_archived already does, for the same reason.
-      * vault_credentials.project_id — NULL is unreachable, not just
-        unlisted: connectors_actions.list_project_connectors and
-        subscribe_agent_to_project_credential both filter on it, and no
-        surface anywhere lists project-less credentials, so a stored secret
-        would linger forever with no way to see or revoke it. Rehomed
-        alongside the agents that use it, keeping the two on the same
-        project so subscribe_agent_to_project_credential's equality check
-        still holds.
 
     What is deliberately LEFT ALONE:
       * usage_events.project_id (no FK) — historical billing/usage rows.
@@ -750,32 +776,22 @@ async def delete_project(
     target = await get_project(tenant_id=tenant_id, workspace_id=workspace_id, project_id=project_id)
     if target is None:
         return None
-    if target.get("is_default"):
-        raise ValueError("The default project cannot be deleted.")
 
-    # Resolved BEFORE the transaction below: ensure_default_project takes
-    # its own connection out of the same pool, and calling it from inside a
-    # held transaction is how you deadlock a small pool.
-    default_project = await ensure_default_project(tenant_id=tenant_id, workspace_id=workspace_id)
-    default_project_id = str((default_project or {}).get("id") or "").strip()
-    if not default_project_id:
-        raise ValueError("Could not resolve this workspace's default project; nothing was deleted.")
-
-    # ONE transaction for the count + both reassignments + the delete, on one
-    # connection. Not decoration: the first browser run of this failed on the
-    # vault_credentials statement (that table has no tenant_id column), and
-    # with a statement-per-transaction helper the agents had ALREADY been
-    # moved out of a project that then didn't get deleted — a user's agents
-    # silently rehomed by an operation that reported failure. Either all of
-    # it happens or none of it does.
+    # ONE transaction for the count + the delete, on one connection — the
+    # count must be read from rows the cascade has not touched yet, and the
+    # delete must not partially apply.
     async def _run(connection: Any) -> Dict[str, Any]:
             await control_plane_repository.apply_connection_scope(
                 connection, tenant_id=tenant_id, workspace_id=workspace_id,
             )
 
-            # Count what the cascade is about to take, BEFORE it takes it —
-            # the caller (route → activity ledger → UI) can only report
-            # honestly on numbers read while the rows still exist.
+            # Count what the cascade/FK-null is about to take, BEFORE it
+            # takes it — the caller (route → activity ledger → UI) can only
+            # report honestly on numbers read while the rows still exist.
+            # agents/credentials are counted here too (not reassigned —
+            # see docstring): both columns are ON DELETE SET NULL, so the
+            # DELETE FROM projects below nulls them out on its own; this
+            # SELECT is only for the honest tally, not a precondition for it.
             counts_row = await connection.fetchrow(
                 """
                 SELECT
@@ -786,44 +802,17 @@ async def delete_project(
                   (SELECT COUNT(*) FROM project_memberships
                      WHERE tenant_id = $1 AND workspace_id = $2 AND project_id = $3) AS members,
                   (SELECT COUNT(*) FROM agent_goals
-                     WHERE tenant_id = $1 AND workspace_id = $2 AND project_id = $3) AS goals
+                     WHERE tenant_id = $1 AND workspace_id = $2 AND project_id = $3) AS goals,
+                  (SELECT COUNT(*) FROM workspace_agent_installs
+                     WHERE tenant_id = $1 AND workspace_id = $2 AND project_id = $3) AS agents,
+                  (SELECT COUNT(*) FROM vault_credentials
+                     WHERE workspace_id = $2 AND project_id = $3) AS credentials
                 """,
                 tenant_id,
                 workspace_id,
                 project_id,
             )
             counts = dict(counts_row) if counts_row else {}
-
-            agents_moved = await connection.execute(
-                """
-                UPDATE workspace_agent_installs
-                SET project_id = $4, updated_at = NOW()
-                WHERE tenant_id = $1 AND workspace_id = $2 AND project_id = $3
-                """,
-                tenant_id,
-                workspace_id,
-                project_id,
-                default_project_id,
-            )
-            # NOTE the different WHERE shape: vault_credentials has NO
-            # tenant_id column at all — one of the four tables CLAUDE.md
-            # calls out as carrying only ONE of the two scope columns (also
-            # why empyralis_rls_scope_match can't be applied to it).
-            # workspace_id + project_id is the full scope available, and it
-            # is sufficient: a project id is unique across tenants, and the
-            # rows whose workspace_id is deliberately NULL are the
-            # platform-scoped credentials, which never carry a project_id
-            # and so can never match here.
-            credentials_moved = await connection.execute(
-                """
-                UPDATE vault_credentials
-                SET project_id = $3
-                WHERE workspace_id = $1 AND project_id = $2
-                """,
-                workspace_id,
-                project_id,
-                default_project_id,
-            )
 
             deleted = await connection.execute(
                 "DELETE FROM projects WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3",
@@ -832,16 +821,12 @@ async def delete_project(
                 project_id,
             )
             if _affected_row_count(deleted) < 1:
-                # Raced with a concurrent delete. Roll the reassignments
-                # back too — claiming a deletion that did not happen is the
-                # dishonesty this whole path is written to avoid.
+                # Raced with a concurrent delete. Claiming a deletion that
+                # did not happen is the dishonesty this whole path is
+                # written to avoid.
                 raise _ProjectDeleteRaced()
 
-            return {
-                "counts": counts,
-                "agents_moved": _affected_row_count(agents_moved),
-                "credentials_moved": _affected_row_count(credentials_moved),
-            }
+            return {"counts": counts}
 
     try:
         async with pool.acquire() as connection:
@@ -858,10 +843,8 @@ async def delete_project(
         "documents_deleted": int(counts.get("documents") or 0),
         "members_removed": int(counts.get("members") or 0),
         "goals_deleted": int(counts.get("goals") or 0),
-        "agents_moved": outcome["agents_moved"],
-        "credentials_moved": outcome["credentials_moved"],
-        "moved_to_project_id": default_project_id,
-        "moved_to_project_name": str((default_project or {}).get("name") or ""),
+        "agents_unassigned": int(counts.get("agents") or 0),
+        "credentials_unassigned": int(counts.get("credentials") or 0),
     }
 
 

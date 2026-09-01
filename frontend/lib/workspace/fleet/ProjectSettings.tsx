@@ -266,48 +266,48 @@ export function ProjectSettings({
             {gatewayError ? <div className="fleet-member-invite-error">{gatewayError}</div> : null}
           </div>
 
-          {/* The default project is never removable — a workspace must keep
-              a home for ungrouped agents, which both
-              projects_repository.set_project_archived and .delete_project
-              refuse to take away. Nothing is rendered for it at all rather
-              than a disabled pair of buttons (CLAUDE.md: no dead controls).
+          {/* Every project is archivable and deletable, including the
+              is_default one (founder ruling, 2026-09-01: is_default is now
+              a legacy marker with no removal consequence — an agent is
+              independent of every project, so deleting/archiving one never
+              needs to keep a "home" in reserve; see projects_repository.
+              delete_project's docstring). Previously this whole section was
+              unrendered for is_default projects, which is exactly the "I
+              have no idea how to delete this shit" bug he hit personally —
+              a control the product needed stayed permanently absent.
               Neither button is accent-filled: this view spends its one
               accent on the page's own primary action, never here. */}
-          {!project.is_default && (
-            <>
-              <div className="fleet-member-invite-divider" />
-              <div className="fleet-member-invite-section">
-                <h2 className="fleet-member-invite-heading">Remove</h2>
-                <div className="fleet-project-remove-row">
-                  <button
-                    type="button"
-                    className="fleet-btn"
-                    disabled={removeBusy}
-                    onClick={() => void commitArchived(!project.archived)}
-                  >
-                    {project.archived ? "Restore" : "Archive"}
-                  </button>
-                  <span className="fleet-project-remove-hint">
-                    {project.archived
-                      ? "Back in your project list."
-                      : "Hidden from your lists. Restorable, nothing is lost."}
-                  </span>
-                </div>
-                <div className="fleet-project-remove-row">
-                  <button
-                    type="button"
-                    className="fleet-btn fleet-btn--danger-outline"
-                    disabled={removeBusy}
-                    onClick={() => { setRemoveError(null); setConfirmDelete(true); }}
-                  >
-                    Delete…
-                  </button>
-                  <span className="fleet-project-remove-hint">Permanent.</span>
-                </div>
-                {removeError ? <div className="fleet-member-invite-error">{removeError}</div> : null}
-              </div>
-            </>
-          )}
+          <div className="fleet-member-invite-divider" />
+          <div className="fleet-member-invite-section">
+            <h2 className="fleet-member-invite-heading">Remove</h2>
+            <div className="fleet-project-remove-row">
+              <button
+                type="button"
+                className="fleet-btn"
+                disabled={removeBusy}
+                onClick={() => void commitArchived(!project.archived)}
+              >
+                {project.archived ? "Restore" : "Archive"}
+              </button>
+              <span className="fleet-project-remove-hint">
+                {project.archived
+                  ? "Back in your project list."
+                  : "Hidden from your lists. Restorable, nothing is lost."}
+              </span>
+            </div>
+            <div className="fleet-project-remove-row">
+              <button
+                type="button"
+                className="fleet-btn fleet-btn--danger-outline"
+                disabled={removeBusy}
+                onClick={() => { setRemoveError(null); setConfirmDelete(true); }}
+              >
+                Delete…
+              </button>
+              <span className="fleet-project-remove-hint">Permanent.</span>
+            </div>
+            {removeError ? <div className="fleet-member-invite-error">{removeError}</div> : null}
+          </div>
         </div>
       )}
 
@@ -333,10 +333,11 @@ export function ProjectSettings({
  *  AgentsList.tsx's DeleteAgentDialog, so the two destructive confirmations
  *  in this product read identically. It names what actually goes, because
  *  the delete is a cascade the reader cannot see: tasks, documents and
- *  goals die with the project, and the agents do NOT — they move to the
- *  workspace's default project (projects_repository.delete_project rehomes
- *  them deliberately rather than letting the FK null their project_id out
- *  from under their toolset). */
+ *  goals die with the project, and the agents do NOT — they simply stop
+ *  belonging to any project (an agent is independent of every project,
+ *  CLAUDE.md hard rule; projects_repository.delete_project no longer
+ *  rehomes them anywhere — see its own docstring for why forcing a "home"
+ *  project to exist was itself the bug). */
 function DeleteProjectDialog({
   projectName,
   contents,
@@ -370,7 +371,7 @@ function DeleteProjectDialog({
     contents?.tasks != null ? plural(contents.tasks, "task", "tasks") : null,
     contents?.documents != null ? plural(contents.documents, "document", "documents") : null,
   ].filter((s): s is string => Boolean(s)).join(" and ");
-  const agentsMoving = contents?.agents ?? 0;
+  const agentsLosingProject = contents?.agents ?? 0;
 
   return createPortal(
     <div
@@ -400,8 +401,8 @@ function DeleteProjectDialog({
           <p style={{ margin: 0, fontSize: 13, color: "var(--text-primary)", lineHeight: 1.5 }}>
             Delete <strong>{projectName}</strong>?
             {tally ? ` Its ${tally} are deleted with it.` : " Its tasks and documents are deleted with it."}
-            {agentsMoving > 0
-              ? ` ${plural(agentsMoving, "agent", "agents")} move to General.`
+            {agentsLosingProject > 0
+              ? ` ${plural(agentsLosingProject, "agent", "agents")} will no longer belong to a project.`
               : ""}
             {" "}This can&apos;t be undone — archive instead to keep it.
           </p>

@@ -436,10 +436,13 @@ async def fleet_projects(
         # side effect of someone merely loading their own list — the same
         # anti-pattern default_project_id_if_exists's own docstring already
         # warns against ("a write nobody asked for"), just not applied here
-        # until now. ensure_default_project still exists and is still called
-        # from genuine on-demand actions (delete_project/set_project_archived
-        # rehoming an orphaned agent, and a project-less non-owner invite in
-        # routes_workspaces.py) — this was the one EAGER, read-path caller.
+        # until now. ensure_default_project still exists; its only caller
+        # left is a project-less non-owner invite in routes_workspaces.py
+        # (an owner-initiated write, not a read path) — this was the one
+        # EAGER, read-path caller. delete_project/set_project_archived used
+        # to call it too, to rehome an orphaned agent, which had the same
+        # silent-create bug on a project with no is_default sibling; neither
+        # calls it any more (projects_repository.delete_project's docstring).
         rows = await projects.list_projects(
             tenant_id=tenant_id,
             workspace_id=resolved_workspace_id,
@@ -597,13 +600,14 @@ async def fleet_delete_project(
     project_id: str,
     current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
-    """Owner-only, irreversible: permanently delete a project. Its tasks,
-    documents, goals and member grants go with it; its agents and its
-    project-scoped connector credentials are rehomed to the workspace's
-    default project rather than left with a NULL project_id — see
-    projects_repository.delete_project's own docstring for why that
-    distinction is load-bearing (a NULL there silently revokes an agent's
-    project_task__*/document__*/goal__* tools) and for exactly what is
+    """Owner-only, irreversible: permanently delete a project, including
+    the `is_default` one — every project is removable now (founder ruling,
+    2026-09-01). Its tasks, documents, goals and member grants go with it;
+    its agents and its project-scoped connector credentials end up with a
+    NULL project_id (the FK's own ON DELETE SET NULL) rather than being
+    rehomed anywhere — see projects_repository.delete_project's own
+    docstring for exactly what that means for each (correct/intended for
+    agents, a documented open gap for credentials) and for what is
     deliberately left untouched.
 
     ARCHIVING (PATCH .../projects/{id} with archived=true) is the reversible
@@ -627,12 +631,12 @@ async def fleet_delete_project(
             workspace_id=resolved_workspace_id,
             project_id=project_id,
         )
-    except ValueError as exc:
-        # Business-logic refusal (the default project) — a real, explainable
-        # answer, not a crash. Same {ok:false, error} shape every other
-        # failure in this file returns.
-        return {"ok": False, "error": str(exc)}
     except Exception as exc:
+        # delete_project no longer raises ValueError for anything (every
+        # project, including is_default, is removable now) — this stays a
+        # plain catch-all so an unexpected failure still returns the same
+        # {ok:false, error} shape every other failure in this file does,
+        # rather than a crash.
         return {"ok": False, "error": str(exc)}
 
     if removed is None:
@@ -659,8 +663,8 @@ async def fleet_delete_project(
                 f"{_actor_label(current_user)} deleted this project — "
                 f"{removed.get('tasks_deleted', 0)} task(s), "
                 f"{removed.get('documents_deleted', 0)} document(s) removed; "
-                f"{removed.get('agents_moved', 0)} agent(s) moved to "
-                f"{removed.get('moved_to_project_name') or 'the default project'}."
+                f"{removed.get('agents_unassigned', 0)} agent(s) no longer "
+                f"belong to a project."
             ),
             status="executed",
             metadata=removed,

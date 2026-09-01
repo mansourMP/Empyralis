@@ -458,8 +458,10 @@ export type DeletedProjectSummary = {
   tasks_deleted?: number;
   documents_deleted?: number;
   goals_deleted?: number;
-  agents_moved?: number;
-  moved_to_project_name?: string;
+  /** Agents that were in this project end up with no project at all — an
+   *  agent is independent of every project (CLAUDE.md hard rule), so this
+   *  is never a "moved to X" figure; there is no destination. */
+  agents_unassigned?: number;
 };
 
 export async function deleteFleetProject(
