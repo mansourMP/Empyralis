@@ -62,7 +62,14 @@ export default function WorkspaceAgentDetailPage() {
       // already crumbs it Agents › {agent}. Below 768px the list pane
       // collapses away (agents-split-pane.ts) and this is the ONLY way
       // back to it.
-      backHref={`${base}/agents`}
+      //
+      // `?list=1` (bug A, 2026-09-01): with exactly one agent, plain
+      // `${base}/agents` bounces straight back here via the solo redirect
+      // (agent-solo-redirect.ts) — the back control looked real but was a
+      // dead end for every workspace holding exactly one agent. `?list=1`
+      // is agents/page.tsx's own explicit-list-intent suppression for that
+      // redirect; see its header comment there.
+      backHref={`${base}/agents?list=1`}
       backLabel="Agents"
       initialTab={tab}
       onTabChange={(t) => router.replace(`${agentBase}/${t}`)}

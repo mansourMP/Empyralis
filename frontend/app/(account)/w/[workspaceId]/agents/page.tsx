@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 
 import {
@@ -30,7 +30,11 @@ import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
 import { FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import { HeaderAction, useBreadcrumbBadge } from "@/lib/workspace/fleet/Breadcrumbs";
 import { planAgentCountShape } from "@/lib/workspace/fleet/agent-count-shape";
-import { shouldRedirectToSoloAgent } from "@/lib/workspace/fleet/agent-solo-redirect";
+import {
+  shouldRedirectToSoloAgent,
+  isSoloRedirectListBackParam,
+  isSoloRedirectNewHandoffParam,
+} from "@/lib/workspace/fleet/agent-solo-redirect";
 import { createButtonClass } from "@/lib/workspace/fleet/create-accent";
 // AgentCards.tsx (the Cards layout) is DELETED, 2026-08-30 — this page was
 // its only renderer, and this stylesheet was its only importer. It still
@@ -179,9 +183,29 @@ function AgentsListSkeleton() {
   );
 }
 
-export default function AgentsPage() {
+// `useSearchParams()` needs a Suspense boundary above it (Next's own
+// requirement — see app/continue/page.tsx for the identical shape already
+// used elsewhere in this codebase) — added here specifically so `?list=1`
+// can be read through it rather than through raw `window.location.search`.
+// That switch is load-bearing, not stylistic: bug A, 2026-09-01, second
+// pass. The first fix read `?list=1` straight off `window.location.search`
+// (matching how `?new=1` already worked) and it held up against a direct
+// URL load / reload, but NOT against clicking FleetAgentDetail's real back
+// `<Link>` in a live browser — `window.location.search` was proven (by
+// direct instrumentation) to still read the OLD, query-less `/agents` on
+// this page's very first render/effect after that click, one or two
+// renders BEFORE Next's own history state actually caught up to
+// `?list=1`. The solo-redirect effect fired on that stale first read
+// before the correction ever landed, so the fix looked right on paper and
+// in a unit test but still failed in exactly the real scenario it exists
+// for. `useSearchParams()` reads from Next's router state directly, kept
+// in lockstep with navigation instead of the imperative, occasionally-
+// lagging `window.location` — the same reason app/continue and app/login
+// already read query params this way instead of `window.location.search`.
+function AgentsPageInner() {
   const params = useParams();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const workspaceId = String(params?.workspaceId || "");
   const base = `/w/${encodeURIComponent(workspaceId)}`;
 
@@ -336,17 +360,35 @@ export default function AgentsPage() {
     () => (soloAgent ? `${base}/agents/${encodeURIComponent(soloAgent.agent_id)}/chat` : null),
     [soloAgent, base],
   );
-  // ?new=1 is the command palette's "New agent" target — it must still create
-  // a new agent on a workspace that already has exactly one, not bounce away
-  // to that existing one before the create-and-navigate effect below ever
-  // runs. Read once, synchronously, at mount (matching consumedNew's own
-  // one-shot style further down): the query is stripped from the URL within
-  // the same render pass the create kicks off in, so re-deriving this from the
-  // live URL on every render would start redirecting again the instant the
-  // param is gone — before the async create has finished.
-  const [suppressSoloRedirect] = useState<boolean>(
-    () => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("new") === "1",
+  // `?new=1` — the command palette's "New agent" target. Read ONCE,
+  // synchronously, at mount (matching consumedNew's own one-shot style
+  // further down): it must still create a new agent on a workspace that
+  // already has exactly one, not bounce away to that existing one before
+  // the create-and-navigate effect below ever runs. The query is stripped
+  // from the URL within the same render pass the create kicks off in (see
+  // consumedNew below), so re-deriving this from the live URL on every
+  // render would start redirecting again the instant the param is gone —
+  // before the async create has finished.
+  const [suppressNewHandoff] = useState<boolean>(
+    () => typeof window !== "undefined" && isSoloRedirectNewHandoffParam(window.location.search),
   );
+  // `?list=1` — bug A, 2026-09-01: FleetAgentDetail's back control
+  // (`backHref`, set by the [agentId]/[tab] page) points here with this
+  // param so "go back to the agents list" reaches the list even when the
+  // workspace holds exactly one agent — otherwise the solo redirect bounces
+  // straight back into the same agent and the list, and "New agent" with
+  // it, become permanently unreachable for any workspace with exactly one
+  // agent (every new customer).
+  //
+  // Read via `useSearchParams()` (the component's own header comment above
+  // explains why), and on every render rather than once at mount — the
+  // second, and NOT the first, thing that makes this different from
+  // `?new=1` above. `?new=1` is consumed once and stripped from the URL,
+  // so it is read once; `?list=1` is never stripped, so it must keep
+  // reading true for as long as the URL carries it, including a later
+  // render of this same mounted instance.
+  const suppressListBack = isSoloRedirectListBackParam(searchParams.toString());
+  const suppressSoloRedirect = suppressNewHandoff || suppressListBack;
   // MAN-374 — `!cardOpen` is the real guard here, and `suppressSoloRedirect`
   // alone was never enough: it only protects the ONE entry point that sets
   // `?new=1` (the command palette). "Create your first agent" (FirstAgentEmpty
@@ -599,5 +641,19 @@ export default function AgentsPage() {
         />
       )}
     </main>
+  );
+}
+
+// The Suspense boundary `useSearchParams()` requires (see AgentsPageInner's
+// own header comment for why that hook replaced a `window.location.search`
+// read here) — `fallback={null}` rather than a skeleton because the wait is
+// not a real loading state: `useSearchParams()` resolves synchronously from
+// data the router already has by the time this route renders at all, so
+// there is nothing for a reader to ever actually see suspended.
+export default function AgentsPage() {
+  return (
+    <Suspense fallback={null}>
+      <AgentsPageInner />
+    </Suspense>
   );
 }

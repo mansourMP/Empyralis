@@ -23,7 +23,7 @@
  *
  * Run: npx tsx lib/workspace/fleet/tabs/work-tab-activity.test.ts
  */
-import { buildActivityRows, fleetRecordHref, fleetRecordLabel, toolIconFor, type TraceEvent } from "./WorkTab";
+import { allAgentTraceRefs, buildActivityRows, fleetRecordHref, fleetRecordLabel, toolIconFor, type Thread, type TraceEvent, type Turn } from "./WorkTab";
 
 let passed = 0;
 let failed = 0;
@@ -187,6 +187,67 @@ function taskUpdateEvents(): TraceEvent[] {
   assert(rows[0].text === "Listed documents", "document__list gets its own friendly label");
   assert(rows[0].linkLabel === undefined, "no linked_record on the wire means no link on the row");
   assert(rows[0].detail === "2 documents.", "with no linked_record, the plain summary is shown as detail same as any other tool");
+}
+
+// ── allAgentTraceRefs: bug B's root cause, 2026-09-01 ────────────────────
+//
+// Founder, on a 2-turn Telegram conversation: "if I reload this page, it
+// shows four messages... then it loads again by itself and only shows
+// two." This file's own top comment already says why: a real agent_turn()
+// call opens its OWN agent_traces row every time, so a 2-turn conversation
+// is two traces, never one. The pre-fix code (`latestTraceRef`, still used
+// for the sidebar's preview line) scanned turns back-to-front and returned
+// on the FIRST agent-side turn carrying a trace_id — i.e. only the latest
+// exchange's trace was ever discoverable from a thread at all, so the
+// detail pane could only ever render one trace no matter which turn it
+// asked about. allAgentTraceRefs is what the fix reads instead: every
+// trace a turn points at, not just the last one.
+
+function agentTurn(traceId: string | undefined, createdAt: string): Turn {
+  return { role: "assistant", content: "a reply", created_at: createdAt, metadata: traceId ? { trace_id: traceId } : {} };
+}
+function customerTurn(createdAt: string): Turn {
+  return { role: "user", content: "a message", created_at: createdAt };
+}
+
+{
+  // The exact shape of the founder's report: two full exchanges, each its
+  // own trace.
+  const thread: Thread = {
+    id: "th_1",
+    turns: [
+      customerTurn("2026-08-31T13:14:00Z"),
+      agentTurn("trace_a", "2026-08-31T13:15:33Z"),
+      customerTurn("2026-08-31T13:16:00Z"),
+      agentTurn("trace_b", "2026-08-31T13:17:39Z"),
+    ],
+  };
+  const refs = allAgentTraceRefs(thread);
+  assert(refs.length === 2, "a 2-turn conversation carries TWO traces, not one — this is the whole bug");
+  assert(refs[0].traceId === "trace_a" && refs[0].assistantIndex === 1, "the FIRST exchange's trace is still discoverable, not just the latest");
+  assert(refs[1].traceId === "trace_b" && refs[1].assistantIndex === 3, "the latest exchange's trace is discoverable too — nothing regresses for the single-turn case");
+}
+
+{
+  // A turn whose assistant reply carries no trace_id at all (predates trace
+  // instrumentation, or no control-plane DB) is simply absent from the
+  // list — never a fabricated entry with an empty id that would 404 a
+  // lookup.
+  const thread: Thread = {
+    id: "th_2",
+    turns: [customerTurn("t0"), agentTurn(undefined, "t1"), customerTurn("t2"), agentTurn("trace_c", "t3")],
+  };
+  const refs = allAgentTraceRefs(thread);
+  assert(refs.length === 1 && refs[0].traceId === "trace_c", "a turn with no trace_id is skipped, not returned as an empty-id ref");
+}
+
+{
+  // A single-exchange thread — the common case — still resolves to exactly
+  // one ref, same as before this fix (no regression for the majority
+  // shape: one customer turn, one reply).
+  const thread: Thread = { id: "th_3", turns: [customerTurn("t0"), agentTurn("trace_only", "t1")] };
+  const refs = allAgentTraceRefs(thread);
+  assert(refs.length === 1 && refs[0].traceId === "trace_only", "a single-exchange thread resolves to exactly one trace ref");
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);
