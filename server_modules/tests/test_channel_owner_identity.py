@@ -321,7 +321,10 @@ class OwnerIdentityWritePathTests(_Base):
 class OwnerIdentityReachesTheAuthorityChainTests(_Base):
     """The link is only worth anything if the turn's own tool-authority
     decision sees it. That decision reads a THIRD function
-    (personal_channels_repository.list_owner_linked_channel_identities_for_workspace,
+    (personal_channels_repository.list_owner_linked_channel_identities_for_agent
+    as of the 2026-09-01 per-agent-scoping fix — the workspace-wide
+    list_owner_linked_channel_identities_for_workspace tested directly
+    below is a sibling read, not what the resolver itself calls anymore —
     via agent_turn_runtime_service._resolve_channel_sender_class), so prove
     the write lands where that function looks rather than assuming it."""
 
@@ -349,6 +352,7 @@ class OwnerIdentityReachesTheAuthorityChainTests(_Base):
                 channel_origin=CHANNEL_KEY,
                 sender_id=f"telegram:{OWNER_SENDER_ID}",
                 workspace_id="ws-owner",
+                agent_id=self.agent_id,
             ),
             "owner",
         )
@@ -357,6 +361,7 @@ class OwnerIdentityReachesTheAuthorityChainTests(_Base):
                 channel_origin=CHANNEL_KEY,
                 sender_id=f"telegram:{STRANGER_SENDER_ID}",
                 workspace_id="ws-owner",
+                agent_id=self.agent_id,
             ),
             "audience",
         )

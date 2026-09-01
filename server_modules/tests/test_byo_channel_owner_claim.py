@@ -192,6 +192,7 @@ class ClaimReachesToolAuthorityAndCommandOwnershipTests(unittest.TestCase):
         with self._patched_db_path():
             result = _run(agent_turn_runtime_service._resolve_channel_sender_class(
                 channel_origin="telegram_agent_byo", sender_id=_OWNER_ID, workspace_id="ws-byo",
+                agent_id="agent-1",
             ))
         self.assertEqual(result, "owner")
 
@@ -199,6 +200,7 @@ class ClaimReachesToolAuthorityAndCommandOwnershipTests(unittest.TestCase):
         with self._patched_db_path():
             result = _run(agent_turn_runtime_service._resolve_channel_sender_class(
                 channel_origin="telegram_agent_byo", sender_id=_STRANGER_ID, workspace_id="ws-byo",
+                agent_id="agent-1",
             ))
         self.assertEqual(result, "audience")
 

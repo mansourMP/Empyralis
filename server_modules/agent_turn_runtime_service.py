@@ -5556,7 +5556,7 @@ async def handle_sage_chat(**kwargs: Any) -> dict:
 
 
 async def _resolve_channel_sender_class(
-    *, channel_origin: str, sender_id: str | None, workspace_id: str,
+    *, channel_origin: str, sender_id: str | None, workspace_id: str, agent_id: str,
 ) -> str:
     """owner / audience / unknown — the Phase U2 tool-authority
     classification for a channel turn. Pulled out as its own top-level
@@ -5567,8 +5567,27 @@ async def _resolve_channel_sender_class(
     the machine-administration floor, the memory-write attribution stamp,
     and the turn's recorded principal.
 
-    AUTHORITATIVE SOURCE: personal_channels_repository, never workspace.
-    identity_links. That table is genuinely readable now (control_plane_
+    agent_id (2026-09-01 fix): the id of the agent whose turn this actually
+    is — the same `_acting_install_id` (specialist install, or the
+    workspace master install when there is no specialist) that
+    _handle_sage_chat_unguarded already resolves a few lines above this
+    call, for the exact same reason: usage attribution and memory-write
+    stamping already had to know which agent this turn belongs to, and
+    tool-authority classification is answering a question about that SAME
+    agent. Before this fix, this function resolved owner WORKSPACE-WIDE
+    through list_owner_linked_channel_identities_for_workspace, whose own
+    docstring says the last-updated row per channel_key wins across every
+    agent in the workspace — so linking a second agent to a second person
+    silently reassigned the FIRST agent's owner to that second person too.
+    Now scoped through list_owner_linked_channel_identities_for_agent
+    instead, the per-agent twin of that same repository function. A
+    sender with no link recorded for THIS agent_id fails CLOSED to
+    "audience" (see that function's own docstring) — it is never widened
+    back out to the workspace-wide set, even when agent_id itself is
+    empty/unresolved.
+
+    AUTHORITATIVE SOURCE: personal_channels_repository (per-agent), never
+    workspace.identity_links. That table is genuinely readable now (control_plane_
     repository.get_workspace_by_id's SELECT was fixed to return it), but
     nothing in the shipped product has ever WRITTEN to it — routes_
     workspaces.py's identity-links endpoints have zero frontend callers —
@@ -5599,7 +5618,7 @@ async def _resolve_channel_sender_class(
     try:
         from server_modules.triage_service import resolve_sender_identity
         from server_modules.personal_channels_repository import (
-            list_owner_linked_channel_identities_for_workspace,
+            list_owner_linked_channel_identities_for_agent,
         )
         from server_modules.personal_channels_service import (
             _channel_prefixed_identity_tail,
@@ -5628,7 +5647,7 @@ async def _resolve_channel_sender_class(
         # (agent_turn_adapter's thread resolution, and the per-thread turn
         # lock), so repointing it is a separate change with its own blast
         # radius. Fixing the COMPARISON is what this bug is.
-        linked_by_channel = list_owner_linked_channel_identities_for_workspace(workspace_id)
+        linked_by_channel = list_owner_linked_channel_identities_for_agent(workspace_id, agent_id)
         bindings: list[dict[str, Any]] = [
             {
                 "channel_type": str(channel_key or "").strip().lower(),
@@ -5858,10 +5877,14 @@ async def _handle_sage_chat_unguarded(
     # ── Phase U2: resolve sender class (owner / audience / unknown) ──
     # See _resolve_channel_sender_class's own docstring for the full
     # reasoning: personal_channels_repository is the sole authoritative
-    # source (never workspace.identity_links), and any lookup failure
-    # fails CLOSED to "audience", never "owner".
+    # source (never workspace.identity_links), scoped to THIS turn's own
+    # agent (_acting_install_id, resolved above — same id usage_events_
+    # repository.set_usage_attribution and memory-write stamping already
+    # key off), and any lookup failure fails CLOSED to "audience", never
+    # "owner".
     _sender_class = await _resolve_channel_sender_class(
         channel_origin=channel_origin, sender_id=sender_id, workspace_id=normalized_workspace_id,
+        agent_id=_acting_install_id,
     )
     if channel_origin and sender_id and _sender_class != "owner":
         used_context.append("audience_session")
