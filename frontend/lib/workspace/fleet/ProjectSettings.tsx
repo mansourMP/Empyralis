@@ -1,8 +1,8 @@
 "use client";
 
 /**
- * Project-level settings — rename, and (U3-K) this project's default
- * Gateway. Sits in the same toolbar row as MemberAvatarStack/
+ * Project-level settings — rename, icon/colour, and (U3-K) this project's
+ * default Gateway. Sits in the same toolbar row as MemberAvatarStack/
  * ProjectMemberAdd (project detail page.tsx), which already renders on
  * every view (Overview/Agents/Tasks), not just one tab — the natural home
  * for a control that has to be reachable regardless of which view a reader
@@ -38,6 +38,16 @@
  * subscription sharing (out of scope — see the task brief this shipped
  * under). specialist_runtime_context.resolve_specialist_runtime_context is
  * what actually applies the fallback at turn time.
+ *
+ * Icon/colour (2026-09-01): ProjectIdentityPicker rides in the SAME "Name"
+ * section, its trigger to the left of the name input — one Linear-style
+ * row, not a second section, so a change this small doesn't grow the
+ * popover. Same owner-only gate as everything else in here; that gate is
+ * what makes ProjectIdentityPicker's own `disabled` prop moot on this
+ * call site (a non-owner never reaches this component at all, per the
+ * `if (ownRole !== "owner" ...) return null` below), but the picker is
+ * still never rendered with the gate turned off — a future second caller
+ * copying this file must not have to rediscover that rule.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -47,6 +57,8 @@ import { Settings2 } from "lucide-react";
 import { deleteFleetProject, patchFleetProject, refreshFleetProjects, type FleetProject } from "./fleet-data";
 import { useOwnWorkspaceRole } from "./members-data";
 import { GatewayBoxPicker } from "./gateway-box-picker";
+import { ProjectIdentityPicker } from "./fleet-project-identity";
+import type { TintKey } from "./fleet-presentation";
 
 export function ProjectSettings({
   workspaceId,
@@ -90,6 +102,11 @@ export function ProjectSettings({
   const [savingGateway, setSavingGateway] = useState(false);
   const [gatewayError, setGatewayError] = useState<string | null>(null);
 
+  const [icon, setIcon] = useState(project?.icon || "");
+  const [tint, setTint] = useState(project?.tint || "");
+  const [savingIdentity, setSavingIdentity] = useState(false);
+  const [identityError, setIdentityError] = useState<string | null>(null);
+
   const [removeBusy, setRemoveBusy] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -103,8 +120,11 @@ export function ProjectSettings({
     if (!open) return;
     setNameDraft(project?.name || "");
     setGatewayId(project?.default_gateway_id || "");
+    setIcon(project?.icon || "");
+    setTint(project?.tint || "");
     setNameError(null);
     setGatewayError(null);
+    setIdentityError(null);
     setRemoveError(null);
     setConfirmDelete(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -177,6 +197,31 @@ export function ProjectSettings({
     }
   }
 
+  async function commitIdentity(next: { icon: string; tint: TintKey }) {
+    const previousIcon = icon;
+    const previousTint = tint;
+    setIcon(next.icon);
+    setTint(next.tint);
+    setSavingIdentity(true);
+    setIdentityError(null);
+    try {
+      await patchFleetProject(workspaceId, project!.id, { icon: next.icon, tint: next.tint });
+      // Same reasoning as commitArchived below: the rail's own project
+      // list and this page's breadcrumb icon are both separate reads of
+      // useFleetProjects, not this popover's own state, so a caller-only
+      // onChanged() would leave them showing the old tile until their next
+      // poll. Force that refetch immediately, the same way archiving does.
+      refreshFleetProjects(workspaceId);
+      onChanged?.();
+    } catch (e) {
+      setIcon(previousIcon);
+      setTint(previousTint);
+      setIdentityError(e instanceof Error ? e.message : "Could not save.");
+    } finally {
+      setSavingIdentity(false);
+    }
+  }
+
   async function commitArchived(next: boolean) {
     setRemoveBusy(true);
     setRemoveError(null);
@@ -234,25 +279,41 @@ export function ProjectSettings({
         <div className="fleet-toolbar-popover fleet-member-invite-popover" role="dialog" aria-label="Project settings">
           <div className="fleet-member-invite-section">
             <h2 className="fleet-member-invite-heading">Name</h2>
-            <input
-              className="fleet-wizard-input"
-              value={nameDraft}
-              disabled={savingName}
-              maxLength={200}
-              onChange={(e) => setNameDraft(e.currentTarget.value)}
-              onBlur={commitName}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  e.currentTarget.blur();
-                } else if (e.key === "Escape") {
-                  e.preventDefault();
-                  setNameDraft(project!.name);
-                  setNameError(null);
-                }
-              }}
-            />
+            <div className="fleet-project-identity-row">
+              {/* No `disabled={savingIdentity}` here on purpose — that prop
+                  swaps the whole trigger+popover for a plain static tile
+                  (see the component's own "no dead controls" contract),
+                  which would slam the popover shut the instant a swatch is
+                  clicked, before a person can try a second colour. A rare
+                  double-submit during the sub-200ms round trip is harmless
+                  (set_project_identity is a plain overwrite); a picker that
+                  closes itself on every click is not. */}
+              <ProjectIdentityPicker
+                icon={icon}
+                tint={tint}
+                onChange={(next) => void commitIdentity(next)}
+              />
+              <input
+                className="fleet-wizard-input"
+                value={nameDraft}
+                disabled={savingName}
+                maxLength={200}
+                onChange={(e) => setNameDraft(e.currentTarget.value)}
+                onBlur={commitName}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    e.currentTarget.blur();
+                  } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    setNameDraft(project!.name);
+                    setNameError(null);
+                  }
+                }}
+              />
+            </div>
             {nameError ? <div className="fleet-member-invite-error">{nameError}</div> : null}
+            {identityError ? <div className="fleet-member-invite-error">{identityError}</div> : null}
           </div>
 
           <div className="fleet-member-invite-divider" />
