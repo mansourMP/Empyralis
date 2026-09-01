@@ -117,6 +117,23 @@ def test_a_name_cannot_inject_markup():
 # ── The resolver that feeds it ─────────────────────────────────────────────
 
 
+def _stub_accessible(monkeypatch, ids: list[str]) -> None:
+    """Isolate the seam this file actually tests -- naming/degradation --
+    from live membership resolution, which is its own concern with its own
+    coverage (test_mcp_oauth_provider.py, test_mcp_oauth_connector_flow.py).
+
+    ``_accessible_workspace_ids`` used to be a pure function of
+    ``current_user["workspace_ids"]``, so a bare ``{"workspace_ids": [...]}``
+    fixture was a faithful producer shape. It now resolves LIVE membership
+    (``auth.workspace_access_map``) and drops anything that does not
+    genuinely resolve to a real workspace -- so a bare id with no backing
+    row is correctly treated as orphaned, not as "this test's fixture data".
+    Stubbing the resolver itself keeps that fixture data meaningful again
+    without dragging live control-plane state into a naming test.
+    """
+    monkeypatch.setattr(oauth, "_accessible_workspace_ids", lambda _current_user: list(ids))
+
+
 @pytest.mark.asyncio
 async def test_named_workspaces_degrade_to_a_word_never_to_an_id(monkeypatch):
     """A workspace whose name cannot be read must not fall back to its id.
@@ -136,6 +153,7 @@ async def test_named_workspaces_degrade_to_a_word_never_to_an_id(monkeypatch):
     from server_modules import control_plane_repository as cpr
 
     monkeypatch.setattr(cpr, "get_workspace_by_id", fake_get_workspace_by_id)
+    _stub_accessible(monkeypatch, ["ws_named", "ws_selfnamed", "ws_unreadable"])
 
     result = await oauth._named_accessible_workspaces(
         {"workspace_ids": ["ws_named", "ws_selfnamed", "ws_unreadable"]}
@@ -156,6 +174,7 @@ async def test_the_hint_is_populated_only_on_a_collision(monkeypatch):
     from server_modules import control_plane_repository as cpr
 
     monkeypatch.setattr(cpr, "get_workspace_by_id", fake_get_workspace_by_id)
+    _stub_accessible(monkeypatch, ["ws_1", "ws_2"])
 
     unique = await oauth._named_accessible_workspaces({"workspace_ids": ["ws_1", "ws_2"]})
     assert [row["hint"] for row in unique] == ["", ""]

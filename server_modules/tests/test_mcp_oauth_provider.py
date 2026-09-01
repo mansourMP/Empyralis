@@ -640,6 +640,25 @@ def _consent_app(provider):
     return app
 
 
+def _stubbed_user(user_id: str = "u1", *, workspace_id: str = "ws-1", tenant_id: str = "t1") -> dict:
+    """A ``current_user`` shaped the way ``auth.get_current_user`` actually
+    returns one, not the bare ``{"workspace_ids": [...]}`` this file used to
+    hand-build.
+
+    These tests monkeypatch ``_current_dashboard_user`` itself, so they never
+    run ``auth.get_current_user`` -- the fixture has to carry a realistic
+    ``workspace_access`` map on its own, or ``_accessible_workspace_ids``
+    (which resolves LIVE membership, never the raw ``workspace_ids`` claim)
+    has nothing to resolve. See test_mcp_oauth_connector_flow.py for the
+    real, unstubbed session path, and the same-shape DELETED-workspace
+    regression a few tests down.
+    """
+    return {
+        "user_id": user_id,
+        "workspace_access": {workspace_id: {"role": "owner", "tenant_id": tenant_id}},
+    }
+
+
 def test_consent_get_not_logged_in_redirects_to_login(provider, monkeypatch):
     from starlette.testclient import TestClient
 
@@ -669,7 +688,7 @@ def test_consent_get_logged_in_renders_allow_deny_form(provider, monkeypatch):
     from starlette.testclient import TestClient
 
     monkeypatch.setattr(
-        oauth, "_current_dashboard_user", lambda request, **_kw: {"user_id": "u1", "workspace_ids": ["ws-1"]},
+        oauth, "_current_dashboard_user", lambda request, **_kw: _stubbed_user(),
     )
     client_info = _run(_register_client(provider))
     ticket = oauth._sign_consent_ticket(
@@ -693,7 +712,7 @@ def test_consent_post_allow_issues_code_and_redirects(provider, monkeypatch, use
     from starlette.testclient import TestClient
 
     monkeypatch.setattr(
-        oauth, "_current_dashboard_user", lambda request, **_kw: {"user_id": "u1", "workspace_ids": ["ws-1"]},
+        oauth, "_current_dashboard_user", lambda request, **_kw: _stubbed_user(),
     )
     client_info = _run(_register_client(provider))
     redirect_uri = str(client_info.redirect_uris[0])
@@ -725,7 +744,7 @@ def test_consent_post_deny_redirects_with_access_denied(provider, monkeypatch):
     from starlette.testclient import TestClient
 
     monkeypatch.setattr(
-        oauth, "_current_dashboard_user", lambda request, **_kw: {"user_id": "u1", "workspace_ids": ["ws-1"]},
+        oauth, "_current_dashboard_user", lambda request, **_kw: _stubbed_user(),
     )
     client_info = _run(_register_client(provider))
     redirect_uri = str(client_info.redirect_uris[0])
@@ -754,7 +773,7 @@ def test_consent_post_csrf_mismatch_rejected(provider, monkeypatch):
     from starlette.testclient import TestClient
 
     monkeypatch.setattr(
-        oauth, "_current_dashboard_user", lambda request, **_kw: {"user_id": "u1", "workspace_ids": ["ws-1"]},
+        oauth, "_current_dashboard_user", lambda request, **_kw: _stubbed_user(),
     )
     client_info = _run(_register_client(provider))
     ticket = oauth._sign_consent_ticket(
@@ -779,7 +798,7 @@ def test_consent_post_workspace_not_in_membership_rejected(provider, monkeypatch
     from starlette.testclient import TestClient
 
     monkeypatch.setattr(
-        oauth, "_current_dashboard_user", lambda request, **_kw: {"user_id": "u1", "workspace_ids": ["ws-1"]},
+        oauth, "_current_dashboard_user", lambda request, **_kw: _stubbed_user(),
     )
     client_info = _run(_register_client(provider))
     ticket = oauth._sign_consent_ticket(
