@@ -234,6 +234,17 @@ export function refreshFleetProjects(workspaceId: string): void {
   refreshSharedResources(`fleet-projects:${workspaceId}:`);
 }
 
+/** Every task-list view for this workspace, refetched now — useFleetTasks'
+ *  per-project key AND useFleetWorkspaceTasks' `:workspace` key both start
+ *  with `fleet-tasks:${workspaceId}:`, so one call catches the board, the
+ *  grouped list, and "My work" at once. Deleting a task changes what all
+ *  three return (the row disappears; a promoted sub-task's own row changes
+ *  shape), the same "one write, several differently-keyed readers" gap
+ *  refreshFleetProjects exists to close. */
+export function refreshFleetTasks(workspaceId: string): void {
+  refreshSharedResources(`fleet-tasks:${workspaceId}:`);
+}
+
 /** Force-refetch the workspace's agent list, AWAITABLY — unlike
  *  refreshFleetProjects (fire-and-forget), a caller here needs the promise:
  *  found live 2026-08-19 creating an agent and navigating straight into its
@@ -1683,6 +1694,42 @@ export async function patchFleetTask(
     throw new Error(apiErrorMessage(data, `Could not update task (HTTP ${res.status})`));
   }
   return withNormalizedStatus(data.task as FleetTask);
+}
+
+/** DELETE .../fleet/tasks/{id} — member-and-above on the task's own project
+ *  (routes_fleet.fleet_delete_task, gated identically to patchFleetTask
+ *  above), irreversible. There is no archive for a task the way
+ *  patchFleetProject's `archived` flag gives projects; this is the only
+ *  removal path there is. Resolves to the server's own summary of what
+ *  went, so a caller can say what actually happened instead of guessing —
+ *  same shape as DeletedProjectSummary above. */
+export type DeletedTaskSummary = {
+  /** Sub-tasks are NEVER deleted by this call — parent_task_id -> this row
+   *  is ON DELETE SET NULL (migrations/add_task_parent.sql), so they are
+   *  promoted to top-level tasks. This counts how many were promoted, not
+   *  how many were destroyed. */
+  subtasks_promoted?: number;
+  /** task.metadata.comments lived on the row itself, so these ARE gone. */
+  comments_deleted?: number;
+  /** Only the ATTACHMENT to this task is removed (project_task_labels'
+   *  own ON DELETE CASCADE) — the label itself is a shared workspace
+   *  vocabulary entry (workspace_labels) and survives untouched. */
+  labels_detached?: number;
+};
+
+export async function deleteFleetTask(
+  workspaceId: string,
+  taskId: string,
+): Promise<DeletedTaskSummary> {
+  const res = await fleetAuthorizedFetch(
+    `/api/w/${encodeURIComponent(workspaceId)}/fleet/tasks/${encodeURIComponent(taskId)}`,
+    { method: "DELETE", credentials: "include", headers: buildCookieAuthHeaders("DELETE", {}) },
+  );
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data?.ok === false) {
+    throw new Error(apiErrorMessage(data, `Could not delete task (HTTP ${res.status})`));
+  }
+  return (data.deleted || {}) as DeletedTaskSummary;
 }
 
 /* ── The workspace roster ─────────────────────────────────────────────────

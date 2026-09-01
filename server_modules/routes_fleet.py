@@ -964,6 +964,82 @@ async def fleet_patch_task(
         return {"ok": False, "error": str(exc)}
 
 
+@router.delete("/api/w/{workspace_id}/fleet/tasks/{task_id}")
+async def fleet_delete_task(
+    request: Request,
+    workspace_id: str,
+    task_id: str,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Permanently delete ONE task. Irreversible -- there was previously no
+    way to remove a standalone task at all; it could only die via its
+    project's own CASCADE in fleet_delete_project above. Founder-requested.
+
+    What goes with it (see project_tasks_service.delete_task's own docstring
+    for the full accounting): its comments (stored on the row itself) and
+    its label attachments (the labels themselves survive). Its SUB-TASKS are
+    NOT deleted -- they are promoted to top-level tasks, the same ON DELETE
+    SET NULL rule fleet_delete_project's docstring already states for the
+    identical reason (a sub-task is real work with its own history; one
+    click on the parent must not silently take it too).
+
+    MAN-64/MAN-70: `member`, gated on the task's OWN project via
+    _enforce_task_project_access -- deliberately matching fleet_patch_task's
+    gating exactly rather than inventing a stricter, delete-specific tier.
+    Every other task mutation on this file (patch, assign, comment, label,
+    parent) already trusts a project member to act on a task they can see;
+    a permanent delete is a bigger consequence but not a different KIND of
+    action than those, and a second, harsher permission shape for the same
+    task would be a new concept to learn with no MAN-64/MAN-70 basis for
+    where its line sits."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="member")
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
+    await _enforce_task_project_access(current_user, resolved_workspace_id, tenant_id, task_id, minimum_role="member")
+    from server_modules import project_tasks_service as tasks
+
+    try:
+        removed = await tasks.delete_task(
+            tenant_id=tenant_id,
+            workspace_id=resolved_workspace_id,
+            task_id=task_id,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+    if removed is None:
+        return {"ok": False, "error": "Task not found."}
+
+    # Audit trail, mirroring fleet_delete_project's own ledger write above.
+    try:
+        from server_modules import activity_ledger_service
+        from server_modules.control_plane_repository import get_workspace_by_id
+
+        ws = await get_workspace_by_id(resolved_workspace_id)
+        await activity_ledger_service.append_activity_event(
+            tenant_id=str((ws or {}).get("tenant_id") or "").strip() or "system",
+            workspace_id=resolved_workspace_id,
+            actor_type="user",
+            actor_id=str((current_user or {}).get("user_id") or "").strip() or "owner",
+            event_class="fleet_control",
+            detail_level="audit_reference",
+            action="task_deleted",
+            title=f"{removed.get('title') or 'Task'} deleted",
+            summary=(
+                f"{_actor_label(current_user)} deleted this task -- "
+                f"{removed.get('comments_deleted', 0)} comment(s) removed; "
+                f"{removed.get('subtasks_promoted', 0)} sub-task(s) promoted to top-level."
+            ),
+            status="executed",
+            metadata=removed,
+        )
+    except Exception:
+        # The task IS gone; failing to journal that must not turn a
+        # successful delete into a reported failure the caller retries.
+        LOGGER.warning("task_deleted ledger write failed for %s", task_id, exc_info=True)
+
+    return {"ok": True, "deleted": removed}
+
+
 class FleetAssignTaskRequest(BaseModel):
     # MAN-64/MAN-70: a task's assignee is either an agent or a human, never
     # both -- exactly ONE of these two must be set. Two optional fields

@@ -26,6 +26,7 @@
 
 import { useState, type CSSProperties } from "react";
 
+import { CopyLinkButton } from "@/lib/ui/CopyLinkButton";
 import { formatDueDate, timeAgo } from "./fleet-presentation";
 import { AgentSigil } from "./fleet-indicators";
 import { MemberAvatar } from "./MemberAvatarStack";
@@ -109,7 +110,11 @@ export function TasksList({
   onStatusChange?: (taskId: string, status: FleetTaskStatus) => void;
 }) {
   const columns = COLUMN_TRACKS.filter((c) => display[c.key]);
-  const grid = ["minmax(260px, 1fr)", ...columns.map((c) => c.track)].join(" ");
+  // Trailing 32px track for the Copy link button — same fixed, always-on
+  // track .fleet-projects-list's own grid carries for its CopyLinkButton
+  // (fleet-theme.css), not a toggleable display property: it's a permanent
+  // page control, not a data column.
+  const grid = ["minmax(260px, 1fr)", ...columns.map((c) => c.track), "32px"].join(" ");
 
   return (
     <div className="fleet-tasks-list" style={{ "--fleet-list-grid": grid } as CSSProperties}>
@@ -120,6 +125,7 @@ export function TasksList({
             {c.head}
           </span>
         ))}
+        <span />
       </div>
       {tasks.map((task, index) => (
         <TaskRow
@@ -361,6 +367,19 @@ function TaskRow({
           <TaskWakeDeferralIcon task={task} size={12} />
         </span>
       ) : null}
+
+      {/* Copy link — same CopyLinkButton the project list row uses
+          (fleet-data's projects/page.tsx), placed in the trailing 32px
+          track this row's grid always reserves for it (see the grid
+          comment above). Its own click handler stops this row's <a> from
+          also navigating, matching the assignee button just above. Hidden
+          on the mobile collapse along with the other desktop cells (see
+          fleet-theme.css's .fleet-task-cell-copy rule) — the row has no
+          per-cell room at that width and .fleet-task-row itself remains a
+          real link there. */}
+      <span className="fleet-task-cell-copy">
+        <CopyLinkButton path={href} label={task.title || "this task"} />
+      </span>
 
       {/* Mobile replacement — reuses the Agents list's own mobile classes
           verbatim (they carry no agent-specific semantics), so 375px costs

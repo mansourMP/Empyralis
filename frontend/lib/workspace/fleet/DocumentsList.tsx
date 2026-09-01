@@ -45,6 +45,7 @@ import { useCallback, useState, type CSSProperties } from "react";
 import Link from "next/link";
 import { ChevronRight, FileText, Folder, FolderOpen, FolderGit2 } from "lucide-react";
 
+import { CopyLinkButton } from "@/lib/ui/CopyLinkButton";
 import type { FleetDocument } from "./documents-data";
 import {
   buildDocumentTree,
@@ -94,10 +95,11 @@ function TreeNodes({
       {nodes.map((node) => {
         if (node.kind === "file") {
           const tooltip = fileTooltip(node.document, node.name);
+          const href = hrefFor(node.document);
           return (
             <Link
               key={node.document.id}
-              href={hrefFor(node.document)}
+              href={href}
               className="fleet-doc-tree-row fleet-doc-tree-row--file"
               style={depthStyle(depth)}
               title={tooltip}
@@ -106,6 +108,19 @@ function TreeNodes({
               <FileText size={14} strokeWidth={1.75} className="fleet-doc-tree-icon" aria-hidden="true" />
               <span className="fleet-doc-tree-name">{node.name}</span>
               <span className="fleet-doc-tree-meta">{timeAgo(node.document.updated_at)}</span>
+              {/* Copy link — the one per-row hover affordance this tree had
+                  none of before (folders aren't real objects, so only a FILE
+                  row gets one). Same CopyLinkButton every other row/detail
+                  surface shares; its own click handler stops this row's real
+                  Next <Link> from also navigating, the identical nested-
+                  interactive pattern the project list row already uses
+                  (projects/page.tsx) inside this exact component type. */}
+              <CopyLinkButton
+                path={href}
+                label={node.name}
+                className="fleet-icon-btn fleet-doc-tree-copy"
+                iconSize={13}
+              />
             </Link>
           );
         }

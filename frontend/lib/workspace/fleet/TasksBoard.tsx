@@ -81,6 +81,7 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { CornerDownRight, Plus } from "lucide-react";
 
+import { CopyLinkButton } from "@/lib/ui/CopyLinkButton";
 import { dueLabel } from "./TasksList";
 import { formatDate, formatDateTime, formatDueDate } from "./fleet-presentation";
 import { AgentSigil } from "./fleet-indicators";
@@ -436,6 +437,18 @@ function TaskCard({
         }
       }}
     >
+      {/* Copy link — same CopyLinkButton every other row/detail surface in
+          this codebase shares, absolutely positioned into the card's
+          top-right corner (the card has no free grid track the way the
+          flat list's row does — see fleet-theme.css's .fleet-board-card-
+          copy). Its own click handler stops the drag-source anchor from
+          navigating, same as the status <select> just below it. */}
+      <CopyLinkButton
+        path={href}
+        label={task.title || "this task"}
+        className="fleet-icon-btn fleet-board-card-copy"
+      />
+
       {/* A sub-task's parent, above the title — Linear's card order, and the
           only thing that stops a sub-task card being indistinguishable from a
           top-level one on a board that lists both. Text, not a link: the card
