@@ -14,7 +14,6 @@ import { getErrorMessage } from "@/lib/ui/api-error";
 import { breadcrumbCount, findSageAgent, formatNumber } from "@/lib/workspace/fleet/fleet-presentation";
 import { ProjectIcon } from "@/lib/workspace/fleet/fleet-project-identity";
 import { formatProjectWorkSummary } from "@/lib/workspace/fleet/project-work-summary";
-import { CreateFirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
 import { composerSubmitButtonClass, createButtonClass } from "@/lib/workspace/fleet/create-accent";
 import { planFirstAgentPrompt } from "@/lib/workspace/fleet/workspace-first-run";
 import { FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
@@ -120,53 +119,45 @@ export default function ProjectsPage() {
   }, [router, base]);
 
   // Workspace-wide agent facts only, never per-project: the Properties
-  // drawer's own "Agents" total (a genuine workspace-scoped count) and the
-  // first-run prompt's real-agent-count gate below. Same Sage exclusion as
-  // the Agents list — the Operator never counts as a row anywhere.
-  const { agents: allAgents, loading: agentsLoading } = useFleetAgents(workspaceId);
+  // drawer's own "Agents" total (a genuine workspace-scoped count). Same
+  // Sage exclusion as the Agents list — the Operator never counts as a row
+  // anywhere. Agent CREATION is not this page's business (see the header
+  // action below) — this is read-only, for the Properties panel.
+  const { agents: allAgents } = useFleetAgents(workspaceId);
   const sageAgent = useMemo(() => findSageAgent(allAgents), [allAgents]);
   const agents = useMemo(
     () => (sageAgent ? allAgents.filter((a) => a.agent_id !== sageAgent.agent_id) : allAgents),
     [allAgents, sageAgent],
   );
 
-  // ── The first-run offer ───────────────────────────────────────────────────
-  // This page is where a brand-new customer LANDS (/w/{id} redirects here), so
-  // it is the one screen that has to answer "how do I make my first agent".
-  // Which shape — or none — is decided by workspace-first-run.ts; read its
-  // header for the dead end this closes and why the band does not simply
-  // replace the list.
+  // ── The zero-projects first-run state ─────────────────────────────────────
+  // This page is where a brand-new customer LANDS (/w/{id} redirects here),
+  // so it is the one screen that has to answer "how do I make my first
+  // project" on a genuinely empty workspace — see workspace-first-run.ts for
+  // the ("full" | "none") rule and for the agent-creation band that used to
+  // also live here and was removed (founder ruling: a project's own
+  // surfaces are about that project, never about creating an agent).
   //
-  // The two `*Settled` latches are STICKY on purpose and must not be
-  // simplified back to `!loading`. fleet-data.ts's shared cache sets `loading`
-  // true again on EVERY 30s background refetch (runSharedFetch), so a live
-  // `!loading` would flash "no agents in this workspace yet" at an established
-  // workspace twice a minute. "Nothing here" and "haven't been told yet" are
-  // different facts; these say which one we are in.
+  // `projectsSettled` is STICKY on purpose and must not be simplified back
+  // to `!loading`. fleet-data.ts's shared cache sets `loading` true again on
+  // EVERY 30s background refetch (runSharedFetch), so a live `!loading`
+  // would flash "No projects yet" at an established workspace twice a
+  // minute. "Nothing here" and "haven't been told yet" are different facts;
+  // this says which one we are in.
   const [projectsSettled, setProjectsSettled] = useState(false);
-  const [agentsSettled, setAgentsSettled] = useState(false);
   useEffect(() => {
     if (!loading) setProjectsSettled(true);
   }, [loading]);
-  useEffect(() => {
-    if (!agentsLoading) setAgentsSettled(true);
-  }, [agentsLoading]);
   // Archived is a filtered VIEW, never the workspace's own emptiness — a
-  // workspace whose only project is archived still has that project, and
-  // offering "create your first agent" over the archive would be answering a
-  // question nobody asked. `allProjects` (unfiltered by the archive toggle)
-  // is what the plan is asked about.
+  // workspace whose only project is archived still has that project.
+  // `allProjects` (unfiltered by the archive toggle) is what the plan is
+  // asked about.
   const firstAgentPrompt = useMemo(
     () =>
       showArchived
         ? "none"
-        : planFirstAgentPrompt({
-            projectsKnown: projectsSettled,
-            projectCount: allProjects.length,
-            agentsKnown: agentsSettled,
-            realAgentCount: agents.length,
-          }),
-    [showArchived, projectsSettled, allProjects.length, agentsSettled, agents.length],
+        : planFirstAgentPrompt({ projectsKnown: projectsSettled, projectCount: allProjects.length }),
+    [showArchived, projectsSettled, allProjects.length],
   );
 
   // Workspace-scoped only — the Properties drawer's "Spend today"/"Tokens
@@ -232,18 +223,20 @@ export default function ProjectsPage() {
           breadcrumb (U3-E's "one header bar" reading was wrong). */}
       {/* WHO OWNS THE VIEW'S ONE ACCENT FILL is create-accent.ts's answer, not
           a literal here. This used to be an unconditional `--accent-fill`,
-          which put it and the first-run offer's own filled button on screen
-          together on every brand-new workspace — "two accent-filled buttons in
-          one view is a bug", the same defect agents/page.tsx already fixed for
-          its own "New agent". `listIsEmpty` is the FIRST-RUN offer's presence
-          — the zero-projects empty state below OR the CreateFirstAgentEmpty
-          band — not `projects.length === 0` on its own: the band renders over
-          a real list, and while it is up it is the primary action. */}
+          which put it and the zero-projects empty state's own filled button
+          on screen together on every brand-new workspace — "two
+          accent-filled buttons in one view is a bug", the same defect
+          agents/page.tsx already fixed for its own "New agent". `listIsEmpty`
+          is `firstAgentPrompt === "full"` — the zero-projects empty state's
+          own presence, and ONLY that: an agent band used to also compete for
+          this fill once a project existed and no agent did (removed, founder
+          ruling — see workspace-first-run.ts), so past that one true-empty
+          case this header is always the primary action again. */}
       <HeaderAction>
         <button
           type="button"
           className={createButtonClass("header", {
-            listIsEmpty: firstAgentPrompt !== "none",
+            listIsEmpty: firstAgentPrompt === "full",
             composerOpen: dialogOpen,
           })}
           onClick={() => setDialogOpen(true)}
@@ -267,25 +260,14 @@ export default function ProjectsPage() {
 
       <div className="fleet-content-with-panel">
         <div className="fleet-content-main">
-          {/* THE FIRST AGENT IS REACHABLE FROM WHERE A NEW CUSTOMER LANDS.
-              Above the list, never instead of it — this only renders once
-              the workspace has a real project on screen (its own, or a
-              pre-2026-09-01 workspace's inherited "General"; a brand-new
-              workspace has none and shows the "full" CreateFirstAgentEmpty
-              state below instead — see workspace-first-run.ts). The band
-              disappears the moment an agent exists, recomputed from the
-              live count with no flag to unset, exactly like every other
-              count-shape consumer here. */}
-          {firstAgentPrompt === "band" && (
-            <CreateFirstAgentEmpty
-              variant="band"
-              workspaceId={workspaceId}
-              onCreated={refresh}
-              title="No agents in this workspace yet."
-              desc=""
-              siblingComposerOpen={dialogOpen}
-            />
-          )}
+          {/* Agent creation used to be offered from here too — a band above
+              the list once a project existed and the workspace had no
+              agent (CreateFirstAgentEmpty variant="band"). DELETED
+              2026-09-01: founder, on seeing it live, "inside this project I
+              am seeing a button that says create your first agent even
+              though project is something that must be related to the
+              projects, not agents." This page's list is projects; agent
+              creation lives in the Agents section of the rail. */}
           {loading && projects.length === 0 ? (
             // Reuses `.fleet-projects-list`/`.fleet-projects-list-header`/
             // `.fleet-project-row`'s real 2-column grid so the column-title
@@ -334,7 +316,7 @@ export default function ProjectsPage() {
                     project" does — one composer, two doors, so there is
                     nothing here for a sibling composer to go blind to.
                     `listIsEmpty: true` mirrors the header's own
-                    `firstAgentPrompt !== "none"` read of this exact branch,
+                    `firstAgentPrompt === "full"` read of this exact branch,
                     so create-accent.ts never sees two owners at once. */}
                 <button
                   type="button"
@@ -422,14 +404,18 @@ export default function ProjectsPage() {
 }
 
 /**
- * Full-panel project composer (replaces the old label-over-input small
- * dialog — founder's read: "mine looks like a table that I have to fill").
- * Same "paper, not a form" philosophy TaskComposer already established
- * (.fleet-composer-title/-desc: bare text entry, no border, placeholder as
- * the only label — see TaskComposer.tsx's own header comment for the full
- * rationale), just scaled to a near-full-viewport panel instead of a 640px
- * popover: a project is a bigger, rarer commitment than a task, and
- * Linear's own composer reads as a page, not a card.
+ * Compact project composer — the same small centred "paper" shell
+ * TaskComposer (TaskComposer.tsx) established, not a parallel one.
+ *
+ * 2026-09-01, reverted from a near-full-viewport panel (founder: "while I
+ * am going to create project the user interface of it is changed... this
+ * is completely bullshit... creating projects user interface must be
+ * something like that is compact like tasks, except some buttons are not
+ * going to be there, like to do priority and some other things"). This now
+ * renders through TaskComposer's OWN classes — .fleet-composer-backdrop/
+ * .fleet-composer/-head/-crumb/-close/-paper/-title/-desc/-error/-foot —
+ * rather than a project-sized copy of them, so the two composers can never
+ * drift apart in size or spacing again by construction.
  *
  * FleetCreateProjectRequest (server_modules/routes_fleet.py) accepts
  * exactly two fields: name and description. The `projects` table
@@ -440,10 +426,11 @@ export default function ProjectsPage() {
  * fleet-project-identity.ts's own comment on why the tint picker was
  * removed: "There is no picker anywhere for a human to choose it, so the
  * hue was never a decision"). So unlike TaskComposer there is no
- * property-chips row here — building chips for fields the backend
- * silently drops would be exactly the "control whose own label admits it
- * does nothing" CLAUDE.md rules out. Name (the heading) and description
- * (the dominant body) are the whole surface.
+ * .fleet-composer-chips row here at all — building chips for fields the
+ * backend silently drops would be exactly the "control whose own label
+ * admits it does nothing" CLAUDE.md rules out. Name and description are
+ * the whole surface, which is why this ends up SHORTER than a task's
+ * composer despite sharing its exact width and type scale.
  */
 function NewProjectDialog({
   workspaceId,
@@ -485,8 +472,8 @@ function NewProjectDialog({
 
   return (
     <div
-      className="fleet-detail-backdrop"
-      onClick={onClose}
+      className="fleet-composer-backdrop"
+      onMouseDown={onClose}
       onKeyDown={(e) => {
         if (e.key === "Escape") {
           e.stopPropagation();
@@ -498,34 +485,38 @@ function NewProjectDialog({
       }}
     >
       <div
-        className="fleet-project-composer"
+        className="fleet-composer"
         role="dialog"
         aria-modal="true"
         aria-label="New project"
-        onClick={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
       >
-        <div className="fleet-composer-head fleet-project-composer-head">
+        <div className="fleet-composer-head">
           <span className="fleet-composer-crumb">
             {workspace?.name ? <span className="fleet-composer-crumb-project">{workspace.name}</span> : null}
             {workspace?.name ? <span aria-hidden>›</span> : null}
             <span>New project</span>
           </span>
           <button type="button" className="fleet-composer-close" onClick={onClose} aria-label="Close">
-            <X size={16} strokeWidth={2} />
+            <X size={14} strokeWidth={2} />
           </button>
         </div>
 
-        <div className="fleet-project-composer-body">
-          {/* Real heading structure per CLAUDE.md craft doctrine — visually
-              hidden because the big name input directly below IS the
-              heading visually (its placeholder communicates intent exactly
-              like Linear's "Project name" gray placeholder), but a
-              dialog's accessible name still deserves a real h2, not just
-              aria-label on the wrapping div. */}
-          <h2 className="fleet-sr-only">New project</h2>
+        {/* Real heading structure per CLAUDE.md craft doctrine — visually
+            hidden because the title input directly below IS the heading
+            visually (its placeholder communicates intent exactly like
+            Linear's "Project name" gray placeholder), but a dialog's
+            accessible name still deserves a real h2, not just aria-label on
+            the wrapping div. */}
+        <h2 className="fleet-sr-only">New project</h2>
+
+        {/* The paper — same two bare fields as TaskComposer, nothing else:
+            no .fleet-composer-chips row follows, because a project has no
+            status/priority/assignee to chip. */}
+        <div className="fleet-composer-paper">
           <input
             ref={nameRef}
-            className="fleet-composer-title fleet-project-composer-name"
+            className="fleet-composer-title"
             value={name}
             onChange={(e) => setName(e.currentTarget.value)}
             placeholder="Project name"
@@ -538,20 +529,21 @@ function NewProjectDialog({
             }}
           />
           <textarea
-            className="fleet-composer-desc fleet-project-composer-desc"
+            className="fleet-composer-desc"
             value={description}
+            rows={3}
             onChange={(e) => setDescription(e.currentTarget.value)}
-            placeholder="Write a description, a project brief, or collect ideas…"
+            placeholder="Add description…"
           />
         </div>
 
         {error ? (
-          <p className="fleet-project-composer-error" role="alert">
+          <p className="fleet-composer-error" role="alert">
             {error}
           </p>
         ) : null}
 
-        <div className="fleet-small-dialog-footer">
+        <div className="fleet-composer-foot">
           <button type="button" className="fleet-btn" onClick={onClose} disabled={busy}>Cancel</button>
           {/* Routed through create-accent.ts rather than hardcoding the filled
               class — same class out, but it is now VISIBLE to that module's

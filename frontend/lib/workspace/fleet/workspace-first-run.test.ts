@@ -1,14 +1,18 @@
 /**
- * The first-run offer's rule, driven through the REAL planFirstAgentPrompt the
- * Projects page renders against — the same "expected and actual come from
- * different places" discipline agent-count-shape.test.ts / create-accent.test.ts
- * already apply.
+ * The Projects page's zero-projects-empty-state rule, driven through the
+ * REAL planFirstAgentPrompt the page renders against — the same "expected
+ * and actual come from different places" discipline agent-count-shape.test.ts
+ * / create-accent.test.ts already apply.
  *
- * Plus structural assertions a behavioural test structurally cannot make: that
- * the page actually CALLS this (the "built, tested, and never wired" defect
- * this codebase has more of than any other), that the band renders above the
- * list rather than replacing it, and that the header's "New project" stopped
- * being an unconditional accent fill.
+ * Plus structural assertions a behavioural test structurally cannot make:
+ * that the page actually CALLS this (the "built, tested, and never wired"
+ * defect this codebase has more of than any other), and — the other
+ * direction of that same defect — that the agent-creation BAND this module
+ * used to also drive is actually GONE from the page and from
+ * first-agent-empty.tsx, not merely unreachable dead code left lying
+ * around for the next author to revive by accident (founder ruling,
+ * 2026-09-01: a project's own surfaces are about that project, never about
+ * creating an agent).
  *
  * Run: npx tsx lib/workspace/fleet/workspace-first-run.test.ts
  */
@@ -29,87 +33,50 @@ function assert(condition: boolean, label: string): void {
   }
 }
 
-const settled: FirstAgentPromptState = {
-  projectsKnown: true,
-  projectCount: 1,
-  agentsKnown: true,
-  realAgentCount: 0,
-};
+const settled: FirstAgentPromptState = { projectsKnown: true, projectCount: 1 };
 
-// ── THE BUG THIS EXISTS TO CLOSE ─────────────────────────────────────────────
-// Every workspace bootstraps a "General" project, so projectCount is 1 on a
-// brand-new signup and the old `projects.length === 0` gate could never fire.
-// This is the exact state a customer lands in seconds after signing up.
+// ── "no projects" and "haven't asked yet" are different facts ────────────────
 assert(
-  planFirstAgentPrompt(settled) === "band",
-  "a bootstrapped workspace with its General project and no agents gets the BAND",
-);
-
-// ── "no agents" and "haven't asked yet" are different facts ──────────────────
-assert(
-  planFirstAgentPrompt({ ...settled, projectsKnown: false }) === "none",
+  planFirstAgentPrompt({ projectsKnown: false, projectCount: 0 }) === "none",
   "nothing is claimed before the project list has ever settled",
 );
 assert(
-  planFirstAgentPrompt({ ...settled, agentsKnown: false }) === "none",
-  "nothing is claimed before the agent list has ever settled",
+  planFirstAgentPrompt({ projectsKnown: true, projectCount: 0 }) === "full",
+  "a settled, genuinely empty project list gets the centred empty state",
 );
-// The shape that would flash the band at an established workspace: both lists
-// return [] while loading, and fleet-data.ts re-raises `loading` on every 30s
-// poll, so a plan keyed on length alone would re-accuse twice a minute.
 assert(
-  planFirstAgentPrompt({ projectsKnown: false, projectCount: 0, agentsKnown: false, realAgentCount: 0 }) === "none",
-  "a cold paint (both lists empty AND unknown) offers nothing at all",
+  planFirstAgentPrompt(settled) === "none",
+  "a settled workspace with a real project (its own, or an inherited 'General') gets nothing — the real list is on screen",
 );
 
-// ── it disappears on its own ─────────────────────────────────────────────────
+// ── it disappears on its own ──────────────────────────────────────────────
 assert(
-  planFirstAgentPrompt({ ...settled, realAgentCount: 1 }) === "none",
-  "one real agent and the band is gone — recomputed from the live count, no flag to unset",
-);
-assert(planFirstAgentPrompt({ ...settled, realAgentCount: 19 }) === "none", "an established fleet sees nothing");
-
-// ── the pane-is-empty branch is byte-identical to what the page already did ──
-assert(
-  planFirstAgentPrompt({ ...settled, projectCount: 0 }) === "full",
-  "zero projects still gets the centred CreateFirstAgentEmpty, unchanged",
-);
-// Deliberately NOT gated on the agent count: keeping this branch independent
-// is what stops an empty project list ever falling through to "No projects
-// match these filters" for a workspace that happens to own an agent.
-assert(
-  planFirstAgentPrompt({ ...settled, projectCount: 0, realAgentCount: 4 }) === "full",
-  "zero projects reads FULL even with agents present — the pane is empty either way",
-);
-assert(
-  planFirstAgentPrompt({ ...settled, projectCount: 0, agentsKnown: false }) === "full",
-  "the FULL branch never waits on the agent list it does not read",
+  planFirstAgentPrompt({ projectsKnown: true, projectCount: 7 }) === "none",
+  "an established workspace sees nothing — recomputed from the live count, no flag to unset",
 );
 
-// A negative count is not a state the caller can reach, but a `<=` rather than
-// a `===` is the difference between degrading to the teaching state and
+// A negative count is not a state the caller can reach, but a `<=` rather
+// than a `===` is the difference between degrading to the teaching state and
 // falling through to a list nobody can act on.
-assert(planFirstAgentPrompt({ ...settled, projectCount: -1 }) === "full", "a nonsense project count degrades to FULL");
-assert(planFirstAgentPrompt({ ...settled, realAgentCount: -1 }) === "band", "a nonsense agent count degrades to BAND");
+assert(
+  planFirstAgentPrompt({ projectsKnown: true, projectCount: -1 }) === "full",
+  "a nonsense project count degrades to FULL",
+);
 
-// ── The two visual states are MUTUALLY EXCLUSIVE ─────────────────────────────
-// Both render an offer to create the first agent; two on one screen is the
-// duplicate-primary-action bug this codebase already documents twice.
-for (const projectCount of [0, 1, 7]) {
-  for (const realAgentCount of [0, 1]) {
-    const prompt = planFirstAgentPrompt({ ...settled, projectCount, realAgentCount });
-    assert(
-      prompt === "full" || prompt === "band" || prompt === "none",
-      `plan returns one of three states (${projectCount}/${realAgentCount} gave ${prompt})`,
-    );
-  }
+/** Line and block comments stripped — same discipline create-accent.test.ts's
+ *  own codeOnly() applies, so this file's and the real components' own prose
+ *  (which narrates exactly the deleted names, on purpose, as history) cannot
+ *  trip a guard aimed at rendered code. */
+function codeOnly(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
 }
 
-// ── STRUCTURAL: the page actually renders all of this ────────────────────────
-const pageSource = readFileSync(
+// ── STRUCTURAL: the page actually renders this ────────────────────────────
+const pageSourceRaw = readFileSync(
   new URL("../../../app/(account)/w/[workspaceId]/projects/page.tsx", import.meta.url),
   "utf8",
 );
+const pageSource = codeOnly(pageSourceRaw);
 // Canary: if this read stops reaching the real page, every assertion below
 // passes vacuously and reports green. Same discipline as
 // primary-rail-nav.test.ts's FleetShellDecider scan.
@@ -120,77 +87,54 @@ assert(
   "the projects page CALLS the plan — built-and-never-wired is this codebase's most common defect",
 );
 assert(
-  /firstAgentPrompt === "band"/.test(pageSource),
-  "the band renders on the plan's own answer, never a re-derived condition",
+  /listIsEmpty:\s*firstAgentPrompt === "full"/.test(pageSource),
+  "the header's accent ownership is fed the plan's own answer, never a re-derived condition",
 );
-assert(
-  /variant="band"/.test(pageSource),
-  "the band variant is the one requested — the full centred state stays the zero-projects answer",
-);
-// The band must sit ABOVE the list, not in place of it: a workspace's real
-// "General" project stays on screen, because "No projects yet" over a project
-// that exists is the outcome-honesty law broken in an empty state.
-assert(
-  pageSource.indexOf('firstAgentPrompt === "band"') < pageSource.indexOf("fleet-projects-list"),
-  "the band is rendered before the list, not instead of it",
-);
-// Sticky latches, never a live `!loading` — fleet-data.ts re-raises loading on
+// Sticky latch, never a live `!loading` — fleet-data.ts re-raises loading on
 // every background poll.
-assert(
-  /setProjectsSettled\(true\)/.test(pageSource) && /setAgentsSettled\(true\)/.test(pageSource),
-  "both known-latches are sticky, so a 30s background poll cannot re-flash the band",
-);
-assert(
-  /projectsKnown: projectsSettled/.test(pageSource) && /agentsKnown: agentsSettled/.test(pageSource),
-  "the plan is handed the latches, not a live loading flag",
-);
+assert(/setProjectsSettled\(true\)/.test(pageSource), "the known-latch is sticky, so a 30s background poll cannot re-flash the empty state");
+assert(/projectsKnown: projectsSettled/.test(pageSource), "the plan is handed the latch, not a live loading flag");
 // Archived is a filtered VIEW, not the workspace being empty.
-assert(/showArchived\s*\?\s*"none"/.test(pageSource), "the archived view is never offered the first-run band");
+assert(/showArchived\s*\?\s*"none"/.test(pageSource), "the archived view is never offered the empty-state accent");
 
-// ── STRUCTURAL: one accent fill in the view ──────────────────────────────────
-// The header's "New project" was an unconditional `fleet-btn--accent-fill`,
-// which put it beside CreateFirstAgentEmpty's own filled button on every
-// brand-new workspace. agents/page.tsx already fixed the identical defect for
-// its own "New agent"; this is that fix on the page a customer actually lands
-// on.
+// ── STRUCTURAL: the agent-creation band is actually GONE, not just unused ──
+// "Built, tested, and never wired" usually means dead code nobody deleted
+// after its one caller stopped calling it — that trap runs BOTH directions:
+// leaving CreateFirstAgentEmpty's variant="band" branch and FirstAgentBand
+// sitting in first-agent-empty.tsx with zero remaining callers is exactly
+// the shape a future author "revives" on some other project-adjacent page,
+// reopening the bug the founder just closed.
 assert(
-  !/className="fleet-btn fleet-btn--accent-fill"/.test(pageSource),
-  "no hardcoded accent-fill survives on this page — create-accent.ts decides",
+  !/variant\s*=\s*"band"/.test(pageSource),
+  "the Projects page does not render CreateFirstAgentEmpty's band variant — deleted, not merely unrendered",
 );
 assert(
-  /createButtonClass\("header"/.test(pageSource),
-  "the header button asks create-accent.ts who owns the fill",
-);
-
-// ── STRUCTURAL: the band component itself ────────────────────────────────────
-const bandSource = readFileSync(new URL("./first-agent-empty.tsx", import.meta.url), "utf8");
-assert(bandSource.includes("FirstAgentBand"), "CANARY: first-agent-empty.tsx was actually read");
-assert(
-  /createButtonClass\("empty_state"/.test(bandSource),
-  "the band's own button goes through create-accent.ts too — never a second opinion",
-);
-// One creation path: the card wiring and the post-create navigation exist once,
-// so a second copy cannot drift out of awaiting the agent-list refresh.
-assert(
-  (bandSource.match(/<AgentCreateCard/g) || []).length === 1,
-  "exactly one AgentCreateCard mount serves both variants",
-);
-assert(
-  (bandSource.match(/quickCreateAgentChatPath\(/g) || []).length === 1,
-  "exactly one post-create navigation, shared by both variants",
+  !/CreateFirstAgentEmpty/.test(pageSource),
+  "the Projects page does not import or render CreateFirstAgentEmpty at all any more — agent creation is not this page's business",
 );
 
-// ── STRUCTURAL: the band's CSS spends no accent of its own ───────────────────
-// accent-restraint.test.ts already bans that globally; asserted here too
-// because this band is the one place a future author would be tempted to paint
-// the surface rather than the button.
+const firstAgentEmptySource = codeOnly(readFileSync(new URL("./first-agent-empty.tsx", import.meta.url), "utf8"));
+assert(
+  firstAgentEmptySource.includes("export function CreateFirstAgentEmpty"),
+  "CANARY: first-agent-empty.tsx was actually read",
+);
+assert(
+  !/FirstAgentBand/.test(firstAgentEmptySource),
+  "FirstAgentBand no longer exists — the component the band rendered is deleted, not dead-coded",
+);
+assert(
+  !/variant/.test(firstAgentEmptySource),
+  "CreateFirstAgentEmpty no longer takes a variant prop — there is only one offer left (the centred state)",
+);
+
+// CSS has no comment syntax this file's own prose would collide with the
+// same way — no codeOnly() needed for it.
 const cssSource = readFileSync(new URL("./fleet-theme.css", import.meta.url), "utf8");
-const bandBlock = cssSource.slice(
-  cssSource.indexOf(".fleet-first-run {"),
-  cssSource.indexOf(".fleet-first-run {") + 1400,
+assert(cssSource.includes("fleet-composer-foot"), "CANARY: fleet-theme.css was actually read");
+assert(
+  !/^\.fleet-first-run\s*\{/m.test(cssSource),
+  "the band's own CSS rule is gone, not an orphaned style nothing renders any more",
 );
-assert(bandBlock.includes(".fleet-first-run-title"), "CANARY: the band's CSS block was actually located");
-assert(!/--accent/.test(bandBlock), "the band's own surface spends no accent — only its button does");
 
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) {

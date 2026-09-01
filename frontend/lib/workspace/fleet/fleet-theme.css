@@ -9173,45 +9173,36 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
    Two shapes, picked per dialog, never mixed (contract rule: "pick one
    shape per dialog; don't mix a sheet's silhouette with a dialog's
    footer"):
-     - Substantial content (the wizard's 4 navigable steps; the project
-       composer's heading-sized name + dominant description body)
-       → full-screen sheet, fixed height so a short screen doesn't read as
-       "mostly empty backdrop" — the CTA row still pins to the sheet's own
-       true bottom edge either way, but a fixed (not content-hugging) sheet
-       height keeps that edge in a consistent place screen to screen.
+     - Substantial content (the wizard's 4 navigable steps) → full-screen
+       sheet, fixed height so a short screen doesn't read as "mostly empty
+       backdrop" — the CTA row still pins to the sheet's own true bottom
+       edge either way, but a fixed (not content-hugging) sheet height keeps
+       that edge in a consistent place screen to screen.
      - The channel-connect banner is one screen (a single token field) →
        centered floating dialog, full width within a comfortable margin,
        rounded on all four corners. Forcing it into a sheet shell would
        leave a tall dead gap of backdrop above a small card — the exact
        failure mode this section exists to name. (The project composer used
-       to be this shape too, back when it was just a name field — now that
-       it's a full "paper" composer it belongs with the wizard above.) */
+       to live here too, back when it was a full-viewport "paper" panel —
+       2026-09-01 it went back to compact, TaskComposer's own
+       .fleet-composer-backdrop shell, which needs no mobile override of its
+       own: same width:640px/max-width:100% shrink every other composer
+       already relies on.) */
 @media (max-width: 768px) {
   .fleet-detail-backdrop {
     align-items: center;
     padding: 20px;
   }
-  .fleet-detail-backdrop:has(.fleet-wizard),
-  .fleet-detail-backdrop:has(.fleet-project-composer) {
+  .fleet-detail-backdrop:has(.fleet-wizard) {
     align-items: flex-end;
     padding: 0;
   }
 
-  .fleet-wizard,
-  .fleet-project-composer {
+  .fleet-wizard {
     width: 100%;
     max-width: 100%;
     height: 88dvh;
     border-radius: 16px 16px 0 0;
-  }
-  .fleet-project-composer-name {
-    font-size: 26px;
-    padding: 18px 0 8px;
-  }
-  .fleet-project-composer-body,
-  .fleet-project-composer-error {
-    padding-left: 20px;
-    padding-right: 20px;
   }
   .fleet-small-dialog,
   .fleet-channel-banner {
@@ -10630,77 +10621,20 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   border: 0;
 }
 
-/* ── Project composer — full-panel "paper" composer ───────────────────────
-   Same paper philosophy as the task composer just above (.fleet-composer-*:
-   bare text entry, no box, placeholder as the only label) but scaled up to
-   a near-full-viewport panel — Linear's own "New project" composer is a
-   page-sized surface, not a popover, and a project is a bigger, rarer
-   commitment than a task. Reuses .fleet-detail-backdrop (blur + centered
-   scrim, already shared by the agent-detail modal) and every
-   .fleet-composer-* piece that doesn't need a bigger size (head/crumb/
-   close/title/desc-base/foot-via-.fleet-small-dialog-footer/error-base) —
-   only the panel's own dimensions and the name/description type scale are
-   new here.
-
-   No property-chips row: FleetCreateProjectRequest (routes_fleet.py)
-   accepts exactly name + description, so unlike the task composer there is
-   nothing real to put in a chips row (see NewProjectDialog's own comment
-   in projects/page.tsx for the full accounting). */
-.fleet-project-composer {
-  width: min(92vw, 1180px);
-  height: min(88vh, 900px);
-  max-width: 100%;
-  max-height: 100%;
-  display: flex;
-  flex-direction: column;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  box-shadow: 0 32px 80px -32px rgba(0, 0, 0, 0.55);
-  overflow: hidden;
-  animation: fleet-modal-in var(--dur-2) var(--ease-out);
-}
-
-.fleet-project-composer-head {
-  padding: 20px 20px 0 24px;
-}
-
-.fleet-project-composer-body {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  padding: 8px 40px 8px;
-}
-
-/* Name — the heading. Placeholder ("Project name") IS the label, exactly
-   like the task composer's title, just a full step up in size: this is the
-   one and only heading-weight element on the panel. */
-.fleet-project-composer-name {
-  font-size: 32px;
-  font-weight: var(--weight-semibold);
-  line-height: 1.3;
-  padding: 24px 0 10px;
-}
-
-/* Description — the dominant body, not an afterthought textarea. Grows to
-   fill whatever room the panel has above the footer. */
-.fleet-project-composer-desc {
-  flex: 1;
-  min-height: 220px;
-  font-size: 14px;
-  line-height: 1.6;
-  padding: 6px 0 24px;
-}
-
-.fleet-project-composer-error {
-  flex-shrink: 0;
-  margin: 0;
-  padding: 0 40px 12px;
-  font-size: 12px;
-  color: var(--offline-text);
-}
+/* ── Project composer ──────────────────────────────────────────────────────
+   2026-09-01, reverted to compact (founder: "creating projects user
+   interface must be something like that is compact like tasks" — the
+   near-full-viewport panel this block used to draw, min(92vw,1180px) x
+   min(88vh,900px), was read as "completely bullshit"). NewProjectDialog
+   (projects/page.tsx) now renders through the exact same shell as
+   TaskComposer — .fleet-composer-backdrop/.fleet-composer/-head/-crumb/
+   -close/-paper/-title/-desc/-error/-foot, zero project-specific classes —
+   rather than a parallel set sized differently. It ends up SMALLER than the
+   task composer, not bigger: same shell, minus the whole .fleet-composer-chips
+   row, because FleetCreateProjectRequest (routes_fleet.py) accepts exactly
+   name + description and a project has no status/priority/assignee to chip
+   (see NewProjectDialog's own comment for the full accounting). No CSS of
+   its own is left here — that IS the reuse. */
 
 /* ── Label dots ─────────────────────────────────────────────────────────────
    `color` on a label is a palette TOKEN NAME from the server
@@ -12600,56 +12534,11 @@ h2.fleet-assistant-console-title {
   }
 }
 
-/* ── The workspace's own first-run offer ─────────────────────────────────────
-   The band a brand-new customer meets on the page they actually land on. See
-   workspace-first-run.ts for WHEN it renders and why it is a band rather than
-   the centred empty state.
-
-   Same one-line grammar as .fleet-agent-setup above — fact on the left, the
-   one control that acts on it hard right — and deliberately NOT the same
-   weight. That band is deferrable business on a page about something else and
-   spends no accent; this one IS the page's primary action for a workspace
-   with nothing in it, so it carries the view's single accent fill (handed out
-   by create-accent.ts, so the header's "New project" steps down beside it).
-
-   A CARD, not a full-bleed strip: it sits inside .fleet-content-main above a
-   real list, so a bordered surface reads as an offer ABOUT the list rather
-   than as page chrome that got stuck to the top of it. */
-.fleet-first-run {
-  flex-shrink: 0;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2) var(--space-3);
-  margin-bottom: var(--space-4);
-  padding: var(--space-3) var(--space-4);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-  background: var(--bg-card);
-  animation: fleet-fade var(--dur-2) var(--ease-out);
-}
-
-.fleet-first-run-icon {
-  display: inline-flex;
-  align-items: center;
-  flex-shrink: 0;
-  color: var(--text-muted);
-}
-
-/* Takes the leftover room so the button is pinned right on a wide screen and
-   wraps under the sentence rather than crushing it on a narrow one. */
-.fleet-first-run-title {
-  flex: 1 1 220px;
-  min-width: 0;
-  font-size: var(--text-base);
-  color: var(--text-primary);
-}
-
-@media (max-width: 720px) {
-  .fleet-first-run {
-    padding: var(--space-3);
-  }
-}
+/* .fleet-first-run — the "create your first agent" band a project's own
+   page used to show once it had a project and no agent — DELETED 2026-09-01
+   (founder: a project's surfaces are about that project, not agent
+   creation; see workspace-first-run.ts and first-agent-empty.tsx for the
+   full removal). */
 
 /* ── The agent create card's own identity ────────────────────────────────────
    2026-08-21. AgentCreateCard borrows TaskComposer's .fleet-composer shell —

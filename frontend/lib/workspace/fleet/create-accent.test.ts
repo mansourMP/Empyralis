@@ -107,131 +107,96 @@ for (const control of CONTROLS) {
 // Everything above drives createAccentOwner directly with hand-picked
 // states — it cannot see a caller handing the rule the WRONG variable, only
 // that the rule itself is consistent once given an input. The Projects page
-// is exactly the shape that trap catches: it carries not one but TWO
-// competing "make a new thing" controls (NewProjectDialog's header button
-// and CreateFirstAgentEmpty's band/full offer), so "is this control's own
-// list empty" and "is create-accent's rule fed the right composer state"
-// have to be checked against what the page can ACTUALLY put on screen, not
-// against inputs this file invents.
+// is exactly the shape that trap catches: it carries up to TWO competing
+// "make a new thing" controls on screen at once (the header's "New
+// project" and, on a genuinely empty workspace, the zero-projects empty
+// state's own "Create your first project"), plus NewProjectDialog itself
+// once opened — so "is this control's own list empty" and "is
+// create-accent's rule fed the right composer state" have to be checked
+// against what the page can ACTUALLY put on screen, not against inputs this
+// file invents.
+//
+// A THIRD control used to compete here too: CreateFirstAgentEmpty's
+// variant="band", offering to create an AGENT once a project existed and
+// none did. DELETED 2026-09-01 (founder: a project's own surfaces are about
+// that project, never about creating an agent) — see
+// workspace-first-run.test.ts for the structural guard that it stays
+// deleted, not merely unrendered.
 //
 // planFirstAgentPrompt (workspace-first-run.ts) is the real, pure function
-// that decides whether CreateFirstAgentEmpty renders at all and as which
-// variant — imported here rather than re-derived, so this test moves when
-// that rule does. `projectsPageOwners` below is the one place that composes
-// it with create-accent.ts's rule; the two CANARIES after it exist because a
-// composition that only ever agrees with itself is exactly the "check that
-// derives its expectations from the thing it checks" trap CLAUDE.md names.
+// that decides whether the zero-projects empty state renders at all —
+// imported here rather than re-derived, so this test moves when that rule
+// does. `projectsPageOwners` below is the one place that composes it with
+// create-accent.ts's rule; the CANARY after it exists because a composition
+// that only ever agrees with itself is exactly the "check that derives its
+// expectations from the thing it checks" trap CLAUDE.md names.
 import { planFirstAgentPrompt } from "./workspace-first-run";
 
-type ProjectsPageState = { projectCount: number; realAgentCount: number; dialogOpen: boolean; cardOpen: boolean };
+type ProjectsPageState = { projectCount: number; dialogOpen: boolean };
 
-// Every state the Projects page can actually be in, including the one
-// "observed live" on a workspace with the bootstrapped "General" project
-// and zero agents (band, not the centred empty state — projects.length is
-// 1, not 0), and the sibling-composer overlaps: NewProjectDialog opened
-// while the band or the full empty state is already on screen.
 const PROJECTS_PAGE_STATES: ProjectsPageState[] = [
-  { projectCount: 0, realAgentCount: 0, dialogOpen: false, cardOpen: false }, // brand new workspace, nothing yet
-  { projectCount: 1, realAgentCount: 0, dialogOpen: false, cardOpen: false }, // the reported case: one project ("General"), no agents
-  { projectCount: 3, realAgentCount: 0, dialogOpen: false, cardOpen: false }, // several projects, still no agents
-  { projectCount: 1, realAgentCount: 2, dialogOpen: false, cardOpen: false }, // established workspace — past first run
-  { projectCount: 1, realAgentCount: 0, dialogOpen: true, cardOpen: false }, // New Project dialog opened over the band
-  { projectCount: 0, realAgentCount: 0, dialogOpen: true, cardOpen: false }, // New Project dialog opened over the full empty state
-  { projectCount: 1, realAgentCount: 0, dialogOpen: false, cardOpen: true }, // AgentCreateCard opened from the band itself
+  { projectCount: 0, dialogOpen: false }, // brand new workspace, nothing yet
+  { projectCount: 1, dialogOpen: false }, // THE REPORTED CASE: a project exists, the workspace has no agent — nothing competes for the fill any more, the header owns it
+  { projectCount: 3, dialogOpen: false }, // several projects — established workspace, past first run
+  { projectCount: 1, dialogOpen: true }, // New Project dialog opened over a real list
+  { projectCount: 0, dialogOpen: true }, // New Project dialog opened over the zero-projects empty state
 ];
 
-/** Mirrors exactly what the Projects page renders and how each control's
- *  own accent state is computed — `headerListIsEmpty` and
- *  `emptyStateComposerOpen` are parameters precisely so the canaries below
- *  can swap in the WRONG binding and prove this function would have caught
- *  it, rather than hard-coding one answer this file can only agree with. */
+/** Mirrors exactly what the Projects page renders and how each control's own
+ *  accent state is computed — `headerListIsEmpty` is a parameter precisely
+ *  so the canary below can swap in a WRONG binding and prove this function
+ *  would have caught it, rather than hard-coding one answer this file can
+ *  only agree with. */
 function projectsPageOwners(
   state: ProjectsPageState,
   headerListIsEmpty: (s: ProjectsPageState) => boolean,
-  emptyStateComposerOpen: (s: ProjectsPageState) => boolean,
 ): string[] {
-  const prompt = planFirstAgentPrompt({
-    projectsKnown: true,
-    projectCount: state.projectCount,
-    agentsKnown: true,
-    realAgentCount: state.realAgentCount,
-  });
-  const emptyStateRendered = prompt !== "none";
+  const prompt = planFirstAgentPrompt({ projectsKnown: true, projectCount: state.projectCount });
+  const emptyStateRendered = prompt === "full";
   const owners: string[] = [];
   if (createOwnsAccent("header", { listIsEmpty: headerListIsEmpty(state), composerOpen: state.dialogOpen })) {
     owners.push("header");
   }
-  if (
-    emptyStateRendered &&
-    createOwnsAccent("empty_state", { listIsEmpty: true, composerOpen: emptyStateComposerOpen(state) })
-  ) {
-    owners.push("empty_state (band/full)");
+  if (emptyStateRendered && createOwnsAccent("empty_state", { listIsEmpty: true, composerOpen: state.dialogOpen })) {
+    owners.push("empty_state (zero-projects)");
   }
   // NewProjectDialog's own submit always fills while mounted — it is routed
   // through composerSubmitButtonClass(), asserted filled elsewhere in this
   // file, so it is not re-derived here.
   if (state.dialogOpen) owners.push("composer (New Project dialog)");
-  // AgentCreateCard is itself a FOURTH composer-like control, nested inside
-  // the band/full empty state and mounted whenever cardOpen is true — its
-  // own submit button (AgentCreateCard.tsx) fills for most wizard steps.
-  // Not modelled via createOwnsAccent (its accent is step-gated, not this
-  // module's business) but it still occupies the "a composer is open"
-  // slot, so it counts here or this simulation would silently believe
-  // NOBODY owns the accent while a real, filled AgentCreateCard is on
-  // screen — a false failure, not a real one.
-  if (state.cardOpen) owners.push("composer (AgentCreateCard)");
   return owners;
 }
 
-// The bindings this page ACTUALLY uses today (projects/page.tsx and
-// first-agent-empty.tsx) — reproduced here as plain functions of the same
-// state, not read from source, so the assertion is "the real rule composed
-// correctly" rather than "the file contains some string".
+// The binding this page ACTUALLY uses today (projects/page.tsx) —
+// reproduced here as a plain function of the same state, not read from
+// source, so the assertion is "the real rule composed correctly" rather
+// than "the file contains some string".
 const REAL_HEADER_LIST_IS_EMPTY = (s: ProjectsPageState) =>
-  planFirstAgentPrompt({
-    projectsKnown: true,
-    projectCount: s.projectCount,
-    agentsKnown: true,
-    realAgentCount: s.realAgentCount,
-  }) !== "none";
-const REAL_EMPTY_STATE_COMPOSER_OPEN = (s: ProjectsPageState) => s.cardOpen || s.dialogOpen;
+  planFirstAgentPrompt({ projectsKnown: true, projectCount: s.projectCount }) === "full";
 
 for (const state of PROJECTS_PAGE_STATES) {
-  const owners = projectsPageOwners(state, REAL_HEADER_LIST_IS_EMPTY, REAL_EMPTY_STATE_COMPOSER_OPEN);
+  const owners = projectsPageOwners(state, REAL_HEADER_LIST_IS_EMPTY);
   assert(
     owners.length === 1,
     `Projects page: exactly one accent owner for ${JSON.stringify(state)} — got [${owners.join(", ") || "none"}]`,
   );
 }
 
-// CANARY 1: the "obviously right" binding a naive fix reaches for —
-// listIsEmpty = projects.length === 0 — leaves the header ALSO filled on
-// the reported case, because the band renders off the AGENT count, not the
-// project count. Proves the check above can actually fail.
-const naiveHeaderOwners = projectsPageOwners(
-  { projectCount: 1, realAgentCount: 0, dialogOpen: false, cardOpen: false },
-  (s) => s.projectCount === 0,
-  REAL_EMPTY_STATE_COMPOSER_OPEN,
-);
+// CANARY: the exact regression removing the band could have introduced.
+// Before the fix, the header asked "is ANY first-run offer showing"
+// (`firstAgentPrompt !== "none"`), which was true both when the pane was
+// genuinely empty AND when the (now-deleted) agent band was showing over a
+// real project list. Deleting the band's render without also updating that
+// binding leaves the header still believing SOME control owns the fill on
+// the reported case (a project exists, no agent) — but nothing renders
+// there any more, so NOBODY does. Zero owners, not two, is the failure mode
+// this task's own fix had to avoid.
+const zeroOwnerRegression = projectsPageOwners({ projectCount: 1, dialogOpen: false }, () => true);
 assert(
-  naiveHeaderOwners.length === 2,
-  `CANARY: listIsEmpty = projects.length === 0 WOULD leave two owners on the reported case — got ` +
-    `[${naiveHeaderOwners.join(", ")}] (if this is not 2, the check above can no longer catch this class of bug)`,
-);
-
-// CANARY 2: the bug this change actually fixed — the band/full empty state
-// watching only its OWN nested AgentCreateCard and staying blind to the
-// page's sibling NewProjectDialog. Proves the check above would catch that
-// direction too (two owners, not the "zero owners" the naive fix chases).
-const blindEmptyStateOwners = projectsPageOwners(
-  { projectCount: 1, realAgentCount: 0, dialogOpen: true, cardOpen: false },
-  REAL_HEADER_LIST_IS_EMPTY,
-  (s) => s.cardOpen, // pre-fix: never looked at dialogOpen
-);
-assert(
-  blindEmptyStateOwners.length === 2,
-  `CANARY: an empty-state button blind to a sibling composer WOULD leave two owners when New Project opens ` +
-    `over the band — got [${blindEmptyStateOwners.join(", ")}] (if this is not 2, the check above can no longer catch this class of bug)`,
+  zeroOwnerRegression.length === 0,
+  `CANARY: a header binding that still assumes an agent-creation offer competes for the fill leaves ZERO owners ` +
+    `now that the band is gone — got [${zeroOwnerRegression.join(", ")}] (if this is not 0, the check above can no ` +
+    `longer catch the exact regression this task fixed)`,
 );
 
 // ── Wired, not just built ────────────────────────────────────────────────
@@ -281,39 +246,18 @@ for (const site of SITES) {
   );
 }
 
-// ── siblingComposerOpen is actually THREADED, not just declared ──────────
-// CANARY 2 above proves the composed rule catches an empty state that
-// ignores a sibling composer — but that composition is this test file's own
-// code, not the real components'. This closes the gap the same way the
-// SITES loop above does: read the real files and confirm the wiring is
-// actually there, so a future edit that quietly drops the prop (instead of
-// mis-deriving it) still fails loudly.
+// ── The zero-projects empty state's OWN composerOpen wiring ──────────────
+// The one remaining "second create control on this page" case, now that the
+// agent band is gone: opening New Project over the zero-projects empty
+// state itself. Read the real file and confirm the wiring is actually
+// there, so a future edit that quietly drops it still fails loudly.
 const projectsPageSource = codeOnly(
   readFileSync(
     new URL("../../../app/(account)/w/[workspaceId]/projects/page.tsx", import.meta.url),
     "utf8",
   ),
 );
-const firstAgentEmptySource = codeOnly(readFileSync(new URL("./first-agent-empty.tsx", import.meta.url), "utf8"));
-
-assert(
-  projectsPageSource.length > 500 && firstAgentEmptySource.length > 500,
-  "CANARY: projects/page.tsx and first-agent-empty.tsx were actually read",
-);
-// 2026-09-01: the zero-projects "full" state stopped being CreateFirstAgentEmpty
-// (founder ruling — Empyralis launches on "track your issues and your
-// documents", agents deliberately kept out of that pitch, so the one
-// accent-filled control on a brand-new workspace's landing screen has to
-// offer a PROJECT, not an agent). Only ONE CreateFirstAgentEmpty render
-// remains on this page — the "band" shown once a project exists and no
-// agent does — so only one siblingComposerOpen={dialogOpen} feeds it now.
-// The zero-projects empty state's own button threads dialogOpen directly
-// (asserted separately below), not through this prop at all.
-assert(
-  (projectsPageSource.match(/siblingComposerOpen=\{dialogOpen\}/g) || []).length === 1,
-  "projects/page.tsx passes siblingComposerOpen={dialogOpen} to the ONE remaining CreateFirstAgentEmpty render " +
-    "(the band) — losing this is exactly how the two-owner bug came back the first time",
-);
+assert(projectsPageSource.length > 500, "CANARY: projects/page.tsx was actually read");
 assert(
   /createButtonClass\(\s*"empty_state",\s*\{\s*listIsEmpty:\s*true,\s*composerOpen:\s*dialogOpen\s*\}\s*\)/.test(
     projectsPageSource,
@@ -322,11 +266,12 @@ assert(
     "dialogOpen straight into create-accent.ts as its composerOpen — dropping this is a two-owner bug the moment " +
     "New Project is opened over an empty projects list",
 );
+// The Projects page does not render CreateFirstAgentEmpty at all any more —
+// agent creation is not this page's business (see workspace-first-run.test.ts
+// for the fuller structural guard on this).
 assert(
-  (firstAgentEmptySource.match(/composerOpen:\s*createCardOpen\s*\|\|\s*siblingComposerOpen/g) || []).length === 2,
-  "BOTH FirstAgentEmpty and FirstAgentBand OR their own nested card's open state together with the page's " +
-    "sibling composer — dropping either half (or fixing only one of the two components) reopens the bug this " +
-    "file's own header comment documents",
+  !/CreateFirstAgentEmpty/.test(projectsPageSource),
+  "projects/page.tsx does not import or render CreateFirstAgentEmpty — agent creation stays off project surfaces",
 );
 
 // The canary for the guard itself: prove it can still SEE a violation, or a
