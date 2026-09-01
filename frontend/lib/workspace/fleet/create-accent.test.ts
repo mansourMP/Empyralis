@@ -237,6 +237,7 @@ assert(
 // ── Wired, not just built ────────────────────────────────────────────────
 const SITES: { path: string; name: string }[] = [
   { path: "../../../app/(account)/w/[workspaceId]/agents/page.tsx", name: "the workspace Agents page" },
+  { path: "../../../app/(account)/w/[workspaceId]/projects/page.tsx", name: "the Projects page" },
   { path: "../../../app/(account)/w/[workspaceId]/projects/[projectId]/page.tsx", name: "a project's page (Agents/Tasks/Documents)" },
   { path: "./first-agent-empty.tsx", name: "FirstAgentEmpty" },
   { path: "./AgentCreateCard.tsx", name: "AgentCreateCard" },
@@ -299,10 +300,27 @@ assert(
   projectsPageSource.length > 500 && firstAgentEmptySource.length > 500,
   "CANARY: projects/page.tsx and first-agent-empty.tsx were actually read",
 );
+// 2026-09-01: the zero-projects "full" state stopped being CreateFirstAgentEmpty
+// (founder ruling — Empyralis launches on "track your issues and your
+// documents", agents deliberately kept out of that pitch, so the one
+// accent-filled control on a brand-new workspace's landing screen has to
+// offer a PROJECT, not an agent). Only ONE CreateFirstAgentEmpty render
+// remains on this page — the "band" shown once a project exists and no
+// agent does — so only one siblingComposerOpen={dialogOpen} feeds it now.
+// The zero-projects empty state's own button threads dialogOpen directly
+// (asserted separately below), not through this prop at all.
 assert(
-  (projectsPageSource.match(/siblingComposerOpen=\{dialogOpen\}/g) || []).length === 2,
-  "projects/page.tsx passes siblingComposerOpen={dialogOpen} to BOTH CreateFirstAgentEmpty renders (the band " +
-    "and the full empty state) — one site quietly losing this is exactly how the two-owner bug came back",
+  (projectsPageSource.match(/siblingComposerOpen=\{dialogOpen\}/g) || []).length === 1,
+  "projects/page.tsx passes siblingComposerOpen={dialogOpen} to the ONE remaining CreateFirstAgentEmpty render " +
+    "(the band) — losing this is exactly how the two-owner bug came back the first time",
+);
+assert(
+  /createButtonClass\(\s*"empty_state",\s*\{\s*listIsEmpty:\s*true,\s*composerOpen:\s*dialogOpen\s*\}\s*\)/.test(
+    projectsPageSource,
+  ),
+  "projects/page.tsx's own zero-projects empty state (\"Create your first project\") threads the page's " +
+    "dialogOpen straight into create-accent.ts as its composerOpen — dropping this is a two-owner bug the moment " +
+    "New Project is opened over an empty projects list",
 );
 assert(
   (firstAgentEmptySource.match(/composerOpen:\s*createCardOpen\s*\|\|\s*siblingComposerOpen/g) || []).length === 2,
