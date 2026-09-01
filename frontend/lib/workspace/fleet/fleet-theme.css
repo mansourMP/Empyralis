@@ -10319,6 +10319,19 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
   flex-direction: column;
   padding: 4px 16px 6px;
 }
+/* Project composer only: the identity picker's trigger sits beside the
+   title instead of above/below it, so choosing an icon+colour costs zero
+   vertical space — the whole reason NewProjectDialog was reverted to this
+   compact shell in the first place. */
+.fleet-composer-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.fleet-composer-title-row .fleet-composer-title {
+  flex: 1;
+  min-width: 0;
+}
 .fleet-composer-title,
 .fleet-composer-desc {
   width: 100%;
@@ -10836,6 +10849,105 @@ h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px;
     0 0 0 2px var(--bg-card),
     0 0 0 3.5px var(--text-secondary);
   transition: box-shadow var(--dur-1) var(--ease-out);
+}
+
+/* ── Project identity picker (fleet-project-identity.ProjectIdentityPicker) ──
+   Icon + colour, a person's own choice now — that file's banner has the
+   full "this looks like the removed hash-hue, it isn't" writeup. The
+   trigger is the project's own tile made clickable (no new visual — same
+   .fleet-tile every ProjectIcon renders); the popover is two dense grids,
+   icon shapes then TINTS swatches, airy between the groups and dense
+   within each (this file's own grouping rule). Selection in BOTH grids is
+   the exact same neutral ring .fleet-label-swatch.is-selected just above
+   already shipped — proof this technique reads as "selected" without
+   spending any hue on it — never a fill or border colour pulled from the
+   swatch's own value. No declaration anywhere in this block references
+   --accent; every swatch paints with a literal TINTS value passed inline
+   from the component, never a CSS accent alias. Hover/focus feedback is
+   background or transform only, deliberately never outline/box-shadow —
+   a :focus-visible rule painting either is exactly what
+   no-focus-ring-drift.test.ts exists to catch. */
+.fleet-identity-picker {
+  position: relative;
+  display: inline-flex;
+}
+.fleet-identity-picker-trigger {
+  display: inline-flex;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  cursor: pointer;
+}
+.fleet-identity-picker-trigger:hover .fleet-tile,
+.fleet-identity-picker-trigger:focus-visible .fleet-tile {
+  background: var(--rail-active);
+}
+.fleet-identity-picker-pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 5;
+  width: 216px;
+  padding: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--fleet-float-shadow);
+  animation: fleet-fade var(--dur-1) var(--ease-out);
+}
+.fleet-identity-picker-label {
+  padding: 2px 2px 6px;
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-medium);
+  color: var(--text-muted);
+}
+.fleet-identity-picker-divider {
+  height: 1px;
+  margin: 8px 0;
+  background: var(--border);
+}
+.fleet-identity-swatch-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 4px;
+}
+.fleet-identity-swatch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  cursor: pointer;
+  transition: transform var(--dur-1) var(--ease-out);
+}
+.fleet-identity-swatch.is-selected {
+  box-shadow:
+    0 0 0 2px var(--bg-card),
+    0 0 0 3.5px var(--text-secondary);
+  transition: box-shadow var(--dur-1) var(--ease-out);
+}
+.fleet-identity-swatch--icon {
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+}
+.fleet-identity-swatch--icon:hover,
+.fleet-identity-swatch--icon:focus-visible {
+  background: var(--rail-active);
+  color: var(--text-primary);
+}
+.fleet-identity-swatch--icon.is-selected {
+  color: var(--text-primary);
+}
+.fleet-identity-swatch--tint {
+  border-radius: 999px;
+}
+.fleet-identity-swatch--tint:hover,
+.fleet-identity-swatch--tint:focus-visible {
+  transform: scale(1.08);
 }
 
 /* ── Recolouring an existing label (TaskLabelEditor's vocabulary list) ──────
@@ -11600,6 +11712,21 @@ h2.fleet-assistant-console-title {
   font-size: var(--text-xs);
   font-weight: var(--weight-medium);
   color: var(--text-muted);
+}
+
+/* ProjectSettings.tsx's "Name" section: ProjectIdentityPicker's trigger
+   sits to the left of the name field, one row, rather than a whole extra
+   section under its own heading — the same "no extra vertical space"
+   discipline .fleet-composer-title-row applies in the New-project
+   composer. */
+.fleet-project-identity-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.fleet-project-identity-row .fleet-wizard-input {
+  flex: 1;
+  min-width: 0;
 }
 
 .fleet-member-invite-row {

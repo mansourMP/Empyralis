@@ -107,8 +107,11 @@ export type FleetProject = {
    *  ever true in a list fetched with useFleetProjects(ws, true). */
   archived?: boolean;
   /** Icon name (lucide-react key, e.g. "rocket") and tint key (TintKey) —
-   *  always populated by the backend (projects_repository.py), computed
-   *  deterministically from the project id if never explicitly set. */
+   *  always populated by the backend (projects_repository.py): computed
+   *  deterministically from the project id until a person overrides it via
+   *  ProjectIdentityPicker (fleet-project-identity.tsx), PATCHed through
+   *  patchFleetProject's own icon/tint fields below. Either way, always a
+   *  real, renderable value — never blank. */
   icon?: string;
   tint?: string;
   metadata?: Record<string, unknown>;
@@ -499,17 +502,26 @@ export async function deleteFleetProject(
   return (data.deleted || {}) as DeletedProjectSummary;
 }
 
-/** PATCH .../fleet/projects/{id} — rename, archive/unarchive, or set/clear
- *  the project's default Gateway (routes_fleet.fleet_patch_project,
- *  owner-only server-side). `default_gateway_id: ""` explicitly clears the
- *  default; omitting the field leaves it untouched — same "undefined means
- *  don't touch, empty string means clear" contract patchFleetTask's own
- *  clear_due_at pairing established for a nullable field on this same kind
- *  of PATCH. */
+/** PATCH .../fleet/projects/{id} — rename, archive/unarchive, set/clear the
+ *  project's default Gateway, or set its icon/tint (routes_fleet.
+ *  fleet_patch_project, owner-only server-side). `default_gateway_id: ""`
+ *  explicitly clears the default; omitting a field leaves it untouched —
+ *  same "undefined means don't touch, empty string means clear" contract
+ *  patchFleetTask's own clear_due_at pairing established for a nullable
+ *  field on this same kind of PATCH. icon/tint have no clear state (every
+ *  project always carries both, real or hash-computed — see FleetProject's
+ *  own comment above); either can be sent alone. */
 export async function patchFleetProject(
   workspaceId: string,
   projectId: string,
-  patch: { name?: string; description?: string; archived?: boolean; default_gateway_id?: string }
+  patch: {
+    name?: string;
+    description?: string;
+    archived?: boolean;
+    default_gateway_id?: string;
+    icon?: string;
+    tint?: string;
+  }
 ): Promise<FleetProject> {
   const res = await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/projects/${encodeURIComponent(projectId)}`, {
     method: "PATCH",

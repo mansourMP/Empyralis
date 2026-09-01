@@ -483,6 +483,13 @@ async def fleet_projects(
 class FleetCreateProjectRequest(BaseModel):
     name: str = Field(min_length=1)
     description: str = ""
+    # A choice from ProjectIdentityPicker made before the project exists --
+    # both optional, both None when the composer's picker was never opened
+    # (create_project then falls through to its usual deterministic hash,
+    # unchanged). Validated against projects_repository.VALID_PROJECT_ICONS
+    # / PROJECT_TINTS inside create_project itself, same as the PATCH path.
+    icon: Optional[str] = None
+    tint: Optional[str] = None
 
 
 @router.post("/api/w/{workspace_id}/fleet/projects")
@@ -514,6 +521,8 @@ async def fleet_create_project(
             workspace_id=resolved_workspace_id,
             name=body.name,
             description=body.description,
+            icon=body.icon,
+            tint=body.tint,
             # MAN-115: give the creator an explicit membership row too, even
             # though creation is owner-gated (owners already bypass the
             # project check) — keeps the project's own member roster honest
@@ -535,6 +544,12 @@ class FleetPatchProjectRequest(BaseModel):
     # `""` explicitly clears it back to unset; any other string is validated
     # against this workspace's registrations before saving.
     default_gateway_id: Optional[str] = None
+    # A person's own choice from ProjectIdentityPicker -- see
+    # projects_repository.set_project_identity. `None` (the default) leaves
+    # that one field untouched; either can be sent alone (e.g. recolouring
+    # without touching the icon).
+    icon: Optional[str] = None
+    tint: Optional[str] = None
 
 
 @router.patch("/api/w/{workspace_id}/fleet/projects/{project_id}")
@@ -545,8 +560,8 @@ async def fleet_patch_project(
     body: FleetPatchProjectRequest,
     current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
-    """Rename, edit, archive/unarchive, or set the default Gateway of a
-    project.
+    """Rename, edit, archive/unarchive, set the default Gateway, or set the
+    icon/tint of a project.
 
     MAN-64/MAN-70 permission review: LEFT AT `owner`, DELIBERATELY, flagged
     rather than loosened -- same reasoning as fleet_create_project just
@@ -556,7 +571,12 @@ async def fleet_patch_project(
     settings than to routine task upkeep). default_gateway_id is gated the
     same way, if anything for a stronger reason: assigning the project's
     shared compute is a workspace-shaping decision too, not routine task
-    upkeep -- see set_project_default_gateway's own docstring."""
+    upkeep -- see set_project_default_gateway's own docstring. icon/tint
+    ride along at the same tier as everything else here rather than getting
+    a looser one of their own -- ProjectSettings.tsx (the only frontend
+    caller) is itself owner-gated already (CLAUDE.md: no dead controls, a
+    viewer who can't edit a project never sees the picker at all), so this
+    matches what the UI already assumes rather than widening past it."""
     resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
     from server_modules import projects_repository as projects
 
@@ -583,6 +603,14 @@ async def fleet_patch_project(
                 workspace_id=resolved_workspace_id,
                 project_id=project_id,
                 gateway_id=body.default_gateway_id,
+            )
+        if body.icon is not None or body.tint is not None:
+            project = await projects.set_project_identity(
+                tenant_id=await _resolve_tenant(resolved_workspace_id),
+                workspace_id=resolved_workspace_id,
+                project_id=project_id,
+                icon=body.icon,
+                tint=body.tint,
             )
         if project is None:
             return {"ok": False, "error": "Project not found."}

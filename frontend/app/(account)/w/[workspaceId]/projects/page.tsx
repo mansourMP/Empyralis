@@ -11,8 +11,8 @@ import { useFleetAgents, useFleetProjects, useFleetWorkspace } from "@/lib/works
 import { HeaderAction, useBreadcrumbBadge } from "@/lib/workspace/fleet/Breadcrumbs";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { getErrorMessage } from "@/lib/ui/api-error";
-import { breadcrumbCount, findSageAgent, formatNumber } from "@/lib/workspace/fleet/fleet-presentation";
-import { ProjectIcon } from "@/lib/workspace/fleet/fleet-project-identity";
+import { breadcrumbCount, findSageAgent, formatNumber, type TintKey } from "@/lib/workspace/fleet/fleet-presentation";
+import { ProjectIcon, ProjectIdentityPicker } from "@/lib/workspace/fleet/fleet-project-identity";
 import { formatProjectWorkSummary } from "@/lib/workspace/fleet/project-work-summary";
 import { composerSubmitButtonClass, createButtonClass } from "@/lib/workspace/fleet/create-accent";
 import { planFirstAgentPrompt } from "@/lib/workspace/fleet/workspace-first-run";
@@ -417,20 +417,20 @@ export default function ProjectsPage() {
  * rather than a project-sized copy of them, so the two composers can never
  * drift apart in size or spacing again by construction.
  *
- * FleetCreateProjectRequest (server_modules/routes_fleet.py) accepts
- * exactly two fields: name and description. The `projects` table
- * (server_modules/control_plane_repository.py) has no status/priority/
- * lead/members/start/target/labels/dependencies/milestones column — icon
- * and tint exist but are assigned deterministically from the new row's id
- * server-side and were deliberately never made user-choosable (see
- * fleet-project-identity.ts's own comment on why the tint picker was
- * removed: "There is no picker anywhere for a human to choose it, so the
- * hue was never a decision"). So unlike TaskComposer there is no
- * .fleet-composer-chips row here at all — building chips for fields the
- * backend silently drops would be exactly the "control whose own label
- * admits it does nothing" CLAUDE.md rules out. Name and description are
- * the whole surface, which is why this ends up SHORTER than a task's
- * composer despite sharing its exact width and type scale.
+ * FleetCreateProjectRequest (server_modules/routes_fleet.py) accepts name,
+ * description, and now (2026-09-01) an optional icon/tint — the `projects`
+ * table still has no status/priority/lead/members/start/target/labels/
+ * dependencies/milestones column, so unlike TaskComposer there is still no
+ * .fleet-composer-chips row here; building chips for fields the backend
+ * silently drops would be exactly the "control whose own label admits it
+ * does nothing" CLAUDE.md rules out. Icon/colour isn't a chip either way —
+ * it rides in the title row as ProjectIdentityPicker's own small trigger
+ * (fleet-project-identity.tsx), matching how Linear's own composer puts a
+ * project's coloured icon directly beside its name, not in a property row.
+ * Leaving it untouched keeps create_project's usual deterministic default;
+ * touching it sends the person's actual choice. Name and description stay
+ * the dominant surface, which is why this still ends up SHORTER than a
+ * task's composer despite sharing its exact width and type scale.
  */
 function NewProjectDialog({
   workspaceId,
@@ -443,6 +443,11 @@ function NewProjectDialog({
 }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  // Undefined until the picker is actually opened and used — undefined
+  // means "the person never touched it," not "they picked nothing," so the
+  // create request below can tell those apart and leave create_project's
+  // own deterministic default alone when it's the former.
+  const [identity, setIdentity] = useState<{ icon: string; tint: TintKey } | undefined>(undefined);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const nameRef = useRef<HTMLInputElement | null>(null);
@@ -458,7 +463,11 @@ function NewProjectDialog({
         method: "POST",
         credentials: "include",
         headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
-        body: JSON.stringify({ name: clean, description: description.trim() }),
+        body: JSON.stringify({
+          name: clean,
+          description: description.trim(),
+          ...(identity ? { icon: identity.icon, tint: identity.tint } : {}),
+        }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
@@ -468,7 +477,7 @@ function NewProjectDialog({
     } finally {
       setBusy(false);
     }
-  }, [busy, description, name, onCreated, workspaceId]);
+  }, [busy, description, identity, name, onCreated, workspaceId]);
 
   return (
     <div
@@ -510,24 +519,32 @@ function NewProjectDialog({
             the wrapping div. */}
         <h2 className="fleet-sr-only">New project</h2>
 
-        {/* The paper — same two bare fields as TaskComposer, nothing else:
-            no .fleet-composer-chips row follows, because a project has no
-            status/priority/assignee to chip. */}
+        {/* The paper — same two bare fields as TaskComposer, plus the
+            identity picker's small trigger riding in the title row (not a
+            .fleet-composer-chips row — see this function's own header
+            comment for why). */}
         <div className="fleet-composer-paper">
-          <input
-            ref={nameRef}
-            className="fleet-composer-title"
-            value={name}
-            onChange={(e) => setName(e.currentTarget.value)}
-            placeholder="Project name"
-            autoFocus
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
-                e.preventDefault();
-                void create();
-              }
-            }}
-          />
+          <div className="fleet-composer-title-row">
+            <ProjectIdentityPicker
+              icon={identity?.icon}
+              tint={identity?.tint}
+              onChange={setIdentity}
+            />
+            <input
+              ref={nameRef}
+              className="fleet-composer-title"
+              value={name}
+              onChange={(e) => setName(e.currentTarget.value)}
+              placeholder="Project name"
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
+                  e.preventDefault();
+                  void create();
+                }
+              }}
+            />
+          </div>
           <textarea
             className="fleet-composer-desc"
             value={description}

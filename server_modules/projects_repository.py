@@ -53,7 +53,14 @@ DEFAULT_PROJECT_SLUG = "general"
 # surface. Names are lucide-react component names in kebab-case; the
 # frontend maps these 1:1 to imports. Assigned once at creation from a
 # deterministic hash of the project id (stable forever), stored in
-# `metadata` so an owner can override it later without a migration.
+# `metadata` -- that comment used to end "so an owner can override it later
+# without a migration" while nothing actually let them. 2026-09-01: now
+# something does -- set_project_identity below, PATCHed through
+# ProjectIdentityPicker (frontend/lib/workspace/fleet/
+# fleet-project-identity.tsx, whose file banner has the full "this is a
+# reversal, and here is why it doesn't contradict the earlier one" writeup).
+# The hash-computed value stays exactly what a brand-new project starts
+# with -- a real decision now only exists once a human PATCHes over it.
 PROJECT_ICONS = [
     "rocket", "target", "compass", "flag", "star", "zap", "package", "briefcase",
     "layers", "box", "puzzle", "shield", "gem", "anchor", "globe", "flame",
@@ -64,6 +71,16 @@ PROJECT_TINTS = ["blue", "purple", "amber", "teal", "coral", "rose", "sky", "lim
 # same everywhere, not randomized by its (otherwise arbitrary) generated id.
 DEFAULT_PROJECT_ICON = "folder-kanban"
 DEFAULT_PROJECT_TINT = "blue"
+
+# Every icon name a human can explicitly choose, via create_project's own
+# icon= or set_project_identity — the 16 auto-assigned ones plus
+# DEFAULT_PROJECT_ICON itself: auto-assignment reserves "folder-kanban" for
+# the workspace's own default project, but that is a default-assignment
+# rule, not a ban on anyone else picking the same shape on purpose. Matches
+# frontend/lib/workspace/fleet/fleet-project-identity.tsx's PROJECT_ICON_MAP
+# key-for-key (17 entries each) -- keep both in sync by hand; there is no
+# shared source of truth across the Python/TypeScript boundary here.
+VALID_PROJECT_ICONS = frozenset(PROJECT_ICONS + [DEFAULT_PROJECT_ICON])
 
 
 def _deterministic_project_identity(project_id: str) -> Dict[str, str]:
@@ -116,6 +133,9 @@ def _row_to_project(row: Any) -> Optional[Dict[str, Any]]:
         # Fall back to a live-computed identity for rows written before this
         # field existed (or ever cleared) — never render a project with no
         # icon/tint. "General" always gets the fixed default, not the hash.
+        # metadata.icon/tint is a real, human-set value once someone has
+        # used ProjectIdentityPicker (set_project_identity below) — this
+        # fallback only ever fires for a project nobody has touched yet.
         "icon": str(metadata.get("icon") or "").strip() or (
             DEFAULT_PROJECT_ICON if r.get("is_default") else identity["icon"]
         ),
@@ -456,6 +476,14 @@ async def create_project(
     is_default: bool = False,
     project_id: Optional[str] = None,
     created_by_user_id: Optional[str] = None,
+    # A human's own choice from ProjectIdentityPicker, made before the
+    # project (and therefore its id) exists yet -- so unlike a later PATCH
+    # via set_project_identity, this has to land in the very same INSERT.
+    # None (the default -- nobody touched the picker) falls through to the
+    # deterministic hash below exactly as it always has; the default
+    # project's own fixed identity always wins over either.
+    icon: Optional[str] = None,
+    tint: Optional[str] = None,
 ) -> Dict[str, Any]:
     tenant_id = str(tenant_id or "").strip()
     workspace_id = str(workspace_id or "").strip()
@@ -464,6 +492,12 @@ async def create_project(
         raise ValueError("tenant_id and workspace_id are required to create a project.")
     if not name:
         raise ValueError("Project name is required.")
+    clean_icon = str(icon or "").strip()
+    if clean_icon and clean_icon not in VALID_PROJECT_ICONS:
+        raise ValueError(f"Unknown project icon: {clean_icon!r}")
+    clean_tint = str(tint or "").strip()
+    if clean_tint and clean_tint not in PROJECT_TINTS:
+        raise ValueError(f"Unknown project tint: {clean_tint!r}")
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         raise control_plane_repository.runtime_db.DurableRuntimeConfigurationError(
@@ -474,12 +508,20 @@ async def create_project(
     task_key = await _unique_task_key(pool, tenant_id, workspace_id, final_slug)
     pid = str(project_id or "").strip() or _new_project_id()
     # Icon + tint assigned once, here, from the new id — never recomputed
-    # once stored (a rename must not visually reshuffle the project).
+    # once stored (a rename must not visually reshuffle the project) --
+    # unless the creator actually picked one, in which case that deliberate
+    # choice wins over the hash. The default project's fixed identity always
+    # wins over either; "General" never looks different between workspaces.
     identity = (
         {"icon": DEFAULT_PROJECT_ICON, "tint": DEFAULT_PROJECT_TINT}
         if is_default
         else _deterministic_project_identity(pid)
     )
+    if not is_default:
+        if clean_icon:
+            identity["icon"] = clean_icon
+        if clean_tint:
+            identity["tint"] = clean_tint
     row = await control_plane_repository.rls_fetchrow(
         pool,
         """
@@ -1012,6 +1054,84 @@ async def set_project_default_gateway(
         resolved_workspace_id,
         resolved_project_id,
         clean_gateway_id,
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
+    )
+    return _row_to_project(row)
+
+
+async def set_project_identity(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    project_id: str,
+    icon: Optional[str] = None,
+    tint: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Set this project's icon and/or tint -- the one place a person's own
+    choice from ProjectIdentityPicker (fleet-project-identity.tsx) lands.
+    `None` (the default) leaves that field untouched; passing a value always
+    validates it against the exact same curated vocabulary
+    _deterministic_project_identity draws its own hash-picks from
+    (VALID_PROJECT_ICONS / PROJECT_TINTS) -- a project can never end up
+    carrying an icon/tint name the frontend has no glyph or colour token
+    for, whether it arrived by hash or by hand.
+
+    Both fields live in one jsonb column, so this reads the row's OWN
+    current metadata inside the same UPDATE (`metadata->>'icon'` /
+    `metadata->>'tint'` on the right-hand side, evaluated against the
+    pre-update row) rather than fetching first -- one atomic round trip, no
+    read-modify-write race with a concurrent metadata writer, same
+    discipline set_project_default_gateway's docstring lays out for its own
+    jsonb_set. Passing neither raises rather than silently no-op'ing back
+    the current row -- the two PATCH callers (routes_fleet.py's
+    fleet_patch_project, create_project's own icon=/tint=) both only reach
+    here when at least one of the two was actually provided."""
+    if icon is None and tint is None:
+        raise ValueError("set_project_identity requires icon and/or tint.")
+    pool = await control_plane_repository.ensure_control_plane_schema()
+    if pool is None:
+        return None
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    resolved_project_id = str(project_id or "").strip()
+
+    clean_icon: Optional[str] = None
+    if icon is not None:
+        clean_icon = str(icon or "").strip()
+        if clean_icon not in VALID_PROJECT_ICONS:
+            raise ValueError(f"Unknown project icon: {clean_icon!r}")
+    clean_tint: Optional[str] = None
+    if tint is not None:
+        clean_tint = str(tint or "").strip()
+        if clean_tint not in PROJECT_TINTS:
+            raise ValueError(f"Unknown project tint: {clean_tint!r}")
+
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
+        """
+        UPDATE projects
+        SET metadata = jsonb_set(
+                jsonb_set(
+                    COALESCE(metadata, '{}'::jsonb),
+                    '{icon}',
+                    to_jsonb(COALESCE($4::text, metadata->>'icon', '')),
+                    true
+                ),
+                '{tint}',
+                to_jsonb(COALESCE($5::text, metadata->>'tint', '')),
+                true
+            ),
+            updated_at = NOW()
+        WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3
+        RETURNING id, tenant_id, workspace_id, name, slug, description,
+                  is_default, archived, metadata, created_at, updated_at
+        """,
+        resolved_tenant_id,
+        resolved_workspace_id,
+        resolved_project_id,
+        clean_icon,
+        clean_tint,
         tenant_id=resolved_tenant_id,
         workspace_id=resolved_workspace_id,
     )

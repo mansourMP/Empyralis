@@ -1,6 +1,6 @@
 import type { CSSProperties, ReactNode } from "react";
 
-import type { AgentStatusTone } from "./fleet-presentation";
+import { TINTS, type AgentStatusTone, type TintKey } from "./fleet-presentation";
 
 /**
  * The fleet's shared visual-indicator vocabulary. One place so a status dot in
@@ -138,34 +138,45 @@ export function AgentSigil({
 
 /** A rounded leading icon/initial tile for a list row. Neutral by default
  *  (`--rail-active` fill, `--text-secondary` glyph — the fallback baked into
- *  `.fleet-tile` itself). `accent` uses the brand accent tint; `danger` uses
- *  the destructive tint, for a tile that stands in for a real error/failed
- *  state rather than decoration.
+ *  `.fleet-tile` itself). `accent`/`danger` are semantic variants (a quiet
+ *  inset, and the destructive tint for a tile standing in for a real
+ *  error/failed state) — neither is decoration, so neither takes `tint`.
  *
- *  There used to be a `tint` prop here too — a per-identity hue (`TintKey`)
- *  picked by hashing an id, applied to project icons, agent avatars, and
- *  task-assignee avatars. Removed in the colour-discipline pass: an
- *  auto-assigned hue that sits directly beside the entity's own name/label
- *  told the reader nothing they couldn't already read off the text, and
- *  eight arbitrary hues scattered across every list is exactly the "colour
- *  that means nothing" the pass exists to cut (see fleet-theme.css's file
- *  banner). The colour-as-legend use case (multiple agents' cost lines on
- *  one chart, where hue is the ONLY way to tell a line from its label) is
- *  unaffected — that still reads TINTS/tintKeyForIndex directly
- *  (fleet-sparkline.tsx's MultiSeriesChart, billing/page.tsx) since a
- *  chart's colour genuinely carries information a static tile's doesn't. */
+ *  `tint` (`TintKey`) DID exist here once, got removed in a colour-
+ *  discipline pass, and is back — this is not that removal quietly
+ *  reverting. What got removed was a hue picked by HASHING an id: nobody
+ *  ever chose it, so it told a reader nothing their eyes on the label text
+ *  didn't already. What's back is the opposite kind of value — a colour a
+ *  PERSON explicitly picked (fleet-project-identity.tsx's
+ *  ProjectIdentityPicker is the one caller today; see that file's banner
+ *  for the full "reversal, and why it isn't one" writeup). Same TintKey
+ *  type, same TINTS lookup, opposite reason it's on screen — decoration a
+ *  human authored is information, not noise. Every other caller of this
+ *  component still gets the plain neutral tile unless it explicitly passes
+ *  `tint`; nothing was widened by default.
+ *
+ *  The colour-as-legend use case (multiple agents' cost lines on one
+ *  chart, where hue is the ONLY way to tell a line from its label) never
+ *  went through this component at all — that still reads TINTS/
+ *  tintKeyForIndex directly (fleet-sparkline.tsx's MultiSeriesChart,
+ *  billing/page.tsx). */
 export function TintTile({
   accent,
   danger,
+  tint,
   size = 28,
   children,
 }: {
   accent?: boolean;
   danger?: boolean;
+  /** A person-chosen identity colour — never set from a hash. */
+  tint?: TintKey;
   size?: number;
   children: ReactNode;
 }) {
-  const style: CSSProperties = { width: size, height: size };
+  const style: CSSProperties = tint
+    ? ({ width: size, height: size, "--tile-bg": TINTS[tint].bg, "--tile-fg": TINTS[tint].fg } as CSSProperties)
+    : { width: size, height: size };
   const variant = accent ? " fleet-tile--accent" : danger ? " fleet-tile--danger" : "";
   return (
     <span className={`fleet-tile${variant}`} style={style}>
