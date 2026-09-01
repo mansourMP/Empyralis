@@ -69,6 +69,31 @@ export default function GlobalError({
             </a>
             <a
               href="/login"
+              onClick={() => {
+                // Same dead end already fixed on ShellRecoveryActions.tsx and
+                // OnboardingClient.tsx's own sign-out actions: a browser
+                // stuck holding a stray host-only empyralis_csrf_token
+                // cookie twin (RFC 6265 -- a Domain-scoped cookie and a
+                // host-only one with no Domain attribute are independent
+                // entries) 403s csrf_mismatch on every mutating request,
+                // INCLUDING POST /api/auth/login -- so a plain link here
+                // cannot actually get anyone back in. Logout is the one
+                // route with a deliberate, already-sanctioned CSRF
+                // exemption (app/api/auth/logout/route.ts) and it also
+                // deletes the host-only twin, healing the split identity.
+                //
+                // This file is deliberately self-contained (see the header
+                // comment above -- root-error-boundary-coverage.test.ts
+                // asserts it imports nothing from @/lib or @/app, because if
+                // the root layout itself crashed nothing shared can be
+                // assumed to have survived), so it cannot reach
+                // useSignOutAndStartOver. fetch/credentials are native
+                // browser APIs, not imports. No preventDefault: the anchor's
+                // own navigation to /login fires regardless of whether this
+                // best-effort POST succeeds, so cmd-click and "never leave
+                // them with nothing" both hold by construction.
+                fetch('/api/auth/logout', { method: 'POST', credentials: 'include', keepalive: true }).catch(() => {});
+              }}
               style={{
                 padding: '8px 16px',
                 borderRadius: 6,

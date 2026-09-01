@@ -27,6 +27,7 @@ export function FirstAgentEmpty({
   onCreate,
   busy,
   createCardOpen = false,
+  siblingComposerOpen = false,
 }: {
   title: string;
   desc: string;
@@ -37,6 +38,18 @@ export function FirstAgentEmpty({
    *  quiet hairline variant — the rule lives in create-accent.ts, not
    *  here, because four controls answer to it. */
   createCardOpen?: boolean;
+  /** Whether a DIFFERENT composer elsewhere on this same view (e.g.
+   *  Projects page's own NewProjectDialog) is open. This empty state has no
+   *  way to see that page's own dialogOpen state on its own — the caller
+   *  has to hand it over, same as it hands over createCardOpen for its own
+   *  nested card. Without this, opening that sibling dialog left TWO
+   *  `fleet-btn--accent-fill` buttons live at once (this one, unaware, and
+   *  the dialog's own submit) — a real violation of create-accent.ts's "the
+   *  composer owns it, everything behind the backdrop drops to quiet"
+   *  contract, caught live on a workspace with one project and no agents:
+   *  open "New project" while the band shows and both buttons render
+   *  filled. */
+  siblingComposerOpen?: boolean;
 }) {
   return (
     <div className="fleet-empty">
@@ -48,7 +61,7 @@ export function FirstAgentEmpty({
       <div className="fleet-empty-actions">
         <button
           type="button"
-          className={createButtonClass("empty_state", { listIsEmpty: true, composerOpen: createCardOpen })}
+          className={createButtonClass("empty_state", { listIsEmpty: true, composerOpen: createCardOpen || siblingComposerOpen })}
           onClick={onCreate}
           disabled={busy}
         >
@@ -83,11 +96,15 @@ export function FirstAgentBand({
   onCreate,
   busy,
   createCardOpen = false,
+  siblingComposerOpen = false,
 }: {
   title: string;
   onCreate: () => void;
   busy?: boolean;
   createCardOpen?: boolean;
+  /** See FirstAgentEmpty's own doc on this prop — same gap, same fix, the
+   *  band is just as unaware of a sibling composer as the centred state. */
+  siblingComposerOpen?: boolean;
 }) {
   return (
     <section className="fleet-first-run" aria-label="Get started">
@@ -97,7 +114,7 @@ export function FirstAgentBand({
       <span className="fleet-first-run-title">{title}</span>
       <button
         type="button"
-        className={createButtonClass("empty_state", { listIsEmpty: true, composerOpen: createCardOpen })}
+        className={createButtonClass("empty_state", { listIsEmpty: true, composerOpen: createCardOpen || siblingComposerOpen })}
         onClick={onCreate}
         disabled={busy}
       >
@@ -127,6 +144,7 @@ export function CreateFirstAgentEmpty({
   title,
   desc,
   variant = "full",
+  siblingComposerOpen = false,
 }: {
   workspaceId: string;
   onCreated?: () => void;
@@ -135,6 +153,12 @@ export function CreateFirstAgentEmpty({
    *  list under it is what a reader is looking at anyway. */
   desc: string;
   variant?: "full" | "band";
+  /** A page can carry a SECOND create control this component knows nothing
+   *  about — Projects page's own NewProjectDialog, gated on its own
+   *  dialogOpen state. Pass that through so this offer's button cedes the
+   *  accent to it too, not only to its own AgentCreateCard. Nobody else
+   *  passes it (Inbox has no sibling composer), so it defaults to false. */
+  siblingComposerOpen?: boolean;
 }) {
   const router = useRouter();
   const { projects } = useFleetProjects(workspaceId);
@@ -149,9 +173,20 @@ export function CreateFirstAgentEmpty({
   return (
     <>
       {variant === "band" ? (
-        <FirstAgentBand title={title} onCreate={() => setCardOpen(true)} createCardOpen={cardOpen} />
+        <FirstAgentBand
+          title={title}
+          onCreate={() => setCardOpen(true)}
+          createCardOpen={cardOpen}
+          siblingComposerOpen={siblingComposerOpen}
+        />
       ) : (
-        <FirstAgentEmpty title={title} desc={desc} onCreate={() => setCardOpen(true)} createCardOpen={cardOpen} />
+        <FirstAgentEmpty
+          title={title}
+          desc={desc}
+          onCreate={() => setCardOpen(true)}
+          createCardOpen={cardOpen}
+          siblingComposerOpen={siblingComposerOpen}
+        />
       )}
       {cardOpen && (
         <AgentCreateCard workspaceId={workspaceId} projects={projects} onClose={() => setCardOpen(false)} onCreated={handleAgentCreated} />

@@ -70,6 +70,13 @@ const ALLOWLIST: Record<string, string> = {
     "invite-code validation happens BEFORE the person has an account or session (POST /api/pilot/invites/validate) — there is no session to refresh.",
   "app/preview/PublicAgentPreviewClient.tsx":
     "a public marketplace preview (GET /api/marketplace/agents) — works for anonymous visitors, credentials: 'include' is opportunistic, not required.",
+  "app/global-error.tsx":
+    "the last-resort root error boundary — root-error-boundary-coverage.test.ts requires it import NOTHING from " +
+    "@/lib or @/app (if the root layout itself crashed, shared code cannot be assumed to have survived), so its " +
+    "'Sign in again' recovery link cannot route through fleetAuthorizedFetch. The fetch() is a best-effort, " +
+    "fire-and-forget POST /api/auth/logout (keepalive: true, no preventDefault) that heals a stuck CSRF cookie " +
+    "twin before the anchor's own navigation to /login fires regardless of whether it succeeds — there is no " +
+    "session left to refresh by the time this runs, and refreshing is not the right response to a 401 here anyway.",
 };
 
 let passed = 0;
