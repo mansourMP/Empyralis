@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import httpx
 import pytest
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 
-from server_modules import routes_platform_analytics
 from server_modules import routes_workspaces
 from server_modules import workspace_admin_service
 
@@ -12,7 +11,6 @@ from server_modules import workspace_admin_service
 def _build_app() -> FastAPI:
     app = FastAPI()
     app.include_router(routes_workspaces.router)
-    app.include_router(routes_platform_analytics.router)
     return app
 
 
@@ -244,60 +242,6 @@ async def test_provider_admin_routes_accept_valid_csrf_and_delegate_owner_scope(
     assert captured["current_user"] == {"user_id": "owner-1"}
     for key, value in expected.items():
         assert captured[key] == value
-
-
-@pytest.mark.anyio
-async def test_platform_analytics_route_delegates_to_admin_service(monkeypatch: pytest.MonkeyPatch):
-    app = _build_app()
-    app.dependency_overrides[routes_platform_analytics.get_current_user] = lambda: {
-        "user_id": "admin-1",
-        "auth_type": "bearer",
-        "auth_admin": True,
-        "is_admin": True,
-    }
-
-    async def fake_build_platform_analytics_payload(current_user):
-        assert current_user["user_id"] == "admin-1"
-        return {
-            "scope": "platform",
-            "summary": {
-                "total_active_external_users_30d": 12,
-                "total_messages": 58,
-            },
-            "deployments": [],
-            "model_cost_breakdown": [],
-        }
-
-    monkeypatch.setattr(
-        routes_platform_analytics.workspace_admin_service,
-        "build_platform_analytics_payload",
-        fake_build_platform_analytics_payload,
-    )
-
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-        response = await client.get("/platform-analytics")
-
-    assert response.status_code == 200
-    assert response.json()["scope"] == "platform"
-    assert response.json()["summary"]["total_messages"] == 58
-
-
-@pytest.mark.anyio
-async def test_platform_analytics_route_rejects_non_admin() -> None:
-    app = _build_app()
-
-    def _forbidden():
-        raise HTTPException(status_code=403, detail="Admin role required.")
-
-    app.dependency_overrides[routes_platform_analytics.get_current_user] = _forbidden
-
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-        response = await client.get("/platform-analytics")
-
-    assert response.status_code == 403
-    assert response.json()["detail"] == "Admin role required."
 
 
 @pytest.mark.anyio

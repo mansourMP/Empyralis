@@ -245,20 +245,16 @@ from server_modules.routes_billing import router as billing_router
 from server_modules.routes_builder import router as builder_router
 from server_modules.routes_connections import router as connections_router
 from server_modules.routes_connectors import router as connectors_router
-from server_modules.routes_deployed_agents import router as deployed_agents_router
 from server_modules.routes_gateway import router as gateway_router
 from server_modules.routes_health import router as health_router
 from server_modules.routes_marketplace import router as marketplace_router
 from server_modules.routes_operator_console import router as operator_console_router
 from server_modules.routes_personal_channels import router as personal_channels_router
 from server_modules.routes_pilot import router as pilot_router
-from server_modules.routes_platform_analytics import router as platform_analytics_router
 from server_modules.routes_runs import router as runs_router
-from server_modules.routes_studio import router as studio_router
 from server_modules.routes_workspaces import router as workspaces_router
 from server_modules.routes_push import router as push_router
 from server_modules.routes_workflows import router as workflows_router
-from server_modules.routes_doctor import router as doctor_router
 from server_modules.routes_sage_telegram_hosted import router as sage_telegram_hosted_router
 from server_modules.routes_wechat_official import router as wechat_official_router
 from server_modules.routes_fleet import router as fleet_router
@@ -400,15 +396,11 @@ app.include_router(personal_channels_router, prefix="/api")
 app.include_router(workspaces_router, prefix="/api")
 app.include_router(push_router, prefix="/api")
 app.include_router(billing_router, prefix="/api")
-app.include_router(deployed_agents_router, prefix="/api")
 app.include_router(agent_traces_router, prefix="/api")
-app.include_router(platform_analytics_router, prefix="/api")
 app.include_router(marketplace_router, prefix="/api")
 app.include_router(pilot_router, prefix="/api")
-app.include_router(studio_router, prefix="/api")
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api")
-app.include_router(doctor_router)
 app.include_router(sage_telegram_hosted_router, prefix="/api")
 app.include_router(wechat_official_router, prefix="/api")
 app.include_router(fleet_router, prefix="")

@@ -241,16 +241,13 @@ class SingleAppRootTests(unittest.TestCase):
             "routes_billing": types.ModuleType("server_modules.routes_billing"),
             "routes_builder": types.ModuleType("server_modules.routes_builder"),
             "routes_connectors": types.ModuleType("server_modules.routes_connectors"),
-            "routes_deployed_agents": types.ModuleType("server_modules.routes_deployed_agents"),
             "routes_gateway": types.ModuleType("server_modules.routes_gateway"),
             "routes_health": types.ModuleType("server_modules.routes_health"),
             "routes_marketplace": types.ModuleType("server_modules.routes_marketplace"),
             "routes_mini_apps": types.ModuleType("server_modules.routes_mini_apps"),
             "routes_personal_channels": types.ModuleType("server_modules.routes_personal_channels"),
             "routes_pilot": types.ModuleType("server_modules.routes_pilot"),
-            "routes_platform_analytics": types.ModuleType("server_modules.routes_platform_analytics"),
             "routes_runs": types.ModuleType("server_modules.routes_runs"),
-            "routes_studio": types.ModuleType("server_modules.routes_studio"),
             "routes_workspaces": types.ModuleType("server_modules.routes_workspaces"),
             "routes_workflows": types.ModuleType("server_modules.routes_workflows"),
         }
@@ -260,16 +257,13 @@ class SingleAppRootTests(unittest.TestCase):
         route_modules["routes_billing"].router = _build_router("/billing-router")
         route_modules["routes_builder"].router = _build_router("/builder-router")
         route_modules["routes_connectors"].router = _build_router("/connectors-router")
-        route_modules["routes_deployed_agents"].router = _build_router("/deployed-agents-router")
         route_modules["routes_gateway"].router = _build_router("/gateway-router")
         route_modules["routes_health"].router = _build_router("/health-router")
         route_modules["routes_marketplace"].router = _build_router("/marketplace-router")
         route_modules["routes_mini_apps"].router = _build_router("/mini-apps-router")
         route_modules["routes_personal_channels"].router = _build_router("/personal-channels-router")
         route_modules["routes_pilot"].router = _build_router("/pilot-router")
-        route_modules["routes_platform_analytics"].router = _build_router("/platform-analytics-router")
         route_modules["routes_runs"].router = _build_router("/runs-router")
-        route_modules["routes_studio"].router = _build_router("/studio-router")
         route_modules["routes_workspaces"].router = _build_router("/workspaces-router")
         route_modules["routes_workflows"].router = _build_router("/workflows-router")
 
