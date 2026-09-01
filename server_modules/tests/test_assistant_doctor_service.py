@@ -5,10 +5,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import pytest
-from fastapi import FastAPI, HTTPException
-from fastapi.testclient import TestClient
 
-from server_modules import routes_doctor
 from server_modules.assistant_doctor_service import CHECK_SPECS, SageDoctorService
 
 
@@ -404,58 +401,3 @@ class TestSageDoctorService:
         assert result["status"] == "pass"
         get_selection.assert_called_once_with(workspace_id="ws-1", user_id="user-1")
 
-
-class TestSageDoctorRoute:
-    """Route-level auth and scope checks for Sage Doctor."""
-
-    @staticmethod
-    def _app() -> FastAPI:
-        app = FastAPI()
-        app.include_router(routes_doctor.router)
-        return app
-
-    def test_route_requires_authenticated_user(self):
-        app = self._app()
-
-        def _unauthorized():
-            raise HTTPException(status_code=401, detail="Unauthorized")
-
-        app.dependency_overrides[routes_doctor.get_current_user] = _unauthorized
-        client = TestClient(app)
-
-        response = client.get("/api/sage/doctor/check?workspace_id=ws-1")
-
-        assert response.status_code == 401
-        app.dependency_overrides.clear()
-
-    def test_route_derives_tenant_and_user_from_auth_context(self):
-        app = self._app()
-        current_user = {"user_id": "user-1", "workspace_ids": ["ws-1"]}
-        app.dependency_overrides[routes_doctor.get_current_user] = lambda: current_user
-
-        with (
-            patch(
-                "server_modules.routes_doctor.auth_module.enforce_workspace_access",
-                return_value="ws-1",
-            ) as enforce_access,
-            patch(
-                "server_modules.routes_doctor.auth_module.workspace_tenant_id",
-                return_value="tenant-1",
-            ) as workspace_tenant,
-            patch(
-                "server_modules.routes_doctor.SageDoctorService.check_all",
-                return_value={"checks": [], "summary": {"total": 0}},
-            ) as check_all,
-        ):
-            client = TestClient(app)
-            response = client.get("/api/sage/doctor/check?workspace_id=ws-1&tenant_id=forged")
-
-        assert response.status_code == 200
-        enforce_access.assert_called_once_with(current_user, "ws-1", minimum_role="viewer")
-        workspace_tenant.assert_called_once_with(current_user, "ws-1")
-        check_all.assert_called_once_with(
-            workspace_id="ws-1",
-            tenant_id="tenant-1",
-            user_id="user-1",
-        )
-        app.dependency_overrides.clear()

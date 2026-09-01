@@ -334,6 +334,28 @@ ALLOWLISTED_ORPHANS: dict[str, str] = {
         "exactly the false-negative this check's AST approach exists to "
         "avoid; a naive grep sweep would miss this orphan)."
     ),
+    "assistant_doctor_service.py": (
+        "SageDoctorService's sole caller was routes_doctor.py's "
+        "/api/sage/doctor/check route, deleted 2026-09-01 (zero frontend/MCP "
+        "callers, founder-approved dead-route sweep) -- the service module "
+        "itself was not in scope for that deletion, so it stays here orphaned "
+        "rather than silently disappearing with its caller."
+    ),
+    "connected_external_agent_service.py": (
+        "~2,050-line service backing routes_studio.py's /studio/external-agents "
+        "CRUD, channel-binding and agent-surfaces endpoints, deleted 2026-09-01 "
+        "(zero frontend/MCP callers, founder-approved dead-route sweep) -- the "
+        "service module itself was not in scope for that deletion, so it stays "
+        "here orphaned rather than silently disappearing with its only caller. "
+        "Worth a separate look: this is a large chunk of now-dead business logic."
+    ),
+    "deployed_agent_admin_dashboard_service.py": (
+        "Sole caller was routes_deployed_agents.py's /deployed-agents/"
+        "{id}/admin-dashboard route, deleted 2026-09-01 (zero frontend/MCP "
+        "callers, founder-approved dead-route sweep) -- the service module "
+        "itself was not in scope for that deletion, so it stays here orphaned "
+        "rather than silently disappearing with its only caller."
+    ),
     "channel_types.py": "Referenced only by test_channel_types.py.",
     "policy_presets.py": "Referenced only by test_policy_presets_rust_gate.py.",
     "cli_companion_service.py": "Referenced only by test_execution_artifact_state_rust_gate.py.",
