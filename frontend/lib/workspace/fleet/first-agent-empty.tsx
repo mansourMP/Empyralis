@@ -63,12 +63,15 @@ export function FirstAgentEmpty({
  * The same offer, as a BAND above content that is genuinely there.
  *
  * The centred state above owns an empty pane. This one sits over a real
- * list — a fresh workspace bootstraps a "General" project, so its Projects
- * page has a true row to show and "No projects yet" would be a lie told to
- * make room for a call to action. So the list keeps telling the truth and
- * the offer rides above it: the fact on the left, the one thing that acts
- * on it on the right, which is the shape `.fleet-agent-setup` already
- * established for an agent's own unfinished setup.
+ * list — rendered only once the workspace genuinely has a project (its own,
+ * created by the person, or a pre-2026-09-01 workspace's inherited
+ * "General" — see workspace-first-run.ts's CORRECTED note; a fresh
+ * workspace no longer bootstraps one), so its Projects page has a true row
+ * to show and "No projects yet" would be a lie told to make room for a call
+ * to action. So the list keeps telling the truth and the offer rides above
+ * it: the fact on the left, the one thing that acts on it on the right,
+ * which is the shape `.fleet-agent-setup` already established for an
+ * agent's own unfinished setup.
  *
  * It differs from that band on exactly one point, and deliberately: this
  * one OWNS THE VIEW'S ACCENT. `.fleet-agent-setup` spends none, because a
