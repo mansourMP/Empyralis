@@ -13,10 +13,28 @@ workspace owner.
 
 The fix threads an optional `project_id` through invite creation (stored on
 the invite's existing `metadata` jsonb column) and grants it via
-`projects_repository.grant_invite_project_access` from BOTH acceptance
-paths:
-  - routes_workspaces.accept_workspace_invite_route (the /join/{token} link)
-  - auth.accept_workspace_invites_for_user (the auto-accept-at-login path)
+`projects_repository.grant_invite_project_access` from the ONE shared tail
+both real acceptance paths funnel through --
+routes_workspaces._finalize_workspace_invite_acceptance -- called from:
+  - routes_workspaces.accept_workspace_invite_route
+    (POST /workspaces/invites/accept, the emailed /join/{token} link)
+  - routes_workspaces.join_pending_workspace_invite_route
+    (POST /workspaces/invites/{invite_id}/join, the in-app
+    PendingWorkspaceInvitesBanner Join button)
+
+NOTE (2026-09-01): this file originally listed a THIRD path here --
+`auth.accept_workspace_invites_for_user`, "the auto-accept-at-login path" --
+and had a test driving it directly. That function was deleted 2026-08-20
+(see auth.py's `pending_workspace_invites_for_user` docstring): silently
+granting membership on every sign-in for any pending invite matching the
+caller's email was itself a bug ("I didn't accept. The moment I came to the
+platform it was just present." -- founder). Signing in no longer accepts
+anything; it only lets a user with a pending invite and zero workspaces log
+in without a 403 (`auth._login_payload_for_user`), so they can reach the
+banner and press Join. The section-3 test below was rewritten to drive that
+real in-app Join route instead of a function that no longer exists -- same
+end-to-end guarantee (invite-with-project, accepted, grants visible project
+access), through the one real path this file was not already covering.
 
 This is a NEW file -- server_modules/tests/conftest.py and every
 pre-existing test file are owned by a different, concurrently-running agent
@@ -289,6 +307,19 @@ async def _accept_invite(app: FastAPI, invitee_current_user: dict, token: str) -
         return await client.post("/workspaces/invites/accept", json={"token": token})
 
 
+async def _join_invite(app: FastAPI, invitee_current_user: dict, invite_id: str) -> httpx.Response:
+    """The in-app counterpart to _accept_invite: POST
+    /workspaces/invites/{invite_id}/join, no signed token -- the route the
+    PendingWorkspaceInvitesBanner's Join button calls, driven by a caller
+    already authenticated through their own session rather than an emailed
+    link. Both routes are thin wrappers around the same
+    _finalize_workspace_invite_acceptance tail; see routes_workspaces.py."""
+    app.dependency_overrides[routes_workspaces.get_current_user] = lambda: invitee_current_user
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        return await client.post(f"/workspaces/invites/{invite_id}/join")
+
+
 def _register_invitee(*, email: str, password: str = "Inv1tee-Secret-Pass!") -> dict:
     """A real, distinct second user, NOT attached to any workspace -- used
     for both acceptance-path tests so each drives its own real user through
@@ -409,45 +440,61 @@ async def test_invite_with_project_accepted_via_token_route_grants_visible_proje
         assert project["id"] in visible
 
 
-# ── 3. Login auto-accept grants project access too -- the path most likely
-#      to be missed if only the token route were patched.
+# ── 3. The in-app Join route grants project access too -- the second of the
+#      TWO real acceptance paths (section 2 above already covers the emailed
+#      /join/{token} link), most likely to be missed if only the token route
+#      were patched.
+#
+#      This section used to drive `auth.accept_workspace_invites_for_user`
+#      directly, simulating a "login auto-accept" path. That function was
+#      deleted 2026-08-20 -- it was itself the bug (silent membership grant
+#      on sign-in), not a real acceptance path any more. See this file's
+#      module docstring for the full story. Rewritten to drive the real
+#      surviving second path: POST /workspaces/invites/{invite_id}/join,
+#      the route PendingWorkspaceInvitesBanner's Join button calls.
 # ──────────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.anyio
-async def test_invite_with_project_accepted_via_login_auto_accept_grants_visible_project_access():
+async def test_invite_with_project_accepted_via_in_app_join_route_grants_visible_project_access():
     if not _database_url_available():
         pytest.skip(_NO_PG_REASON)
     async with _pg_scope() as (pool, suffix, cleanup_workspace_ids):
+        app = _build_app()
         owner = _register_owner()
         cleanup_workspace_ids.append(owner["workspace_id"])
         tenant_id = owner["tenant_id"]
         project = await projects_repository.create_project(
-            tenant_id=tenant_id, workspace_id=owner["workspace_id"], name="Auto Accept Project"
+            tenant_id=tenant_id, workspace_id=owner["workspace_id"], name="In-App Join Project"
         )
-        invitee_email = f"auto-accept-invitee-{suffix}@example.com"
+        # A second, real project in the SAME workspace the invitee is never
+        # granted -- without this, "project['id'] in visible" would also
+        # pass under a too-wide fix that made _visible_project_ids return
+        # every project in the workspace instead of just the invited one.
+        # The equality assertion at the bottom of this test needs a second
+        # project to actually be a check on the SET, not just membership.
+        other_project = await projects_repository.create_project(
+            tenant_id=tenant_id, workspace_id=owner["workspace_id"], name="Not Invited To This One"
+        )
+        invitee_email = f"in-app-join-invitee-{suffix}@example.com"
 
         # Invitee registers FIRST, with no pending invite yet -- register_user
-        # itself calls accept_workspace_invites_for_user internally (that is
-        # exactly how the auto-accept-at-login path normally fires, on
-        # registration too, not just login), and if the invite already
-        # existed at registration time it would be consumed right there,
-        # leaving nothing for the explicit call below to do and making this
-        # test pass without actually isolating the function under test. This
-        # ordering -- register first, invite second -- mirrors
-        # test_accept_invite_succeeds_when_invitee_signup_already_auto_accepted_it's
-        # own comment on why order matters, just inverted: THAT test wants
-        # the invite consumed at registration; THIS test wants it NOT
-        # consumed at registration, so a later call cleanly simulates "the
-        # invite arrived after signup, and the invitee eventually logs back
-        # in" -- the accept_workspace_invites_for_user call auth.login_user
-        # makes on every sign-in.
+        # deliberately does NOT accept any pending invite for the signing-up
+        # email (see auth.py's own comment right after its
+        # pending_workspace_invites_for_user call in register_user: "signing
+        # up is not accepting"), so ordering here no longer matters for
+        # isolating the path under test the way it used to when an
+        # auto-accept existed. Kept register-then-invite anyway because it
+        # mirrors the realistic case this route exists for: the invite
+        # arrives after the invitee already has an account, they see it on
+        # PendingWorkspaceInvitesBanner next time they're signed in, and
+        # press Join.
         invitee = _register_invitee(email=invitee_email)
 
         # Invite created AFTER the invitee already has an account --
         # create_workspace_invite directly (repository level), not the
-        # route, to isolate this test to auth.accept_workspace_invites_for_user
-        # alone.
+        # creation route, to isolate this test to the join route's own
+        # acceptance behavior.
         invite = await control_plane_repository.create_workspace_invite(
             workspace_id=owner["workspace_id"],
             tenant_id=tenant_id,
@@ -458,15 +505,19 @@ async def test_invite_with_project_accepted_via_login_auto_accept_grants_visible
             project_id=project["id"],
         )
         assert invite["project_id"] == project["id"]
+        invite_id = str(invite["id"])
 
-        # THE call under test: auth.accept_workspace_invites_for_user is what
-        # auth.login_user/register_user invoke on every sign-in -- calling it
-        # directly here (simulating the invitee logging back in after the
-        # invite arrived) isolates the auto-accept-at-login path from the
-        # /join/{token} route entirely, so this test cannot pass by accident
-        # via the other acceptance path.
-        accepted = auth.accept_workspace_invites_for_user(invitee["user_id"], invitee_email)
-        assert any(item["workspace_id"] == owner["workspace_id"] for item in accepted)
+        # THE call under test: POST /workspaces/invites/{invite_id}/join --
+        # the real in-app Join route, driven exactly the way
+        # PendingWorkspaceInvitesBanner drives it (an authenticated caller,
+        # no token), through the real ASGI app rather than by calling any
+        # internal function directly.
+        invitee_current_user = _member_current_user(
+            user_id=invitee["user_id"], email=invitee_email, workspace_id=owner["workspace_id"],
+        )
+        join_response = await _join_invite(app, invitee_current_user, invite_id)
+        assert join_response.status_code == 200
+        assert join_response.json()["status"] == "accepted"
 
         # Real DB proof: workspace membership landed.
         real_memberships = auth._list_workspace_memberships(invitee["user_id"])
@@ -475,22 +526,25 @@ async def test_invite_with_project_accepted_via_login_auto_accept_grants_visible
             for item in real_memberships
         )
 
-        # Raw row proof: project membership landed too -- this is the row
-        # that did NOT exist before this fix, for this exact path.
+        # Raw row proof: project membership landed too, and ONLY for the
+        # invited project -- not the other real project in the same
+        # workspace.
         assert await projects_repository.is_project_member(
             tenant_id=tenant_id, workspace_id=owner["workspace_id"],
             project_id=project["id"], user_id=invitee["user_id"],
         )
-
-        # End-to-end proof through the real visibility filter.
-        invitee_current_user = _member_current_user(
-            user_id=invitee["user_id"], email=invitee_email, workspace_id=owner["workspace_id"],
+        assert not await projects_repository.is_project_member(
+            tenant_id=tenant_id, workspace_id=owner["workspace_id"],
+            project_id=other_project["id"], user_id=invitee["user_id"],
         )
+
+        # End-to-end proof through the real visibility filter -- exact set
+        # equality, not just "in", so a too-wide grant (every project in the
+        # workspace, not just the invited one) fails this test too.
         visible = await routes_fleet._visible_project_ids(
             invitee_current_user, owner["workspace_id"], tenant_id,
         )
-        assert visible is not None
-        assert project["id"] in visible
+        assert visible == {project["id"]}
 
 
 # ── 4. No project_id on the invite: SUPERSEDED by MAN-335.
