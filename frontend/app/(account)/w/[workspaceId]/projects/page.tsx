@@ -22,6 +22,7 @@ import { FleetToolbar, type ToolbarFilter } from "@/lib/workspace/fleet/FleetToo
 import { FleetRightPanel, PanelSection, PanelRow } from "@/lib/workspace/fleet/FleetRightPanel";
 import { UsageStat, bucketSeries, type UsageBucket } from "@/lib/workspace/fleet/fleet-sparkline";
 import { formatUsd } from "@/lib/ui/money";
+import { CopyLinkButton } from "@/lib/ui/CopyLinkButton";
 
 // Agents/Cost/Tokens/Last-active/Status columns — and the "Has agents" /
 // "Empty" filter and the "Agent count"/"Cost"/"Last active" sort modes that
@@ -321,6 +322,7 @@ export default function ProjectsPage() {
               <div className="fleet-projects-list-header" aria-hidden>
                 <span>Project</span>
                 <span className="is-right">Work</span>
+                <span />
               </div>
               {shown.map((p) => {
                 // Real project-owned facts (routes_fleet.fleet_projects
@@ -343,6 +345,16 @@ export default function ProjectsPage() {
                     <span className={`fleet-agent-cell-right fleet-cell-secondary${hasWork ? "" : " fleet-cell-muted"}`}>
                       {workSummary}
                     </span>
+                    {/* Same button as the project detail toolbar's own —
+                        works from a row too, without opening the project
+                        first. Its own click handler stops this row's <Link>
+                        from also navigating (same nested-interactive
+                        pattern TasksList.tsx's assignee button already uses
+                        inside its row anchor). */}
+                    <CopyLinkButton
+                      path={`${base}/projects/${encodeURIComponent(p.id)}`}
+                      label={p.name || "this project"}
+                    />
                   </Link>
                 );
               })}

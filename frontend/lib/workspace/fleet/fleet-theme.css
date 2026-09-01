@@ -6518,14 +6518,15 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
    .fleet-cell-muted directly rather than cloning them — one shared visual
    system for "a right-aligned tabular cell", not two that happen to match. */
 .fleet-projects-list {
-  /* Two columns, 2026-08-30: Agents/Cost/Tokens/Last active/Status were all
-     agent-derived (grouping agents on project_id, a nullable, never-
-     backfilled column that never meant ownership — founder hard rule, "an
-     agent is completely independent of any project") and are gone. Work is
-     the one column left, built from the project's own task_count/
+  /* Two content columns, 2026-08-30: Agents/Cost/Tokens/Last active/Status
+     were all agent-derived (grouping agents on project_id, a nullable,
+     never-backfilled column that never meant ownership — founder hard rule,
+     "an agent is completely independent of any project") and are gone. Work
+     is the one column left, built from the project's own task_count/
      document_count — see projects/page.tsx's own FilterState comment for
-     the full history. */
-  --fleet-list-grid: minmax(260px, 1fr) 220px;
+     the full history. The trailing 32px track (added later) is the Copy
+     link button, not a data column — see .fleet-project-row-copy below. */
+  --fleet-list-grid: minmax(260px, 1fr) 220px 32px;
   --fleet-list-gap: 16px;
   --fleet-list-padding-x: 16px;
   max-width: 1400px;

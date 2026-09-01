@@ -81,6 +81,11 @@
   justify-content: space-between;
   gap: 12px;
 }
+.fleet-task-detail-topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
 .fleet-task-detail-nav {
   display: inline-flex;
   align-items: center;

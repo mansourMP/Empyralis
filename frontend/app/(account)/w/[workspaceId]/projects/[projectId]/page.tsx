@@ -32,6 +32,7 @@ import { MemberAvatarStack } from "@/lib/workspace/fleet/MemberAvatarStack";
 import { ProjectMemberAdd } from "@/lib/workspace/fleet/ProjectMemberAdd";
 import { ProjectPeople } from "@/lib/workspace/fleet/ProjectPeople";
 import { ProjectSettings } from "@/lib/workspace/fleet/ProjectSettings";
+import { CopyLinkButton } from "@/lib/ui/CopyLinkButton";
 import { useBreadcrumbLabel, useBreadcrumbIcon, HeaderAction } from "@/lib/workspace/fleet/Breadcrumbs";
 import { formatDate, formatNumber } from "@/lib/workspace/fleet/fleet-presentation";
 import { ProjectIcon } from "@/lib/workspace/fleet/fleet-project-identity";
@@ -405,8 +406,9 @@ export default function ProjectDetailPage() {
 
   // `inProject` — agents grouped by project_id — is kept for two LIVE
   // consumers: ProjectSettings's delete-confirmation below (`contents.agents`
-  // → "N agents move to General", an honest disclosure of a real backend
-  // side effect — project_id is still a required column on agent rows) and
+  // → "N agents will no longer belong to a project", an honest disclosure
+  // that deleting no longer rehomes them anywhere — project_id is still a
+  // required column on agent rows, just not a required NON-NULL one) and
   // TasksBoard/TasksGroupedList/TasksList/TaskComposer's assignee pool (a
   // separate, NOT-yet-decided question: whether that pool should stay
   // project-filtered or widen to all workspace agents — the founder has
@@ -683,6 +685,13 @@ export default function ProjectDetailPage() {
           // back button to land on.
           onRemoved={() => router.replace(`${base}/projects`)}
         />
+        {/* Copy link — deliberately NOT bundled inside ProjectSettings
+            above: that popover is owner-only (server-enforced), and copying
+            a link is read-only — exactly the action a non-owner project
+            member (or anyone else with access) needs too. CLAUDE.md: "the
+            board is the product; nothing of value may exist only in a
+            conversation" — a project has to be pasteable into Telegram. */}
+        <CopyLinkButton path={`${base}/projects/${encodeURIComponent(projectId)}`} label={project?.name || "this project"} />
         {/* Far RIGHT (margin-left:auto in the stylesheet, on BOTH
             .fleet-toolbar-actions and .fleet-view-options — see
             fleet-theme.css). Every control in here acts on the right-hand

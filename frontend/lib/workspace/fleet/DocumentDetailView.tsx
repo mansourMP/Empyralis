@@ -113,6 +113,7 @@ import {
   type DocumentConflictPlan,
 } from "./document-conflict";
 import { MarkdownLite } from "@/lib/workspace/markdown-lite";
+import { copyTextToClipboard } from "@/lib/ui/copy-link";
 import { timeAgo } from "./fleet-presentation";
 import { DocumentHistory } from "./DocumentHistory";
 import { HeaderAction } from "./Breadcrumbs";
@@ -513,12 +514,19 @@ export function DocumentDetailView({
   }, [canWrite]);
 
   // Copies the page's own URL — available to a viewer too (read-only access
-  // is exactly when "let me hand you a link" comes up). navigator.clipboard
-  // is undefined over plain http:// in some browsers; DocumentMenu's own
-  // click handler is fire-and-forget either way, same as the pattern
-  // MembersSection.tsx already uses for its invite-link copy button.
-  const handleCopyLink = useCallback(async () => {
-    await navigator.clipboard?.writeText(window.location.href);
+  // is exactly when "let me hand you a link" comes up). Returns whether it
+  // actually worked: navigator.clipboard is undefined over plain http:// in
+  // some browsers, and `navigator.clipboard?.writeText(...)` in that case
+  // evaluates to `undefined` rather than a rejected promise, so `await`ing
+  // it resolves cleanly with nothing having happened — a silent no-op that
+  // LOOKS like success to a caller that doesn't check. DocumentMenu's own
+  // click handler awaits this return value and only claims "Copied!" when
+  // it is true (CLAUDE.md: "never claim success if navigator.clipboard
+  // rejected — reporting failure on a success is the worst case, not the
+  // safest"), same discipline MembersSection.tsx's own invite-link copy
+  // button already applies by gating setCopied inside its `.then()`.
+  const handleCopyLink = useCallback((): Promise<boolean> => {
+    return copyTextToClipboard(window.location.href);
   }, []);
 
   // Downloads exactly what's on screen right now (draftRef, not the last-
@@ -883,7 +891,9 @@ function DocumentMenu({
   onDelete,
 }: {
   canWrite: boolean;
-  onCopyLink: () => void | Promise<void>;
+  /** Resolves to whether the copy actually happened — see handleCopyLink's
+   *  own doc comment for why this can't be void/fire-and-forget. */
+  onCopyLink: () => Promise<boolean>;
   onExport: () => void;
   /** Present only when canWrite — the item itself is omitted otherwise,
    *  never rendered disabled (CLAUDE.md: no dead controls). */
@@ -902,11 +912,14 @@ function DocumentMenu({
   // a different message, and showing it here (next to the control that
   // caused it) keeps it from being mislabeled as a save failure.
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  // "Copy link" / "Copied!" label swap, same convention MembersSection.tsx's
-  // invite-link copy button already uses — state change only, no icon
-  // animation, reverts on its own so the menu never needs a second click to
-  // reset it.
-  const [copied, setCopied] = useState(false);
+  // "Copy link" / "Copied!" / "Couldn't copy" label swap, same convention
+  // MembersSection.tsx's invite-link copy button already uses — state
+  // change only, no icon animation, reverts on its own so the menu never
+  // needs a second click to reset it. Three states, not two: "Copied!" only
+  // shows once onCopyLink's promise actually resolves true (see its own
+  // doc comment) — a rejected/no-op clipboard write shows "Couldn't copy"
+  // instead of silently saying nothing, or worse, silently claiming success.
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const ref = useRef<HTMLDivElement | null>(null);
 
@@ -940,7 +953,7 @@ function DocumentMenu({
     if (!open) {
       setConfirming(false);
       setDeleteError(null);
-      setCopied(false);
+      setCopyState("idle");
     }
   }, [open]);
 
@@ -950,11 +963,11 @@ function DocumentMenu({
     };
   }, []);
 
-  const handleCopyClick = useCallback(() => {
-    void onCopyLink();
-    setCopied(true);
+  const handleCopyClick = useCallback(async () => {
+    const ok = await onCopyLink();
+    setCopyState(ok ? "copied" : "failed");
     if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
-    copyTimerRef.current = setTimeout(() => setCopied(false), 1500);
+    copyTimerRef.current = setTimeout(() => setCopyState("idle"), 1500);
   }, [onCopyLink]);
 
   const handleDelete = useCallback(async () => {
@@ -1018,9 +1031,9 @@ function DocumentMenu({
                 type="button"
                 role="menuitem"
                 className="fleet-list-row-menu-item"
-                onClick={handleCopyClick}
+                onClick={() => void handleCopyClick()}
               >
-                {copied ? "Copied!" : "Copy link"}
+                {copyState === "copied" ? "Copied!" : copyState === "failed" ? "Couldn't copy" : "Copy link"}
               </button>
               {canWrite && onDuplicate ? (
                 <button

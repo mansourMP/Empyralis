@@ -99,12 +99,14 @@ import { useRouter } from "next/navigation";
 import {
   ArrowUp,
   Calendar,
+  Check,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
   Clock3,
   CornerDownRight,
   FolderKanban,
+  Link as LinkIcon,
   Loader2,
   MessageSquare,
   Pencil,
@@ -150,6 +152,7 @@ import {
   type TaskViewOptions as TaskViewOptionsState,
 } from "./task-view-options";
 import { MarkdownLiteText } from "../markdown-lite";
+import { useCopyLinkState } from "@/lib/ui/copy-link";
 import "./task-detail.css";
 
 /** Minute precision, not the default's seconds — no decision on this page
@@ -677,6 +680,10 @@ export function TaskDetailView({
     (id: string) => `${projectHref}/tasks/${encodeURIComponent(id)}`,
     [projectHref],
   );
+  // Copies THIS page's own current URL — window.location.href, not a
+  // rebuilt path — same reasoning DocumentDetailView's Copy link uses:
+  // it's guaranteed to match exactly what's on screen.
+  const { state: copyLinkState, copy: copyLink } = useCopyLinkState(() => window.location.href);
   const siblingIndex = useMemo(
     () => orderedSiblings.findIndex((t) => t.id === task.id),
     [orderedSiblings, task.id],
@@ -934,25 +941,54 @@ export function TaskDetailView({
           <div className="fleet-task-page-body">
             <div className="fleet-task-detail-topbar">
               <div className="fleet-task-page-eyebrow">{taskDisplayId(task)}</div>
-              {showTaskNav ? (
-                <div className="fleet-task-detail-nav" aria-label="Task navigation">
-                  <span className="fleet-task-detail-nav-count">
-                    {siblingIndex + 1} / {siblingTasks.length}
-                  </span>
-                  <TaskNavArrow
-                    direction="prev"
-                    target={prevTask}
-                    href={prevTask ? taskDetailHref(prevTask.id) : null}
-                    router={router}
-                  />
-                  <TaskNavArrow
-                    direction="next"
-                    target={nextTask}
-                    href={nextTask ? taskDetailHref(nextTask.id) : null}
-                    router={router}
-                  />
-                </div>
-              ) : null}
+              {/* Wrapped together so .fleet-task-detail-topbar's
+                  justify-content: space-between always sees exactly two
+                  children — the eyebrow on the left, everything else on the
+                  right — whether or not the nav (only shown for 2+ sibling
+                  tasks) is present. */}
+              <div className="fleet-task-detail-topbar-right">
+                {showTaskNav ? (
+                  <div className="fleet-task-detail-nav" aria-label="Task navigation">
+                    <span className="fleet-task-detail-nav-count">
+                      {siblingIndex + 1} / {siblingTasks.length}
+                    </span>
+                    <TaskNavArrow
+                      direction="prev"
+                      target={prevTask}
+                      href={prevTask ? taskDetailHref(prevTask.id) : null}
+                      router={router}
+                    />
+                    <TaskNavArrow
+                      direction="next"
+                      target={nextTask}
+                      href={nextTask ? taskDetailHref(nextTask.id) : null}
+                      router={router}
+                    />
+                  </div>
+                ) : null}
+                {/* Copy link — available to a viewer too (read-only access
+                    is exactly when "let me hand you a link" comes up).
+                    CLAUDE.md: "the board is the product; nothing of value
+                    may exist only in a conversation" — a task has to be
+                    pasteable into Telegram. Same honest-clipboard hook every
+                    Copy link control in this codebase now shares
+                    (lib/ui/copy-link.ts) — "Copied!" only shows once the
+                    write is confirmed, "Couldn't copy" otherwise, never an
+                    optimistic claim on the click alone. */}
+                <button
+                  type="button"
+                  className="fleet-task-detail-icon-btn"
+                  aria-label={copyLinkState === "copied" ? "Link copied" : copyLinkState === "failed" ? "Couldn't copy link" : "Copy link"}
+                  title={copyLinkState === "copied" ? "Copied!" : copyLinkState === "failed" ? "Couldn't copy" : "Copy link"}
+                  onClick={() => void copyLink()}
+                >
+                  {copyLinkState === "copied" ? (
+                    <Check size={14} strokeWidth={2} />
+                  ) : (
+                    <LinkIcon size={14} strokeWidth={1.75} />
+                  )}
+                </button>
+              </div>
             </div>
 
             {parentTask ? (

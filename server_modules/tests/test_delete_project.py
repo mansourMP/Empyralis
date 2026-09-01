@@ -4,8 +4,8 @@ projects_repository.delete_project.
 Until this shipped a project could be created and never removed: the repo
 had `set_project_archived` with NO caller anywhere in the frontend (the
 "built, tested, and never wired" failure mode CLAUDE.md names first) and no
-delete function at all. These tests pin the three things that make the new
-delete safe rather than merely present:
+delete function at all. These tests pin the things that make the new delete
+safe rather than merely present:
 
 1. PERMISSION. Owner-on-the-workspace, exactly matching the create/patch
    routes it supersedes. A viewer, a member, and — the case that actually
@@ -16,20 +16,27 @@ delete safe rather than merely present:
    home tenant disagrees with the workspace's, which is the exact shape of
    the bug CLAUDE.md documents.
 
-2. THE DEFAULT-PROJECT GUARD. `ensure_default_project`'s project is a
-   workspace's home for ungrouped agents; deleting it is refused at the
-   repository (ValueError) and surfaced by the route as a normal
-   {"ok": false, "error": ...}, with no DELETE ever issued.
+2. EVERY PROJECT IS DELETABLE, INCLUDING is_default. Founder ruling,
+   2026-09-01 ("I have no idea how to delete this shit. General project.
+   Why don't I have delete function?"): `is_default` used to refuse deletion
+   here (ValueError, "the default project cannot be deleted") on the theory
+   that a workspace must always keep a home for ungrouped agents. That
+   theory is dead — an agent is independent of every project — so
+   `is_default` is now just a legacy marker with zero effect on whether a
+   project can be removed. These tests prove the refusal is gone AND that
+   deleting never falls back to CREATING a replacement default project
+   (the real bug hiding under the old guard: for a workspace with no other
+   project already marked `is_default`, the old rehoming step silently
+   wrote a fresh "General" project as a side effect of deleting a different
+   one — `ensure_default_project` must never be called from here again).
 
 3. WHAT HAPPENS TO WHAT THE PROJECT OWNED. Tasks/documents/goals/memberships
-   go by FK cascade — but agents and project-scoped vault credentials are
-   REASSIGNED to the default project FIRST, before the DELETE, precisely so
-   the FK's ON DELETE SET NULL never runs on them. A NULL
-   workspace_agent_installs.project_id silently revokes an agent's whole
-   project_task__*/document__*/goal__* toolset (project membership IS the
-   grant), and a NULL vault_credentials.project_id makes a stored secret
-   invisible to every surface that could revoke it. The ordering assertion
-   is the point of these tests, not decoration.
+   go by FK cascade. Agents and project-scoped vault credentials used to be
+   REASSIGNED to a "default" project first, precisely to dodge the FK's own
+   ON DELETE SET NULL — that reassignment is what could invent a project
+   nobody asked for, so it is gone. Both now land on NULL exactly as the FK
+   says, and the counts of each are read (like every other count here)
+   BEFORE the delete, so the caller can still report an honest tally.
 """
 
 from __future__ import annotations
@@ -103,10 +110,8 @@ def _deleted_summary(**overrides) -> dict:
         "documents_deleted": 1,
         "members_removed": 2,
         "goals_deleted": 0,
-        "agents_moved": 2,
-        "credentials_moved": 1,
-        "moved_to_project_id": "proj-default",
-        "moved_to_project_name": "General",
+        "agents_unassigned": 2,
+        "credentials_unassigned": 1,
     }
     base.update(overrides)
     return base
@@ -165,12 +170,13 @@ async def test_owner_delete_returns_what_was_removed() -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True
-    # The caller is told exactly what went and where the agents landed —
-    # "silently drop a user's tasks" is the outcome this response prevents.
+    # The caller is told exactly what went — "silently drop a user's tasks"
+    # is the outcome this response prevents. Agents/credentials are reported
+    # as unassigned, never as moved somewhere — there is no destination any
+    # more (see module docstring).
     assert body["deleted"]["tasks_deleted"] == 3
     assert body["deleted"]["documents_deleted"] == 1
-    assert body["deleted"]["agents_moved"] == 2
-    assert body["deleted"]["moved_to_project_name"] == "General"
+    assert body["deleted"]["agents_unassigned"] == 2
     delete_mock.assert_awaited_once()
     assert delete_mock.await_args.kwargs["project_id"] == "proj-1"
     assert delete_mock.await_args.kwargs["workspace_id"] == "ws-1"
@@ -249,11 +255,16 @@ async def test_unknown_project_is_reported_not_claimed_as_deleted() -> None:
     assert response.json() == {"ok": False, "error": "Project not found."}
 
 
-# ── 2. The default-project guard ───────────────────────────────────────────
+# ── 2. is_default is deletable like any other project ──────────────────────
 
 
 @pytest.mark.anyio
-async def test_route_surfaces_the_default_project_refusal() -> None:
+async def test_route_deletes_the_is_default_project_like_any_other() -> None:
+    """The route level: an is_default project's delete goes through
+    exactly like a normal one's — no special {"ok": false} refusal, no
+    different response shape. delete_project itself decides nothing special
+    about is_default any more (see the repository-level test below); this
+    just proves the route doesn't reintroduce a guard of its own."""
     app = _build_app()
     app.dependency_overrides[routes_fleet.auth_module.get_current_user] = _owner_user
 
@@ -261,11 +272,12 @@ async def test_route_surfaces_the_default_project_refusal() -> None:
         patch("server_modules.routes_fleet._resolve_tenant", new=AsyncMock(return_value="tenant-1")),
         patch(
             "server_modules.projects_repository.delete_project",
-            new=AsyncMock(side_effect=ValueError("The default project cannot be deleted.")),
-        ),
+            new=AsyncMock(return_value=_deleted_summary(id="proj-default", name="General")),
+        ) as delete_mock,
+        patch("server_modules.activity_ledger_service.append_activity_event", new=AsyncMock(return_value=None)),
         patch(
-            "server_modules.activity_ledger_service.append_activity_event",
-            new=AsyncMock(side_effect=AssertionError("nothing was deleted; nothing to journal")),
+            "server_modules.control_plane_repository.get_workspace_by_id",
+            new=AsyncMock(return_value={"id": "ws-1", "tenant_id": "tenant-1"}),
         ),
     ):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
@@ -273,11 +285,13 @@ async def test_route_surfaces_the_default_project_refusal() -> None:
 
     assert response.status_code == 200
     body = response.json()
-    assert body["ok"] is False
-    assert body["error"] == "The default project cannot be deleted."
+    assert body["ok"] is True
+    assert body["deleted"]["id"] == "proj-default"
+    delete_mock.assert_awaited_once()
+    assert delete_mock.await_args.kwargs["project_id"] == "proj-default"
 
 
-# ── 3. The repository: ordering, rehoming, and what the cascade takes ──────
+# ── 3. The repository: counts, no rehoming, and what the cascade takes ─────
 
 
 def _squash(sql: str) -> str:
@@ -286,9 +300,10 @@ def _squash(sql: str) -> str:
 
 class _RecordingConnection:
     """Captures every statement delete_project issues, in order, so the
-    tests can assert on sequence — the ordering (reassign, THEN delete) is
-    the entire safety property here. Also records whether the whole unit of
-    work committed or rolled back, since "all or nothing" is the other."""
+    tests can assert on sequence — the count SELECT must run before the
+    DELETE, or the tally it produces is a lie about rows already gone.
+    Also records whether the whole unit of work committed or rolled back,
+    since "all or nothing" is the other safety property here."""
 
     def __init__(self, owner: "_RecordingPool") -> None:
         self.owner = owner
@@ -304,11 +319,7 @@ class _RecordingConnection:
         self.owner.args.append(args)
         if squashed.startswith("DELETE FROM projects"):
             return self.owner.delete_tag
-        if "workspace_agent_installs" in squashed:
-            return "UPDATE 2"
-        if "vault_credentials" in squashed:
-            return "UPDATE 1"
-        return "UPDATE 0"
+        raise AssertionError(f"delete_project must never reassign anything — unexpected statement: {squashed}")
 
 
 class _RecordingTransaction:
@@ -331,7 +342,7 @@ class _RecordingPool:
     def __init__(self, counts: dict | None = None, delete_tag: str = "DELETE 1") -> None:
         self.statements: list[str] = []
         self.args: list[tuple] = []
-        self.counts = counts or {"tasks": 3, "documents": 1, "members": 2, "goals": 0}
+        self.counts = counts or {"tasks": 3, "documents": 1, "members": 2, "goals": 0, "agents": 2, "credentials": 1}
         self.delete_tag = delete_tag
         self.transactions_opened = 0
         self.committed = False
@@ -368,8 +379,28 @@ def _install_recording_pool(monkeypatch, pool: _RecordingPool) -> None:
     )
 
 
+def _never_ensure_default_project(monkeypatch) -> AsyncMock:
+    """Wired into every repository-level test below: `delete_project` must
+    NEVER call `ensure_default_project` (create-if-absent) for ANY project,
+    is_default or not — that call is exactly what used to silently CREATE a
+    fresh "General" project as a side effect of deleting a different one,
+    for any workspace with no project already marked is_default. Returns
+    the mock so a test can also assert it directly if it wants to."""
+    mock = AsyncMock(side_effect=AssertionError(
+        "delete_project must never call ensure_default_project — that is the "
+        "silent-recreate bug this fix removes"
+    ))
+    monkeypatch.setattr(projects_repository, "ensure_default_project", mock)
+    return mock
+
+
 @pytest.mark.anyio
-async def test_repository_refuses_the_default_project_and_issues_no_delete(monkeypatch) -> None:
+async def test_repository_deletes_the_is_default_project_without_recreating_one(monkeypatch) -> None:
+    """The is_default project itself, deleted, with NO other project in the
+    workspace: the exact shape of "delete the last project" the founder hit
+    personally. Must succeed, must issue the DELETE, and must never call
+    ensure_default_project — proving no replacement "General" project gets
+    invented as a side effect."""
     recorder = _RecordingPool()
     _install_recording_pool(monkeypatch, recorder)
     monkeypatch.setattr(
@@ -377,13 +408,15 @@ async def test_repository_refuses_the_default_project_and_issues_no_delete(monke
         "get_project",
         AsyncMock(return_value={"id": "proj-default", "name": "General", "is_default": True}),
     )
+    _never_ensure_default_project(monkeypatch)
 
-    with pytest.raises(ValueError, match="default project cannot be deleted"):
-        await projects_repository.delete_project(
-            tenant_id="tenant-1", workspace_id="ws-1", project_id="proj-default",
-        )
+    result = await projects_repository.delete_project(
+        tenant_id="tenant-1", workspace_id="ws-1", project_id="proj-default",
+    )
 
-    assert not any(s.startswith("DELETE FROM projects") for s in recorder.statements)
+    assert result is not None
+    assert result["id"] == "proj-default"
+    assert any(s.startswith("DELETE FROM projects") for s in recorder.statements)
 
 
 @pytest.mark.anyio
@@ -393,6 +426,7 @@ async def test_repository_returns_none_for_a_project_in_another_workspace(monkey
     recorder = _RecordingPool()
     _install_recording_pool(monkeypatch, recorder)
     monkeypatch.setattr(projects_repository, "get_project", AsyncMock(return_value=None))
+    _never_ensure_default_project(monkeypatch)
 
     result = await projects_repository.delete_project(
         tenant_id="tenant-1", workspace_id="ws-1", project_id="someone-elses",
@@ -403,12 +437,14 @@ async def test_repository_returns_none_for_a_project_in_another_workspace(monkey
 
 
 @pytest.mark.anyio
-async def test_agents_and_credentials_are_rehomed_before_the_row_is_deleted(monkeypatch) -> None:
-    """The load-bearing ordering test. If the DELETE ran first, the FK's
-    ON DELETE SET NULL would win the race and both UPDATEs would match zero
-    rows: agents would lose their project-scoped toolset with no error
-    anywhere, and the project's vault credentials would become unreachable.
-    """
+async def test_agents_and_credentials_are_never_reassigned_and_land_on_null(monkeypatch) -> None:
+    """The old code reassigned workspace_agent_installs.project_id and
+    vault_credentials.project_id to a "default" project before the DELETE,
+    specifically to dodge the FK's own ON DELETE SET NULL. That reassignment
+    is gone (see module docstring) — _RecordingConnection.execute raises if
+    delete_project issues anything other than the DELETE itself, so this
+    proves no such statement is attempted; the FK is left to null both
+    columns out on its own when the row is deleted."""
     recorder = _RecordingPool()
     _install_recording_pool(monkeypatch, recorder)
     monkeypatch.setattr(
@@ -416,56 +452,34 @@ async def test_agents_and_credentials_are_rehomed_before_the_row_is_deleted(monk
         "get_project",
         AsyncMock(return_value={"id": "proj-1", "name": "Demo takes", "is_default": False}),
     )
-    monkeypatch.setattr(
-        projects_repository,
-        "ensure_default_project",
-        AsyncMock(return_value={"id": "proj-default", "name": "General", "is_default": True}),
-    )
+    _never_ensure_default_project(monkeypatch)
 
     result = await projects_repository.delete_project(
         tenant_id="tenant-1", workspace_id="ws-1", project_id="proj-1",
     )
 
-    installs_at = next(i for i, s in enumerate(recorder.statements) if "workspace_agent_installs" in s)
-    credentials_at = next(i for i, s in enumerate(recorder.statements) if "vault_credentials" in s)
-    delete_at = next(i for i, s in enumerate(recorder.statements) if s.startswith("DELETE FROM projects"))
-    assert installs_at < delete_at
-    assert credentials_at < delete_at
-
-    # Both reassignments point at the workspace's default project. The
-    # ARGUMENT SHAPES DIFFER ON PURPOSE and this asserts the difference:
-    # workspace_agent_installs is scoped by tenant + workspace + project,
-    # but vault_credentials HAS NO tenant_id COLUMN (one of the tables
-    # CLAUDE.md names as carrying only one of the two scope columns), so
-    # binding one there is not a stricter filter, it is a hard
-    # `column "tenant_id" does not exist` — which is exactly how the first
-    # browser run of this delete failed.
-    assert recorder.args[installs_at] == ("tenant-1", "ws-1", "proj-1", "proj-default")
-    assert recorder.args[credentials_at] == ("ws-1", "proj-1", "proj-default")
-    assert "tenant_id" not in recorder.statements[credentials_at]
-
     assert result is not None
-    assert result["agents_moved"] == 2
-    assert result["credentials_moved"] == 1
-    assert result["moved_to_project_id"] == "proj-default"
+    # Reported for an honest tally, not because anything was moved — see
+    # `_deleted_summary`'s doc comment on the field names.
+    assert result["agents_unassigned"] == 2
+    assert result["credentials_unassigned"] == 1
 
 
 @pytest.mark.anyio
 async def test_counts_are_read_before_the_cascade_takes_the_rows(monkeypatch) -> None:
     """The tally the confirmation and the audit-ledger entry are built from
-    can only be honest if it is read while the rows still exist."""
-    recorder = _RecordingPool(counts={"tasks": 7, "documents": 2, "members": 4, "goals": 1})
+    can only be honest if it is read while the rows still exist — agents
+    and credentials included, same as tasks/documents/members/goals."""
+    recorder = _RecordingPool(
+        counts={"tasks": 7, "documents": 2, "members": 4, "goals": 1, "agents": 5, "credentials": 3}
+    )
     _install_recording_pool(monkeypatch, recorder)
     monkeypatch.setattr(
         projects_repository,
         "get_project",
         AsyncMock(return_value={"id": "proj-1", "name": "Demo takes", "is_default": False}),
     )
-    monkeypatch.setattr(
-        projects_repository,
-        "ensure_default_project",
-        AsyncMock(return_value={"id": "proj-default", "name": "General", "is_default": True}),
-    )
+    _never_ensure_default_project(monkeypatch)
 
     result = await projects_repository.delete_project(
         tenant_id="tenant-1", workspace_id="ws-1", project_id="proj-1",
@@ -479,16 +493,15 @@ async def test_counts_are_read_before_the_cascade_takes_the_rows(monkeypatch) ->
     assert result["documents_deleted"] == 2
     assert result["members_removed"] == 4
     assert result["goals_deleted"] == 1
+    assert result["agents_unassigned"] == 5
+    assert result["credentials_unassigned"] == 3
 
 
 @pytest.mark.anyio
 async def test_a_delete_that_removed_nothing_rolls_back_and_reports_nothing(monkeypatch) -> None:
     """Raced with a concurrent delete: the DELETE matched zero rows. Saying
     "deleted" here would be exactly the silent-misrouting dishonesty
-    CLAUDE.md warns about — real call, real success, wrong bookkeeping. And
-    the agent/credential reassignments must not survive either: rehoming a
-    user's agents out of a project that still exists, as a side effect of an
-    operation that reported failure, is the same class of lie."""
+    CLAUDE.md warns about — real call, real success, wrong bookkeeping."""
     recorder = _RecordingPool(delete_tag="DELETE 0")
     _install_recording_pool(monkeypatch, recorder)
     monkeypatch.setattr(
@@ -496,11 +509,7 @@ async def test_a_delete_that_removed_nothing_rolls_back_and_reports_nothing(monk
         "get_project",
         AsyncMock(return_value={"id": "proj-1", "name": "Demo takes", "is_default": False}),
     )
-    monkeypatch.setattr(
-        projects_repository,
-        "ensure_default_project",
-        AsyncMock(return_value={"id": "proj-default", "name": "General", "is_default": True}),
-    )
+    _never_ensure_default_project(monkeypatch)
 
     result = await projects_repository.delete_project(
         tenant_id="tenant-1", workspace_id="ws-1", project_id="proj-1",
@@ -512,10 +521,8 @@ async def test_a_delete_that_removed_nothing_rolls_back_and_reports_nothing(monk
 
 @pytest.mark.anyio
 async def test_the_whole_removal_is_one_transaction(monkeypatch) -> None:
-    """Every statement runs on ONE connection inside ONE transaction. The
-    first real browser run of this delete failed on the vault_credentials
-    statement, and with a statement-per-transaction helper the agents had
-    already been moved out of a project that then didn't get deleted."""
+    """The count SELECT and the DELETE run on ONE connection inside ONE
+    transaction — either both apply or neither does."""
     recorder = _RecordingPool()
     _install_recording_pool(monkeypatch, recorder)
     monkeypatch.setattr(
@@ -523,11 +530,7 @@ async def test_the_whole_removal_is_one_transaction(monkeypatch) -> None:
         "get_project",
         AsyncMock(return_value={"id": "proj-1", "name": "Demo takes", "is_default": False}),
     )
-    monkeypatch.setattr(
-        projects_repository,
-        "ensure_default_project",
-        AsyncMock(return_value={"id": "proj-default", "name": "General", "is_default": True}),
-    )
+    _never_ensure_default_project(monkeypatch)
 
     result = await projects_repository.delete_project(
         tenant_id="tenant-1", workspace_id="ws-1", project_id="proj-1",
