@@ -14,7 +14,7 @@ import {
   type AccountSortColumn,
   type AccountsResponse,
 } from "@/lib/accounts";
-import { EmptyState, ErrorState, ForbiddenState, LoadingState } from "@/lib/components/PageStates";
+import { EmptyState, ErrorState, ForbiddenState, LoadingState, SignedOutState } from "@/lib/components/PageStates";
 import { SortableHeader } from "@/lib/components/SortableHeader";
 import { formatDate } from "@/lib/format";
 import { useOperatorResource } from "@/lib/use-operator-resource";
@@ -158,6 +158,7 @@ function AccountsPageInner() {
       </div>
 
       {view.kind === "loading" && <LoadingState rows={1} />}
+      {view.kind === "signedOut" && <SignedOutState />}
       {view.kind === "forbidden" && <ForbiddenState />}
       {view.kind === "error" && <ErrorState message={view.message} onRetry={refresh} />}
 

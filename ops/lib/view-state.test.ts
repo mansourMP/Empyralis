@@ -31,9 +31,20 @@ assert(
   planOperatorView<Payload>({ loading: false, status: 403, error: "Operator access required.", data: null }).kind === "forbidden",
   "a 403 reads as forbidden, not a generic error",
 );
+// 401 and 403 are DIFFERENT FACTS and may never share one signal. Collapsing
+// them told a signed-out operator that their account was not entitled -- false,
+// and unactionable, since the page offered no way to sign in. 2026-09-02.
 assert(
-  planOperatorView<Payload>({ loading: false, status: 401, error: null, data: null }).kind === "forbidden",
-  "a 401 also reads as forbidden -- require_api_key alone was never authorization",
+  planOperatorView<Payload>({ loading: false, status: 401, error: null, data: null }).kind === "signedOut",
+  "a 401 is 'nobody is signed in', never 'your account lacks access'",
+);
+assert(
+  planOperatorView<Payload>({ loading: false, status: 401, error: null, data: null }).kind !== "forbidden",
+  "a 401 must NOT reach the forbidden copy -- that copy accuses the reader's account",
+);
+assert(
+  planOperatorView<Payload>({ loading: false, status: 403, error: null, data: null }).kind !== "signedOut",
+  "a 403 must NOT offer a sign-in link -- signing in again fixes nothing",
 );
 assert(
   planOperatorView<Payload>({ loading: true, status: 403, error: null, data: null }).kind === "loading",
