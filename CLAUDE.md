@@ -28,6 +28,9 @@ When you learn something durable, add ONE line. A paragraph is archaeology.
 
 - **One agent = one worktree = one branch.** Dispatch subagents with `isolation: "worktree"` — a subagent cannot tell whose dirty files it is looking at. This has destroyed uncommitted work twice.
 - **Never `git stash`.** Worktrees share one stash stack, and a stash mid-merge silently clears `MERGE_HEAD`, producing a single-parent commit that re-conflicts forever. Use `git diff > /tmp/x.patch` + `git checkout --`.
+- **A `pgrep -f`/wait-loop whose own command string contains the pattern MATCHES ITSELF.** It never exits, and
+  `pgrep -f uvicorn | head -1` returns your own ssh shell, so a `/proc/PID/environ` count reads ~13 vars and
+  looks exactly like pm2 stripping the env. Hit twice on 2026-09-02. Use `pgrep -af "uvicor[n]"`, or ask pm2.
 - **Never prune worktrees while an agent is live.** "Merged" is a fact about git; "finished" is a fact about a process only the orchestrator can see.
 - **Isolation covers files and git — not ports, browser tabs, cookies, the scratchpad, or `~/.empyralis/state`.** Pick a non-default port up front, scope browser calls to your own `tabId`, give logs a session-unique name, and never kill a process on a default port assuming it is yours.
 - **The browser pane is SHARED between agents.** Two agents typed into each other's tabs and one closed the pane out from under another on 2026-09-01. Scope every call to your own `tabId`, never close the last tab, and treat a tab you did not open as someone else's session.
