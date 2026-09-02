@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { getErrorMessage } from "./view-state";
 
@@ -70,6 +70,32 @@ export function useOperatorResource<T>(path: string): OperatorResource<T> {
   }, [path]);
 
   useEffect(() => refresh(), [refresh]);
+
+  // Signing in happens on the customer app, in a DIFFERENT TAB — this console
+  // has no sign-in of its own and the login page cannot redirect back across
+  // subdomains (safeNextPath in the customer app only accepts same-origin
+  // paths, correctly: it is an open-redirect guard). So the operator signs in
+  // over there and switches back to this tab, where nothing has changed and
+  // the page still says signed-out.
+  //
+  // Re-fetch when this tab becomes visible again, but ONLY while the last
+  // answer was a 401. Signed in and working, this never fires — no polling,
+  // no request storm on tab switching.
+  const statusRef = useRef<number | null>(null);
+  statusRef.current = status;
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible" && statusRef.current === 401) {
+        refresh();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+    };
+  }, [refresh]);
 
   return { data, status, loading, error, refresh: () => refresh() };
 }

@@ -63,10 +63,17 @@ export function SignedOutState() {
       <div className="ops-page-state-title">You are not signed in</div>
       <div className="ops-page-state-body">
         This console has no sign-in of its own — it reads the session from the customer app on the shared parent
-        domain. Sign in there, then come back to this page.
+        domain. This opens the customer app in a new tab; sign in there, then switch back here and this page
+        loads itself.
       </div>
       {signInUrl && (
-        <a className="ops-btn ops-btn--primary" href={signInUrl} style={{ marginTop: "var(--space-2)" }}>
+        <a
+          className="ops-btn ops-btn--primary"
+          href={signInUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ marginTop: "var(--space-2)" }}
+        >
           Sign in
         </a>
       )}

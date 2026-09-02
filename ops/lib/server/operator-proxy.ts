@@ -36,7 +36,6 @@ import { NextRequest, NextResponse } from "next/server";
  * `planOperatorView` renders that as `forbidden`, honestly.
  */
 
-const ACCESS_COOKIE = "empyralis_access_token";
 const REFRESH_COOKIE = "empyralis_refresh_token";
 const CSRF_COOKIE = "empyralis_csrf_token";
 const CSRF_HEADER = "x-csrf-token";
@@ -148,7 +147,16 @@ export async function forwardOperatorRequest(request: NextRequest, upstreamPath:
   }
 
   let refreshedSetCookies: string[] = [];
-  if (response.status === 401 && request.cookies.get(ACCESS_COOKIE)) {
+  // Gated on the REFRESH cookie, never the access cookie. The access cookie's
+  // max-age is 24h (EMPYRALIS_AUTH_ACCESS_COOKIE_MAX_AGE_SECONDS) while the
+  // refresh cookie's is 30 days, so gating on the access cookie ended every
+  // session 29 days early: once the browser dropped the expired access cookie
+  // this condition went false, no refresh was ever attempted, and the operator
+  // was told to sign in again. Production access logs showed the shape exactly
+  // — repeated 401s on /api/internal/operator/*, and not one POST to
+  // /api/v1/auth/refresh. The access cookie being GONE is precisely when a
+  // refresh is needed; requiring it was backwards.
+  if (response.status === 401 && request.cookies.get(REFRESH_COOKIE)) {
     refreshedSetCookies = await attemptSessionRefresh(request, baseUrl);
     if (refreshedSetCookies.length > 0) {
       cookieHeader = mergeCookieHeader(cookieHeader, refreshedSetCookies);
