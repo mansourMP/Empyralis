@@ -1,0 +1,87 @@
+/* A one-decision page, same shape and same reasoning as
+   (account)/desktop/pair/desktop-pair.css: deliberately does not pull in the
+   workspace shell, and deliberately does not reach for --accent for its own
+   button — that token is reserved for the product's own primary filled
+   button, whose stylesheet this standalone public page does not load. A
+   local look-alike painted with the same token is exactly how "purple only
+   on the primary button" turned into 48 declarations the first time. */
+.download-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 24px;
+  background: var(--bg-app, var(--app-bg, #fff));
+}
+
+.download-card {
+  width: 100%;
+  max-width: 440px;
+  text-align: center;
+  color: var(--text-primary, #111113);
+}
+
+.download-title {
+  margin: 0 0 12px;
+  font-size: 22px;
+  font-weight: 640;
+  line-height: 1.25;
+}
+
+.download-detail {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-secondary, #6b6b70);
+}
+
+.download-detail--unavailable {
+  margin-top: 24px;
+}
+
+.download-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 550;
+  height: 40px;
+  padding: 0 22px;
+  margin-top: 26px;
+  border-radius: 9px;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.download-btn--primary {
+  background: var(--text-primary, #111113);
+  color: var(--bg-card, #fff);
+  border: 1px solid transparent;
+}
+
+.download-meta {
+  margin: 12px 0 0;
+  font-size: 12px;
+  color: var(--text-secondary, #6b6b70);
+}
+
+.download-note {
+  margin: 20px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary, #6b6b70);
+}
+
+.download-footnote {
+  margin: 28px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary, #6b6b70);
+}
+
+.download-footnote a,
+.download-note a {
+  color: inherit;
+  text-decoration: underline;
+}

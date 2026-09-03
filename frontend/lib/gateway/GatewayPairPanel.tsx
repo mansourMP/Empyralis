@@ -326,6 +326,21 @@ export function GatewayPairPanel({
         </>
       ) : (
         <>
+          {/* macOS only — the desktop app pairs itself with no terminal at
+              all (shipped 2026-09-03). Linux and Windows have no such app,
+              so the command below stays their only real path; on macOS it
+              stays too, as the fallback for a headless Mac (a VPS, a Mac
+              mini with no one at the keyboard) where there is no window to
+              double-click into. */}
+          {platform === "macos" && (
+            <p className="gw-pair-panel-hint">
+              Prefer not to use a terminal?{" "}
+              <a href="/download/mac" target="_blank" rel="noopener noreferrer">
+                Download Empyralis for Mac
+              </a>{" "}
+              instead — it pairs itself.
+            </p>
+          )}
           <p className="gw-pair-panel-hint">
             Run this on the computer you want to connect, then wait — this updates automatically once it's paired.
           </p>

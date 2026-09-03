@@ -70,6 +70,13 @@ const ALLOWLIST: Record<string, string> = {
     "invite-code validation happens BEFORE the person has an account or session (POST /api/pilot/invites/validate) — there is no session to refresh.",
   "app/preview/PublicAgentPreviewClient.tsx":
     "a public marketplace preview (GET /api/marketplace/agents) — works for anonymous visitors, credentials: 'include' is opportunistic, not required.",
+  "app/download/page.tsx":
+    "a public, unauthenticated page (the Mac download link, reachable from a signed-out visitor with no " +
+    "session to attach or refresh) fetching the desktop app's own public update feed " +
+    "(GET https://empyralis.ai/releases/desktop/latest/latest.json) -- a different origin's public JSON, not " +
+    "this app's authenticated backend, and not something fleetAuthorizedFetch's session/CSRF machinery applies " +
+    "to. /download/mac's route handler resolves the identical feed through the same resolveDesktopDownload(); " +
+    "route handlers are excluded structurally above rather than needing an entry here.",
   "app/global-error.tsx":
     "the last-resort root error boundary — root-error-boundary-coverage.test.ts requires it import NOTHING from " +
     "@/lib or @/app (if the root layout itself crashed, shared code cannot be assumed to have survived), so its " +
