@@ -219,7 +219,16 @@ jobs:
         id: stamp
         env:
           EMPYRALIS_DESKTOP_VERSION: ${{ inputs.version }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # `-` is ad-hoc, and it must be a literal dash, never the empty
+          # string. An unset GitHub secret interpolates to "", which is NOT
+          # the same as unset: tauri passes it through and `codesign` fails
+          # with `Signing with identity "" ... no identity found`, killing the
+          # bundle step. That is why every Release Desktop run has failed and
+          # why no .dmg has ever been published. The fallback keeps the
+          # workflow's stated contract intact -- absent secrets ship ad-hoc,
+          # a present APPLE_SIGNING_IDENTITY still upgrades the build with no
+          # edit here.
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
         run: |
           set -euo pipefail
           VERSION="$(python3 scripts/write_tauri_release_config.py --print-version)"
@@ -245,7 +254,16 @@ jobs:
           # succeeded. Verified by hand: the same build with an explicit
           # empty password exits 0 and writes a valid signature.
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # `-` is ad-hoc, and it must be a literal dash, never the empty
+          # string. An unset GitHub secret interpolates to "", which is NOT
+          # the same as unset: tauri passes it through and `codesign` fails
+          # with `Signing with identity "" ... no identity found`, killing the
+          # bundle step. That is why every Release Desktop run has failed and
+          # why no .dmg has ever been published. The fallback keeps the
+          # workflow's stated contract intact -- absent secrets ship ad-hoc,
+          # a present APPLE_SIGNING_IDENTITY still upgrades the build with no
+          # edit here.
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
           APPLE_API_KEY: ${{ env.APPLE_API_KEY }}
           APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
           APPLE_API_ISSUER: ${{ env.APPLE_API_ISSUER }}
