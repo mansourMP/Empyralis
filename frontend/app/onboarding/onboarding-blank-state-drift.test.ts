@@ -176,6 +176,60 @@ assert(
   "the effect marks its ref guard before submitting, so a membership-reference change mid-flight can't trigger a second automatic PATCH",
 );
 
+// ── The redirect loop (real signup, 2026-09-03) ──────────────────────────
+//
+// A ref guard only survives its own mount. The workspace layout redirects
+// back to /onboarding whenever bootstrap still reports requiresOnboarding,
+// and it can report that for up to WORKSPACE_LOOKUP_CACHE_TTL_SECONDS (3s)
+// after the PATCH that cleared it. So: PATCH 200 -> navigate -> layout reads
+// a stale record -> bounce back -> REMOUNT -> fresh ref -> PATCH again.
+//
+// Production evidence from one real signup: ELEVEN `PATCH /api/workspaces/
+// {id}` in 28 seconds, every one returning 200, spaced ~3s apart — one per
+// cache TTL. The person saw "Setting up your workspace" flash on and off
+// the whole time.
+//
+// Two independent things must hold, and neither is sufficient alone.
+
+assert(
+  /sessionStorage/.test(source),
+  "the auto-submit guard persists beyond a single mount (sessionStorage) — a " +
+    "ref alone is reset by the remount that the bounce causes, which is what " +
+    "let one signup fire eleven PATCHes",
+);
+assert(
+  /hasAutoSubmitted\(/.test(source) && /markAutoSubmitted\(/.test(source),
+  "the persistent guard is both READ and WRITTEN — writing without checking " +
+    "would guard nothing",
+);
+assert(
+  /AUTO_SUBMIT_KEY_PREFIX \+ workspaceId/.test(source),
+  "the guard is keyed per WORKSPACE, not global — a second workspace must " +
+    "still be able to run its own setup",
+);
+assert(
+  /catch \{/.test(source.slice(source.indexOf("function hasAutoSubmitted"), source.indexOf("function initialValuesForMembership"))),
+  "sessionStorage access is wrapped — a private window can throw on it, and " +
+    "this is the SIGN-UP path, where private windows are common",
+);
+
+// The second half: do not navigate into a layout that will bounce back.
+const submitTail = source.slice(source.indexOf("setupCompleted: true"), source.indexOf("router.refresh()"));
+assert(
+  /isWorkspaceReadyForProduct/.test(submitTail),
+  "after the PATCH the success path waits until the workspace actually READS " +
+    "as ready before navigating — a 200 does not mean the next reader sees it",
+);
+assert(
+  /attempt < \d+/.test(submitTail),
+  "that wait is BOUNDED — an unbounded poll would strand a new sign-up on " +
+    "this screen forever if readiness never resolved",
+);
+assert(
+  source.indexOf("router.replace(") > source.indexOf("isWorkspaceReadyForProduct"),
+  "the readiness wait comes BEFORE the navigation, not after it",
+);
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) {
   process.exit(1);
