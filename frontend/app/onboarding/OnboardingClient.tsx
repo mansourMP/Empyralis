@@ -12,6 +12,7 @@ import {
 } from '@/lib/account/account-workspaces-client';
 import { useAccountShell } from '@/lib/shell/account-shell-context';
 import {
+  isWorkspaceReadyForProduct,
   type WorkspaceMembershipRecord,
 } from '@/lib/shell/workspace-membership-model';
 import {
@@ -19,6 +20,31 @@ import {
   WorkspaceSetupForm,
   createDefaultWorkspaceSetupValues,
 } from '@/lib/workspace/workspace-setup-form';
+
+/** Has auto-submit already run for this workspace in this tab? Kept in
+ *  sessionStorage, not a ref: a ref dies with the component, and the whole
+ *  failure mode here is the component being remounted by a redirect that
+ *  bounced off a not-yet-visible setup flag. Every accessor is wrapped
+ *  because a private window can throw on sessionStorage. */
+const AUTO_SUBMIT_KEY_PREFIX = 'empyralis.onboarding.autosubmitted.';
+
+function hasAutoSubmitted(workspaceId: string): boolean {
+  if (!workspaceId) return false;
+  try {
+    return window.sessionStorage.getItem(AUTO_SUBMIT_KEY_PREFIX + workspaceId) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function markAutoSubmitted(workspaceId: string): void {
+  if (!workspaceId) return;
+  try {
+    window.sessionStorage.setItem(AUTO_SUBMIT_KEY_PREFIX + workspaceId, '1');
+  } catch {
+    // Storage unavailable — the in-memory ref still guards this mount.
+  }
+}
 
 function initialValuesForMembership(
   membership: WorkspaceMembershipRecord,
@@ -69,13 +95,16 @@ export function OnboardingClient({
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const { isSigningOut, signOutAndStartOver } = useSignOutAndStartOver();
-  // Guards the auto-submit effect below so it fires at most once per mount.
-  // handleSubmit's own success path calls actions.replaceSession(), which
-  // changes state.workspaceMemberships (and therefore the memoized
-  // `membership` object the effect depends on) WHILE this component may
-  // still be mounted awaiting the router.replace() navigation -- without
-  // this guard that reference change would re-run the effect and fire a
-  // second PATCH before the redirect lands.
+  // Guards the auto-submit effect below so it fires at most once PER WORKSPACE,
+  // not once per mount. A `useRef` was the original guard and it is defeated by
+  // a remount, which is exactly what happens here: the workspace layout can
+  // redirect back to /onboarding while the just-written setup flag is still
+  // invisible to it, the component remounts, the ref is fresh, and it PATCHes
+  // again. A real signup on 2026-09-03 sent ELEVEN PATCHes over 28 seconds,
+  // one per ~3s WORKSPACE_LOOKUP_CACHE_TTL_SECONDS, every one returning 200.
+  //
+  // sessionStorage rather than a module-scoped Set so the guard also survives a
+  // full page load, and wrapped because a private window can throw on access.
   const autoSubmitAttempted = useRef(false);
 
   const membership = useMemo(
@@ -108,9 +137,32 @@ export function OnboardingClient({
       } catch {
         // Continue even if the session refresh is transiently unavailable.
       }
-      // Fresh-workspace onboarding lands straight in the create-first-agent
-      // wizard (?new=1) — not a bare landing, and not the removed Sage chat
-      // route. The workspace already carries a name at this point.
+      // Wait for the workspace to actually READ as ready before navigating.
+      // The PATCH returning 200 does not mean the next reader sees it: the
+      // workspace record is cached for WORKSPACE_LOOKUP_CACHE_TTL_SECONDS (3s
+      // by default), so navigating immediately can land on a layout that still
+      // believes onboarding is required and bounces straight back here. Poll
+      // the same bootstrap the layout reads, then go once.
+      //
+      // Bounded, and it navigates anyway when the bound is reached: a wrong
+      // guess about readiness must never strand someone on this screen, and
+      // the destination has its own redirect if it genuinely is not ready.
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        try {
+          const check = await loadAccountShellBootstrap();
+          const fresh = check.workspaceMemberships.find(
+            (item) => item.workspace.id === membership.workspace.id,
+          );
+          if (fresh && isWorkspaceReadyForProduct(fresh)) {
+            actions.replaceSession(check);
+            break;
+          }
+        } catch {
+          // Transient — keep waiting out the bound rather than navigating
+          // into a layout that will bounce.
+        }
+        await new Promise((resolve) => setTimeout(resolve, 600));
+      }
       router.replace(`/w/${encodeURIComponent(membership.workspace.id)}/agents?new=1`);
       router.refresh();
     } catch (error) {
@@ -133,7 +185,15 @@ export function OnboardingClient({
     if (state.status !== 'authenticated' || !membership || autoSubmitAttempted.current) {
       return;
     }
+    if (hasAutoSubmitted(membership.workspace.id)) {
+      // Already submitted for this workspace in this tab. A remount means a
+      // redirect bounced us back, not that setup needs doing again — PATCHing
+      // a second time would just restart the loop.
+      autoSubmitAttempted.current = true;
+      return;
+    }
     autoSubmitAttempted.current = true;
+    markAutoSubmitted(membership.workspace.id);
     void handleSubmit(autoSubmitValuesForMembership(membership));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.status, membership]);
