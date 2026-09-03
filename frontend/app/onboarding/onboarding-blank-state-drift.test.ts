@@ -213,21 +213,56 @@ assert(
     "this is the SIGN-UP path, where private windows are common",
 );
 
-// The second half: do not navigate into a layout that will bounce back.
-const submitTail = source.slice(source.indexOf("setupCompleted: true"), source.indexOf("router.refresh()"));
+// The second half: do not navigate into a layout that will bounce back. The
+// wait lives in goToWorkspace so BOTH exits (fresh submit, and the
+// already-submitted guard) go through the same one.
+const goToWorkspaceBody = source.slice(
+  source.indexOf("async function goToWorkspace"),
+  source.indexOf("async function handleSubmit"),
+);
+assert(goToWorkspaceBody.length > 100, "CANARY: goToWorkspace was actually located in the source");
 assert(
-  /isWorkspaceReadyForProduct/.test(submitTail),
-  "after the PATCH the success path waits until the workspace actually READS " +
-    "as ready before navigating — a 200 does not mean the next reader sees it",
+  /isWorkspaceReadyForProduct/.test(goToWorkspaceBody),
+  "the exit path waits until the workspace actually READS as ready before " +
+    "navigating — a 200 does not mean the next reader sees it",
 );
 assert(
-  /attempt < \d+/.test(submitTail),
+  /attempt < \d+/.test(goToWorkspaceBody),
   "that wait is BOUNDED — an unbounded poll would strand a new sign-up on " +
     "this screen forever if readiness never resolved",
 );
 assert(
+  /await goToWorkspace\(/.test(source.slice(source.indexOf("setupCompleted: true"))),
+  "the successful-submit path leaves through that same shared exit",
+);
+assert(
   source.indexOf("router.replace(") > source.indexOf("isWorkspaceReadyForProduct"),
   "the readiness wait comes BEFORE the navigation, not after it",
+);
+
+// ── Every exit navigates (the five-minute strand, 2026-09-03) ────────────
+//
+// The first version of the persistent guard returned early when it saw the
+// workspace had already been submitted — correct about not re-PATCHing, and
+// silently wrong about everything else. No PATCH, no redirect, no error: the
+// founder sat on "Setting up your workspace" for five minutes. "Do not submit
+// again" and "do not go anywhere" are two different decisions and only the
+// first was intended.
+
+const guardBranch = source.slice(
+  source.indexOf("if (hasAutoSubmitted("),
+  source.indexOf("markAutoSubmitted(membership.workspace.id);"),
+);
+assert(guardBranch.length > 50, "CANARY: the already-submitted guard branch was actually located");
+assert(
+  /goToWorkspace\(/.test(guardBranch),
+  "the already-submitted branch still NAVIGATES — refusing to re-PATCH must " +
+    "never mean refusing to leave the setup screen",
+);
+assert(
+  /router\.replace\(/.test(source.slice(source.indexOf("async function goToWorkspace"), source.indexOf("async function handleSubmit"))),
+  "goToWorkspace ends in a navigation even when readiness never resolves — " +
+    "the bound must expire INTO a redirect, not into nothing",
 );
 
 console.log(`\n${passed} passed, ${failed} failed`);
