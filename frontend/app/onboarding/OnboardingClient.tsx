@@ -114,6 +114,31 @@ export function OnboardingClient({
     [state.workspaceMemberships, targetWorkspaceId],
   );
 
+  // Wait until the workspace actually READS as ready, then leave. Bounded,
+  // and it navigates REGARDLESS once the bound is spent — every path out of
+  // this component ends in a navigation, because the alternative is someone
+  // sitting on "Setting up your workspace" with nothing happening.
+  async function goToWorkspace(workspaceId: string) {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      try {
+        const check = await loadAccountShellBootstrap();
+        const fresh = check.workspaceMemberships.find(
+          (item) => item.workspace.id === workspaceId,
+        );
+        if (fresh && isWorkspaceReadyForProduct(fresh)) {
+          actions.replaceSession(check);
+          break;
+        }
+      } catch {
+        // Transient — wait out the bound rather than navigating into a
+        // layout that would only bounce us back here.
+      }
+      await new Promise((resolve) => setTimeout(resolve, 600));
+    }
+    router.replace(`/w/${encodeURIComponent(workspaceId)}/agents?new=1`);
+    router.refresh();
+  }
+
   async function handleSubmit(values: CreateWorkspaceInput) {
     if (!membership) {
       return;
@@ -147,24 +172,7 @@ export function OnboardingClient({
       // Bounded, and it navigates anyway when the bound is reached: a wrong
       // guess about readiness must never strand someone on this screen, and
       // the destination has its own redirect if it genuinely is not ready.
-      for (let attempt = 0; attempt < 8; attempt += 1) {
-        try {
-          const check = await loadAccountShellBootstrap();
-          const fresh = check.workspaceMemberships.find(
-            (item) => item.workspace.id === membership.workspace.id,
-          );
-          if (fresh && isWorkspaceReadyForProduct(fresh)) {
-            actions.replaceSession(check);
-            break;
-          }
-        } catch {
-          // Transient — keep waiting out the bound rather than navigating
-          // into a layout that will bounce.
-        }
-        await new Promise((resolve) => setTimeout(resolve, 600));
-      }
-      router.replace(`/w/${encodeURIComponent(membership.workspace.id)}/agents?new=1`);
-      router.refresh();
+      await goToWorkspace(membership.workspace.id);
     } catch (error) {
       setErrorMessage(
         error instanceof Error ? error.message : 'Workspace setup could not be saved.',
@@ -189,7 +197,15 @@ export function OnboardingClient({
       // Already submitted for this workspace in this tab. A remount means a
       // redirect bounced us back, not that setup needs doing again — PATCHing
       // a second time would just restart the loop.
+      //
+      // But it must still LEAVE. Returning here without navigating is how the
+      // first version of this guard stranded the founder on this screen for
+      // five minutes (2026-09-03): no PATCH, no redirect, no error — just
+      // "Setting up your workspace" forever. Refusing to re-submit and
+      // refusing to move are two different decisions and only the first one
+      // was wanted.
       autoSubmitAttempted.current = true;
+      void goToWorkspace(membership.workspace.id);
       return;
     }
     autoSubmitAttempted.current = true;
