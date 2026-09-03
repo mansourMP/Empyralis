@@ -319,6 +319,27 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      # The self-hosted Mac has none of the tooling a GitHub-hosted runner
+      # ships preinstalled, and `aws` is what both publish steps upload with.
+      # Its absence ended the first build that ever produced a .dmg: the
+      # bundle succeeded, the artifact was 61MB and correct, and the job then
+      # died with `aws: command not found` (exit 127) one step before the
+      # upload. Installed here rather than by hand on the machine, so a
+      # re-imaged or second runner cannot reintroduce the same dead end. The
+      # feed job does not need this — it runs on ubuntu-latest, which has it.
+      - name: Ensure the AWS CLI is available (self-hosted runner)
+        run: |
+          set -euo pipefail
+          export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+          if command -v aws >/dev/null 2>&1; then
+            echo "aws already present: $(aws --version 2>&1)"
+          else
+            echo "aws not found on this runner; installing via Homebrew."
+            brew install awscli
+          fi
+          echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+          echo "/usr/local/bin" >> "$GITHUB_PATH"
+
       - name: Publish binaries to Cloudflare R2
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
