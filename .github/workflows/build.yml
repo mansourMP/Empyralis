@@ -87,24 +87,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Apple silicon. Every Mac the founder or a customer is realistically
-          # running today.
+          # Apple silicon only (founder's call, 2026-09-03). No self-hosted
+          # Intel Mac exists, so that slice always ran on a GitHub-hosted
+          # macos-13 runner — which does not queue on a private repo the way
+          # a missing self-hosted runner does, it bills, and its own presence
+          # in the matrix gated every run TWICE over despite a comment here
+          # once claiming it did not: `feed` below declares `needs: macos`,
+          # so a hung Intel job meant the update feed never got written even
+          # after the aarch64 half published cleanly, and the workflow's
+          # `concurrency: desktop-release-${{ github.ref }}` group held every
+          # later push queued behind that same hung job. Apple silicon is
+          # what the founder's own Mac is and what he judges to be "every Mac
+          # a customer realistically has today" — see this job's git history
+          # for the Intel entry if that judgment ever needs revisiting.
           - arch: aarch64
             # The founder's own Mac, registered as a self-hosted runner.
-            # GitHub's hosted macOS machines bill at 10x the Linux rate on a
-            # private repo, and this job sat QUEUED for over an hour rather
-            # than failing with a reason — so the release could never publish
-            # and the download link could never exist. Apple silicon covers
-            # every Mac a customer realistically has today.
             runner: [self-hosted, macOS, ARM64]
-          # Intel. Cheap to keep and impossible to add back retroactively for
-          # someone already on an old machine.
-          # Intel. No self-hosted Intel Mac exists, and GitHub's hosted
-          # macOS runners are the thing that blocked this release in the
-          # first place, so this slice does not gate a publish: the arm64
-          # build must be able to ship without it.
-          - arch: x86_64
-            runner: macos-13
     steps:
       - name: Checkout
         with:
@@ -402,11 +400,13 @@ jobs:
           import json, os, pathlib, datetime
           version = os.environ["VERSION"]
           base = f"https://empyralis.ai/releases/desktop/{version}"
-          # Tauri's own platform keys. darwin-universal is deliberately absent:
-          # this workflow builds two separate slices, and claiming a universal
-          # build it did not produce would hand half the fleet a binary that
-          # cannot run.
-          arches = {"aarch64": "darwin-aarch64", "x86_64": "darwin-x86_64"}
+          # Tauri's own platform keys. Apple silicon only (2026-09-03) -- see
+          # the macos job's own matrix comment for why the Intel slice was
+          # dropped rather than merely left to hang. darwin-universal is
+          # deliberately absent too: this workflow builds one real slice, and
+          # claiming a universal build it did not produce would hand an Intel
+          # Mac a binary that cannot run.
+          arches = {"aarch64": "darwin-aarch64"}
           platforms = {}
           for arch, key in arches.items():
               name = f"Empyralis_{version}_darwin-{arch}.app.tar.gz"
