@@ -264,9 +264,16 @@ jobs:
           # a present APPLE_SIGNING_IDENTITY still upgrades the build with no
           # edit here.
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
-          APPLE_API_KEY: ${{ env.APPLE_API_KEY }}
-          APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
-          APPLE_API_ISSUER: ${{ env.APPLE_API_ISSUER }}
+          # DELIBERATELY NOT LISTED HERE: APPLE_API_KEY / APPLE_API_KEY_PATH /
+          # APPLE_API_ISSUER. The certificate step already writes them to
+          # $GITHUB_ENV when a real Apple account is configured, and GITHUB_ENV
+          # propagates to every later step on its own — so naming them here adds
+          # nothing when they exist, and does real harm when they do not: an
+          # unset `env.APPLE_API_ISSUER` interpolates to "", tauri reads a SET
+          # (empty) value as "notarize this", and the bundle dies with
+          # `The value '' is invalid for '--issuer <issuer>': must be a valid
+          # UUID` — after signing has already succeeded. Same empty-string-is-
+          # not-unset trap as APPLE_SIGNING_IDENTITY above, one step later.
         working-directory: src-tauri
         run: |
           set -euo pipefail
