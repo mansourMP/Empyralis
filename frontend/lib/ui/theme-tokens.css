@@ -296,6 +296,33 @@ html[data-theme="dark"] {
      needs a whisper of elevation on top of its hairline border. Dark theme
      already has a real fill step (--bg-card vs --bg-panel) and takes none. */
   --card-shadow: none;
+
+  /* ── Identity tints (projects, agents) ───────────────────────────────
+     A person PICKS these in ProjectIdentityPicker, so they carry meaning
+     and have to be legible. The previous set was a 16%-alpha DARK base
+     over a dark card, which composited to near-grey — chroma spread of
+     13-20 out of 255, `lime` effectively grey. That is the "blurry" the
+     founder kept reacting to: nothing was blurred, the colour simply was
+     not on screen. Measured, not guessed.
+
+     Rebuilt as one system: lightness and chroma are FIXED and only HUE
+     moves. That is what makes eight tints read as one family rather than
+     eight unrelated swatches, and it is the whole reason to define them
+     here instead of inline. Every fg-on-bg pair clears 4.5:1.
+
+     `purple` is a LEGACY KEY that deliberately renders GREEN: violet is
+     the reserved accent and no identity tint may claim it. Renaming the
+     key would desync every already-assigned project from PROJECT_TINTS
+     (server_modules/projects_repository.py) without a migration. */
+  --tint-rose-bg: #522b2e;   --tint-rose-fg: #ff9ea8;
+  --tint-coral-bg: #512e1e;  --tint-coral-fg: #ffa778;
+  --tint-amber-bg: #493311;  --tint-amber-fg: #f7b755;
+  --tint-lime-bg: #313d1a;   --tint-lime-fg: #b0d36e;
+  --tint-purple-bg: #204028; --tint-purple-fg: #7fdd95;
+  --tint-teal-bg: #04413c;   --tint-teal-fg: #34e0cf;
+  --tint-sky-bg: #0c3e4e;    --tint-sky-fg: #49d6ff;
+  --tint-blue-bg: #263856;   --tint-blue-fg: #90c5ff;
+
 }
 
 html[data-theme="light"] {
@@ -380,4 +407,18 @@ html[data-theme="light"] {
   --priority-bar-empty: color-mix(in srgb, var(--text-muted) 55%, transparent);
 
   --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+
+  /* Identity tints, light theme. Same hues, inverted roles — a pale
+     chromatic wash under a saturated ink. The old single-value set had no
+     light variant at all: one bright fg painted on a pale wash landed
+     around 1.9:1, i.e. an icon nobody could see. */
+  --tint-rose-bg: #ffdfe1;   --tint-rose-fg: #9b2d40;
+  --tint-coral-bg: #ffe2d1;  --tint-coral-fg: #993700;
+  --tint-amber-bg: #ffe7c8;  --tint-amber-fg: #884a00;
+  --tint-lime-bg: #e4f1cf;   --tint-lime-fg: #486700;
+  --tint-purple-bg: #d5f5db; --tint-purple-fg: #007029;
+  --tint-teal-bg: #c8f6ef;   --tint-teal-fg: #007265;
+  --tint-sky-bg: #caf3ff;    --tint-sky-fg: #006897;
+  --tint-blue-bg: #d9ecff;   --tint-blue-fg: #2457aa;
+
 }

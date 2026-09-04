@@ -2911,6 +2911,20 @@ a.fleet-breadcrumb:hover {
   font-size: 12px;
   font-weight: var(--weight-semibold);
 }
+/* Identity tint resolved HERE, from data-tint, rather than from an inline
+   style carrying a literal colour. That is the whole point: a literal
+   cannot be theme-aware, and the single set TintTile used to inline was
+   authored for dark — in light theme it painted a bright icon on a pale
+   wash at ~1.9:1. The tokens live in theme-tokens.css and each theme
+   defines its own pair. */
+.fleet-tile[data-tint="rose"]   { background: var(--tint-rose-bg);   color: var(--tint-rose-fg); }
+.fleet-tile[data-tint="coral"]  { background: var(--tint-coral-bg);  color: var(--tint-coral-fg); }
+.fleet-tile[data-tint="amber"]  { background: var(--tint-amber-bg);  color: var(--tint-amber-fg); }
+.fleet-tile[data-tint="lime"]   { background: var(--tint-lime-bg);   color: var(--tint-lime-fg); }
+.fleet-tile[data-tint="purple"] { background: var(--tint-purple-bg); color: var(--tint-purple-fg); }
+.fleet-tile[data-tint="teal"]   { background: var(--tint-teal-bg);   color: var(--tint-teal-fg); }
+.fleet-tile[data-tint="sky"]    { background: var(--tint-sky-bg);    color: var(--tint-sky-fg); }
+.fleet-tile[data-tint="blue"]   { background: var(--tint-blue-bg);   color: var(--tint-blue-fg); }
 /* Was an accent wash. A tile is an identity mark, not an action, so it now
    uses the same neutral inset the rest of the tile family does and leans on
    --text-primary to stay the emphatic one. */

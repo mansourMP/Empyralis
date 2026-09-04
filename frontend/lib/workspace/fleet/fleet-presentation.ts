@@ -133,28 +133,52 @@ export type AgentSummary = {
 
 export type TintKey = "blue" | "purple" | "amber" | "teal" | "coral" | "rose" | "sky" | "lime";
 
-/* Muted per-agent/per-project identity tints (~16% opacity fill + colored
-   glyph). These are identity colors, NOT the brand accent — 8 total so a
-   project's deterministic-hash assignment (projects_repository.py) has a
-   real spread to draw from.
+/* Identity tint GLYPH colours, as literals — the one thing that still has to
+   be a real hex rather than a token: these are handed to chart and sparkline
+   code (billing/page.tsx, fleet-sparkline.tsx) and painted onto the picker
+   swatches, none of which can resolve a CSS var().
 
-   The "purple" key's rendered color is green, not purple — the accent
-   directive banned purple everywhere, including chips. The string "purple"
-   is kept as the object key only because it's a data contract with
-   server_modules/projects_repository.py's PROJECT_TINTS list (the backend
-   hashes a project id to one of these literal strings and the frontend
-   looks it up here); renaming the key would desync already-assigned
-   projects from their tint without a migration, which is out of scope for
-   an accent-color change. No pixel it produces is purple. */
-export const TINTS: Record<TintKey, { bg: string; fg: string }> = {
-  blue: { bg: "rgba(12, 68, 124, 0.16)", fg: "#85B7EB" },
-  purple: { bg: "rgba(21, 128, 61, 0.16)", fg: "#4ADE80" },
-  amber: { bg: "rgba(133, 79, 11, 0.16)", fg: "#EF9F27" },
-  teal: { bg: "rgba(15, 110, 86, 0.16)", fg: "#5DCAA5" },
-  coral: { bg: "rgba(153, 60, 29, 0.16)", fg: "#F0997B" },
-  rose: { bg: "rgba(136, 19, 55, 0.16)", fg: "#FB7185" },
-  sky: { bg: "rgba(12, 74, 110, 0.16)", fg: "#7DD3FC" },
-  lime: { bg: "rgba(63, 98, 18, 0.16)", fg: "#BEF264" },
+   The TILE surface is NOT here any more. It used to be a `bg` field holding a
+   16%-alpha DARK base, which composited over the dark card to a near-grey —
+   chroma spread of 13-20 out of 255 — and had no light-theme variant at all.
+   That pair now lives in theme-tokens.css as --tint-<key>-bg/-fg, per theme,
+   and .fleet-tile resolves it from data-tint. Keep it that way: a literal
+   here can never follow the theme, which is exactly how light theme ended up
+   painting a bright glyph on a pale wash.
+
+   Values below are the DARK-theme glyph colours, so one colour identifies a
+   project across its tile, its picker swatch and its chart series. All eight
+   are light enough for the dark checkmark the picker draws over them.
+
+   The "purple" key renders GREEN, deliberately: violet is the reserved
+   accent and no identity tint may claim it. The key string is a data
+   contract with PROJECT_TINTS in server_modules/projects_repository.py, so
+   renaming it would desync every already-assigned project without a
+   migration — TINT_LABELS below is what stops that lie reaching a person. */
+export const TINTS: Record<TintKey, { fg: string }> = {
+  blue: { fg: "#90c5ff" },
+  purple: { fg: "#7fdd95" },
+  amber: { fg: "#f7b755" },
+  teal: { fg: "#34e0cf" },
+  coral: { fg: "#ffa778" },
+  rose: { fg: "#ff9ea8" },
+  sky: { fg: "#49d6ff" },
+  lime: { fg: "#b0d36e" },
+};
+
+/* What a person is actually told a swatch is called. The picker put the raw
+   key in `title` and `aria-label`, so a green swatch announced itself as
+   "purple" to every screen reader and every hover. The key is a backend
+   contract and cannot move; the label can. */
+export const TINT_LABELS: Record<TintKey, string> = {
+  blue: "Blue",
+  purple: "Green",
+  amber: "Amber",
+  teal: "Teal",
+  coral: "Coral",
+  rose: "Rose",
+  sky: "Sky",
+  lime: "Lime",
 };
 
 const TINT_ORDER: TintKey[] = ["blue", "teal", "amber", "coral", "purple"];

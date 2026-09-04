@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 
 import { TintTile } from "./fleet-indicators";
-import { TINTS, type TintKey } from "./fleet-presentation";
+import { TINT_LABELS, TINTS, type TintKey } from "./fleet-presentation";
 
 /**
  * Project identity — icon + colour.
@@ -252,8 +252,8 @@ export function ProjectIdentityPicker({
                   type="button"
                   role="radio"
                   aria-checked={selected}
-                  aria-label={k}
-                  title={k}
+                  aria-label={TINT_LABELS[k]}
+                  title={TINT_LABELS[k]}
                   className={`fleet-identity-swatch fleet-identity-swatch--tint${selected ? " is-selected" : ""}`}
                   style={{ background: TINTS[k].fg }}
                   onClick={() => onChange({ icon: activeIcon, tint: k })}

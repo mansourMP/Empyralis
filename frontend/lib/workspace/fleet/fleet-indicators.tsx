@@ -1,6 +1,6 @@
 import type { CSSProperties, ReactNode } from "react";
 
-import { TINTS, type AgentStatusTone, type TintKey } from "./fleet-presentation";
+import { type AgentStatusTone, type TintKey } from "./fleet-presentation";
 
 /**
  * The fleet's shared visual-indicator vocabulary. One place so a status dot in
@@ -174,12 +174,13 @@ export function TintTile({
   size?: number;
   children: ReactNode;
 }) {
-  const style: CSSProperties = tint
-    ? ({ width: size, height: size, "--tile-bg": TINTS[tint].bg, "--tile-fg": TINTS[tint].fg } as CSSProperties)
-    : { width: size, height: size };
+  // The tint is emitted as data-tint and resolved in CSS, never inlined as a
+  // literal colour: a literal cannot follow the theme, and the one set that
+  // used to be inlined here was authored for dark only.
+  const style: CSSProperties = { width: size, height: size };
   const variant = accent ? " fleet-tile--accent" : danger ? " fleet-tile--danger" : "";
   return (
-    <span className={`fleet-tile${variant}`} style={style}>
+    <span className={`fleet-tile${variant}`} style={style} data-tint={tint}>
       {children}
     </span>
   );
